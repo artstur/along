@@ -2,7 +2,7 @@
 
 围绕长程健康与储蓄目标的 Personal Agent 个性化原型。手机优先，支持 iPhone、Android 和桌面浏览器；可添加至手机主屏幕。
 
-在线体验：https://along-personal-agent.rpcdpmm6bs.chatgpt.site （所有者私有，需要相应访问权限）
+在线体验：https://personality-demo.pages.dev （公开访问，无需 ChatGPT 登录）
 
 ## 体验主线
 
@@ -37,6 +37,17 @@ node server.mjs --dist
 ```
 
 `dist/` 可以部署到任何支持 HTTPS 的静态托管平台。应用使用相对路径，支持子目录部署。
+
+## Cloudflare Pages 部署
+
+本项目使用 Cloudflare Pages Direct Upload，项目名 `personality-demo`。
+
+1. 运行 `npm run build`。
+2. 在 Cloudflare 的 Workers & Pages 中打开此项目，选择创建新的 Production deployment。
+3. 上传 `dist/` 文件夹，或将其中的文件打包为 ZIP（确保 `index.html` 位于 ZIP 根目录）。
+4. 点击 Save and Deploy，完成后访问 https://personality-demo.pages.dev 。
+
+这是手动上传部署，GitHub 提交不会自动发布；不需要授予 Cloudflare 对私有 GitHub 仓库的访问权限。
 
 ## 在手机上使用
 
