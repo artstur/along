@@ -1,0 +1,14 @@
+{
+  "name": "along-personal-agent",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "A thoughtful, local-first personal agent prototype for long-term health and savings goals.",
+  "scripts": {
+    "dev": "node server.mjs",
+    "build": "node build.mjs",
+    "test": "node --test engine.test.mjs",
+    "check": "node --check app.mjs && node --check engine.mjs && node --test engine.test.mjs"
+  },
+  "engines": { "node": ">=20" }
+}
