@@ -37,12 +37,12 @@ struct HealthSummary {
 
     func displayValue(for metric: HealthMetric) -> String {
         switch metric {
-        case .steps: steps.map { "\($0) 步" } ?? "无可读取记录"
+        case .steps: return steps.map { "\($0) 步" } ?? "无可读取记录"
         case .workout:
             guard let workoutMinutes, let workoutCount else { return "无可读取记录" }
             return "\(workoutMinutes) 分钟 · \(workoutCount) 次"
-        case .weight: weightKg.map { String(format: "%.1f kg", $0) } ?? "无可读取记录"
-        case .sleep: sleepMinutes.map { "\($0) 分钟" } ?? "无可读取记录"
+        case .weight: return weightKg.map { String(format: "%.1f kg", $0) } ?? "无可读取记录"
+        case .sleep: return sleepMinutes.map { "\($0) 分钟" } ?? "无可读取记录"
         }
     }
 
