@@ -5,10 +5,18 @@
   "type": "module",
   "description": "A mobile-first health goals and adaptive tasks prototype.",
   "scripts": {
-    "dev": "node server.mjs",
+    "dev": "./node_modules/node/bin/node server.mjs",
     "build": "node build.mjs",
     "test": "node --test engine.test.mjs",
-    "check": "node --check app.mjs && node --check health.mjs && node --test health.test.mjs && node --test engine.test.mjs"
+    "check": "node --check app.mjs && node --check health.mjs && node --check loop.mjs && node --check server.mjs && node --test health.test.mjs && node --test loop.test.mjs && node --test engine.test.mjs"
   },
-  "engines": { "node": ">=20" }
+  "engines": {
+    "node": ">=22.19"
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh-sdk-client": "0.2.1-rc.3"
+  },
+  "devDependencies": {
+    "node": "22.23.4"
+  }
 }

@@ -1,5 +1,5 @@
-const CACHE='along-shell-v3';
-const FILES=['./','./index.html','./style.css','./app.mjs','./health.mjs','./icon.svg','./icon-192.png','./icon-512.png','./manifest.webmanifest'];
+const CACHE='along-shell-v4';
+const FILES=['./','./index.html','./style.css','./app.mjs','./health.mjs','./loop.mjs','./agent-replay.json','./icon.svg','./icon-192.png','./icon-512.png','./manifest.webmanifest'];
 self.addEventListener('install',event=>{event.waitUntil(caches.open(CACHE).then(cache=>cache.addAll(FILES)).then(()=>self.skipWaiting()));});
 self.addEventListener('activate',event=>{event.waitUntil(caches.keys().then(keys=>Promise.all(keys.filter(k=>k.startsWith('along-shell-')&&k!==CACHE).map(k=>caches.delete(k)))).then(()=>self.clients.claim()));});
 self.addEventListener('fetch',event=>{
