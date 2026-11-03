@@ -1,86 +1,30 @@
-# Personality Demo · Along
+# Along · 健康目标 Demo
 
-围绕长程健康与储蓄目标的 Personal Agent 个性化原型。手机优先，支持 iPhone、Android 和桌面浏览器；可添加至手机主屏幕。
+手机优先的单页体验：展示 Apple Health 连接入口、查看步数/体重/健身/睡眠、设定目标、查看随数据变化的任务。
 
-在线体验：https://personality-demo.pages.dev （公开访问，无需 ChatGPT 登录）
+在线体验：[personality-demo.pages.dev](https://personality-demo.pages.dev/)。
 
-## 体验主线
+## 当前能体验什么
 
-虚构用户林悦同时推进两个目标：三个月内建立瑜伽习惯，以及为进修储蓄 ¥24,000。一次出差与 ¥1,800 临时支出改变了条件。
+- 点击「连接」会说明 Apple Health 的实际授权条件。普通网页无法直接读取 HealthKit；此页面当前没有原生 iOS 容器，不会伪装成已连接。
+- 点击「先用演示数据体验」可查看四项示例数据，明确标记为「演示中」。
+- 设定「本周健身总时长」或「本月减重」目标。模拟新的健身或体重记录，可以观察目标进度和任务更新。
+- 状态只保存在当前浏览器的 `localStorage`。旧版 Along 状态使用独立 key，不会混入新版健康数据。
 
-1. 在目标页点击「模拟一次变化」。
-2. 点击「一起调整」，比较延后期限或按期补足的财务路径。
-3. 选择「出差不补练」，按意愿勾选记住这套恢复方式，再确认调整。
-4. 在记忆中查看来源、作用范围，尝试停用或纠正。
-5. 点击「模拟两周后」，比较启用与停用记忆时的建议。
-6. 完成调整后的练习任务，把一次合作方法沉淀到知识库。
+## 运行与构建
 
-## 五个模块
-
-- **目标**：进展、约束、下一步、调整理由，以及目标参数编辑。
-- **连接应用**：日历、健康和账单的模拟连接，可断开与重新连接。
-- **记忆**：事实与推测分开；查看来源和适用范围；纠正、停用、删除、设置到期时间。
-- **知识库**：示例资料、自建文字资料与 TXT/Markdown 导入、合作方法。
-- **任务**：已完成/未完成、完成反馈、撤销、进度联动、自建任务。
-
-## 运行
-
-需要 Node.js 20+，无外部运行依赖。
+需要 Node.js 20+，无运行依赖。
 
 ```sh
 npm run dev
-# http://localhost:4173
-
-npm test
+npm run check
 npm run build
-node server.mjs --dist
 ```
 
-`dist/` 可以部署到任何支持 HTTPS 的静态托管平台。应用使用相对路径，支持子目录部署。
+本地地址 `http://localhost:4173`；静态文件在 `dist/`。现有 Cloudflare Pages 使用手动上传，代码提交不会自动更新线上页面。
 
-## Cloudflare Pages 部署
+## 下一步接入 iOS
 
-本项目使用 Cloudflare Pages Direct Upload，项目名 `personality-demo`。
+页面预留 `window.AlongHealthBridge.connect({types:['steps','weight','workout','sleep']})`，调用方应返回 `{steps,weightKg,workoutMinutes,workoutCount,sleepMinutes}`。步数是当天值，健身是本周累计，睡眠是最近一晚时长。体重和睡眠可以为 `null`。原生 iOS 容器需要请求 HealthKit 读取权限、完成查询，再提供这个桥接接口。
 
-1. 运行 `npm run build`。
-2. 在 Cloudflare 的 Workers & Pages 中打开此项目，选择创建新的 Production deployment。
-3. 上传 `dist/` 文件夹，或将其中的文件打包为 ZIP（确保 `index.html` 位于 ZIP 根目录）。
-4. 点击 Save and Deploy，完成后访问 https://personality-demo.pages.dev 。
-
-这是手动上传部署，GitHub 提交不会自动发布；不需要授予 Cloudflare 对私有 GitHub 仓库的访问权限。
-
-## 在手机上使用
-
-- iPhone：Safari 打开 HTTPS 链接 → 分享 → 添加到主屏幕。
-- Android：Chrome 打开链接 → 菜单 → 安装应用/添加到主屏幕。
-- 电脑：直接打开网页，也可在支持的浏览器中安装。
-
-首次在线打开后，Service Worker 缓存应用外壳，后续可离线体验本地交互（托管层登录验证可能仍需网络）。
-
-## 已实现与边界
-
-这是**透明规则驱动的交互 Demo**，没有调用真实大模型，没有后台代理或自动随时间运行。
-
-- 人物、账单、健康记录、课程与连接均为示例。没有读取手机、银行、日历或 Apple Health。
-- 调整由用户明确确认，不执行转账、预约、消息发送或外部修改。
-- 自由补充按原话记录，不自动解析成新规则。任意上传资料仅供查阅，不自动改变建议。
-- 练习完成次数不代表身体改善，保存一次方法也不代表已验证其长期有效。
-- 状态保存在当前浏览器的 `localStorage` 中，不上传、不跨设备同步。可在「关于与数据管理」导入/导出 JSON 备份或重置示例。
-- 目标修改使旧储蓄方案失效；断开来源后不生成对应新信号；停用、过期、改写或不匹配情境的记忆不再触发原方法。
-
-## 验证
-
-`node:test` 覆盖财务路径算术、跨目标联动、记忆适用/过期/停用、来源断开、完成撤销、技能去重、用户任务保留、目标期限和持久化恢复。另有手机及桌面浏览器交互检查。
-
-## 文件
-
-| 文件 | 用途 |
-| --- | --- |
-| `engine.mjs` | 不可变状态更新与个性化规则 |
-| `app.mjs` | 界面与用户交互 |
-| `style.css` | 手机优先的响应式样式 |
-| `engine.test.mjs` | 关键行为测试 |
-| `manifest.webmanifest`, `sw.js` | 主屏幕安装与应用外壳缓存 |
-| `build.mjs`, `server.mjs` | 无依赖构建与本地开发服务器 |
-
-后续可以在保持状态模型与确认机制的基础上，加入服务端模型调用、真实 OAuth 连接、跨设备存储，以及基于真实反馈的方法评估。
+此版仅完成前端接口约定；尚无 iOS 原生实现、DSH 后台或自动执行的 Agent。
