@@ -4,8 +4,8 @@
 
 ## 在 iPhone 上运行
 
-1. 安装完整 Xcode，打开 [AlongHealth.xcodeproj](AlongHealth.xcodeproj)。在 target 的 **Signing & Capabilities** 里选自己的 Team，确认 **HealthKit** capability 已开启。若 bundle ID 与你的签名冲突，改成自己的唯一 ID。
-2. 用数据线连接 iPhone，按 Xcode 提示信任设备并开启开发者模式。选择这台 iPhone 作为运行设备，点 Run。HealthKit 的真实读取需要真机。
+1. 安装支持手机系统版本的完整 Xcode，打开 [AlongHealth.xcodeproj](AlongHealth.xcodeproj)。例如，iOS 27 需要 Xcode 27；Xcode 27 要求 macOS Tahoe 26.6 或更新版本。当前 Xcode 16.4 的真机支持范围是 iOS 15–18。在 target 的 **Signing & Capabilities** 里选自己的 Team，确认 **HealthKit** capability 已开启。若 bundle ID 与你的签名冲突，改成自己的唯一 ID。
+2. 在 iOS 27 + Xcode 27 上，可以打开 Xcode 的 Device Hub，点侧栏的 `+` → **Pair Nearby Device…**，首次通过同一局域网无线配对；也可以用数据线连接。按提示在 iPhone 上完成配对、信任设备并开启开发者模式。选择这台 iPhone 作为运行设备，点 Run。HealthKit 的真实读取需要真机。
 3. 在 Mac 上的项目根目录执行 `npm install`、`npm run sync-server`。终端会显示仅 10 分钟有效的一次性 8 位配对码。服务默认只监听 `127.0.0.1:4175`。
 4. 为手机建立临时 HTTPS 地址。安装 [Cloudflare Tunnel](https://developers.cloudflare.com/tunnel/get-started/quick-tunnels/) 后，另开终端执行 `cloudflared tunnel --url http://127.0.0.1:4175`，记下输出的 `https://…trycloudflare.com` 地址。服务和 tunnel 两个终端都要保持运行。临时地址会变化；每次重启同步服务都会产生新的配对码。不要把配对码公开分享。
 5. 在 Along App 中点 Apple Health 的“连接”，勾选需要的类型，点“读取并预览”。系统会显示相应 HealthKit 读取权限。确认摘要无误，输入上面的 HTTPS 地址和配对码，点“确认并同步到 Along”。成功后，网页显示所选数据和更新后的目标进度。
