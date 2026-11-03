@@ -23,3 +23,10 @@ test('broken stored data falls back to empty state',()=>{
   assert.deepEqual(loadState('{bad'),initialState());
   assert.deepEqual(loadState('{"version":0}'),initialState());
 });
+test('partial HealthKit selection never treats missing workouts as zero progress',()=>{
+  const goal=addGoal(initialState(),'workout',2);
+  const state=setSnapshot(goal,{steps:6000,selectedTypes:['steps']},'healthkit');
+  assert.equal(state.snapshot.workoutMinutes,null);
+  assert.equal(taskPlan(state).progress[0].label,'等待健身记录');
+  assert.equal(taskPlan(state).tasks[0].status,'active');
+});

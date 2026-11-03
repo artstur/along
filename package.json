@@ -6,9 +6,10 @@
   "description": "A mobile-first health goals and adaptive tasks prototype.",
   "scripts": {
     "dev": "./node_modules/node/bin/node server.mjs",
+    "sync-server": "./node_modules/node/bin/node sync-server.mjs",
     "build": "node build.mjs",
     "test": "node --test engine.test.mjs",
-    "check": "node --check app.mjs && node --check health.mjs && node --check loop.mjs && node --check server.mjs && node --test health.test.mjs && node --test loop.test.mjs && node --test engine.test.mjs"
+    "check": "node --check app.mjs && node --check health.mjs && node --check loop.mjs && node --check server.mjs && node --check sync-server.mjs && node --test health.test.mjs && node --test loop.test.mjs && node --test sync-server.test.mjs && node --test engine.test.mjs"
   },
   "engines": {
     "node": ">=22.19"
