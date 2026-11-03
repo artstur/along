@@ -5,3 +5,5 @@ node_modules/
 *.zip
 .env*
 .openai/*.local.*
+ios/*.xcodeproj/xcuserdata/
+ios/*.xcodeproj/project.xcworkspace/xcuserdata/

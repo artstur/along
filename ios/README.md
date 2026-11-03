@@ -4,7 +4,7 @@
 
 ## 在 iPhone 上运行
 
-1. 安装支持手机系统版本的完整 Xcode，打开 [AlongHealth.xcodeproj](AlongHealth.xcodeproj)。例如，iOS 27 需要 Xcode 27；Xcode 27 要求 macOS Tahoe 26.6 或更新版本。当前 Xcode 16.4 的真机支持范围是 iOS 15–18。在 target 的 **Signing & Capabilities** 里选自己的 Team，确认 **HealthKit** capability 已开启。若 bundle ID 与你的签名冲突，改成自己的唯一 ID。
+1. 安装支持手机系统版本的完整 Xcode，打开 [AlongHealth.xcodeproj](AlongHealth.xcodeproj)。例如，iOS 27 需要 Xcode 27。在 Xcode → Settings → Apple Accounts 登录自己的 Apple 账号；然后在 target 的 **Signing & Capabilities** 里选自己的 Team，确认 **HealthKit** capability 已开启。若 bundle ID 与你的签名冲突，改成自己的唯一 ID。
 2. 在 iOS 27 + Xcode 27 上，可以打开 Xcode 的 Device Hub，点侧栏的 `+` → **Pair Nearby Device…**，首次通过同一局域网无线配对；也可以用数据线连接。按提示在 iPhone 上完成配对、信任设备并开启开发者模式。选择这台 iPhone 作为运行设备，点 Run。HealthKit 的真实读取需要真机。
 3. 在 Mac 上的项目根目录执行 `npm install`、`npm run sync-server`。终端会显示仅 10 分钟有效的一次性 8 位配对码。服务默认只监听 `127.0.0.1:4175`。
 4. 为手机建立临时 HTTPS 地址。安装 [Cloudflare Tunnel](https://developers.cloudflare.com/tunnel/get-started/quick-tunnels/) 后，另开终端执行 `cloudflared tunnel --url http://127.0.0.1:4175`，记下输出的 `https://…trycloudflare.com` 地址。服务和 tunnel 两个终端都要保持运行。临时地址会变化；每次重启同步服务都会产生新的配对码。不要把配对码公开分享。
@@ -29,4 +29,5 @@
 
 - 这是手动同步；没有后台 HealthKit 观察器或定期读取。
 - 真实健康摘要会驱动网页的目标进度与本地任务计算。“目标变化实验”仍是模拟事件驱动的独立实验，不会把真实健康数据直接送入 DSH Agent。
-- 项目源码已提供，但只有安装完整 Xcode 并在真机上运行后，才能完成 HealthKit 授权与签名验证。
+- 已于 2026-11-04 在 iPhone 真机完成签名安装、HealthKit 读取预览、用户确认同步、服务端落盘和页面更新验证。HealthKit 对没有匹配记录的统计查询可能返回 `errorNoData`；此时界面显示“无可读取记录”，不会把它当作整个连接失败。
+- 当前使用 Xcode 个人团队签名。个人团队的配置文件通常 7 天后到期，届时需重新构建并安装；临时 HTTPS 通道与 Mac 上的同步服务也需保持运行。

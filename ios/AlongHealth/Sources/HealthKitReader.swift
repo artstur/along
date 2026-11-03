@@ -40,7 +40,8 @@ final class HealthKitReader {
         let predicate = HKQuery.predicateForSamples(withStart: start, end: now, options: .strictStartDate)
         let statistics = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<HKStatistics?, Error>) in
             let query = HKStatisticsQuery(quantityType: type, quantitySamplePredicate: predicate, options: .cumulativeSum) { _, value, error in
-                if let error { continuation.resume(throwing: error) }
+                if let error, Self.isNoData(error) { continuation.resume(returning: nil) }
+                else if let error { continuation.resume(throwing: error) }
                 else { continuation.resume(returning: value) }
             }
             store.execute(query)
@@ -95,11 +96,17 @@ final class HealthKitReader {
     private func samples(of type: HKSampleType, predicate: NSPredicate?, limit: Int = HKObjectQueryNoLimit, sort: [NSSortDescriptor]? = nil) async throws -> [HKSample] {
         try await withCheckedThrowingContinuation { continuation in
             let query = HKSampleQuery(sampleType: type, predicate: predicate, limit: limit, sortDescriptors: sort) { _, values, error in
-                if let error { continuation.resume(throwing: error) }
+                if let error, Self.isNoData(error) { continuation.resume(returning: []) }
+                else if let error { continuation.resume(throwing: error) }
                 else { continuation.resume(returning: values ?? []) }
             }
             store.execute(query)
         }
+    }
+
+    private static func isNoData(_ error: Error) -> Bool {
+        let value = error as NSError
+        return value.domain == HKErrorDomain && value.code == HKError.Code.errorNoData.rawValue
     }
 }
 
