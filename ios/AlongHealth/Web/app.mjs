@@ -49,7 +49,7 @@ function notice(message) {
 async function refreshAgentConnection() {
   if (!agentConfig.token) {agentConnection={status:'unconfigured',error:''};return;}
   agentConnection={status:'checking',error:''};
-  if (screen==='agent') render();
+  if (screen==='agent') renderAgentUpdate();
   try {
     const status=await agentCall(agentConfig,'/connection/status',{});
     if (!status?.along || !status?.dsh) throw Error('DSH Along Source 尚未就绪');
@@ -69,7 +69,7 @@ async function refreshAgentConnection() {
   } catch(error) {
     agentConnection={status:'error',error:error.message||'连接检查失败'};
   }
-  if (screen==='agent') render();
+  if (screen==='agent') renderAgentUpdate();
 }
 function saveHealth(next) {
   state = ensureHealthGoal(next);
@@ -194,7 +194,7 @@ async function refreshSuperAgentGoal(domain=activeGoal) {
   try {
     const run=await agentCall(agentConfig,'/super-agent/goals/status',{requestId:current.requestId});
     applyGoalRun(domain,run);
-    if (screen==='agent'&&activeGoal===domain) render();
+    if (screen==='agent'&&activeGoal===domain) renderAgentUpdate();
   } catch(error) {
     if (!current.actual) saveGoalRun(domain,{...current,status:'blocked',statusLabel:'DSH 状态读取失败',error:error.message});
   } finally { goalSuperAgentRequests.delete(current.requestId); }
@@ -372,6 +372,16 @@ function lab() {
   return `<div class="app-shell"><header class="topbar"><div class="topbar-inner">${brand()}<span class="topbar-caption">目标变化实验</span></div></header><main class="content lab-content">${backButton('back-home','返回目标')}<h1>当进度变化，下一步会怎样变？</h1><p class="lab-intro">这是与真实健康数据隔离的模拟实验。Along 计算进度，再判断是否需要更新建议。</p>${experimentPanel()}</main></div>`;
 }
 function render() { app.innerHTML = screen === 'lab' ? lab() : screen === 'agent' ? goalAgentPage() : screen === 'task' ? taskDetailPage() : home(); }
+function renderAgentUpdate({follow=false}={}) {
+  const previous=app.querySelector('.agent-scroll');
+  if (!previous) {render();return;}
+  const scrollTop=previous.scrollTop;
+  const nearBottom=previous.scrollHeight-previous.scrollTop-previous.clientHeight<160;
+  render();
+  const next=app.querySelector('.agent-scroll');
+  if (!next) return;
+  next.scrollTop=follow||nearBottom?next.scrollHeight:Math.min(scrollTop,Math.max(0,next.scrollHeight-next.clientHeight));
+}
 window.__alongNavigateBack = () => {
   const button=app.querySelector('.back-button[data-action]');
   if (!button) return false;
@@ -535,8 +545,7 @@ app.addEventListener('submit', async event => {
   } finally {
     agentBusy=false;
     if (screen==='agent' && activeGoal===domain) {
-      render();
-      scrollAgentConversationToBottom();
+      renderAgentUpdate({follow:true});
     }
   }
 });
