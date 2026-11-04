@@ -51,7 +51,7 @@ function show(html) {
 }
 
 function brand() {
-  return `<div class="brand"><span class="brand-symbol" aria-hidden="true">A<span>·</span></span><span>along</span></div>`;
+  return `<div class="brand"><img class="brand-symbol" src="./app-icon.png" alt=""><span>along</span></div>`;
 }
 function customView() {
   return {

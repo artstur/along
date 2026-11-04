@@ -16,8 +16,7 @@ p { line-height: 1.5; }
 .topbar { height: 64px; border-bottom: 1px solid #eaeae9; background: #fff; }
 .topbar-inner { max-width: 620px; height: 100%; padding: 0 24px; margin: auto; display: flex; align-items: center; justify-content: space-between; }
 .brand { display: flex; align-items: center; gap: 8px; font-size: 20px; font-weight: 650; letter-spacing: -.65px; }
-.brand-symbol { width: 26px; height: 26px; border-radius: 7px; background: #1b1b1b; color: #fff; display: grid; place-items: center; font-size: 18px; line-height: 1; }
-.brand-symbol span { margin-left: -4px; }
+.brand-symbol { display: block; width: 26px; height: 26px; border-radius: 7px; object-fit: cover; }
 .topbar-caption { color: #8a8a8a; font-size: 11px; }
 .content { max-width: 620px; padding: 28px 24px 56px; margin: auto; }
 

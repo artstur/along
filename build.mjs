@@ -1,5 +1,5 @@
 import { mkdir, rm, copyFile, readFile, writeFile } from 'node:fs/promises';
-const files=['index.html','style.css','app.mjs','health.mjs','workspace.mjs','loop.mjs','goal-agent-core.mjs','adaptive-ui.mjs','super-agent.mjs','agent-client.mjs','agent-replay.json','icon.svg','icon-192.png','icon-512.png','manifest.webmanifest','sw.js'];
+const files=['index.html','style.css','app.mjs','health.mjs','workspace.mjs','loop.mjs','goal-agent-core.mjs','adaptive-ui.mjs','super-agent.mjs','agent-client.mjs','agent-replay.json','app-icon.png','icon.svg','icon-192.png','icon-512.png','manifest.webmanifest','sw.js'];
 await rm('dist',{recursive:true,force:true});
 await mkdir('dist',{recursive:true});
 for(const file of files)await copyFile(file,`dist/${file}`);
