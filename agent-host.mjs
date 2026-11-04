@@ -6,7 +6,7 @@ import {join} from 'node:path';
 import {mkdirSync, readFileSync, writeFileSync, existsSync, chmodSync} from 'node:fs';
 import {routeHealthChange, requestedTargetFromMessage, validateGoalReply, validateTaskReply} from './goal-agent-core.mjs';
 import {safeAdaptiveLayout} from './adaptive-ui.mjs';
-import {runGoalCodex,runTaskCodex} from './codex-agent.mjs';
+import {runTaskCodex} from './codex-agent.mjs';
 
 const dir = join(homedir(), '.along', 'agent-host');
 mkdirSync(dir, {recursive:true, mode:0o700});
@@ -34,7 +34,7 @@ const superAgentURL = (process.env.ALONG_SUPERAGENT_URL || 'http://127.0.0.1:308
 function respond(res,status,data) { res.writeHead(status,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}).end(JSON.stringify(data)); }
 async function body(req) {
   let text='';
-  for await (const chunk of req) { text+=chunk; if (text.length>12_000) throw Error('请求过大'); }
+  for await (const chunk of req) { text+=chunk; if (text.length>32_000) throw Error('请求过大'); }
   return JSON.parse(text);
 }
 function authorized(req) {
@@ -73,15 +73,27 @@ function cleanSnapshot(value,domain) {
   const selected=Array.isArray(value?.selectedTypes)?value.selectedTypes.filter(type=>['workout','steps','weight','sleep'].includes(type)):[];
   return {workoutMinutes:selected.includes('workout') && Number.isInteger(value?.workoutMinutes) ? Math.min(Math.max(value.workoutMinutes,0),10080):null, selectedTypes:selected, source:'Apple Health 最小摘要'};
 }
-function layoutInstruction(domain) {
-  const sourceRule=domain==='custom'?'自定义目标没有可信指标来源，不得生成 metric 模块。':`metric source 只能是 ${domain==='health'?'workoutMinutes、sleepMinutes、weightKg':'saved'}，不得输出 value，实际值由 Along 从可信数据源绑定。`;
-  return `生成一个可确认的 layout。layout 不是 HTML，只能是声明式 JSON。modules 最多 6 项，只允许 summary、fact_list、chips、metric；${sourceRule} tasks 最多 6 项，每项 state 只能是 temporary、planned、deferred。questions 最多 6 项。未知事实必须放在 questions，或把相关任务标记为 temporary；不得把假设写成已知事实，不得输出脚本、样式、链接或任意组件名。`;
-}
 async function runExclusive(operation) {
   if (busy) throw Error('Along 正在处理上一条请求，请稍后再试');
   busy=true;
   try { return await operation(); }
   finally { busy=false; }
+}
+function requestId(value) {
+  const id=String(value??'');
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$/.test(id)) throw Error('Super Agent requestId 无效');
+  return id;
+}
+function normalizeGoalRun(run) {
+  if (!run?.result) return run;
+  const domain=run.input?.goal?.domain;
+  if (!['health','finance','custom'].includes(domain)) throw Error('DSH 返回的目标类型无效');
+  const output=validateGoalReply(run.result,domain);
+  const layout=run.result.layout==null?null:safeAdaptiveLayout(run.result.layout,domain);
+  if (run.result.layout!=null && !layout) throw Error('DSH 返回的目标空间格式不正确');
+  const requested=requestedTargetFromMessage(String(run.input?.message??''),domain);
+  if (requested!=null && output.proposal?.target!==requested) throw Error(`DSH 目标数值与用户指定的 ${requested} 不一致`);
+  return {...run,result:{...output,layout}};
 }
 const server=createServer({key:readFileSync(key),cert:readFileSync(cert)},async(req,res)=>{
   try {
@@ -102,29 +114,24 @@ const server=createServer({key:readFileSync(key),cert:readFileSync(cert)},async(
       return respond(res,200,await superAgentCall('/along-source/api/tasks',{value:input}));
     }
     if (req.method==='POST' && path==='/super-agent/tasks/status') {
-      const input=await body(req),requestId=String(input?.requestId??'');
-      if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$/.test(requestId)) throw Error('Super Agent requestId 无效');
-      return respond(res,200,await superAgentCall(`/along-source/api/tasks/${encodeURIComponent(requestId)}`,{method:'GET'}));
+      const input=await body(req),id=requestId(input?.requestId);
+      return respond(res,200,await superAgentCall(`/along-source/api/tasks/${encodeURIComponent(id)}`,{method:'GET'}));
     }
-    if (req.method==='POST' && path==='/goal/chat') {
+    if (req.method==='POST' && path==='/super-agent/goals') {
       const input=await body(req);
       const goal=cleanGoal(input.goal), snapshot=cleanSnapshot(input.snapshot,goal.domain);
       const message=String(input.message??'').trim();
       if (!message||message.length>800) throw Error('消息长度需在 1 至 800 字之间');
-      const requestedTarget=requestedTargetFromMessage(message,goal.domain);
-      const history=Array.isArray(input.history)?input.history.slice(-6).map(item=>({role:item.role==='assistant'?'assistant':'user',text:String(item.text??'').slice(0,800)})):[];
-      const exactTarget=requestedTarget==null?'':`用户明确要求的目标数值是 ${requestedTarget}。若 proposal.active=true，target 必须是 ${requestedTarget}；不要擅自改为较低数值。若你认为不合适，在 reply 解释并把 proposal.active 设为 false、target 设为 null，等待用户选择。`;
-      const progress=goal.domain==='health' && Number.isInteger(snapshot.workoutMinutes) && requestedTarget!=null ? `本周已完成 ${snapshot.workoutMinutes} 分钟，距用户指定目标还差 ${Math.max(0,requestedTarget-snapshot.workoutMinutes)} 分钟。用户说的“每天只有 20 分钟”是接下来可安排的时间；你没有过去每天的时长分布。不得声称 20×7=140 是本周总时长上限，不要在回答或依据中提这个上限。若剩余 15 分钟，一次 15 分钟活动就符合每天 20 分钟的约束。` : '';
-      const targetRule=goal.domain==='custom'?'自定义目标的 proposal.target 必须是 null。':'健康目标 target 单位是每周运动分钟，范围 1-10080；理财目标 target 单位是人民币元，范围 1-10000000。';
-      const prompt=`你是 Along 的目标共创与页面规划 Agent。只根据下面资料及用户消息对话。不要读取文件、不要调用工具、不要给医疗或投资决策建议，不得声称已连接理财账户。先理解目标、约束和可执行的下一步；信息不足可追问。如果目标明确，把 proposal.active 设为 true；如果还不能形成提案，设为 false，并把其他 proposal 文本字段设为空字符串、target 设为 null。${targetRule} 不能改变目标类型。提案和 layout 尚未执行，必须由用户确认。${layoutInstruction(goal.domain)}${exactTarget}${progress}\n当前目标：${JSON.stringify(goal)}\n当前摘要：${JSON.stringify(snapshot)}\n最近对话：${JSON.stringify(history)}\n用户消息：${message}`;
-      const answer=await runExclusive(()=>runGoalCodex(prompt));
-      const output=validateGoalReply(answer,goal.domain);
-      const layout=answer.layout==null?null:safeAdaptiveLayout(answer.layout,goal.domain);
-      if (requestedTarget!=null && output.proposal && output.proposal.target!==requestedTarget) {
-        output.proposal=null;
-        output.reply += ` 我给出的目标数值与你指定的 ${requestedTarget} 不一致，已撤回该提案。`;
-      }
-      return respond(res,200,{...output,layout,source:'live-along'});
+      const history=Array.isArray(input.history)?input.history.slice(-12).map(item=>({role:item.role==='assistant'?'assistant':'user',text:String(item.text??'').slice(0,1200)})).filter(item=>item.text.trim()):[];
+      const response=await superAgentCall('/along-source/api/goals',{value:{requestId:requestId(input.requestId),goal,snapshot,message,history}});
+      return respond(res,200,{...response,run:normalizeGoalRun(response.run)});
+    }
+    if (req.method==='POST' && path==='/super-agent/goals/status') {
+      const input=await body(req),id=requestId(input?.requestId);
+      return respond(res,200,normalizeGoalRun(await superAgentCall(`/along-source/api/goals/${encodeURIComponent(id)}`,{method:'GET'})));
+    }
+    if (req.method==='POST' && path==='/goal/chat') {
+      return respond(res,409,{error:'目标输入已迁移到 DSH Super Agent，请更新 Along 后重试'});
     }
     if (req.method==='POST' && path==='/goal/event') {
       const input=await body(req), goal=cleanGoal(input.goal);

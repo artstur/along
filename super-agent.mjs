@@ -1,4 +1,5 @@
 export const SUPER_AGENT_RUNS_KEY = 'along.super-agent-runs.v2';
+export const GOAL_SUPER_AGENT_RUNS_KEY = 'along.goal-super-agent-runs.v1';
 
 const TASK_STATES = new Set(['temporary', 'planned', 'deferred']);
 const DOMAINS = new Set(['health', 'finance', 'custom']);
@@ -46,4 +47,37 @@ export function safeSuperAgentRun(value) {
   if (value.actual===true && (!value.source || !value.trigger || !Array.isArray(value.assignments) || !Array.isArray(value.events))) return null;
   if (value.version===2 || value.actual===true) return value;
   return null;
+}
+
+export function createGoalSuperAgentRequest({domain='health',goal,snapshot={},message,history=[],requestId}={}) {
+  if (!DOMAINS.has(domain)) throw Error('目标领域无效');
+  const cleanMessage=cleanText(message,'',800);
+  if (!cleanMessage) throw Error('请输入目标');
+  const id=requestId || `along-goal-${domain}-${crypto.randomUUID()}`;
+  return {
+    requestId:id,
+    goal:{domain,title:cleanText(goal?.title,'当前目标',120),target:Number.isFinite(goal?.target)?goal.target:null},
+    snapshot:snapshot && typeof snapshot==='object' ? snapshot : {},
+    message:cleanMessage,
+    history:Array.isArray(history)?history.slice(-12).map(item=>({role:item?.role==='assistant'?'assistant':'user',text:cleanText(item?.text,'',1200)})).filter(item=>item.text):[],
+  };
+}
+
+export function createPendingGoalSuperAgentRun(request, createdAt=Date.now()) {
+  return {
+    version:1,actual:false,runtime:'dsh-superagent',kind:'goal',requestId:request.requestId,input:{goal:request.goal,message:request.message},
+    source:{kind:'along',label:'Along 目标'},trigger:{kind:'goal',label:'正在提交给 DSH'},eval:null,ticket:null,mandate:null,
+    assignments:[],agents:[],events:[],result:null,status:'working',statusLabel:'连接 DSH Super Agent',progress:2,createdAt,updatedAt:createdAt,
+  };
+}
+
+export function createFailedGoalSuperAgentRun(request, error, updatedAt=Date.now()) {
+  return {...createPendingGoalSuperAgentRun(request,updatedAt),status:'blocked',statusLabel:'DSH 暂不可用',
+    error:cleanText(error,'DSH Super Agent 请求失败',500),updatedAt};
+}
+
+export function safeGoalSuperAgentRun(value) {
+  if (!value || value.kind!=='goal' || value.runtime!=='dsh-superagent' || typeof value.requestId!=='string') return null;
+  if (value.actual===true && (!value.source || !value.trigger || !Array.isArray(value.agents) || !Array.isArray(value.events))) return null;
+  return value.version===1 || value.actual===true ? value : null;
 }
