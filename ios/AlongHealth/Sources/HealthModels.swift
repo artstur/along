@@ -1,14 +1,17 @@
 import Foundation
 
 enum HealthMetric: String, CaseIterable, Identifiable {
-    case steps, workout, weight, sleep
+    case steps, workout, activeEnergy, weight, restingHeartRate, wristTemperature, sleep
 
     var id: String { rawValue }
     var title: String {
         switch self {
         case .steps: "步数"
         case .workout: "健身记录"
+        case .activeEnergy: "活动消耗"
         case .weight: "体重"
+        case .restingHeartRate: "静息心率"
+        case .wristTemperature: "睡眠期间手腕温度"
         case .sleep: "睡眠"
         }
     }
@@ -16,7 +19,10 @@ enum HealthMetric: String, CaseIterable, Identifiable {
         switch self {
         case .steps: "今天的总步数"
         case .workout: "本周总分钟数与次数"
+        case .activeEnergy: "今天主动活动消耗的千卡数"
         case .weight: "最近一次体重"
+        case .restingHeartRate: "近 7 天最近一次估计值"
+        case .wristTemperature: "近 30 天最近一次绝对温度"
         case .sleep: "昨晚睡眠分钟数"
         }
     }
@@ -30,9 +36,13 @@ struct HealthSummary {
     var workoutCount: Int?
     var weightKg: Double?
     var sleepMinutes: Int?
+    var activeEnergyKcal: Int?
+    var restingHeartRate: Int?
+    var wristTemperatureC: Double?
 
     var hasReadableValue: Bool {
-        steps != nil || workoutMinutes != nil || weightKg != nil || sleepMinutes != nil
+        steps != nil || workoutMinutes != nil || weightKg != nil || sleepMinutes != nil ||
+        activeEnergyKcal != nil || restingHeartRate != nil || wristTemperatureC != nil
     }
 
     func displayValue(for metric: HealthMetric) -> String {
@@ -41,7 +51,10 @@ struct HealthSummary {
         case .workout:
             guard let workoutMinutes, let workoutCount else { return "无可读取记录" }
             return "\(workoutMinutes) 分钟 · \(workoutCount) 次"
+        case .activeEnergy: return activeEnergyKcal.map { "\($0) 千卡" } ?? "无可读取记录"
         case .weight: return weightKg.map { String(format: "%.1f kg", $0) } ?? "无可读取记录"
+        case .restingHeartRate: return restingHeartRate.map { "\($0) 次/分" } ?? "无可读取记录"
+        case .wristTemperature: return wristTemperatureC.map { String(format: "%.1f °C（绝对值）", $0) } ?? "无可读取记录"
         case .sleep: return sleepMinutes.map { "\($0) 分钟" } ?? "无可读取记录"
         }
     }
@@ -52,6 +65,9 @@ struct HealthSummary {
          "workoutCount": workoutCount as Any? ?? NSNull(),
          "weightKg": weightKg as Any? ?? NSNull(),
          "sleepMinutes": sleepMinutes as Any? ?? NSNull(),
+         "activeEnergyKcal": activeEnergyKcal as Any? ?? NSNull(),
+         "restingHeartRate": restingHeartRate as Any? ?? NSNull(),
+         "wristTemperatureC": wristTemperatureC as Any? ?? NSNull(),
          "selectedTypes": selected.map(\.rawValue)]
     }
 
@@ -63,7 +79,10 @@ struct HealthSummary {
             case .workout:
                 snapshot["workoutMinutes"] = workoutMinutes as Any? ?? NSNull()
                 snapshot["workoutCount"] = workoutCount as Any? ?? NSNull()
+            case .activeEnergy: snapshot["activeEnergyKcal"] = activeEnergyKcal as Any? ?? NSNull()
             case .weight: snapshot["weightKg"] = weightKg as Any? ?? NSNull()
+            case .restingHeartRate: snapshot["restingHeartRate"] = restingHeartRate as Any? ?? NSNull()
+            case .wristTemperature: snapshot["wristTemperatureC"] = wristTemperatureC as Any? ?? NSNull()
             case .sleep: snapshot["sleepMinutes"] = sleepMinutes as Any? ?? NSNull()
             }
         }

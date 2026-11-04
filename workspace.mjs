@@ -41,6 +41,11 @@ export function healthView(state, customization = null) {
   const percent = hasWorkout ? Math.min(100, Math.round(completed / target * 100)) : 0;
   const real = state.source === 'healthkit';
   const sample = state.source === 'demo';
+  const metrics = real ? [
+    selected?.includes('restingHeartRate') ? {label:'静息心率',value:state.snapshot.restingHeartRate == null ? '无记录' : `${state.snapshot.restingHeartRate} 次/分`} : null,
+    selected?.includes('wristTemperature') ? {label:'手腕温度',value:state.snapshot.wristTemperatureC == null ? '无记录' : `${state.snapshot.wristTemperatureC.toFixed(1)} °C`} : null,
+    selected?.includes('activeEnergy') ? {label:'今日活动消耗',value:state.snapshot.activeEnergyKcal == null ? '无记录' : `${state.snapshot.activeEnergyKcal} 千卡`} : null,
+  ].filter(Boolean) : [];
   const primary = !hasWorkout
     ? {title: '先连接本周健身记录', detail: '选择 Apple Health 的健身记录后，Along 才能计算还差多少。', status: '待连接'}
     : remaining === 0
@@ -57,7 +62,7 @@ export function healthView(state, customization = null) {
     note: real ? '根据你选择导入的 Apple Health 摘要计算' : sample ? '当前使用演示健康数据' : '连接 Apple Health 后开始追踪',
     primary: chosenTask,
     secondary: hasWorkout ? [{title: '完成后更新健身记录', detail: '新数据到来时，下一步会重新计算。', status: '待更新'}] : [],
-    connection: {name: 'Apple Health', label: real ? '已连接' : sample ? '演示数据' : '未连接', detail: real ? '读取所选摘要 · 保存在本机' : sample ? '当前没有连接真实健康数据' : '步数、健身、体重、睡眠由你选择', action: real ? '更新' : '连接', kind: real ? 'real' : sample ? 'demo' : 'none'},
+    connection: {name: 'Apple Health', label: real ? '已连接' : sample ? '演示数据' : '未连接', detail: real ? `已选 ${selected?.length ?? 0} 项 · 前台自动检查 · 保存在本机` : sample ? '当前没有连接真实健康数据' : '选择要读取的健康数据', action: real ? '管理' : '连接', kind: real ? 'real' : sample ? 'demo' : 'none', metrics},
   };
 }
 

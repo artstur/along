@@ -6,7 +6,7 @@
 
 1. 安装支持手机系统版本的完整 Xcode，打开 [AlongHealth.xcodeproj](AlongHealth.xcodeproj)。例如，iOS 27 需要 Xcode 27。在 Xcode → Settings → Apple Accounts 登录自己的 Apple 账号；然后在 target 的 **Signing & Capabilities** 里选自己的 Team，确认 **HealthKit** capability 已开启。若 bundle ID 与你的签名冲突，改成自己的唯一 ID。
 2. 在 iOS 27 + Xcode 27 上，可以打开 Xcode 的 Device Hub，点侧栏的 `+` → **Pair Nearby Device…**，首次通过同一局域网无线配对；也可以用数据线连接。按提示在 iPhone 上完成配对、信任设备并开启开发者模式。选择这台 iPhone 作为运行设备，点 Run。HealthKit 的真实读取需要真机。
-3. 在 Along App 的健康目标页点 Apple Health“连接”，勾选需要的类型，点“读取并预览”。系统会显示相应 HealthKit 读取权限。确认摘要无误后，点“确认导入本机 Along”。如果选择了健身记录，首页会更新本周运动目标及动态任务；其他摘要保存在本机，首页只简要显示连接状态。不需要 Mac 上的同步服务、配对码或 Tunnel。
+3. 在 Along App 的健康目标页点 Apple Health“管理”。上次保存的选择会保持开启，也可点「一键全部开启」。点“读取并预览”，系统会显示新增类型的 HealthKit 读取权限。确认摘要无误后，点“确认导入本机 Along”。如果选择了健身记录，首页会更新本周运动目标及动态任务；其他摘要保存在本机，连接区简要显示静息心率、手腕温度和活动消耗。不需要 Mac 上的同步服务、配对码或 Tunnel。
 
 ## 读取和发送的范围
 
@@ -14,10 +14,15 @@
 | --- | --- | --- |
 | 步数 | 今日步数累计 | `steps` 整数 |
 | 健身记录 | 本周 workout | 总分钟数 `workoutMinutes` 与次数 `workoutCount` |
+| 活动消耗 | 今日 `activeEnergyBurned` | `activeEnergyKcal` 整数，单位千卡 |
 | 体重 | 最近一次 body mass | `weightKg`，保留一位小数 |
+| 静息心率 | 近 7 天最近一次 `restingHeartRate` | `restingHeartRate` 整数，单位次/分 |
+| 睡眠期间手腕温度 | 近 30 天最近一次 `appleSleepingWristTemperature` | `wristTemperatureC`，绝对温度 °C，保留一位小数 |
 | 睡眠 | 昨晚的 asleep 阶段 | 去重后的 `sleepMinutes` 整数 |
 
-只请求勾选类型的读取权限；不请求写入权限。没有可读取记录时，该值显示为“无可读取记录”；HealthKit 不会让读取方区分“没有记录”和“用户拒绝了读取”。用户至少有一项可读取摘要时才能确认导入。当前页面代码把摘要保存在 App 内 WKWebView 的 `localStorage`，不发送原始样本、逐条运动记录、具体睡眠区间或设备信息。若用户主动把 iPhone 与同一 Wi-Fi 的 Mac Agent Host 配对，目标问答和显著变化的任务重排只发送目标和健身分钟数汇总。
+Apple 健康 App 的手腕温度通常展示相对个人基线的偏差；HealthKit 读取的是绝对温度，两者显示口径不同。Apple 睡眠评分没有公开的 HealthKit 读取类型，Along 不会把睡眠时长换算成同名评分；连接页会说明这一限制。
+
+只请求勾选类型的读取权限；不请求写入权限。上次保存的开关表示 Along 已选择在前台自动检查，不代表系统确认了某项读取权限。没有可读取记录时，该值显示为“无可读取记录”；HealthKit 不会让读取方区分“没有记录”和“用户拒绝了读取”。用户至少有一项可读取摘要时才能确认导入。当前页面代码把摘要保存在 App 内 WKWebView 的 `localStorage`，不发送原始样本、逐条运动记录、具体睡眠区间或设备信息。若用户主动把 iPhone 与同一 Wi-Fi 的 Mac Agent Host 配对，目标问答和显著变化的任务重排只发送目标和健身分钟数汇总。
 
 ## 当前边界
 

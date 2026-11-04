@@ -4,9 +4,9 @@ import {homedir} from 'node:os';
 import {join} from 'node:path';
 import {mkdir, readFile, writeFile, rename, unlink} from 'node:fs/promises';
 
-const TYPES = ['steps', 'workout', 'weight', 'sleep'];
-const FIELDS = {steps:['steps'], workout:['workoutMinutes','workoutCount'], weight:['weightKg'], sleep:['sleepMinutes']};
-const LIMITS = {steps:300000, workoutMinutes:10080, workoutCount:500, weightKg:500, sleepMinutes:1440};
+const TYPES = ['steps', 'workout', 'activeEnergy', 'weight', 'restingHeartRate', 'wristTemperature', 'sleep'];
+const FIELDS = {steps:['steps'], workout:['workoutMinutes','workoutCount'], activeEnergy:['activeEnergyKcal'], weight:['weightKg'], restingHeartRate:['restingHeartRate'], wristTemperature:['wristTemperatureC'], sleep:['sleepMinutes']};
+const LIMITS = {steps:300000, workoutMinutes:10080, workoutCount:500, activeEnergyKcal:20000, weightKg:500, restingHeartRate:250, wristTemperatureC:45, sleepMinutes:1440};
 const MAX_BODY = 4096;
 
 export function validateHealthSummary(value) {
@@ -21,7 +21,7 @@ export function validateHealthSummary(value) {
   for (const [field, number] of Object.entries(value.snapshot)) {
     if (number === null) continue;
     if (typeof number !== 'number' || !Number.isFinite(number) || number < 0 || number > LIMITS[field]) throw Error('健康摘要数值不正确');
-    if (field !== 'weightKg' && !Number.isInteger(number)) throw Error('健康摘要数值不正确');
+    if (!['weightKg','wristTemperatureC'].includes(field) && !Number.isInteger(number)) throw Error('健康摘要数值不正确');
   }
   return {schema:1, source:'healthkit', selectedTypes:TYPES.filter(type=>selected.has(type)), capturedAt:value.capturedAt, snapshot:Object.fromEntries(Object.entries(value.snapshot))};
 }

@@ -27,3 +27,13 @@ test('finance connection stays explicitly simulated and changes the task', () =>
   assert.match(changed.primary.detail, /¥2,000/);
   assert.match(changed.note, /演示数据/);
 });
+test('connected health sources show only selected additional aggregates',()=>{
+  const state=ensureHealthGoal(setSnapshot(initialState(),{
+    selectedTypes:['workout','restingHeartRate','activeEnergy'],
+    workoutMinutes:75,workoutCount:2,restingHeartRate:58,activeEnergyKcal:340,
+  },'healthkit'));
+  const view=healthView(state);
+  assert.equal(view.connection.metrics.length,2);
+  assert.deepEqual(view.connection.metrics.map(item=>item.label),['静息心率','今日活动消耗']);
+  assert.match(view.connection.detail,/已选 3 项/);
+});

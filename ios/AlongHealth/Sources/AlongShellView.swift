@@ -97,7 +97,7 @@ final class AlongBridgeModel: ObservableObject {
         guard requestID == nil else { return }
         requestID = id
         self.webView = webView
-        selection = []
+        selection = savedSelection
         preview = nil
         errorMessage = nil
         showSheet = true
@@ -117,6 +117,13 @@ final class AlongBridgeModel: ObservableObject {
             }
             catch { errorMessage = error.localizedDescription }
         }
+    }
+
+    func selectAll() {
+        guard !busy else { return }
+        selection = Set(HealthMetric.allCases)
+        preview = nil
+        errorMessage = nil
     }
 
     func confirmImport() {
@@ -312,7 +319,19 @@ struct HealthSyncSheet: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("选择要读取的数据") {
+                Section {
+                    Button {
+                        bridge.selectAll()
+                    } label: {
+                        HStack {
+                            Text("一键全部开启").fontWeight(.semibold)
+                            Spacer()
+                            if bridge.selection.count == HealthMetric.allCases.count {
+                                Image(systemName: "checkmark.circle.fill")
+                            }
+                        }
+                    }
+                    .disabled(bridge.busy || bridge.selection.count == HealthMetric.allCases.count)
                     ForEach(HealthMetric.allCases) { metric in
                         Toggle(isOn: Binding(
                             get: { bridge.selection.contains(metric) },
@@ -331,6 +350,14 @@ struct HealthSyncSheet: View {
                     }
                     Button(bridge.busy ? "正在读取…" : "读取并预览") { bridge.readPreview() }
                         .disabled(bridge.selection.isEmpty || bridge.busy)
+                } header: {
+                    Text("选择要读取的数据 · 已选 \(bridge.selection.count)/\(HealthMetric.allCases.count)")
+                } footer: {
+                    Text("已选项目会在 App 前台自动检查。开关表示 Along 的选择；HealthKit 不会向 App 告知某项读取权限是否已被拒绝。")
+                }
+                Section("睡眠评分") {
+                    Text("Apple 睡眠评分目前没有可供第三方 App 直接读取的 HealthKit 类型。Along 可读取昨晚睡眠时长，但不会把它伪装成苹果评分。")
+                        .font(.footnote).foregroundStyle(.secondary)
                 }
                 if let preview = bridge.preview {
                     Section("导入前预览") {

@@ -30,3 +30,14 @@ test('partial HealthKit selection never treats missing workouts as zero progress
   assert.equal(taskPlan(state).progress[0].label,'等待健身记录');
   assert.equal(taskPlan(state).tasks[0].status,'active');
 });
+test('new HealthKit aggregates remain local and selected without changing workout progress',()=>{
+  const goal=addGoal(initialState(),'workout',2);
+  const state=setSnapshot(goal,{
+    selectedTypes:['workout','activeEnergy','restingHeartRate','wristTemperature'],
+    workoutMinutes:75,workoutCount:2,activeEnergyKcal:356,restingHeartRate:59,wristTemperatureC:35.8,
+  },'healthkit');
+  assert.equal(state.snapshot.activeEnergyKcal,356);
+  assert.equal(state.snapshot.restingHeartRate,59);
+  assert.equal(state.snapshot.wristTemperatureC,35.8);
+  assert.equal(taskPlan(state).progress[0].percent,63);
+});

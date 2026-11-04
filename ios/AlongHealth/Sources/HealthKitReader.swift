@@ -15,7 +15,10 @@ final class HealthKitReader {
             switch metric {
             case .steps: HKQuantityType.quantityType(forIdentifier: .stepCount)!
             case .workout: HKObjectType.workoutType()
+            case .activeEnergy: HKQuantityType.quantityType(forIdentifier: .activeEnergyBurned)!
             case .weight: HKQuantityType.quantityType(forIdentifier: .bodyMass)!
+            case .restingHeartRate: HKQuantityType.quantityType(forIdentifier: .restingHeartRate)!
+            case .wristTemperature: HKQuantityType.quantityType(forIdentifier: .appleSleepingWristTemperature)!
             case .sleep: HKCategoryType.categoryType(forIdentifier: .sleepAnalysis)!
             }
         })
@@ -34,6 +37,9 @@ final class HealthKitReader {
         }
         if selection.contains(.weight) { result.weightKg = try await latestWeight() }
         if selection.contains(.sleep) { result.sleepMinutes = try await lastNightSleep(now: now) }
+        if selection.contains(.activeEnergy) { result.activeEnergyKcal = try await todayActiveEnergy(now: now) }
+        if selection.contains(.restingHeartRate) { result.restingHeartRate = try await latestRestingHeartRate(now: now) }
+        if selection.contains(.wristTemperature) { result.wristTemperatureC = try await latestWristTemperature(now: now) }
         return result
     }
 
@@ -44,7 +50,10 @@ final class HealthKitReader {
             switch metric {
             case .steps: type = HKObjectType.quantityType(forIdentifier: .stepCount)!
             case .workout: type = .workoutType()
+            case .activeEnergy: type = HKObjectType.quantityType(forIdentifier: .activeEnergyBurned)!
             case .weight: type = HKObjectType.quantityType(forIdentifier: .bodyMass)!
+            case .restingHeartRate: type = HKObjectType.quantityType(forIdentifier: .restingHeartRate)!
+            case .wristTemperature: type = HKObjectType.quantityType(forIdentifier: .appleSleepingWristTemperature)!
             case .sleep: type = HKObjectType.categoryType(forIdentifier: .sleepAnalysis)!
             }
             let query = HKObserverQuery(sampleType: type, predicate: nil) { _, completion, error in
@@ -75,6 +84,42 @@ final class HealthKitReader {
         }
         guard let count = statistics?.sumQuantity()?.doubleValue(for: .count()) else { return nil }
         return max(0, Int(count.rounded(.down)))
+    }
+
+    private func todayActiveEnergy(now: Date) async throws -> Int? {
+        let type = HKQuantityType.quantityType(forIdentifier: .activeEnergyBurned)!
+        let start = Calendar.current.startOfDay(for: now)
+        let predicate = HKQuery.predicateForSamples(withStart: start, end: now, options: .strictStartDate)
+        let statistics = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<HKStatistics?, Error>) in
+            let query = HKStatisticsQuery(quantityType: type, quantitySamplePredicate: predicate, options: .cumulativeSum) { _, value, error in
+                if let error, Self.isNoData(error) { continuation.resume(returning: nil) }
+                else if let error { continuation.resume(throwing: error) }
+                else { continuation.resume(returning: value) }
+            }
+            store.execute(query)
+        }
+        guard let kcal = statistics?.sumQuantity()?.doubleValue(for: .kilocalorie()) else { return nil }
+        return max(0, Int(kcal.rounded()))
+    }
+
+    private func latestRestingHeartRate(now: Date) async throws -> Int? {
+        let type = HKQuantityType.quantityType(forIdentifier: .restingHeartRate)!
+        guard let sample = try await latestQuantity(type, since: -7, now: now) else { return nil }
+        let beatsPerMinute = HKUnit.count().unitDivided(by: .minute())
+        return max(0, Int(sample.quantity.doubleValue(for: beatsPerMinute).rounded()))
+    }
+
+    private func latestWristTemperature(now: Date) async throws -> Double? {
+        let type = HKQuantityType.quantityType(forIdentifier: .appleSleepingWristTemperature)!
+        guard let sample = try await latestQuantity(type, since: -30, now: now) else { return nil }
+        return (sample.quantity.doubleValue(for: .degreeCelsius()) * 10).rounded() / 10
+    }
+
+    private func latestQuantity(_ type: HKQuantityType, since days: Int, now: Date) async throws -> HKQuantitySample? {
+        guard let start = Calendar.current.date(byAdding: .day, value: days, to: now) else { return nil }
+        let predicate = HKQuery.predicateForSamples(withStart: start, end: now, options: [])
+        let sorted = [NSSortDescriptor(key: HKSampleSortIdentifierEndDate, ascending: false)]
+        return try await samples(of: type, predicate: predicate, limit: 1, sort: sorted).first as? HKQuantitySample
     }
 
     private func thisWeekWorkouts(now: Date) async throws -> (minutes: Int, count: Int)? {

@@ -19,11 +19,11 @@
 	<key>CFBundleShortVersionString</key>
 	<string>1.0</string>
 	<key>CFBundleVersion</key>
-	<string>3</string>
+	<string>4</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>连接同一 Wi-Fi 的 Mac 上的 Along Agent，用于目标问答和任务调整。</string>
 	<key>NSHealthShareUsageDescription</key>
-	<string>仅在你选择后读取步数、健身、体重和睡眠；首次确认后在 App 前台刷新所选摘要。</string>
+	<string>仅在你选择后读取步数、健身、活动消耗、体重、静息心率、睡眠期间手腕温度和睡眠；首次确认后在 App 前台刷新所选摘要。</string>
 	<key>NSHealthUpdateUsageDescription</key>
 	<string>Along 不向 Apple Health 写入数据。</string>
 	<key>UISupportedInterfaceOrientations</key>

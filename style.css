@@ -72,6 +72,10 @@ p { line-height: 1.5; }
 .connection-action:hover { background: #f4f4f4; }
 .minor-action { border: 0; background: transparent; color: #727272; font-size: 11px; text-decoration: underline; text-underline-offset: 3px; padding: 8px 0; }
 .connection-footnote { margin-top: 9px; color: #989898; font-size: 10px; }
+.connection-metrics { display: flex; gap: 7px; flex-wrap: wrap; margin-top: 8px; }
+.connection-metrics > div { display: flex; flex-direction: column; gap: 3px; padding: 9px 11px; border: 1px solid #e8e8e7; border-radius: 10px; background: #fff; }
+.connection-metrics span { color: #999; font-size: 10px; }
+.connection-metrics strong { color: #333; font-size: 11px; font-weight: 600; }
 .lab-entry { width: 100%; display: flex; justify-content: space-between; align-items: center; margin-top: 34px; padding: 16px 0; border: 0; border-top: 1px solid #e6e6e5; background: transparent; color: #858585; text-align: left; font-size: 11px; }
 .lab-entry span { font-size: 16px; }
 footer { padding: 0 0 26px; color: #aaa; text-align: center; font-size: 10px; }

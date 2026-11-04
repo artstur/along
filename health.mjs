@@ -13,9 +13,10 @@ export const removeGoal = (state, id) => ({...state, goals: state.goals.filter(g
 export function setSnapshot(state, input, source) {
   if (!['demo', 'healthkit'].includes(source)) throw Error('未知数据来源');
   const optionalNumber = value => value == null ? null : Number(value);
-  const data = {steps: optionalNumber(input?.steps), workoutMinutes: optionalNumber(input?.workoutMinutes), workoutCount: optionalNumber(input?.workoutCount), weightKg: optionalNumber(input?.weightKg), sleepMinutes: optionalNumber(input?.sleepMinutes)};
+  const data = {steps: optionalNumber(input?.steps), workoutMinutes: optionalNumber(input?.workoutMinutes), workoutCount: optionalNumber(input?.workoutCount), weightKg: optionalNumber(input?.weightKg), sleepMinutes: optionalNumber(input?.sleepMinutes), activeEnergyKcal: optionalNumber(input?.activeEnergyKcal), restingHeartRate: optionalNumber(input?.restingHeartRate), wristTemperatureC: optionalNumber(input?.wristTemperatureC)};
   if (Object.values(data).some(value => value !== null && (!Number.isFinite(value) || value < 0))) throw Error('健康数据格式不正确');
-  const selectedTypes=source==='healthkit' && Array.isArray(input?.selectedTypes) ? input.selectedTypes.filter(type=>['steps','workout','weight','sleep'].includes(type)) : null;
+  if ((data.restingHeartRate != null && data.restingHeartRate > 250) || (data.wristTemperatureC != null && data.wristTemperatureC > 45) || (data.activeEnergyKcal != null && data.activeEnergyKcal > 20000)) throw Error('健康数据超出合理范围');
+  const selectedTypes=source==='healthkit' && Array.isArray(input?.selectedTypes) ? input.selectedTypes.filter(type=>['steps','workout','activeEnergy','weight','restingHeartRate','wristTemperature','sleep'].includes(type)) : null;
   return {...state, source, snapshot: {...data, selectedTypes, updatedAt: new Date().toISOString()}, goals: state.goals.map(goal => {
     if (goal.type !== 'weight') return goal;
     if (source !== state.source) return {...goal, baselineWeight:data.weightKg, weightRecords:data.weightKg == null ? 0 : 1};
