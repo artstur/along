@@ -21,3 +21,9 @@ test('explicit numeric targets are recognized without interpreting a daily limit
   assert.equal(requestedTargetFromMessage('目标设为 2 小时','health'),120);
   assert.equal(requestedTargetFromMessage('每月目标改为 ¥12,000 元','finance'),12000);
 });
+
+test('custom goals can produce a title and task without inventing a numeric target',()=>{
+  const value=validateGoalReply({reply:'先建立试运行方案',proposal:{title:'完成第一部长篇小说',target:null,task:'整理故事主线',reason:'先明确范围'},layout:{}},'custom');
+  assert.equal(value.proposal.target,null);
+  assert.equal(requestedTargetFromMessage('未来半年完成一部长篇小说','custom'),null);
+});

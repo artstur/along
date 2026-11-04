@@ -57,15 +57,15 @@ export function routeHealthEvent(before, event) {
 
 export function acceptAgentSuggestion(value, expectedRemaining) {
   const raw = typeof value === 'string' ? value : value?.finalResponse;
-  if (typeof raw !== 'string') throw Error('DSH 没有返回任务');
+  if (typeof raw !== 'string') throw Error('Agent 没有返回任务');
   const match = raw.trim().match(/(?:```(?:json)?\s*)?(\{[\s\S]*?\})(?:\s*```)?/);
-  if (!match) throw Error('DSH 返回格式不正确');
+  if (!match) throw Error('Agent 返回格式不正确');
   let answer;
-  try { answer = JSON.parse(match[1]); } catch { throw Error('DSH 返回格式不正确'); }
+  try { answer = JSON.parse(match[1]); } catch { throw Error('Agent 返回格式不正确'); }
   if (!answer || !Number.isInteger(answer.minutes) || answer.minutes !== expectedRemaining ||
       typeof answer.task !== 'string' || !answer.task.trim() || answer.task.length > 100 ||
       typeof answer.reason !== 'string' || !answer.reason.trim() || answer.reason.length > 240) {
-    throw Error('DSH 建议与 Along 计算的剩余分钟不一致');
+    throw Error('Agent 建议与 Along 计算的剩余分钟不一致');
   }
   return {task: answer.task.trim(), reason: answer.reason.trim(), minutes: answer.minutes};
 }

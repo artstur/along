@@ -150,7 +150,7 @@ final class AlongBridgeModel: ObservableObject {
 
 struct AlongWebView: UIViewRepresentable {
     @ObservedObject var bridge: AlongBridgeModel
-    private let site = URL(string: "https://personality-demo.pages.dev/")!
+    private let site = URL(string: "https://artstur.github.io/Personality-Demo/")!
 
     func makeCoordinator() -> Coordinator { Coordinator(bridge: bridge) }
 
@@ -214,7 +214,7 @@ struct AlongWebView: UIViewRepresentable {
 
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
             guard ["alongHealth", "alongHealthRefresh", "alongAgent"].contains(message.name), message.frameInfo.isMainFrame,
-                  message.frameInfo.securityOrigin.host == "personality-demo.pages.dev",
+                  message.frameInfo.securityOrigin.host == "artstur.github.io",
                   let body = message.body as? [String: Any], let id = body["id"] as? String,
                   let webView = message.webView else { return }
             if message.name == "alongHealth" {
@@ -274,7 +274,8 @@ struct AlongWebView: UIViewRepresentable {
         func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
                      decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
             guard let url = navigationAction.request.url else { decisionHandler(.cancel); return }
-            decisionHandler(url.scheme == "https" && url.host == "personality-demo.pages.dev" ? .allow : .cancel)
+            decisionHandler(url.scheme == "https" && url.host == "artstur.github.io" &&
+                            url.path.hasPrefix("/Personality-Demo/") ? .allow : .cancel)
         }
     }
 }

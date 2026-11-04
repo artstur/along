@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["reply", "proposal", "layout"],
+  "properties": {
+    "reply": {"type": "string", "minLength": 1, "maxLength": 1200},
+    "proposal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["active", "title", "target", "task", "reason"],
+      "properties": {
+        "active": {"type": "boolean"},
+        "title": {"type": "string", "maxLength": 80},
+        "target": {"type": ["integer", "null"]},
+        "task": {"type": "string", "maxLength": 120},
+        "reason": {"type": "string", "maxLength": 300}
+      }
+    },
+    "layout": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "title", "badge", "summary", "modules", "tasks", "questions"],
+      "properties": {
+        "version": {"const": 1},
+        "title": {"type": "string", "minLength": 1, "maxLength": 80},
+        "badge": {"type": "string", "maxLength": 40},
+        "summary": {"type": "string", "minLength": 1, "maxLength": 600},
+        "modules": {
+          "type": "array", "maxItems": 6,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "id", "title", "content", "facts", "chips", "source", "target", "unit", "note"],
+            "properties": {
+              "kind": {"enum": ["summary", "fact_list", "chips", "metric"]},
+              "id": {"type": "string"},
+              "title": {"type": "string"},
+              "content": {"type": ["string", "null"]},
+              "facts": {"type":"array","maxItems":6,"items":{"type":"object","additionalProperties":false,"required":["label","value"],"properties":{"label":{"type":"string"},"value":{"type":"string"}}}},
+              "chips": {"type":"array","maxItems":8,"items":{"type":"string"}},
+              "source": {"enum":["workoutMinutes","sleepMinutes","weightKg","saved",null]},
+              "target": {"type":["number","string","null"]},
+              "unit": {"type":"string"},
+              "note": {"type":"string"}
+            }
+          }
+        },
+        "tasks": {
+          "type": "array", "maxItems": 6,
+          "items": {"type":"object","additionalProperties":false,"required":["id","when","title","detail","state"],"properties":{"id":{"type":"string"},"when":{"type":"string"},"title":{"type":"string"},"detail":{"type":"string"},"state":{"enum":["temporary","planned","deferred"]}}}
+        },
+        "questions": {"type":"array","maxItems":6,"items":{"type":"string"}}
+      }
+    }
+  }
+}

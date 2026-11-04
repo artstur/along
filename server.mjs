@@ -16,9 +16,9 @@ createServer(async(req,res)=>{
       const route=routeHealthEvent(before,event);
       if(route.decision==='quiet')return json(res,200,{decision:'quiet',reason:route.reason,remaining:route.remainingAfter});
       if(typeof before.loop.currentTask!=='string'||before.loop.currentTask.length>100)throw Error('原任务格式不正确');
-      const {proposeNextStep}=await import('./dsh-agent.mjs');
+      const {proposeNextStep}=await import('./codex-agent.mjs');
       const suggestion=await proposeNextStep({oldTask:before.loop.currentTask,eventMinutes:event.amount,completed:route.after.snapshot.workoutMinutes,target:120,remaining:route.remainingAfter});
-      return json(res,200,{decision:'replan',reason:route.reason,remaining:route.remainingAfter,suggestion,source:'live-dsh'});
+      return json(res,200,{decision:'replan',reason:route.reason,remaining:route.remainingAfter,suggestion,source:'live-codex'});
     }
     let path=resolve(root,'.'+decodeURIComponent(new URL(req.url,'http://localhost').pathname));
     if(path!==root&&!path.startsWith(root+sep)){res.writeHead(403).end();return;}
