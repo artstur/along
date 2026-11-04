@@ -220,7 +220,7 @@ footer { padding: 0 0 26px; color: #aaa; text-align: center; font-size: 10px; }
 .agent-status { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 8px 12px; }
 .agent-status strong { color: #222; font-size: 12px; }
 .agent-status span { line-height: 1.45; }
-.agent-status button { border: 0; background: none; font: inherit; color: #333; text-decoration: underline; white-space: nowrap; }
+.agent-status em { padding: 4px 7px; border-radius: 7px; background: #efefee; color: #555; font-size: 10px; font-style: normal; white-space: nowrap; }
 .agent-setup h2 { color: #222; font-size: 15px; }
 .agent-setup p { margin-top: 8px; line-height: 1.6; }
 .agent-setup code { font-family: ui-monospace, SFMono-Regular, monospace; color: #222; }

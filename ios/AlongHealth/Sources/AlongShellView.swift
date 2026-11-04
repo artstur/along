@@ -160,21 +160,72 @@ final class AlongBridgeModel: ObservableObject {
 }
 
 enum AlongConnectionStore {
-    private static let key = "along.connection.v1"
+    private static let legacyKey = "along.connection.v1"
+    private static let service = "com.artstur.AlongHealth.connection"
+    private static let account = "Along"
 
     static func load() -> [String: String]? {
-        guard let saved = UserDefaults.standard.dictionary(forKey: key) else { return nil }
-        return clean(saved)
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        var item: CFTypeRef?
+        if SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
+           let data = item as? Data,
+           let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let clean = clean(value) { return clean }
+
+        guard let legacy = UserDefaults.standard.dictionary(forKey: legacyKey),
+              let clean = clean(legacy) else { return nil }
+        _ = save(clean.mapValues { $0 as Any })
+        UserDefaults.standard.removeObject(forKey: legacyKey)
+        return clean
     }
 
     @discardableResult
     static func save(_ value: [String: Any]) -> [String: String]? {
-        guard let clean = clean(value) else { return nil }
-        UserDefaults.standard.set(clean, forKey: key)
+        guard let clean = clean(value),
+              let data = try? JSONSerialization.data(withJSONObject: clean) else { return nil }
+        let key: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+        ]
+        let attributes: [String: Any] = [
+            kSecValueData as String: data,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+        ]
+        let status = SecItemUpdate(key as CFDictionary, attributes as CFDictionary)
+        if status == errSecItemNotFound {
+            var item = key
+            item.merge(attributes) { _, new in new }
+            guard SecItemAdd(item as CFDictionary, nil) == errSecSuccess else { return nil }
+        } else if status != errSecSuccess { return nil }
         return clean
     }
 
-    static func clear() { UserDefaults.standard.removeObject(forKey: key) }
+    static func clear() {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+        ]
+        SecItemDelete(query as CFDictionary)
+        UserDefaults.standard.removeObject(forKey: legacyKey)
+    }
+
+#if DEBUG
+    static func bootstrapFromEnvironment() {
+        guard let json = ProcessInfo.processInfo.environment["ALONG_CONNECTION"],
+              let data = json.data(using: .utf8),
+              let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return }
+        _ = save(value)
+    }
+#endif
 
     private static func clean(_ value: [String: Any]) -> [String: String]? {
         guard let baseURL = value["baseURL"] as? String,
@@ -202,6 +253,9 @@ struct AlongWebView: UIViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(bridge: bridge) }
 
     func makeUIView(context: Context) -> WKWebView {
+#if DEBUG
+        AlongConnectionStore.bootstrapFromEnvironment()
+#endif
         print("Along connection restored: \(AlongConnectionStore.load() != nil)")
         let controller = WKUserContentController()
         controller.add(context.coordinator, name: "alongHealth")
@@ -297,7 +351,10 @@ struct AlongWebView: UIViewRepresentable {
 
         static func connectionOperation(_ input: [String: Any]) throws -> [String: String] {
             switch input["action"] as? String {
-            case "load": return AlongConnectionStore.load() ?? [:]
+            case "load":
+                let saved = AlongConnectionStore.load()
+                print("Along connection delivered to web: \(saved != nil)")
+                return saved ?? [:]
             case "save":
                 guard let value = input["value"] as? [String: Any],
                       let saved = AlongConnectionStore.save(value) else { throw AgentBridgeError.invalidConfiguration }

@@ -36,7 +36,7 @@ npm run build
 
 健康目标问答只发送当前目标与已选健身时长的汇总值，不发送原始 HealthKit 记录；自定义目标只发送用户主动输入的目标文本。Along 的生成结果使用严格 JSON Schema，再由客户端二次验证、绑定可信指标并渲染；用户确认后才改变目标空间。健康变化的流程是 Apple Health 来源 → 有意义变化筛选 → 待处理任务 → Along 生成提案 → 用户确认。任务详情页进一步落地了 Ticket、Mandate 和 Assignment 概念，但不宣称存在后台长期运行的独立工作进程。
 
-Mac 关闭或网络断开时，首页的确定性进度仍可更新，Along 问答和任务提案会显示不可用。连接凭证的哈希值保存在 Mac 本机 `~/.along/agent-host/pairing.json`，连接信息同时保存在 iPhone App 沙盒中；正常重启或升级 App 后无需重新输入，只有主动打开「连接设置」时才清除。
+Mac 关闭或网络断开时，首页的确定性进度仍可更新，Along 问答和任务提案会显示不可用。连接凭证的哈希值保存在 Mac 本机 `~/.along/agent-host/pairing.json`，连接信息同时保存在 iPhone Keychain；正常重启、升级或重新安装 App 后无需重新输入，页面也不提供一键清除入口。
 
 ## iPhone 原生薄壳
 
