@@ -4,7 +4,9 @@ import {EXPERIMENT, startExperiment, routeHealthEvent, acceptAgentSuggestion, ag
 import {routeHealthChange} from './goal-agent-core.mjs';
 import {AGENT_KEY, GOALS_KEY, CONVERSATIONS_KEY, readStored, agentCall, loadNativeConnection, saveNativeConnection} from './agent-client.mjs';
 import {ADAPTIVE_LAYOUTS_KEY, safeAdaptiveLayout, validateAdaptiveLayout} from './adaptive-ui.mjs';
-import {SUPER_AGENT_RUNS_KEY, createFailedSuperAgentRun, createPendingSuperAgentRun, createSuperAgentRequest, safeSuperAgentRun} from './super-agent.mjs';
+import {GOAL_SUPER_AGENT_RUNS_KEY, SUPER_AGENT_RUNS_KEY, createFailedGoalSuperAgentRun, createFailedSuperAgentRun,
+  createGoalSuperAgentRequest, createPendingGoalSuperAgentRun, createPendingSuperAgentRun, createSuperAgentRequest,
+  safeGoalSuperAgentRun, safeSuperAgentRun} from './super-agent.mjs';
 const TICKET_KEY = 'along.goal-ticket.v1';
 
 const app = document.querySelector('#app');
@@ -24,6 +26,7 @@ const storedLayouts = readStored(ADAPTIVE_LAYOUTS_KEY, {health:null, finance:nul
 let goalLayouts = {health:safeAdaptiveLayout(storedLayouts.health,'health'), finance:safeAdaptiveLayout(storedLayouts.finance,'finance'), custom:safeAdaptiveLayout(storedLayouts.custom,'custom')};
 let pendingTask = readStored(TICKET_KEY, null);
 let superAgentRuns = readStored(SUPER_AGENT_RUNS_KEY, {});
+let goalSuperAgentRuns = readStored(GOAL_SUPER_AGENT_RUNS_KEY, {});
 function saveTicket(ticket) { pendingTask=ticket; if (ticket) localStorage.setItem(TICKET_KEY,JSON.stringify(ticket)); else localStorage.removeItem(TICKET_KEY); }
 localStorage.setItem(KEY, JSON.stringify(state));
 
@@ -113,6 +116,53 @@ async function refreshSuperAgentTask(task) {
     if (!current?.actual) {superAgentRuns={...superAgentRuns,[key]:createFailedSuperAgentRun(request,error.message)};saveSuperAgentRuns();render();}
   } finally { superAgentRequests.delete(request.requestId); }
 }
+function saveGoalSuperAgentRuns() { localStorage.setItem(GOAL_SUPER_AGENT_RUNS_KEY,JSON.stringify(goalSuperAgentRuns)); }
+function currentGoalSuperAgentRun(domain=activeGoal) { return safeGoalSuperAgentRun(goalSuperAgentRuns[domain]); }
+const goalSuperAgentRequests=new Set();
+function saveGoalRun(domain,run) {
+  goalSuperAgentRuns={...goalSuperAgentRuns,[domain]:run};
+  saveGoalSuperAgentRuns();
+}
+function applyGoalRun(domain,value) {
+  let run=safeGoalSuperAgentRun(value);
+  if (!run) throw Error('DSH 没有返回真实目标编排记录');
+  if (run.status==='done' && run.result && !run.applied) {
+    const history=conversations[domain]||[];
+    if (!history.some(item=>item.requestId===run.requestId)) {
+      conversations[domain]=[...history,{role:'assistant',text:run.result.reply,proposal:run.result.proposal,layout:run.result.layout,
+        requestId:run.requestId}].slice(-20);
+      saveConversations();
+    }
+    run={...run,applied:true};
+  }
+  saveGoalRun(domain,run);
+  return run;
+}
+async function submitSuperAgentGoal(domain,message,history) {
+  const request=createGoalSuperAgentRequest({domain,goal:currentGoal(),snapshot:currentSummary(),message,history});
+  saveGoalRun(domain,createPendingGoalSuperAgentRun(request));
+  goalSuperAgentRequests.add(request.requestId);
+  try {
+    const response=await agentCall(agentConfig,'/super-agent/goals',request);
+    if (!response?.run?.actual) throw Error('DSH 没有返回真实目标编排记录');
+    applyGoalRun(domain,response.run);
+  } catch(error) {
+    saveGoalRun(domain,createFailedGoalSuperAgentRun(request,error.message));
+    throw error;
+  } finally { goalSuperAgentRequests.delete(request.requestId); }
+}
+async function refreshSuperAgentGoal(domain=activeGoal) {
+  const current=currentGoalSuperAgentRun(domain);
+  if (!current?.actual || current.status!=='working' || goalSuperAgentRequests.has(current.requestId) || !agentConfig.token) return;
+  goalSuperAgentRequests.add(current.requestId);
+  try {
+    const run=await agentCall(agentConfig,'/super-agent/goals/status',{requestId:current.requestId});
+    applyGoalRun(domain,run);
+    if (screen==='agent'&&activeGoal===domain) render();
+  } catch(error) {
+    if (!current.actual) saveGoalRun(domain,{...current,status:'blocked',statusLabel:'DSH 状态读取失败',error:error.message});
+  } finally { goalSuperAgentRequests.delete(current.requestId); }
+}
 function trustedMetric(source) {
   if (activeGoal==='finance') return source==='saved' && finance.connected ? finance.saved : null;
   const selected=state.snapshot?.selectedTypes;
@@ -181,7 +231,7 @@ function home() {
 }
 
 function taskAgentCard(agent) {
-  const progress=agent.status==='done'?100:agent.status==='working'?55:agent.status==='blocked'?85:0;
+  const progress=Number.isFinite(agent.progress)?agent.progress:agent.status==='done'?100:agent.status==='working'?55:agent.status==='blocked'?85:0;
   return `<article class="worker-card ${agent.status}"><div class="worker-card-head"><span class="worker-mark" aria-hidden="true">${esc(agent.role==='Executor'?'W':'A')}</span><div><strong>${esc(agent.name)}</strong><span>${esc(agent.role)}</span></div><span class="worker-state">${esc(agentStateLabel[agent.status]||agent.status)}</span></div><p class="worker-objective">${esc(agent.objective)}</p><div class="worker-progress"><span style="width:${progress}%"></span></div><p class="worker-now"><span>当前</span>${esc(agent.work)}</p>${agent.report?`<p class="worker-output"><span>报告</span>${esc(agent.report.summary)}</p>`:''}</article>`;
 }
 function taskDetailPage() {
@@ -212,6 +262,18 @@ function taskDetailPage() {
   </main></div>`;
 }
 
+function goalOrchestrationPanel(run) {
+  if (!run) return '';
+  const events=(run.events||[]).slice(-5);
+  const mandateText=typeof run.mandate==='string'?run.mandate:run.mandate?.scope||'仅围绕本次目标进行拆解、规划与可交付执行。';
+  return `<section class="goal-orchestration ${run.status}" aria-live="polite"><div class="goal-run-head"><div><span class="eyebrow">真实 DSH Super Agent</span><h2>${esc(run.statusLabel)}</h2></div><strong>${run.progress}%</strong></div><div class="run-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${run.progress}"><span style="width:${run.progress}%"></span></div>
+  <div class="orchestration-flow compact"><div><span>Source</span><strong>目标输入</strong></div><b aria-hidden="true">→</b><div><span>Main Session</span><strong>${run.eval?.decision==='accept'?'已接单':run.eval?.decision==='evaluating'?'评估中':'等待'}</strong></div><b aria-hidden="true">→</b><div><span>Ticket</span><strong>${run.ticket?esc(run.ticket.id.slice(0,8)):'创建中'}</strong></div><b aria-hidden="true">→</b><div><span>Worker</span><strong>${run.agents?.length||0} 个 Agent</strong></div></div>
+  ${run.mandate?`<div class="mandate-card"><span>Mandate · 本次授权边界</span><p>${esc(mandateText)}</p></div>`:''}
+  ${run.agents?.length?`<div class="worker-grid">${run.agents.map(taskAgentCard).join('')}</div>`:''}
+  ${events.length?`<div class="goal-run-events">${events.map(event=>`<p><span>${formatTime(event.at)}</span>${esc(event.text)}</p>`).join('')}</div>`:''}
+  ${run.error?`<p class="goal-run-error">${esc(run.error)}</p>`:''}</section>`;
+}
+
 function agentPreview(item,index,goal,domain) {
   if (!item.proposal && !item.layout) return '';
   const change=domain==='health'?`${goal.target} → ${item.proposal?.target} 分钟 / 周`:domain==='finance'?`¥${goal.target.toLocaleString('zh-CN')} → ¥${item.proposal?.target.toLocaleString('zh-CN')}`:'建立新的自定义目标';
@@ -223,13 +285,16 @@ function goalAgentPage() {
   const domain=activeGoal;
   const goal=currentGoal();
   const history=conversations[domain] || [];
+  const goalRun=currentGoalSuperAgentRun(domain);
+  const goalRunning=goalRun?.status==='working';
   const label=domain==='health'?'健康':domain==='finance'?'理财演示':'自定义目标';
   const targetText=domain==='health'?`${goal.target} 分钟 / 周`:domain==='finance'?`¥${goal.target.toLocaleString('zh-CN')}`:'由你用自然语言定义';
   const placeholder=domain==='custom'?'例如：未来半年完成第一部长篇小说，每周只有周末能集中写作':'例如：这周运动目标改为 150 分钟，但每天只有 20 分钟';
-  return `<div class="app-shell"><header class="topbar"><div class="topbar-inner">${brand()}<span class="topbar-caption">目标共创</span></div></header><main class="content agent-page"><button class="back-button" data-action="agent-back">← 返回目标</button><div class="agent-title"><span class="eyebrow">${label} · Along</span><h1>${esc(goal.title)}</h1><p>当前目标：${targetText}。你提出想法，Along 生成目标空间和动态任务；确认后才会改变首页。</p></div>
+  return `<div class="app-shell"><header class="topbar"><div class="topbar-inner">${brand()}<span class="topbar-caption">目标共创</span></div></header><main class="content agent-page"><button class="back-button" data-action="agent-back">← 返回目标</button><div class="agent-title"><span class="eyebrow">${label} · DSH Super Agent</span><h1>${esc(goal.title)}</h1><p>当前目标：${targetText}。提交后由 Main Session 接单，Worker 与真实子 Agent 拆解、分工并生成动态任务；确认后才会改变首页。</p></div>
   ${agentConfig.token ? `<div class="agent-status"><strong>Along 已连接</strong><span>保持手机与 Mac 在同一网络即可继续使用</span><em>自动保持</em></div>` : `<div class="agent-setup"><h2>首次连接 Along</h2><p>只需设置一次，之后会自动恢复。让 Mac 与 iPhone 保持在同一网络，启动 Along 服务后填入一次连接信息。</p><form id="pair-form"><input name="baseURL" placeholder="Along 服务地址" value="${esc(agentConfig.baseURL||'')}" required><input name="fingerprint" placeholder="连接指纹" value="${esc(agentConfig.fingerprint||'')}" required><input name="code" placeholder="一次性连接码" inputmode="numeric" required><button class="button" ${agentBusy?'disabled':''}>${agentBusy?'连接中…':'连接 Along'}</button></form></div>`}
   <div class="agent-messages">${history.length?history.map((item,index)=>`<div class="agent-message ${item.role}"><span>${item.role==='user'?'你':'Along'}</span><p>${esc(item.text)}</p>${agentPreview(item,index,goal,domain)}</div>`).join(''):'<p class="agent-empty">说说你希望达成什么、期限、约束和偏好；Along 会先整理并请你确认。</p>'}</div>
-  <form id="agent-form" class="agent-composer"><textarea name="message" placeholder="${placeholder}" maxlength="800" required></textarea><button class="button" ${agentBusy||!agentConfig.token?'disabled':''}>${agentBusy?'Along 正在思考…':'发送给 Along'}</button></form><p class="agent-disclaimer">${domain==='finance'?'理财连接和余额仍是演示；Along 只规划，不交易。':domain==='health'?'仅发送当前目标与所选健康摘要，不发送原始记录。':'只发送你在目标对话中主动提供的信息。'}</p></main></div>`;
+  ${goalOrchestrationPanel(goalRun)}
+  <form id="agent-form" class="agent-composer"><textarea name="message" placeholder="${placeholder}" maxlength="800" required ${goalRunning?'disabled':''}></textarea><button class="button" ${agentBusy||goalRunning||!agentConfig.token?'disabled':''}>${goalRunning?'Super Agent 编排中…':agentBusy?'正在提交…':'交给 Super Agent'}</button></form><p class="agent-disclaimer">${domain==='finance'?'理财连接和余额仍是演示；Super Agent 只规划，不交易。':domain==='health'?'仅发送当前目标与所选健康摘要，不发送原始记录。':'只发送你在目标对话中主动提供的信息。'}</p></main></div>`;
 }
 
 function currentGoal() {
@@ -358,6 +423,7 @@ app.addEventListener('submit', async event => {
   if (!['pair-form','agent-form'].includes(event.target.id)) return;
   event.preventDefault();
   if (agentBusy) return;
+  if (event.target.id==='agent-form' && currentGoalSuperAgentRun()?.status==='working') return;
   const form=new FormData(event.target);
   agentBusy=true;
   render();
@@ -374,9 +440,10 @@ app.addEventListener('submit', async event => {
       if (!message) return;
       const domain=activeGoal;
       const history=conversations[domain]||[];
-      const result=await agentCall(agentConfig,'/goal/chat',{goal:currentGoal(),snapshot:currentSummary(),message,history:history.map(item=>({role:item.role,text:item.text}))});
-      conversations[domain]=[...history,{role:'user',text:message},{role:'assistant',text:result.reply,proposal:result.proposal,layout:result.layout}].slice(-20);
+      conversations[domain]=[...history,{role:'user',text:message}].slice(-20);
       saveConversations();
+      render();
+      await submitSuperAgentGoal(domain,message,history.map(item=>({role:item.role,text:item.text})));
     }
   } catch(error) { notice(error.message || 'Along 请求失败'); }
   finally { agentBusy=false;render(); }
@@ -450,3 +517,7 @@ setInterval(() => {
   if (!task) return;
   void refreshSuperAgentTask(task);
 },4_000);
+setInterval(() => {
+  if (screen!=='agent' || document.visibilityState==='hidden') return;
+  void refreshSuperAgentGoal(activeGoal);
+},3_000);

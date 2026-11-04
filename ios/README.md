@@ -32,4 +32,4 @@ Apple 健康 App 的手腕温度通常展示相对个人基线的偏差；Health
 - 真实健康摘要会驱动网页的目标进度与任务计算。仅在 Along 已连接且有显著健身时长变化时，请求新的任务提案；采用前需用户确认。“目标变化实验”仍是隔离的模拟实验。
 - 2026-11-04 已在 iPhone 真机完成签名安装、HealthKit 读取预览、用户确认本机导入和页面更新验证；最终构建也已覆盖安装并启动。HealthKit 对没有匹配记录的统计查询可能返回 `errorNoData`；此时界面显示“无可读取记录”，不会把它当作整个连接失败。
 - 当前使用 Xcode 个人团队签名。个人团队的配置文件通常 7 天后到期，届时需重新构建并安装。GitHub 提交和 Pages 更新不会自动更新已安装的 iPhone App；移动端需重新同步内置资源并安装。
-- 动态任务详情已接入 Mac 上独立运行的 DSH Super Agent。只有任务 Source、Eval、Ticket、Assignment 和 Report 的真实记录会显示为进展；Mac 服务或 GitHub Agent 账号未就绪时，页面明确显示阻塞原因，不会本地模拟完成。
+- 新目标输入和动态任务详情都已接入 Mac 上独立运行的 DSH Super Agent。目标页展示真实的 Source、Main Session、Ticket、Worker、子 Agent 分工、进展、输出与最终综合结果；任务页展示 Source、Eval、Ticket、Assignment 和 Report。Mac 服务或 GitHub Agent 账号未就绪时，页面明确显示阻塞原因，不会本地模拟完成。
