@@ -24,6 +24,8 @@ npm run build
 
 本地地址 `http://localhost:4173`；静态文件在 `dist/`。现有 Cloudflare Pages 使用手动上传，代码提交不会自动更新线上页面。
 
+后续更新：提交并推送 GitHub 后，运行 `npm run build`，再用 `npm exec --yes --package=wrangler@4 -- wrangler pages deploy dist --project-name personality-demo --branch main` 更新静态页面。iPhone 原生代码变更需在 Xcode 重新构建并安装；这两个发布动作都不需要临时公网通道。
+
 本地服务只监听 `127.0.0.1`，`POST /api/health-event` 只接收模拟实验的最少字段，并会复核路由，再决定是否启动 DSH SDK。Cloudflare Pages 是静态站，无法常驻 DSH 进程；公网版不会向事件接口发送页面状态，只在固定 75＋35 场景回放一次真实 DSH 输出，并在界面标明「DSH 建议回放」。它不会把其他事件假装成实时 Agent 建议。
 
 ## iPhone 原生薄壳
