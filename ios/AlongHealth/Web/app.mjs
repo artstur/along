@@ -54,6 +54,18 @@ async function refreshAgentConnection() {
     const status=await agentCall(agentConfig,'/connection/status',{});
     if (!status?.along || !status?.dsh) throw Error('DSH Along Source 尚未就绪');
     agentConnection={status:'ready',error:''};
+    const failedRun=currentGoalSuperAgentRun(activeGoal);
+    if (failedRun?.status==='blocked' && failedRun.actual!==true) {
+      const {[activeGoal]:_discarded,...remainingRuns}=goalSuperAgentRuns;
+      goalSuperAgentRuns=remainingRuns;
+      saveGoalSuperAgentRuns();
+    }
+    const history=conversations[activeGoal]||[];
+    const cleaned=history.filter(item=>!(item.role==='assistant' && /^这次没有完成：目标输入已迁移到 DSH Super Agent/.test(item.text)));
+    if (cleaned.length!==history.length) {
+      conversations[activeGoal]=cleaned;
+      saveConversations();
+    }
   } catch(error) {
     agentConnection={status:'error',error:error.message||'连接检查失败'};
   }
