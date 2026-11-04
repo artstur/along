@@ -50,7 +50,7 @@ function home() {
   const model = activeGoal === 'finance' ? financeView(finance, goalCustom.finance) : healthView(state, goalCustom.health);
   const connection = model.connection;
   const sourceTime = activeGoal === 'health' && state.snapshot?.updatedAt && state.source === 'healthkit'
-    ? ` · ${formatDate(state.snapshot.updatedAt)} 更新` : '';
+    ? ` · ${formatDate(state.snapshot.updatedAt)} 已检查` : '';
   return `<div class="app-shell"><header class="topbar"><div class="topbar-inner">${brand()}<span class="topbar-caption">你的目标空间</span></div></header>
     <main class="content">
       <div class="goal-switch"><label for="goal-select">当前目标</label><div class="select-wrap"><select id="goal-select" aria-label="切换目标"><option value="health" ${activeGoal === 'health' ? 'selected' : ''}>健康 · 每周运动</option><option value="finance" ${activeGoal === 'finance' ? 'selected' : ''}>理财 · 应急储备</option></select><span aria-hidden="true">⌄</span></div></div>
@@ -229,7 +229,6 @@ window.addEventListener('along-health-update', async event => {
   let next;
   try { next=setSnapshot(state,event.detail,'healthkit'); }
   catch { return; }
-  if (before && JSON.stringify({...before,updatedAt:null})===JSON.stringify({...next.snapshot,updatedAt:null})) return;
   saveHealth(next);
   if (!before || beforeSource!=='healthkit') return;
   const goal={domain:'health',title:goalCustom.health?.title || '本周运动',target:state.goals.find(item=>item.type==='workout')?.target||120};
