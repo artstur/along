@@ -10,6 +10,20 @@ export function routeHealthChange(before, after, target) {
   return {decision: 'replan', reason: `本周新增 ${delta} 分钟，距目标从 ${oldRemaining} 分钟变为 ${remaining} 分钟`, oldRemaining, remaining, delta};
 }
 
+export function requestedTargetFromMessage(message, domain) {
+  if (typeof message !== 'string') return null;
+  if (domain === 'health') {
+    const match = message.match(/(?:改为|改成|设为|设成|定为|目标(?:改为|是|为)?|达到)\s*(\d+(?:\.\d+)?)\s*(小时|分钟|分)/);
+    if (!match) return null;
+    const minutes = Number(match[1]) * (match[2] === '小时' ? 60 : 1);
+    return Number.isInteger(minutes) && minutes >= 1 && minutes <= 10080 ? minutes : null;
+  }
+  const match = message.match(/(?:改为|改成|设为|设成|定为|目标(?:改为|是|为)?|达到)\s*[¥￥]?\s*(\d+(?:,\d{3})*)\s*(?:元|块|人民币)/);
+  if (!match) return null;
+  const amount = Number(match[1].replaceAll(',', ''));
+  return Number.isInteger(amount) && amount >= 1 && amount <= 10000000 ? amount : null;
+}
+
 export function readAgentJSON(value) {
   const raw = typeof value === 'string' ? value : value?.finalResponse;
   if (typeof raw !== 'string') throw Error('DSH 没有返回内容');

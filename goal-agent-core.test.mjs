@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {routeHealthChange,validateGoalReply,validateTaskReply} from './goal-agent-core.mjs';
+import {routeHealthChange,requestedTargetFromMessage,validateGoalReply,validateTaskReply} from './goal-agent-core.mjs';
 
 test('health router stays quiet for unrelated or small changes and replans a meaningful change',()=>{
   assert.equal(routeHealthChange({workoutMinutes:75},{workoutMinutes:75,steps:12000},120).decision,'quiet');
@@ -14,4 +14,10 @@ test('agent proposals must preserve the deterministic goal domain and remaining 
   assert.equal(validateGoalReply('{"reply":"建议先试一周","proposal":{"title":"每周运动 150 分钟","target":150,"task":"安排 20 分钟活动","reason":"符合约束"}}','health').proposal.target,150);
   assert.throws(()=>validateGoalReply('{"reply":"好","proposal":{"title":"过量","target":10081,"task":"跑步","reason":"超限"}}','health'));
   assert.throws(()=>validateTaskReply('{"task":"活动 20 分钟","reason":"变化","remaining":20}',10));
+});
+
+test('explicit numeric targets are recognized without interpreting a daily limit as the goal',()=>{
+  assert.equal(requestedTargetFromMessage('这周运动目标改为 150 分钟，但每天只有 20 分钟','health'),150);
+  assert.equal(requestedTargetFromMessage('目标设为 2 小时','health'),120);
+  assert.equal(requestedTargetFromMessage('每月目标改为 ¥12,000 元','finance'),12000);
 });

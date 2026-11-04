@@ -5,7 +5,7 @@ import {homedir, networkInterfaces} from 'node:os';
 import {join} from 'node:path';
 import {mkdirSync, readFileSync, existsSync, chmodSync} from 'node:fs';
 import {DeepSeekHarness} from '@deepseek-ai/dsh-sdk-client';
-import {routeHealthChange, validateGoalReply, validateTaskReply} from './goal-agent-core.mjs';
+import {routeHealthChange, requestedTargetFromMessage, validateGoalReply, validateTaskReply} from './goal-agent-core.mjs';
 
 const dir = join(homedir(), '.along', 'agent-host');
 mkdirSync(dir, {recursive:true, mode:0o700});
@@ -79,9 +79,16 @@ const server=createServer({key:readFileSync(key),cert:readFileSync(cert)},async(
       const goal=cleanGoal(input.goal), snapshot=cleanSnapshot(input.snapshot,goal.domain);
       const message=String(input.message??'').trim();
       if (!message||message.length>800) throw Error('消息长度需在 1 至 800 字之间');
+      const requestedTarget=requestedTargetFromMessage(message,goal.domain);
       const history=Array.isArray(input.history)?input.history.slice(-6).map(item=>({role:item.role==='assistant'?'assistant':'user',text:String(item.text??'').slice(0,800)})):[];
-      const prompt=`你是 Along 的目标共创 Agent。只根据下面资料及用户消息对话。不得调用工具，不要给医疗或投资决策建议，不得声称已连接理财账户。先理解目标、约束和可执行的下一步；信息不足可追问。如果目标明确，返回可确认的提案。只能输出 JSON：{"reply":"给用户的简洁回答","proposal":null 或 {"title":"目标标题","target":整数,"task":"下一步任务","reason":"提案依据"}}。健康目标 target 单位是每周运动分钟，范围 1-10080；理财目标 target 单位是人民币元，范围 1-10000000。不能改变目标类型。提案尚未执行，必须由用户确认。\n当前目标：${JSON.stringify(goal)}\n当前摘要：${JSON.stringify(snapshot)}\n最近对话：${JSON.stringify(history)}\n用户消息：${message}`;
+      const exactTarget=requestedTarget==null?'':`用户明确要求的目标数值是 ${requestedTarget}。若给出 proposal，target 必须是 ${requestedTarget}；不要擅自改为较低数值。若你认为不合适，在 reply 解释并把 proposal 设为 null，等待用户选择。`;
+      const progress=goal.domain==='health' && Number.isInteger(snapshot.workoutMinutes) && requestedTarget!=null ? `本周已完成 ${snapshot.workoutMinutes} 分钟，距用户指定目标还差 ${Math.max(0,requestedTarget-snapshot.workoutMinutes)} 分钟。用户说的“每天只有 20 分钟”是接下来可安排的时间；你没有过去每天的时长分布。不得声称 20×7=140 是本周总时长上限，不要在回答或依据中提这个上限。若剩余 15 分钟，一次 15 分钟活动就符合每天 20 分钟的约束。` : '';
+      const prompt=`你是 Along 的目标共创 Agent。只根据下面资料及用户消息对话。不得调用工具，不要给医疗或投资决策建议，不得声称已连接理财账户。先理解目标、约束和可执行的下一步；信息不足可追问。如果目标明确，返回可确认的提案。只能输出 JSON：{"reply":"给用户的简洁回答","proposal":null 或 {"title":"目标标题","target":整数,"task":"下一步任务","reason":"提案依据"}}。健康目标 target 单位是每周运动分钟，范围 1-10080；理财目标 target 单位是人民币元，范围 1-10000000。不能改变目标类型。提案尚未执行，必须由用户确认。${exactTarget}${progress}\n当前目标：${JSON.stringify(goal)}\n当前摘要：${JSON.stringify(snapshot)}\n最近对话：${JSON.stringify(history)}\n用户消息：${message}`;
       const output=validateGoalReply(await run(prompt),goal.domain);
+      if (requestedTarget!=null && output.proposal && output.proposal.target!==requestedTarget) {
+        output.proposal=null;
+        output.reply += ` 我给出的目标数值与你指定的 ${requestedTarget} 不一致，已撤回该提案。`;
+      }
       return respond(res,200,{...output,source:'live-dsh'});
     }
     if (req.method==='POST' && path==='/goal/event') {
