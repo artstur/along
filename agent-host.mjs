@@ -46,10 +46,10 @@ async function superAgentCall(path,{method='POST',value}={}) {
   try {
     response=await fetch(`${superAgentURL}${path}`,{method,headers:{'x-along-bridge':'1',...(value===undefined?{}:{'content-type':'application/json'})},
       ...(value===undefined?{}:{body:JSON.stringify(value)}),signal:AbortSignal.timeout(15_000)});
-  } catch(error) { throw Error(`DSH Super Agent 未运行：${error.message}`); }
+  } catch(error) { throw Error(`Along 服务暂不可用：${error.message}`); }
   let result;
-  try { result=await response.json(); } catch { throw Error(`DSH Super Agent 返回了无效响应（${response.status}）`); }
-  if (!response.ok) throw Error(result?.error || `DSH Super Agent 请求失败（${response.status}）`);
+  try { result=await response.json(); } catch { throw Error(`Along 返回了无效响应（${response.status}）`); }
+  if (!response.ok) throw Error(result?.error || `Along 请求失败（${response.status}）`);
   return result;
 }
 function cleanGoal(value) {
@@ -81,18 +81,18 @@ async function runExclusive(operation) {
 }
 function requestId(value) {
   const id=String(value??'');
-  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$/.test(id)) throw Error('Super Agent requestId 无效');
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$/.test(id)) throw Error('Along requestId 无效');
   return id;
 }
 function normalizeGoalRun(run) {
   if (!run?.result) return run;
   const domain=run.input?.goal?.domain;
-  if (!['health','finance','custom'].includes(domain)) throw Error('DSH 返回的目标类型无效');
+  if (!['health','finance','custom'].includes(domain)) throw Error('Along 返回的目标类型无效');
   const output=validateGoalReply(run.result,domain);
   const layout=run.result.layout==null?null:safeAdaptiveLayout(run.result.layout,domain);
-  if (run.result.layout!=null && !layout) throw Error('DSH 返回的目标空间格式不正确');
+  if (run.result.layout!=null && !layout) throw Error('Along 返回的目标空间格式不正确');
   const requested=requestedTargetFromMessage(String(run.input?.message??''),domain);
-  if (requested!=null && output.proposal?.target!==requested) throw Error(`DSH 目标数值与用户指定的 ${requested} 不一致`);
+  if (requested!=null && output.proposal?.target!==requested) throw Error(`Along 目标数值与用户指定的 ${requested} 不一致`);
   return {...run,result:{...output,layout}};
 }
 const server=createServer({key:readFileSync(key),cert:readFileSync(cert)},async(req,res)=>{
@@ -131,7 +131,7 @@ const server=createServer({key:readFileSync(key),cert:readFileSync(cert)},async(
       return respond(res,200,normalizeGoalRun(await superAgentCall(`/along-source/api/goals/${encodeURIComponent(id)}`,{method:'GET'})));
     }
     if (req.method==='POST' && path==='/goal/chat') {
-      return respond(res,409,{error:'目标输入已迁移到 DSH Super Agent，请更新 Along 后重试'});
+      return respond(res,409,{error:'目标输入已升级，请更新 Along 后重试'});
     }
     if (req.method==='POST' && path==='/goal/event') {
       const input=await body(req), goal=cleanGoal(input.goal);
