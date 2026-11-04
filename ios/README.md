@@ -6,7 +6,7 @@
 
 1. 安装支持手机系统版本的完整 Xcode，打开 [AlongHealth.xcodeproj](AlongHealth.xcodeproj)。例如，iOS 27 需要 Xcode 27。在 Xcode → Settings → Apple Accounts 登录自己的 Apple 账号；然后在 target 的 **Signing & Capabilities** 里选自己的 Team，确认 **HealthKit** capability 已开启。若 bundle ID 与你的签名冲突，改成自己的唯一 ID。
 2. 在 iOS 27 + Xcode 27 上，可以打开 Xcode 的 Device Hub，点侧栏的 `+` → **Pair Nearby Device…**，首次通过同一局域网无线配对；也可以用数据线连接。按提示在 iPhone 上完成配对、信任设备并开启开发者模式。选择这台 iPhone 作为运行设备，点 Run。HealthKit 的真实读取需要真机。
-3. 在 Along App 中点 Apple Health 的“连接”，勾选需要的类型，点“读取并预览”。系统会显示相应 HealthKit 读取权限。确认摘要无误后，点“确认导入本机 Along”。页面随即显示所选数据和更新后的目标进度；不需要 Mac 上的同步服务、配对码或 Tunnel。
+3. 在 Along App 的健康目标页点 Apple Health“连接”，勾选需要的类型，点“读取并预览”。系统会显示相应 HealthKit 读取权限。确认摘要无误后，点“确认导入本机 Along”。如果选择了健身记录，首页会更新本周运动目标及动态任务；其他摘要保存在本机，首页只简要显示连接状态。不需要 Mac 上的同步服务、配对码或 Tunnel。
 
 ## 读取和发送的范围
 
