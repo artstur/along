@@ -115,7 +115,7 @@ function adaptiveGoalCard(layout) {
 }
 function adaptiveTaskSection(layout) {
   const visible=layout.tasks.slice(0,2),hidden=Math.max(0,layout.tasks.length-visible.length);
-  return `<section class="task-section adaptive-tasks" aria-label="动态任务"><div class="section-heading"><h2>动态任务</h2><span>Agent 根据目标与情境生成</span></div><div class="adaptive-task-card"><div class="generated-status">${layout.tasks.length} 项已生成 · 点击查看 Agent 协作</div>${visible.map(task=>`<button class="generated-task generated-task-button" data-action="open-task" data-task-id="${esc(task.id)}"><div class="task-meta"><span>${esc(task.when)}</span><span class="state-pill">${esc(taskStateLabel[task.state])}</span></div><strong>${esc(task.title)}</strong><p>${esc(task.detail)}</p><span class="task-open-hint">Agent 工作视图 <b aria-hidden="true">→</b></span></button>`).join('')}${hidden?`<p class="hidden-count">还有 ${hidden} 项未来触发任务，将在相关时间出现。</p>`:''}${layout.questions.length?`<div class="missing-strip">待确认 ${layout.questions.length} 项：${esc(layout.questions[0])}</div>`:''}<div class="card-actions"><button class="agent-action" data-action="edit-goal">补充信息</button></div></div></section>`;
+  return `<section class="task-section adaptive-tasks" aria-label="动态任务"><div class="section-heading"><h2>动态任务</h2><span>Agent 根据目标与情境生成</span></div><div class="adaptive-task-card"><div class="generated-status">${layout.tasks.length} 项已生成 · 点击任务查看协作</div>${visible.map(task=>`<button class="generated-task generated-task-button" data-action="open-task" data-task-id="${esc(task.id)}"><div class="task-meta"><span>${esc(task.when)}</span><span class="state-pill">${esc(taskStateLabel[task.state])}</span></div><strong>${esc(task.title)}</strong><p>${esc(task.detail)}</p><span class="task-open-hint">查看任务协作</span></button>`).join('')}${hidden?`<p class="hidden-count">还有 ${hidden} 项未来触发任务，将在相关时间出现。</p>`:''}${layout.questions.length?`<div class="missing-strip">待确认 ${layout.questions.length} 项：${esc(layout.questions[0])}</div>`:''}<div class="card-actions"><button class="agent-action" data-action="edit-goal">补充信息</button></div></div></section>`;
 }
 function home() {
   const model = activeGoal === 'finance' ? financeView(finance, goalCustom.finance) : activeGoal==='custom' ? customView() : healthView(state, goalCustom.health);
@@ -124,18 +124,19 @@ function home() {
   const sourceTime = activeGoal === 'health' && state.snapshot?.updatedAt && state.source === 'healthkit'
     ? ` · ${formatDate(state.snapshot.updatedAt)} 已检查` : '';
   const goalContent=layout?adaptiveGoalCard(layout):`<section class="goal-card" aria-label="${esc(model.category)}">
-        <div class="goal-card-top"><span class="eyebrow">${esc(model.category)}</span><button class="goal-edit" data-action="edit-goal">与 Agent 编辑目标 ↗</button></div>
+        <div class="goal-card-top"><span class="eyebrow">${esc(model.category)}</span></div>
         <h1>${esc(model.title)}</h1>
         <div class="goal-numbers"><strong>${esc(model.measure)}</strong><span>${esc(model.measureUnit)}</span></div>
         <div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${model.percent}" aria-label="目标进度"><span style="width:${model.percent}%"></span></div>
         <p class="progress-caption">${esc(model.progressText)}</p>
         <p class="goal-note">${esc(model.note)}</p>
+        <div class="card-actions"><button class="agent-action" data-action="edit-goal">编辑目标</button></div>
       </section>`;
   const taskContent=layout?adaptiveTaskSection(layout):`<section class="task-section" aria-label="动态任务">
         <div class="section-heading"><h2>动态任务</h2><span>随目标与数据更新</span></div>
-        <button class="focus-task task-card-button" data-action="open-task" data-task-id="primary"><div class="focus-top"><span>下一步</span><span class="task-chip">${esc(model.primary.status)}</span></div><h3>${esc(model.primary.title)}</h3><p>${esc(model.primary.detail)}</p><span class="focus-open-hint">Agent 工作视图 →</span></button>
+        <div class="focus-task"><div class="focus-top"><span>下一步</span><span class="task-chip">${esc(model.primary.status)}</span></div><h3>${esc(model.primary.title)}</h3><p>${esc(model.primary.detail)}</p><div class="card-actions"><button class="agent-action" data-action="edit-goal">补充信息</button></div></div>
         ${pendingTask && activeGoal === 'health' ? `<div class="task-proposal"><span>HealthKit 变化 → 路由判断 → ${pendingTask.suggestion?'Codex 提案 → 等待你确认':'等待 Codex'}</span><p>${esc(pendingTask.reason)}</p>${pendingTask.suggestion ? `<strong>${esc(pendingTask.suggestion.task)}</strong><p>${esc(pendingTask.suggestion.reason)}</p><button class="button" data-action="accept-task">采用这一步</button> <button class="button secondary" data-action="dismiss-task">保留原任务</button>` : `<p>${esc(pendingTask.error || 'Codex 正在规划下一步…')}</p>`}</div>` : ''}
-        ${model.secondary.length ? `<div class="task-list">${model.secondary.map((task,index) => `<button class="task-row task-row-button" data-action="open-task" data-task-id="follow-up-${index}"><span class="task-row-mark" aria-hidden="true"></span><div><strong>${esc(task.title)}</strong><p>${esc(task.detail)}</p></div><span class="task-row-status">${esc(task.status)} →</span></button>`).join('')}</div>` : ''}
+        ${model.secondary.length ? `<div class="task-list">${model.secondary.map((task,index) => `<button class="task-row task-row-button" data-action="open-task" data-task-id="follow-up-${index}"><span class="task-row-mark" aria-hidden="true"></span><div><strong>${esc(task.title)}</strong><p>${esc(task.detail)}</p></div><span class="task-row-status">${esc(task.status)}</span></button>`).join('')}</div>` : ''}
       </section>`;
   const connectionContent=connection?`<section class="connection-section" aria-label="连接来源">
         <div class="section-heading"><h2>连接</h2><span>只显示与当前目标相关的来源</span></div>
