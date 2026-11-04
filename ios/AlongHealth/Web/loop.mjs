@@ -65,7 +65,7 @@ export function acceptAgentSuggestion(value, expectedRemaining) {
   if (!answer || !Number.isInteger(answer.minutes) || answer.minutes !== expectedRemaining ||
       typeof answer.task !== 'string' || !answer.task.trim() || answer.task.length > 100 ||
       typeof answer.reason !== 'string' || !answer.reason.trim() || answer.reason.length > 240) {
-    throw Error('Agent 建议与 Along 计算的剩余分钟不一致');
+    throw Error('Along 建议与已计算的剩余分钟不一致');
   }
   return {task: answer.task.trim(), reason: answer.reason.trim(), minutes: answer.minutes};
 }

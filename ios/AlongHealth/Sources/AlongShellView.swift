@@ -159,6 +159,42 @@ final class AlongBridgeModel: ObservableObject {
     }
 }
 
+enum AlongConnectionStore {
+    private static let key = "along.connection.v1"
+
+    static func load() -> [String: String]? {
+        guard let saved = UserDefaults.standard.dictionary(forKey: key) else { return nil }
+        return clean(saved)
+    }
+
+    @discardableResult
+    static func save(_ value: [String: Any]) -> [String: String]? {
+        guard let clean = clean(value) else { return nil }
+        UserDefaults.standard.set(clean, forKey: key)
+        return clean
+    }
+
+    static func clear() { UserDefaults.standard.removeObject(forKey: key) }
+
+    private static func clean(_ value: [String: Any]) -> [String: String]? {
+        guard let baseURL = value["baseURL"] as? String,
+              let components = URLComponents(string: baseURL),
+              components.scheme == "https", let host = components.host,
+              host.split(separator: ".").count == 4,
+              host.split(separator: ".").allSatisfy({ Int($0).map { (0...255).contains($0) } ?? false }),
+              (host.hasPrefix("192.168.") || host.hasPrefix("10.") ||
+               ((Int(host.split(separator: ".")[0]) == 172) &&
+                (16...31).contains(Int(host.split(separator: ".")[1]) ?? 0))),
+              components.path.isEmpty, components.query == nil, components.fragment == nil,
+              let fingerprint = value["fingerprint"] as? String,
+              fingerprint.count == 64, fingerprint.allSatisfy(\.isHexDigit),
+              let token = value["token"] as? String,
+              token.count == 64, token.allSatisfy(\.isHexDigit)
+        else { return nil }
+        return ["baseURL": baseURL, "fingerprint": fingerprint.uppercased(), "token": token.lowercased()]
+    }
+}
+
 struct AlongWebView: UIViewRepresentable {
     @ObservedObject var bridge: AlongBridgeModel
     private let site = URL(string: "along://app/index.html")!
@@ -166,6 +202,7 @@ struct AlongWebView: UIViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(bridge: bridge) }
 
     func makeUIView(context: Context) -> WKWebView {
+        print("Along connection restored: \(AlongConnectionStore.load() != nil)")
         let controller = WKUserContentController()
         controller.add(context.coordinator, name: "alongHealth")
         controller.add(context.coordinator, name: "alongHealthRefresh")
@@ -208,13 +245,18 @@ struct AlongWebView: UIViewRepresentable {
         const item = agentPending.get(id); if (!item) return;
         agentPending.delete(id);
         if (result.ok) item.resolve(result.value);
-        else item.reject(new Error(result.error || 'Agent 请求失败'));
+        else item.reject(new Error(result.error || 'Along 请求失败'));
       };
       window.AlongAgentBridge = {
         request: ({baseURL, fingerprint, path, token, body}) => new Promise((resolve, reject) => {
           const id = crypto.randomUUID();
           agentPending.set(id, {resolve, reject});
           window.webkit.messageHandlers.alongAgent.postMessage({id, baseURL, fingerprint, path, token, body});
+        }),
+        connection: (action, value = null) => new Promise((resolve, reject) => {
+          const id = crypto.randomUUID();
+          agentPending.set(id, {resolve, reject});
+          window.webkit.messageHandlers.alongAgent.postMessage({id, operation: 'connection', action, value});
         })
       };
     })();
@@ -237,15 +279,40 @@ struct AlongWebView: UIViewRepresentable {
             } else if message.name == "alongHealthRefresh" {
                 Task { @MainActor in bridge.refreshSnapshot(id: id, webView: webView) }
             } else {
+                if body["operation"] as? String == "connection" {
+                    let result: [String: Any]
+                    do { result = ["ok": true, "value": try Self.connectionOperation(body)] }
+                    catch { result = ["ok": false, "error": error.localizedDescription] }
+                    Self.deliverAlongResult(id: id, result: result, webView: webView)
+                    return
+                }
                 Task {
                     let result: [String: Any]
                     do { result = ["ok": true, "value": try await Self.agentRequest(body)] }
                     catch { result = ["ok": false, "error": error.localizedDescription] }
-                    guard let data = try? JSONSerialization.data(withJSONObject: [id, result]),
-                          let json = String(data: data, encoding: .utf8) else { return }
-                    await MainActor.run { webView.evaluateJavaScript("window.__alongAgentBridgeFinish(...\(json))") }
+                    await MainActor.run { Self.deliverAlongResult(id: id, result: result, webView: webView) }
                 }
             }
+        }
+
+        static func connectionOperation(_ input: [String: Any]) throws -> [String: String] {
+            switch input["action"] as? String {
+            case "load": return AlongConnectionStore.load() ?? [:]
+            case "save":
+                guard let value = input["value"] as? [String: Any],
+                      let saved = AlongConnectionStore.save(value) else { throw AgentBridgeError.invalidConfiguration }
+                return saved
+            case "clear":
+                AlongConnectionStore.clear()
+                return [:]
+            default: throw AgentBridgeError.invalidConfiguration
+            }
+        }
+
+        static func deliverAlongResult(id: String, result: [String: Any], webView: WKWebView) {
+            guard let data = try? JSONSerialization.data(withJSONObject: [id, result]),
+                  let json = String(data: data, encoding: .utf8) else { return }
+            webView.evaluateJavaScript("window.__alongAgentBridgeFinish(...\(json))")
         }
 
         static func agentRequest(_ input: [String: Any]) async throws -> [String: Any] {
@@ -277,7 +344,7 @@ struct AlongWebView: UIViewRepresentable {
             let (data, response) = try await session.data(for: request)
             guard let result = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw AgentBridgeError.invalidResponse }
             guard let response = response as? HTTPURLResponse, (200...299).contains(response.statusCode) else {
-                throw AgentBridgeError.server(result["error"] as? String ?? "Mac Agent 请求失败")
+                throw AgentBridgeError.server(result["error"] as? String ?? "Along 请求失败")
             }
             return result
         }
@@ -358,8 +425,8 @@ enum AgentBridgeError: LocalizedError {
     case invalidConfiguration, invalidResponse, server(String)
     var errorDescription: String? {
         switch self {
-        case .invalidConfiguration: "Mac Agent 地址或证书指纹不正确"
-        case .invalidResponse: "Mac Agent 返回格式不正确"
+        case .invalidConfiguration: "Along 连接信息不正确"
+        case .invalidResponse: "Along 返回格式不正确"
         case .server(let message): message
         }
     }
@@ -431,7 +498,7 @@ struct HealthSyncSheet: View {
                             .font(.footnote).foregroundStyle(.secondary)
                     }
                     Section("导入 Along") {
-                        Text("确认后把上述摘要导入这台 iPhone 上的 Along 页面。只有你另行配对 Mac Agent 后，目标问答或显著的健身时长变化才会把目标和健身分钟数汇总发给这台 Mac；不发送原始记录。")
+                        Text("确认后把上述摘要导入这台 iPhone 上的 Along 页面。只有 Along 已连接时，目标问答或显著的健身时长变化才会把目标和健身分钟数汇总发给这台 Mac；不发送原始记录。")
                             .font(.footnote).foregroundStyle(.secondary)
                         Button("确认导入本机 Along") { bridge.confirmImport() }
                             .disabled(bridge.busy || !preview.hasReadableValue)

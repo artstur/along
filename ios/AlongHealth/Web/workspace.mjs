@@ -54,7 +54,7 @@ export function healthView(state, customization = null) {
         ? {title: `找一个 ${remaining} 分钟的活动时段`, detail: `本周只差 ${remaining} 分钟；新记录到来后再更新安排。`, status: '下一步'}
         : {title: `安排一次 ${Math.min(30, remaining)} 分钟活动`, detail: `本周还差 ${remaining} 分钟，先完成一段可执行的运动。`, status: '下一步'};
   const chosenTask = customization?.task && hasWorkout && remaining > 0 ?
-    {title:customization.task, detail:customization.reason || `本周还差 ${remaining} 分钟。`, status:'Agent 提案'} : primary;
+    {title:customization.task, detail:customization.reason || `本周还差 ${remaining} 分钟。`, status:'Along 提案'} : primary;
   return {
     id: 'health', category: '健康目标', title: customization?.title || `本周累计运动 ${target} 分钟`,
     measure: completed == null ? '—' : String(completed), measureUnit: `/ ${target} 分钟`,
@@ -85,7 +85,7 @@ export function financeView(finance, customization = null) {
     measure: saved == null ? '—' : `¥${saved.toLocaleString('zh-CN')}`, measureUnit: `/ ¥${target.toLocaleString('zh-CN')}`,
     percent, progressText: saved == null ? '等待连接演示数据' : remaining ? `已完成 ${percent}% · 还差 ¥${remaining.toLocaleString('zh-CN')}` : '示例目标已达成',
     note: '所有余额与变化均为演示数据，不代表真实账户',
-    primary: customization?.task && known && remaining > 0 ? {title:customization.task,detail:customization.reason || '由 Agent 与你共同确定。',status:'Agent 提案'} : primary,
+    primary: customization?.task && known && remaining > 0 ? {title:customization.task,detail:customization.reason || '由 Along 与你共同确定。',status:'Along 提案'} : primary,
     secondary: known ? [{title: '下一次余额变化后复核节奏', detail: '只更新计划，不自动转账或交易。', status: '待更新'}] : [],
     connection: {name: '蚂蚁财富类应用', label: known ? '演示连接' : '未连接', detail: known ? '模拟汇总余额 · 未读取真实账户' : '以第三方理财应用为例，不会请求账号权限', action: known ? '模拟 +¥800' : '体验连接', kind: known ? 'demo' : 'none'},
   };

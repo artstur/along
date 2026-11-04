@@ -10,7 +10,8 @@ test('creates a ticket with explicit super-agent domain concepts',()=>{
   assert.equal(run.source.kind,'along.dynamic-task');
   assert.equal(run.eval.decision,'accept');
   assert.equal(run.agents.length,4);
-  assert.deepEqual(run.agents.map(agent=>agent.role),['Orchestrator','Context','Planner','Guardian']);
+  assert.deepEqual(run.agents.map(agent=>agent.role),['协调','情境','计划','守护']);
+  assert.deepEqual(run.agents.map(agent=>agent.name),['Along','Along','Along','Along']);
   assert.equal(run.progress,68);
 });
 

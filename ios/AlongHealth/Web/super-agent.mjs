@@ -74,10 +74,10 @@ function roleDefinitions(domain, task) {
   const contextSource=domain==='health' ? 'Apple Health 的已选摘要' : '用户确认的目标与演示结余';
   const boundary=domain==='health' ? '不作医疗判断，不读取未授权的健康数据' : '不访问真实账户，不发起交易或转账';
   return [
-    {key:'orchestrator',name:'协调 Agent',mark:'O',role:'Orchestrator',objective:`将「${task.title}」拆成可验收的分工，负责调度与汇总。`,output:'Ticket、Mandate 与执行顺序'},
-    {key:'context',name:'情境 Agent',mark:'C',role:'Context',objective:`只从${contextSource}提取完成任务所需的信息。`,output:'目标、进度、时间与约束摘要'},
-    {key:'planner',name:'计划 Agent',mark:'P',role:'Planner',objective:`围绕「${task.detail}」形成当下可执行的下一步。`,output:'行动步骤、时机与完成标准'},
-    {key:'guardian',name:'守护 Agent',mark:'G',role:'Guardian',objective:`检查方案是否越过用户授权；${boundary}。`,output:'风险边界与待用户确认项'},
+    {key:'orchestrator',name:'Along',mark:'A',role:'协调',objective:`将「${task.title}」拆成可验收的分工，负责调度与汇总。`,output:'Ticket、Mandate 与执行顺序'},
+    {key:'context',name:'Along',mark:'A',role:'情境',objective:`只从${contextSource}提取完成任务所需的信息。`,output:'目标、进度、时间与约束摘要'},
+    {key:'planner',name:'Along',mark:'A',role:'计划',objective:`围绕「${task.detail}」形成当下可执行的下一步。`,output:'行动步骤、时机与完成标准'},
+    {key:'guardian',name:'Along',mark:'A',role:'守护',objective:`检查方案是否越过用户授权；${boundary}。`,output:'风险边界与待用户确认项'},
   ];
 }
 
@@ -85,9 +85,9 @@ function eventLog(step, createdAt) {
   const entries=[
     ['trigger','Along 接收到动态任务触发'],
     ['eval','Eval 根据目标与任务状态接受请求'],
-    ['ticket','协调 Agent 创建 Ticket 并设定 Mandate'],
-    ['assign','情境、计划与守护 Agent 已分工'],
-    ['deliver','各 Agent 产出已汇总，等待用户行动'],
+    ['ticket','Along 创建 Ticket 并设定 Mandate'],
+    ['assign','Along 已完成情境、计划与守护检查'],
+    ['deliver','Along 已汇总产出，等待用户行动'],
   ];
   return entries.slice(0,Math.min(entries.length,step+2)).map((entry,index)=>({
     id:entry[0],
@@ -126,7 +126,7 @@ export function createSuperAgentRun({task, domain='health', goal=null, createdAt
 }
 
 export function materializeSuperAgentRun(value) {
-  if (!value || value.version!==1 || !DOMAINS.has(value.domain) || !value.task) throw Error('Super Agent 运行记录无效');
+  if (!value || value.version!==1 || !DOMAINS.has(value.domain) || !value.task) throw Error('Along 运行记录无效');
   const step=Math.max(0,Math.min(STAGES.length-1,Number.isInteger(value.step)?value.step:0));
   const stage=STAGES[step];
   const roles=roleDefinitions(value.domain,value.task);

@@ -2,7 +2,7 @@
   "experiment": "weekly-workout-120-v1",
   "beforeMinutes": 75,
   "eventMinutes": 35,
-  "source": "recorded-dsh",
+  "source": "recorded-along",
   "suggestion": {
     "task": "做10分钟轻量健身（如拉伸或快走），完成本周目标。",
     "reason": "原任务计划45分钟，但新增35分钟记录后累计110分钟，只剩10分钟，因此原任务应改为10分钟。",

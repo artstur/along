@@ -23,13 +23,13 @@ async function runCodexJSON(prompt,schema,{timeoutMs=105_000}={}) {
     const args=['exec','--ephemeral','--ignore-user-config','--ignore-rules','--sandbox','read-only','--skip-git-repo-check','--output-schema',schema,'--output-last-message',output,'--color','never','-C',dir,'-'];
     await new Promise((resolve,reject)=>{
       const child=spawn(codexBinary(),args,{stdio:['pipe','ignore','pipe'],env:process.env});
-      const timer=setTimeout(()=>{child.kill('SIGTERM');reject(Error('Codex 生成超时'));},timeoutMs);
+      const timer=setTimeout(()=>{child.kill('SIGTERM');reject(Error('Along 生成超时'));},timeoutMs);
       child.stderr.on('data',chunk=>{if(stderr.length<16_000)stderr+=chunk;});
       child.on('error',error=>{clearTimeout(timer);reject(error);});
       child.on('exit',code=>{
         clearTimeout(timer);
         if(code===0)resolve();
-        else reject(Error(`Codex 调用失败${stderr.trim()?`：${stderr.trim().slice(-600)}`:''}`));
+        else reject(Error(`Along 暂时不可用${stderr.trim()?`：${stderr.trim().slice(-600)}`:''}`));
       });
       child.stdin.end(prompt);
     });

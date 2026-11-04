@@ -8,8 +8,23 @@ export function readStored(key, fallback) {
 }
 
 export async function agentCall(config, path, body) {
-  if (!window.AlongAgentBridge?.request) throw Error('请在 iPhone 的 Along App 中连接 Mac Agent');
-  if (!config?.baseURL || !config?.fingerprint) throw Error('请先填写 Mac Agent 地址和证书指纹');
-  if (path !== '/pair' && !config.token) throw Error('请先用配对码连接 Mac Agent');
+  if (!window.AlongAgentBridge?.request) throw Error('请在 iPhone 的 Along App 中连接 Along');
+  if (!config?.baseURL || !config?.fingerprint) throw Error('请先完成 Along 连接设置');
+  if (path !== '/pair' && !config.token) throw Error('请先连接 Along');
   return window.AlongAgentBridge.request({baseURL:config.baseURL,fingerprint:config.fingerprint,path,token:config.token ?? '',body});
+}
+
+export async function loadNativeConnection() {
+  if (!window.AlongAgentBridge?.connection) return null;
+  return window.AlongAgentBridge.connection('load');
+}
+
+export async function saveNativeConnection(config) {
+  if (!window.AlongAgentBridge?.connection) return;
+  await window.AlongAgentBridge.connection('save', config);
+}
+
+export async function clearNativeConnection() {
+  if (!window.AlongAgentBridge?.connection) return;
+  await window.AlongAgentBridge.connection('clear');
 }

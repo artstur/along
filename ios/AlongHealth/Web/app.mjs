@@ -2,7 +2,7 @@ import {KEY, loadState, setSnapshot} from './health.mjs';
 import {ACTIVE_GOAL_KEY, FINANCE_KEY, ensureHealthGoal, loadFinance, connectFinanceDemo, addFinanceDemoRecord, healthView, financeView} from './workspace.mjs';
 import {EXPERIMENT, startExperiment, routeHealthEvent, acceptAgentSuggestion, agentRequestPayload} from './loop.mjs';
 import {routeHealthChange} from './goal-agent-core.mjs';
-import {AGENT_KEY, GOALS_KEY, CONVERSATIONS_KEY, readStored, agentCall} from './agent-client.mjs';
+import {AGENT_KEY, GOALS_KEY, CONVERSATIONS_KEY, readStored, agentCall, loadNativeConnection, saveNativeConnection, clearNativeConnection} from './agent-client.mjs';
 import {ADAPTIVE_LAYOUTS_KEY, safeAdaptiveLayout, validateAdaptiveLayout} from './adaptive-ui.mjs';
 import {SUPER_AGENT_RUNS_KEY, advanceSuperAgentRun, createSuperAgentRun, safeSuperAgentRun} from './super-agent.mjs';
 const TICKET_KEY = 'along.goal-ticket.v1';
@@ -56,7 +56,7 @@ function brand() {
 function customView() {
   return {
     id:'custom',category:'自定义目标',title:goalCustom.custom?.title || '定义一个真正属于你的目标',measure:'—',measureUnit:'',percent:0,
-    progressText:'先把想实现的改变告诉 Codex',note:'Codex 会整理目标、待确认信息和动态任务；采用后才更新首页。',
+    progressText:'先把想实现的改变告诉 Along',note:'Along 会整理目标、待确认信息和动态任务；采用后才更新首页。',
     primary:{title:'从一句话开始',detail:'可以包含期限、偏好、限制、已知条件和你不希望发生的事情。',status:'待定义'},secondary:[],connection:null,
   };
 }
@@ -111,11 +111,11 @@ function adaptiveGoalCard(layout) {
   const metric=layout.modules.find(module=>module.kind==='metric');
   const visible=[context,metric].filter(Boolean),visibleIds=new Set(visible.map(module=>module.id));
   const more=layout.modules.filter(module=>!visibleIds.has(module.id));
-  return `<section class="goal-card adaptive-goal" aria-label="Agent 生成的目标空间"><div class="goal-card-top"><span class="eyebrow">当前目标</span>${layout.badge?`<span class="layout-badge">${esc(layout.badge)}</span>`:''}</div><h1>${esc(layout.title)}</h1><p class="adaptive-summary">${esc(layout.summary)}</p>${visible.map(module=>adaptiveModule(module,true)).join('')}${more.length?`<details class="adaptive-more"><summary>查看目标详情 · ${more.length} 个模块</summary>${more.map(module=>adaptiveModule(module,false)).join('')}</details>`:''}<div class="card-actions"><button class="agent-action" data-action="edit-goal">编辑目标</button></div></section>`;
+  return `<section class="goal-card adaptive-goal" aria-label="Along 生成的目标空间"><div class="goal-card-top"><span class="eyebrow">当前目标</span>${layout.badge?`<span class="layout-badge">${esc(layout.badge)}</span>`:''}</div><h1>${esc(layout.title)}</h1><p class="adaptive-summary">${esc(layout.summary)}</p>${visible.map(module=>adaptiveModule(module,true)).join('')}${more.length?`<details class="adaptive-more"><summary>查看目标详情 · ${more.length} 个模块</summary>${more.map(module=>adaptiveModule(module,false)).join('')}</details>`:''}<div class="card-actions"><button class="agent-action" data-action="edit-goal">编辑目标</button></div></section>`;
 }
 function adaptiveTaskSection(layout) {
   const visible=layout.tasks.slice(0,2),hidden=Math.max(0,layout.tasks.length-visible.length);
-  return `<section class="task-section adaptive-tasks" aria-label="动态任务"><div class="section-heading"><h2>动态任务</h2><span>Agent 根据目标与情境生成</span></div><div class="adaptive-task-card"><div class="generated-status">${layout.tasks.length} 项已生成 · 点击任务查看协作</div>${visible.map(task=>`<button class="generated-task generated-task-button" data-action="open-task" data-task-id="${esc(task.id)}"><div class="task-meta"><span>${esc(task.when)}</span><span class="state-pill">${esc(taskStateLabel[task.state])}</span></div><strong>${esc(task.title)}</strong><p>${esc(task.detail)}</p><span class="task-open-hint">查看任务协作</span></button>`).join('')}${hidden?`<p class="hidden-count">还有 ${hidden} 项未来触发任务，将在相关时间出现。</p>`:''}${layout.questions.length?`<div class="missing-strip">待确认 ${layout.questions.length} 项：${esc(layout.questions[0])}</div>`:''}<div class="card-actions"><button class="agent-action" data-action="edit-goal">补充信息</button></div></div></section>`;
+  return `<section class="task-section adaptive-tasks" aria-label="动态任务"><div class="section-heading"><h2>动态任务</h2><span>Along 根据目标与情境生成</span></div><div class="adaptive-task-card"><div class="generated-status">${layout.tasks.length} 项已生成 · 点击任务查看协作</div>${visible.map(task=>`<button class="generated-task generated-task-button" data-action="open-task" data-task-id="${esc(task.id)}"><div class="task-meta"><span>${esc(task.when)}</span><span class="state-pill">${esc(taskStateLabel[task.state])}</span></div><strong>${esc(task.title)}</strong><p>${esc(task.detail)}</p><span class="task-open-hint">查看任务协作</span></button>`).join('')}${hidden?`<p class="hidden-count">还有 ${hidden} 项未来触发任务，将在相关时间出现。</p>`:''}${layout.questions.length?`<div class="missing-strip">待确认 ${layout.questions.length} 项：${esc(layout.questions[0])}</div>`:''}<div class="card-actions"><button class="agent-action" data-action="edit-goal">补充信息</button></div></div></section>`;
 }
 function home() {
   const model = activeGoal === 'finance' ? financeView(finance, goalCustom.finance) : activeGoal==='custom' ? customView() : healthView(state, goalCustom.health);
@@ -135,15 +135,14 @@ function home() {
   const taskContent=layout?adaptiveTaskSection(layout):`<section class="task-section" aria-label="动态任务">
         <div class="section-heading"><h2>动态任务</h2><span>随目标与数据更新</span></div>
         <div class="focus-task"><div class="focus-top"><span>下一步</span><span class="task-chip">${esc(model.primary.status)}</span></div><h3>${esc(model.primary.title)}</h3><p>${esc(model.primary.detail)}</p><div class="card-actions"><button class="agent-action" data-action="edit-goal">补充信息</button></div></div>
-        ${pendingTask && activeGoal === 'health' ? `<div class="task-proposal"><span>HealthKit 变化 → 路由判断 → ${pendingTask.suggestion?'Codex 提案 → 等待你确认':'等待 Codex'}</span><p>${esc(pendingTask.reason)}</p>${pendingTask.suggestion ? `<strong>${esc(pendingTask.suggestion.task)}</strong><p>${esc(pendingTask.suggestion.reason)}</p><button class="button" data-action="accept-task">采用这一步</button> <button class="button secondary" data-action="dismiss-task">保留原任务</button>` : `<p>${esc(pendingTask.error || 'Codex 正在规划下一步…')}</p>`}</div>` : ''}
+        ${pendingTask && activeGoal === 'health' ? `<div class="task-proposal"><span>Apple Health 变化 → 路由判断 → ${pendingTask.suggestion?'Along 提案 → 等待你确认':'等待 Along'}</span><p>${esc(pendingTask.reason)}</p>${pendingTask.suggestion ? `<strong>${esc(pendingTask.suggestion.task)}</strong><p>${esc(pendingTask.suggestion.reason)}</p><button class="button" data-action="accept-task">采用这一步</button> <button class="button secondary" data-action="dismiss-task">保留原任务</button>` : `<p>${esc(pendingTask.error || 'Along 正在规划下一步…')}</p>`}</div>` : ''}
         ${model.secondary.length ? `<div class="task-list">${model.secondary.map((task,index) => `<button class="task-row task-row-button" data-action="open-task" data-task-id="follow-up-${index}"><span class="task-row-mark" aria-hidden="true"></span><div><strong>${esc(task.title)}</strong><p>${esc(task.detail)}</p></div><span class="task-row-status">${esc(task.status)}</span></button>`).join('')}</div>` : ''}
       </section>`;
   const connectionContent=connection?`<section class="connection-section" aria-label="连接来源">
-        <div class="section-heading"><h2>连接</h2><span>只显示与当前目标相关的来源</span></div>
-        <div class="connection-card"><div class="connection-symbol" aria-hidden="true">${activeGoal === 'health' ? '♥' : '¥'}</div><div class="connection-copy"><div class="connection-name"><strong>${esc(connection.name)}</strong><span class="source-tag ${connection.kind}">${esc(connection.label)}</span></div><p>${esc(connection.detail)}${esc(sourceTime)}</p></div><button class="connection-action" data-action="${activeGoal === 'health' ? 'connect-health' : connection.kind === 'demo' ? 'finance-event' : 'connect-finance'}">${esc(connection.action)}</button></div>
+        <div class="section-heading"><h2>连接</h2><span>连接和任务相关的数据源</span></div>
+        <div class="connection-card"><div class="connection-symbol" aria-hidden="true">${activeGoal === 'health' ? '♥' : '¥'}</div><div class="connection-copy"><div class="connection-name"><strong>${esc(connection.name)}</strong><span class="source-tag ${connection.kind}">${esc(connection.label)}</span></div><p>${esc(connection.detail)}${esc(sourceTime)}</p></div><button class="agent-action connection-agent-action" data-action="${activeGoal === 'health' ? 'connect-health' : connection.kind === 'demo' ? 'finance-event' : 'connect-finance'}">${esc(connection.action)}</button></div>
         ${connection.metrics?.length ? `<div class="connection-metrics">${connection.metrics.map(item=>`<div><span>${esc(item.label)}</span><strong>${esc(item.value)}</strong></div>`).join('')}</div>` : ''}
         ${state.source === 'demo' && activeGoal === 'health' ? '<button class="minor-action" data-action="clear-health-demo">退出健康演示数据</button>' : ''}
-        ${activeGoal === 'health' && state.source === 'healthkit' ? '<p class="connection-footnote">打开 App 或前台健康记录变化时自动刷新；有意义的变化才请 Agent 重排。</p>' : ''}
         ${activeGoal === 'finance' && finance.connected ? '<p class="connection-footnote">点“模拟 +¥800”只会更新这份本机演示数据，不会访问账户或发起交易。</p>' : ''}
       </section>`:'';
   return `<div class="app-shell"><header class="topbar"><div class="topbar-inner">${brand()}<span class="topbar-caption">你的目标空间</span></div></header>
@@ -152,7 +151,6 @@ function home() {
       ${goalContent}
       ${taskContent}
       ${connectionContent}
-      ${activeGoal === 'health' ? '<button class="lab-entry" data-action="open-lab">查看目标变化实验 <span aria-hidden="true">↗</span></button>' : ''}
     </main><footer>Along · 一起，慢慢向前</footer></div>`;
 }
 
@@ -162,10 +160,10 @@ function taskAgentCard(agent) {
 function taskDetailPage() {
   const task=selectedTask();
   if (!task) {
-    return `<div class="app-shell"><header class="topbar"><div class="topbar-inner">${brand()}<span class="topbar-caption">Super Agent</span></div></header><main class="content task-detail"><button class="back-button" data-action="task-back">← 返回动态任务</button><div class="empty-task"><h1>任务已更新</h1><p>这项动态任务已不在当前计划中，请返回查看最新安排。</p></div></main></div>`;
+    return `<div class="app-shell"><header class="topbar"><div class="topbar-inner">${brand()}<span class="topbar-caption">Along</span></div></header><main class="content task-detail"><button class="back-button" data-action="task-back">← 返回动态任务</button><div class="empty-task"><h1>任务已更新</h1><p>这项动态任务已不在当前计划中，请返回查看最新安排。</p></div></main></div>`;
   }
   const run=currentSuperAgentRun(task);
-  return `<div class="app-shell super-agent-shell"><header class="topbar"><div class="topbar-inner">${brand()}<span class="topbar-caption">Super Agent · 任务协作</span></div></header><main class="content task-detail">
+  return `<div class="app-shell super-agent-shell"><header class="topbar"><div class="topbar-inner">${brand()}<span class="topbar-caption">Along · 任务协作</span></div></header><main class="content task-detail">
     <button class="back-button" data-action="task-back">← 返回动态任务</button>
     <section class="task-hero"><div class="task-hero-top"><span class="eyebrow">${esc(task.when)} · ${esc(taskStateLabel[task.state])}</span><span class="run-status ${run.status}"><i></i>${esc(run.statusLabel)}</span></div><h1>${esc(task.title)}</h1><p>${esc(task.detail)}</p><div class="run-progress-head"><span>总体进展</span><strong>${run.progress}%</strong></div><div class="run-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${run.progress}"><span style="width:${run.progress}%"></span></div></section>
 
@@ -176,11 +174,11 @@ function taskDetailPage() {
       <div><span>Ticket</span><strong>${esc(run.id.replace(/^ticket-/,''))}</strong></div>
     </div><div class="mandate-card"><span>Mandate · 本次授权边界</span><p>${esc(run.mandate)}</p></div></section>
 
-    <section class="workers-section"><div class="section-heading"><h2>Agent 分工</h2><span>${run.agents.filter(agent=>agent.status==='done').length} / ${run.agents.length} 已完成</span></div><div class="worker-grid">${run.agents.map(taskAgentCard).join('')}</div></section>
+    <section class="workers-section"><div class="section-heading"><h2>Along 协作</h2><span>${run.agents.filter(agent=>agent.status==='done').length} / ${run.agents.length} 已完成</span></div><div class="worker-grid">${run.agents.map(taskAgentCard).join('')}</div></section>
 
     <section class="activity-section"><div class="section-heading"><h2>工作记录</h2><span>只记录有意义的状态变化</span></div><div class="activity-list">${run.events.map((event,index)=>`<div class="activity-row"><span class="activity-dot ${index===run.events.length-1&&run.status!=='done'?'active':''}"></span><div><strong>${esc(event.text)}</strong><span>${formatTime(event.at)}</span></div></div>`).join('')}</div></section>
 
-    <aside class="architecture-note"><strong>当前实现边界</strong><p>这是 Along 内的可解释编排层：它按 Super Agent 的 Ticket、Mandate 和 Assignment 模型展示任务。Agent 进度来自本地工作流状态，不代表四个模型正在后台长期运行。</p></aside>
+    <aside class="architecture-note"><strong>当前实现边界</strong><p>Along 以 Ticket、Mandate 和 Assignment 结构展示任务；进度来自本地工作流，不代表多个模型正在后台长期运行。</p></aside>
   </main></div>`;
 }
 
@@ -188,7 +186,7 @@ function agentPreview(item,index,goal,domain) {
   if (!item.proposal && !item.layout) return '';
   const change=domain==='health'?`${goal.target} → ${item.proposal?.target} 分钟 / 周`:domain==='finance'?`¥${goal.target.toLocaleString('zh-CN')} → ¥${item.proposal?.target.toLocaleString('zh-CN')}`:'建立新的自定义目标';
   const goalChange=item.proposal?`<span>目标变化：${change}</span><strong>${esc(item.proposal.title)}</strong><p>下一步：${esc(item.proposal.task)}</p><p>${esc(item.proposal.reason)}</p>`:'';
-  const layoutPreview=item.layout?`<span>Agent 生成的目标空间</span><strong>${esc(item.layout.title)}</strong><p>${esc(item.layout.summary)}</p><p>${item.layout.modules.length} 个目标模块 · ${item.layout.tasks.length} 项动态任务 · ${item.layout.questions.length} 项待确认</p>`:'';
+  const layoutPreview=item.layout?`<span>Along 生成的目标空间</span><strong>${esc(item.layout.title)}</strong><p>${esc(item.layout.summary)}</p><p>${item.layout.modules.length} 个目标模块 · ${item.layout.tasks.length} 项动态任务 · ${item.layout.questions.length} 项待确认</p>`:'';
   return `<div class="proposal-preview">${goalChange}${layoutPreview}<button class="button" data-action="accept-goal" data-index="${index}">${item.proposal?'确认采用目标与界面':'采用这个目标空间'}</button></div>`;
 }
 function goalAgentPage() {
@@ -198,10 +196,10 @@ function goalAgentPage() {
   const label=domain==='health'?'健康':domain==='finance'?'理财演示':'自定义目标';
   const targetText=domain==='health'?`${goal.target} 分钟 / 周`:domain==='finance'?`¥${goal.target.toLocaleString('zh-CN')}`:'由你用自然语言定义';
   const placeholder=domain==='custom'?'例如：未来半年完成第一部长篇小说，每周只有周末能集中写作':'例如：这周运动目标改为 150 分钟，但每天只有 20 分钟';
-  return `<div class="app-shell"><header class="topbar"><div class="topbar-inner">${brand()}<span class="topbar-caption">目标共创</span></div></header><main class="content agent-page"><button class="back-button" data-action="agent-back">← 返回目标</button><div class="agent-title"><span class="eyebrow">${label} · Codex Agent</span><h1>${esc(goal.title)}</h1><p>当前目标：${targetText}。你提出想法，Codex 生成目标空间和动态任务；确认后才会改变首页。</p></div>
-  ${agentConfig.token ? `<div class="agent-status">已配对本地 Mac · ${esc(agentConfig.baseURL)} <button data-action="disconnect-agent">重新配对</button></div>` : `<div class="agent-setup"><h2>连接这台 Mac 上的 Codex</h2><p>Mac 与 iPhone 保持在同一 Wi‑Fi。在 Mac 运行 <code>npm run agent-host</code>，填入终端显示的地址、SHA-256 指纹和一次性配对码。</p><form id="pair-form"><input name="baseURL" placeholder="https://192.168.x.x:4176" value="${esc(agentConfig.baseURL||'')}" required><input name="fingerprint" placeholder="证书指纹 SHA-256" value="${esc(agentConfig.fingerprint||'')}" required><input name="code" placeholder="一次性配对码" inputmode="numeric" required><button class="button" ${agentBusy?'disabled':''}>${agentBusy?'连接中…':'连接 Mac Agent'}</button></form></div>`}
-  <div class="agent-messages">${history.length?history.map((item,index)=>`<div class="agent-message ${item.role}"><span>${item.role==='user'?'你':'Codex Agent'}</span><p>${esc(item.text)}</p>${agentPreview(item,index,goal,domain)}</div>`).join(''):'<p class="agent-empty">说说你希望达成什么、期限、约束和偏好；Codex 会先整理并请你确认。</p>'}</div>
-  <form id="agent-form" class="agent-composer"><textarea name="message" placeholder="${placeholder}" maxlength="800" required></textarea><button class="button" ${agentBusy||!agentConfig.token?'disabled':''}>${agentBusy?'Codex 正在思考…':'发送给 Codex'}</button></form><p class="agent-disclaimer">${domain==='finance'?'理财连接和余额仍是演示；Codex 只规划，不交易。':domain==='health'?'仅发送当前目标与所选健康摘要，不发送原始记录。':'只发送你在目标对话中主动提供的信息。'}</p></main></div>`;
+  return `<div class="app-shell"><header class="topbar"><div class="topbar-inner">${brand()}<span class="topbar-caption">目标共创</span></div></header><main class="content agent-page"><button class="back-button" data-action="agent-back">← 返回目标</button><div class="agent-title"><span class="eyebrow">${label} · Along</span><h1>${esc(goal.title)}</h1><p>当前目标：${targetText}。你提出想法，Along 生成目标空间和动态任务；确认后才会改变首页。</p></div>
+  ${agentConfig.token ? `<div class="agent-status"><strong>Along 已连接</strong><span>保持手机与 Mac 在同一网络即可继续使用</span><button data-action="disconnect-agent">连接设置</button></div>` : `<div class="agent-setup"><h2>首次连接 Along</h2><p>只需设置一次，之后会自动恢复。让 Mac 与 iPhone 保持在同一网络，启动 Along 服务后填入一次连接信息。</p><form id="pair-form"><input name="baseURL" placeholder="Along 服务地址" value="${esc(agentConfig.baseURL||'')}" required><input name="fingerprint" placeholder="连接指纹" value="${esc(agentConfig.fingerprint||'')}" required><input name="code" placeholder="一次性连接码" inputmode="numeric" required><button class="button" ${agentBusy?'disabled':''}>${agentBusy?'连接中…':'连接 Along'}</button></form></div>`}
+  <div class="agent-messages">${history.length?history.map((item,index)=>`<div class="agent-message ${item.role}"><span>${item.role==='user'?'你':'Along'}</span><p>${esc(item.text)}</p>${agentPreview(item,index,goal,domain)}</div>`).join(''):'<p class="agent-empty">说说你希望达成什么、期限、约束和偏好；Along 会先整理并请你确认。</p>'}</div>
+  <form id="agent-form" class="agent-composer"><textarea name="message" placeholder="${placeholder}" maxlength="800" required></textarea><button class="button" ${agentBusy||!agentConfig.token?'disabled':''}>${agentBusy?'Along 正在思考…':'发送给 Along'}</button></form><p class="agent-disclaimer">${domain==='finance'?'理财连接和余额仍是演示；Along 只规划，不交易。':domain==='health'?'仅发送当前目标与所选健康摘要，不发送原始记录。':'只发送你在目标对话中主动提供的信息。'}</p></main></div>`;
 }
 
 function currentGoal() {
@@ -218,10 +216,10 @@ function experimentPanel() {
   const loop = state.loop?.experiment === EXPERIMENT ? state.loop : null;
   const latest = loop?.changes?.find(item => item.decision === 'replan');
   const quiet = loop?.changes?.filter(item => item.decision === 'quiet').length ?? 0;
-  return `<section class="lab-card">${loop ? `<div class="lab-head"><div><strong>本周健身 120 分钟</strong><p>从 75 分钟开始，观察任务何时改变。</p></div><button class="minor-action" data-action="experiment-reset">重新开始</button></div><div class="lab-actions"><button class="button" data-action="event-workout-35" ${running ? 'disabled' : ''}>新增 35 分钟</button><button class="button secondary" data-action="event-workout-1" ${running ? 'disabled' : ''}>仅新增 1 分钟</button><button class="button secondary" data-action="event-steps" ${running ? 'disabled' : ''}>仅步数变化</button></div>${latest ? `<div class="change-card"><span class="eyebrow">${latest.status === 'pending' ? '正在请求 Codex…' : latest.status === 'error' ? '建议暂不可用' : latest.source === 'live-codex' ? 'Codex 实时建议' : 'Agent 建议回放'}</span><div class="change-flow"><div><span>原任务</span><strong>${esc(latest.beforeTask)}</strong></div><span class="flow-arrow">→</span><div><span>新任务</span><strong>${esc(latest.suggestion?.task ?? (latest.status === 'error' ? '尚未生成' : '生成中…'))}</strong></div></div><p>${latest.remainingBefore} → ${latest.remainingAfter} 分钟待完成。${esc(latest.reason)} ${esc(latest.suggestion?.reason ?? '')}</p>${latest.status === 'error' ? `<p>${esc(latest.error)}</p>` : ''}${latest.source === 'recorded-dsh' ? '<p>公网版显示已录制的历史 Agent 运行结果。</p>' : ''}</div>` : '<p class="lab-hint">轻微或无关变化会安静处理；显著变化才请求新任务。</p>'}${quiet ? `<p class="lab-hint">${quiet} 条变化已安静处理，没有调用 Codex。</p>` : ''}` : `<div class="lab-head"><div><strong>看一次目标驱动的调整</strong><p>预设本周 120 分钟、已完成 75 分钟。</p></div></div><button class="button lab-start" data-action="experiment-start">开始实验</button>`}</section>`;
+  return `<section class="lab-card">${loop ? `<div class="lab-head"><div><strong>本周健身 120 分钟</strong><p>从 75 分钟开始，观察任务何时改变。</p></div><button class="minor-action" data-action="experiment-reset">重新开始</button></div><div class="lab-actions"><button class="button" data-action="event-workout-35" ${running ? 'disabled' : ''}>新增 35 分钟</button><button class="button secondary" data-action="event-workout-1" ${running ? 'disabled' : ''}>仅新增 1 分钟</button><button class="button secondary" data-action="event-steps" ${running ? 'disabled' : ''}>仅步数变化</button></div>${latest ? `<div class="change-card"><span class="eyebrow">${latest.status === 'pending' ? '正在请求 Along…' : latest.status === 'error' ? '建议暂不可用' : latest.source === 'live-along' ? 'Along 实时建议' : 'Along 建议回放'}</span><div class="change-flow"><div><span>原任务</span><strong>${esc(latest.beforeTask)}</strong></div><span class="flow-arrow">→</span><div><span>新任务</span><strong>${esc(latest.suggestion?.task ?? (latest.status === 'error' ? '尚未生成' : '生成中…'))}</strong></div></div><p>${latest.remainingBefore} → ${latest.remainingAfter} 分钟待完成。${esc(latest.reason)} ${esc(latest.suggestion?.reason ?? '')}</p>${latest.status === 'error' ? `<p>${esc(latest.error)}</p>` : ''}${latest.source === 'recorded-along' ? '<p>公网版显示已录制的 Along 运行结果。</p>' : ''}</div>` : '<p class="lab-hint">轻微或无关变化会安静处理；显著变化才请求新任务。</p>'}${quiet ? `<p class="lab-hint">${quiet} 条变化已安静处理，没有调用 Along。</p>` : ''}` : `<div class="lab-head"><div><strong>看一次目标驱动的调整</strong><p>预设本周 120 分钟、已完成 75 分钟。</p></div></div><button class="button lab-start" data-action="experiment-start">开始实验</button>`}</section>`;
 }
 function lab() {
-  return `<div class="app-shell"><header class="topbar"><div class="topbar-inner">${brand()}<span class="topbar-caption">目标变化实验</span></div></header><main class="content lab-content"><button class="back-button" data-action="back-home">← 返回目标</button><h1>当进度变化，下一步会怎样变？</h1><p class="lab-intro">这是与真实健康数据隔离的模拟实验。Along 计算进度，再判断是否需要 Codex 建议。</p>${experimentPanel()}</main></div>`;
+  return `<div class="app-shell"><header class="topbar"><div class="topbar-inner">${brand()}<span class="topbar-caption">目标变化实验</span></div></header><main class="content lab-content"><button class="back-button" data-action="back-home">← 返回目标</button><h1>当进度变化，下一步会怎样变？</h1><p class="lab-intro">这是与真实健康数据隔离的模拟实验。Along 计算进度，再判断是否需要更新建议。</p>${experimentPanel()}</main></div>`;
 }
 function render() { app.innerHTML = screen === 'lab' ? lab() : screen === 'agent' ? goalAgentPage() : screen === 'task' ? taskDetailPage() : home(); }
 
@@ -253,12 +251,12 @@ async function injectEvent(event) {
     if (!localAgent && before.snapshot.workoutMinutes === 75 && event.type === 'workout' && event.amount === 35) {
       const replay = await fetch('./agent-replay.json').then(response => response.json());
       if (replay.experiment !== EXPERIMENT || replay.beforeMinutes !== 75 || replay.eventMinutes !== 35) throw Error('回放场景不匹配');
-      result = {decision:'replan', source:'recorded-dsh', suggestion:replay.suggestion};
+      result = {decision:'replan', source:'recorded-along', suggestion:replay.suggestion};
     } else if (localAgent) {
       const response = await fetch('./api/health-event', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(agentRequestPayload(before, event))});
       result = await response.json();
-      if (!response.ok) throw Error(result.error || 'Codex 请求失败');
-    } else throw Error('公网演示仅提供 75＋35 分钟场景的历史 Agent 回放');
+      if (!response.ok) throw Error(result.error || 'Along 请求失败');
+    } else throw Error('公网演示仅提供 75＋35 分钟场景的 Along 回放');
     if (result.decision !== 'replan') throw Error('服务端没有确认重排');
     const suggestion = acceptAgentSuggestion(JSON.stringify(result.suggestion), route.remainingAfter);
     if (state.loop?.changes?.[0]?.id !== id) return;
@@ -288,7 +286,7 @@ app.addEventListener('click', event => {
   if (action === 'task-back') { selectedTaskId=null;screen='home';render(); }
   if (action === 'edit-goal') { screen='agent'; render(); }
   if (action === 'agent-back') { screen='home'; render(); }
-  if (action === 'disconnect-agent') { agentConfig={};localStorage.removeItem(AGENT_KEY);render(); }
+  if (action === 'disconnect-agent') { agentConfig={};localStorage.removeItem(AGENT_KEY);void clearNativeConnection();render(); }
   if (action === 'accept-goal') {
     const index=Number(event.target.dataset.index),item=conversations[activeGoal]?.[index];
     if (!item?.proposal && !item?.layout) return;
@@ -337,7 +335,8 @@ app.addEventListener('submit', async event => {
       const result=await agentCall(config,'/pair',{code:String(form.get('code')).trim()});
       agentConfig={...config,token:result.token};
       localStorage.setItem(AGENT_KEY,JSON.stringify(agentConfig));
-      notice('已连接本地 Codex Agent');
+      await saveNativeConnection(agentConfig);
+      notice('已连接 Along，之后会自动恢复');
     } else {
       const message=String(form.get('message')).trim();
       if (!message) return;
@@ -347,7 +346,7 @@ app.addEventListener('submit', async event => {
       conversations[domain]=[...history,{role:'user',text:message},{role:'assistant',text:result.reply,proposal:result.proposal,layout:result.layout}].slice(-20);
       saveConversations();
     }
-  } catch(error) { notice(error.message || 'Agent 请求失败'); }
+  } catch(error) { notice(error.message || 'Along 请求失败'); }
   finally { agentBusy=false;render(); }
 });
 window.addEventListener('along-health-update', async event => {
@@ -363,7 +362,7 @@ window.addEventListener('along-health-update', async event => {
   const route=routeHealthChange(before,next.snapshot,goal.target);
   if (route.decision==='quiet') return;
   const ticket={id:crypto.randomUUID(),source:'healthkit',trigger:{from:before.workoutMinutes,to:next.snapshot.workoutMinutes},eval:route.decision,mandate:'仅提出任务，用户确认后才采用',reason:route.reason,status:'assigned'};
-  if (!agentConfig.token) { saveTicket({...ticket,status:'waiting',error:'Mac Agent 未连接；进度已更新，任务可稍后再规划。'});if (screen==='home') render();return; }
+  if (!agentConfig.token) { saveTicket({...ticket,status:'waiting',error:'Along 未连接；进度已更新，任务可稍后再规划。'});if (screen==='home') render();return; }
   saveTicket(ticket);if (screen==='home') render();
   try {
     const result=await agentCall(agentConfig,'/goal/event',{goal,before:{workoutMinutes:before.workoutMinutes,selectedTypes:['workout']},after:{workoutMinutes:next.snapshot.workoutMinutes,selectedTypes:['workout']},currentTask:goalCustom.health?.task||healthView(state).primary.title});
@@ -381,6 +380,22 @@ sheet.addEventListener('click', event => {
   }
 });
 render();
+async function restoreAlongConnection() {
+  if (agentConfig.token) {
+    try { await saveNativeConnection(agentConfig); } catch { /* Local storage still keeps the connection. */ }
+    return;
+  }
+  try {
+    const saved=await loadNativeConnection();
+    if (!saved?.baseURL || !saved?.fingerprint || !saved?.token) return;
+    agentConfig=saved;
+    localStorage.setItem(AGENT_KEY,JSON.stringify(agentConfig));
+    render();
+  } catch {
+    // First launch without a native connection is expected.
+  }
+}
+void restoreAlongConnection();
 let lastNativeRefresh = 0;
 async function refreshFromNative() {
   if (!window.AlongHealthBridge?.refresh || document.visibilityState === 'hidden' || Date.now() - lastNativeRefresh < 15_000) return;

@@ -66,7 +66,7 @@ function layoutInstruction(domain) {
   return `生成一个可确认的 layout。layout 不是 HTML，只能是声明式 JSON。modules 最多 6 项，只允许 summary、fact_list、chips、metric；${sourceRule} tasks 最多 6 项，每项 state 只能是 temporary、planned、deferred。questions 最多 6 项。未知事实必须放在 questions，或把相关任务标记为 temporary；不得把假设写成已知事实，不得输出脚本、样式、链接或任意组件名。`;
 }
 async function runExclusive(operation) {
-  if (busy) throw Error('Codex 正在处理上一条请求，请稍后再试');
+  if (busy) throw Error('Along 正在处理上一条请求，请稍后再试');
   busy=true;
   try { return await operation(); }
   finally { busy=false; }
@@ -103,7 +103,7 @@ const server=createServer({key:readFileSync(key),cert:readFileSync(cert)},async(
         output.proposal=null;
         output.reply += ` 我给出的目标数值与你指定的 ${requestedTarget} 不一致，已撤回该提案。`;
       }
-      return respond(res,200,{...output,layout,source:'live-codex'});
+      return respond(res,200,{...output,layout,source:'live-along'});
     }
     if (req.method==='POST' && path==='/goal/event') {
       const input=await body(req), goal=cleanGoal(input.goal);
@@ -114,13 +114,13 @@ const server=createServer({key:readFileSync(key),cert:readFileSync(cert)},async(
       const currentTask=String(input.currentTask??'').slice(0,120);
       const prompt=`你是 Along 的任务调整 Agent。确定性进度由 Along 算好，不要自行修改。不得调用工具，不要给医学建议。只输出 JSON：{"task":"具体可执行的下一步","reason":"解释为什么调整","remaining":${route.remaining}}。目标：${JSON.stringify(goal)}。原任务：${currentTask}。变化：${route.reason}。任务应与剩余 ${route.remaining} 分钟相符；若已完成则建议查看成果。`;
       const suggestion=validateTaskReply(await runExclusive(()=>runTaskCodex(prompt)),route.remaining);
-      return respond(res,200,{...route,suggestion,source:'live-codex'});
+      return respond(res,200,{...route,suggestion,source:'live-along'});
     }
     return respond(res,404,{error:'未找到接口'});
   } catch(error) { respond(res,error.message.includes('正在处理')?429:400,{error:error.message}); }
 });
 server.listen(port,lanHost,()=>{
-  console.log(`Along Agent Host: https://${lanHost}:${port}`);
+  console.log(`Along 服务: https://${lanHost}:${port}`);
   console.log(`证书指纹 SHA-256: ${fingerprint}`);
   console.log(`一次性配对码: ${code} (15 分钟有效)`);
   console.log('仅用于可信任的同一 Wi-Fi；退出请按 Ctrl+C。');

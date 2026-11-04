@@ -8,15 +8,15 @@
 
 - 健康示例是「本周累计运动 120 分钟」。在 [iPhone 原生薄壳](ios/README.md)连接 Apple Health 后，按用户选择的摘要计算进度和下一步；连接页支持一键选择全部可读指标，已保存的选项再次打开时保持开启。普通网页可主动选择演示健康数据。
 - 理财示例是「三个月存下 ¥10,000 应急金」。点击「体验连接」后才出现 ¥3,200 的演示余额；模拟新增 ¥800 后，进度与任务文字随之更新。它没有接入蚂蚁财富或任何真实理财账户，不读取账户，也不转账或交易。
-- 下拉选择「＋ 定义新目标」，即可用自然语言告诉 Codex 期限、偏好和约束。Codex 返回受白名单约束的目标空间与动态任务；用户点「采用」后才更新首页。iPhone 需要和运行 Agent Host 的 Mac 在同一 Wi-Fi。
-- 动态任务卡片可点击进入 Super Agent 协作视图。每个任务映射为独立 Ticket，展示 Source → Trigger → Eval → Ticket 编排链路、Mandate 授权边界，以及协调、情境、计划和守护四类 Agent 的分工、工作状态、进度和交付。当前是 Along 本地可解释编排层，不宣称四个模型在后台长期运行。
+- 下拉选择「＋ 定义新目标」，即可用自然语言告诉 Along 期限、偏好和约束。Along 返回受白名单约束的目标空间与动态任务；用户点「采用」后才更新首页。iPhone 需要和运行 Along 服务的 Mac 在同一 Wi-Fi。
+- 动态任务卡片可点击进入 Along 协作视图。每个任务映射为独立 Ticket，展示 Source → Trigger → Eval → Ticket 编排链路、Mandate 授权边界，以及协调、情境、计划和守护四类工作的状态、进度和交付。当前是 Along 本地可解释编排层，不宣称多个模型在后台长期运行。
 - HealthKit 记录在 App 打开、回到前台、收到前台 HealthKit 更新通知时重新读取；页面可见期间还每 60 秒兜底检查。小变化安静处理；显著的健身时长变化形成待确认的任务提案。当前没有后台实时同步，也不自动完成运动。
-- 原有「目标变化实验」保留在健康目标页底部：固定 75＋35 分钟场景展示 Along 计算、路由判断与 Agent 建议；轻微或无关变化保持安静。
+- 原有「目标变化实验」保留在健康目标页底部：固定 75＋35 分钟场景展示 Along 计算、路由判断与 Along 建议；轻微或无关变化保持安静。
 - 页面状态保存在当前浏览器的 `localStorage`。iPhone 确认导入后，所选健康摘要保存在 App 内 WKWebView 的本地页面数据中；旧健康目标数据也会保留，不依赖 Mac 同步服务。
 
 ## 运行与构建
 
-先运行 `npm install`。开发服务使用项目安装的 Node 22.23.4；目标共创需要本机已登录的 Codex CLI。
+先运行 `npm install`。开发服务使用项目安装的 Node 22.23.4；目标共创需要本机可用的 Along 生成服务。
 
 ```sh
 npm run dev
@@ -28,15 +28,15 @@ npm run build
 
 后续更新：提交并推送 `main` 后，GitHub Actions 自动运行检查、构建并部署 GitHub Pages。iPhone 使用随 App 打包的 `ios/AlongHealth/Web`，网页改动需先运行 `npm run build`，把 `dist/` 同步到该目录，再在 Xcode 重新构建并安装。
 
-`npm run dev` 的本地服务只监听 `127.0.0.1`，`POST /api/health-event` 仍用于原有模拟实验。GitHub Pages 是静态站，无法常驻 Codex 进程；目标共创仍通过同一 Wi-Fi 的 Mac Agent Host 完成。
+`npm run dev` 的本地服务只监听 `127.0.0.1`，`POST /api/health-event` 仍用于原有模拟实验。GitHub Pages 是静态站，无法常驻生成进程；目标共创仍通过同一 Wi-Fi 的 Mac 上的 Along 服务完成。
 
-## 同一 Wi-Fi 的真实 Codex Agent
+## 同一 Wi-Fi 的 Along 服务
 
-在 Mac 本项目目录运行 `npm run agent-host`。终端显示局域网 HTTPS 地址、SHA-256 证书指纹和 15 分钟有效的一次性配对码。iPhone App 的目标编辑页填入这三项，随后即可问答。Agent Host 默认只绑定 Mac 的 Wi-Fi 地址，退出终端即停止服务；没有公网通道。证书由 Mac 本地生成，iPhone 原生网络层校验指纹后才传输，配对后请求使用随机令牌。
+在 Mac 本项目目录运行 `npm run agent-host`。终端显示局域网 HTTPS 地址、SHA-256 证书指纹和 15 分钟有效的一次性配对码。iPhone App 的目标编辑页只需首次填入这三项，随后即可问答；正常重启或升级后会自动恢复。Along 服务默认只绑定 Mac 的 Wi-Fi 地址，退出终端即停止服务；没有公网通道。证书由 Mac 本地生成，iPhone 原生网络层校验指纹后才传输，连接后请求使用随机令牌。
 
-健康目标问答只发送当前目标与已选健身时长的汇总值，不发送原始 HealthKit 记录；自定义目标只发送用户主动输入的目标文本。Codex 通过非交互模式输出严格 JSON Schema，再由 Along 二次验证、绑定可信指标并渲染；用户确认后才改变目标空间。健康变化的流程是 HealthKit 来源 → 有意义变化筛选 → 待处理任务 → Codex 生成提案 → 用户确认。任务详情页进一步落地了 Ticket、Mandate 和 Assignment 概念，但不宣称存在后台长期运行的独立 Worker。
+健康目标问答只发送当前目标与已选健身时长的汇总值，不发送原始 HealthKit 记录；自定义目标只发送用户主动输入的目标文本。Along 的生成结果使用严格 JSON Schema，再由客户端二次验证、绑定可信指标并渲染；用户确认后才改变目标空间。健康变化的流程是 Apple Health 来源 → 有意义变化筛选 → 待处理任务 → Along 生成提案 → 用户确认。任务详情页进一步落地了 Ticket、Mandate 和 Assignment 概念，但不宣称存在后台长期运行的独立工作进程。
 
-Mac 关闭或网络断开时，首页的确定性进度仍可更新，Agent 问答和任务提案会显示不可用。配对令牌的哈希值保存在 Mac 本机 `~/.along/agent-host/pairing.json`，正常重启 Host 后无需重新配对；主动点「重新配对」会替换旧令牌。
+Mac 关闭或网络断开时，首页的确定性进度仍可更新，Along 问答和任务提案会显示不可用。连接凭证的哈希值保存在 Mac 本机 `~/.along/agent-host/pairing.json`，连接信息同时保存在 iPhone App 沙盒中；正常重启或升级 App 后无需重新输入，只有主动打开「连接设置」时才清除。
 
 ## iPhone 原生薄壳
 
