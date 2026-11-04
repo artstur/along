@@ -8,6 +8,8 @@
 2. 在 iOS 27 + Xcode 27 上，可以打开 Xcode 的 Device Hub，点侧栏的 `+` → **Pair Nearby Device…**，首次通过同一局域网无线配对；也可以用数据线连接。按提示在 iPhone 上完成配对、信任设备并开启开发者模式。选择这台 iPhone 作为运行设备，点 Run。HealthKit 的真实读取需要真机。
 3. 在 Along App 的健康目标页点 Apple Health“管理”。上次保存的选择会保持开启，也可点右上角「全部连接」。点“读取并预览”，系统会显示新增类型的 HealthKit 读取权限。确认摘要无误后，点“确认导入本机 Along”。如果选择了健身记录，首页会更新本周运动目标及动态任务；其他摘要保存在本机，连接区简要显示静息心率、手腕温度和活动消耗。不需要 Mac 上的同步服务、配对码或 Tunnel。
 
+网页界面改动后，从仓库根目录运行 `npm run build`，再把 `dist/` 内容同步到 `ios/AlongHealth/Web/`，随后重新构建 App。移动端通过 `along://app/` 自定义协议加载这些内置资源，避免公司网络或 CDN 状态导致启动白屏。
+
 ## 读取和发送的范围
 
 | 用户选项 | HealthKit 读取 | 导入本机 Along 页面 |
@@ -26,7 +28,7 @@ Apple 健康 App 的手腕温度通常展示相对个人基线的偏差；Health
 
 ## 当前边界
 
-- 首次手动授权并确认后，App 在前台为已选类型安装 HealthKit 观察器；页面启动、回到前台也会主动读取，页面可见时每 60 秒兜底检查。HealthKit 观察器不保证秒级通知，当前没有后台交付。页面界面从 GitHub Pages 的 `artstur.github.io/Personality-Demo` 加载，所以打开 App 需要能访问 GitHub；本地摘要可被之后加载的页面版本读取。若要完全离线和固定代码版本，需把页面资源打包进 App。
+- 首次手动授权并确认后，App 在前台为已选类型安装 HealthKit 观察器；页面启动、回到前台也会主动读取，页面可见时每 60 秒兜底检查。HealthKit 观察器不保证秒级通知，当前没有后台交付。页面界面随 App 打包在 `AlongHealth/Web`，不依赖 GitHub Pages 的实时网络；网页更新后需重新运行 `npm run build`、同步 `dist/` 并安装 App。
 - 真实健康摘要会驱动网页的目标进度与任务计算。仅在配对 Mac Agent Host 且有显著健身时长变化时，向 Codex 请求新任务提案；采用前需用户确认。“目标变化实验”仍是隔离的模拟实验。
 - 2026-11-04 已在 iPhone 真机完成签名安装、HealthKit 读取预览、用户确认本机导入和页面更新验证；最终构建也已覆盖安装并启动。HealthKit 对没有匹配记录的统计查询可能返回 `errorNoData`；此时界面显示“无可读取记录”，不会把它当作整个连接失败。
-- 当前使用 Xcode 个人团队签名。个人团队的配置文件通常 7 天后到期，届时需重新构建并安装。GitHub 提交不会自动更新已安装的 iPhone App；GitHub Pages 会由 Actions 自动更新网页。
+- 当前使用 Xcode 个人团队签名。个人团队的配置文件通常 7 天后到期，届时需重新构建并安装。GitHub 提交和 Pages 更新不会自动更新已安装的 iPhone App；移动端需重新同步内置资源并安装。

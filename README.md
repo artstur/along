@@ -26,7 +26,7 @@ npm run build
 
 本地地址 `http://localhost:4173`；静态文件在 `dist/`。
 
-后续更新：提交并推送 `main` 后，GitHub Actions 自动运行检查、构建并部署 GitHub Pages。iPhone 原生代码变更仍需在 Xcode 重新构建并安装。
+后续更新：提交并推送 `main` 后，GitHub Actions 自动运行检查、构建并部署 GitHub Pages。iPhone 使用随 App 打包的 `ios/AlongHealth/Web`，网页改动需先运行 `npm run build`，把 `dist/` 同步到该目录，再在 Xcode 重新构建并安装。
 
 `npm run dev` 的本地服务只监听 `127.0.0.1`，`POST /api/health-event` 仍用于原有模拟实验。GitHub Pages 是静态站，无法常驻 Codex 进程；目标共创仍通过同一 Wi-Fi 的 Mac Agent Host 完成。
 

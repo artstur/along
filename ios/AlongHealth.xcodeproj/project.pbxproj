@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		1D2272AB3B35414CB78D1471 /* Web in Resources */ = {isa = PBXBuildFile; fileRef = E69ECBE9A8C141B9A3C75457 /* Web */; };
 		361D36E0A388C9F3D0C516A3 /* HealthKitReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9BBFF439D907DDD983B94E22 /* HealthKitReader.swift */; };
 		595B5882C1544700B64936EB /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 6821CB996D4B3D95F42D8C7C /* Assets.xcassets */; };
 		83E233CBAFF6B1DD99ED4ADD /* AlongShellView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 558B32A1B3669EFDE3602320 /* AlongShellView.swift */; };
@@ -14,6 +15,7 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		E69ECBE9A8C141B9A3C75457 /* Web */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Web; sourceTree = "<group>"; };
 		142972353AE352839663BD5F /* HealthModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthModels.swift; sourceTree = "<group>"; };
 		50B67BD0E2D1DE69F5A8B26B /* AlongHealth.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = AlongHealth.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		558B32A1B3669EFDE3602320 /* AlongShellView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AlongShellView.swift; sourceTree = "<group>"; };
@@ -45,6 +47,7 @@
 			isa = PBXGroup;
 			children = (
 				6821CB996D4B3D95F42D8C7C /* Assets.xcassets */,
+				E69ECBE9A8C141B9A3C75457 /* Web */,
 			);
 			path = AlongHealth;
 			sourceTree = "<group>";
@@ -123,6 +126,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				595B5882C1544700B64936EB /* Assets.xcassets in Resources */,
+				1D2272AB3B35414CB78D1471 /* Web in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -149,6 +153,7 @@
 				CODE_SIGN_ENTITLEMENTS = AlongHealth/AlongHealth.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = R76F82BFR2;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = AlongHealth/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -288,6 +293,7 @@
 				CODE_SIGN_ENTITLEMENTS = AlongHealth/AlongHealth.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = R76F82BFR2;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = AlongHealth/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (

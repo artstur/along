@@ -10,8 +10,17 @@ struct AlongHealthApp: App {
 
     var body: some Scene {
         WindowGroup {
-            AlongWebView(bridge: bridge)
-                .ignoresSafeArea(edges: .bottom)
+            ZStack {
+                AlongWebView(bridge: bridge)
+                    .ignoresSafeArea(edges: .bottom)
+                if bridge.webLoading {
+                    ProgressView("正在加载 Along…")
+                        .foregroundStyle(.secondary)
+                } else if let error = bridge.webError {
+                    ContentUnavailableView("页面暂时无法加载", systemImage: "wifi.exclamationmark",
+                                           description: Text(error))
+                }
+            }
                 .sheet(isPresented: $bridge.showSheet, onDismiss: { bridge.dismissIfPending() }) {
                     HealthSyncSheet(bridge: bridge)
                         .interactiveDismissDisabled(bridge.busy)
@@ -30,6 +39,8 @@ final class AlongBridgeModel: ObservableObject {
     @Published var preview: HealthSummary?
     @Published var busy = false
     @Published var errorMessage: String?
+    @Published var webLoading = true
+    @Published var webError: String?
 
     private let reader = HealthKitReader()
     private var requestID: String?
@@ -150,7 +161,7 @@ final class AlongBridgeModel: ObservableObject {
 
 struct AlongWebView: UIViewRepresentable {
     @ObservedObject var bridge: AlongBridgeModel
-    private let site = URL(string: "https://artstur.github.io/Personality-Demo/")!
+    private let site = URL(string: "along://app/index.html")!
 
     func makeCoordinator() -> Coordinator { Coordinator(bridge: bridge) }
 
@@ -162,6 +173,7 @@ struct AlongWebView: UIViewRepresentable {
         controller.addUserScript(WKUserScript(source: Self.bridgeScript, injectionTime: .atDocumentStart, forMainFrameOnly: true))
         let configuration = WKWebViewConfiguration()
         configuration.userContentController = controller
+        configuration.setURLSchemeHandler(BundledWebSchemeHandler(), forURLScheme: "along")
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
         webView.load(URLRequest(url: site))
@@ -213,8 +225,11 @@ struct AlongWebView: UIViewRepresentable {
         init(bridge: AlongBridgeModel) { self.bridge = bridge }
 
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+            let origin = message.frameInfo.securityOrigin
+            let trustedOrigin = (origin.protocol == "along" && origin.host == "app") ||
+                                (origin.protocol == "https" && origin.host == "artstur.github.io")
             guard ["alongHealth", "alongHealthRefresh", "alongAgent"].contains(message.name), message.frameInfo.isMainFrame,
-                  message.frameInfo.securityOrigin.host == "artstur.github.io",
+                  trustedOrigin,
                   let body = message.body as? [String: Any], let id = body["id"] as? String,
                   let webView = message.webView else { return }
             if message.name == "alongHealth" {
@@ -268,16 +283,75 @@ struct AlongWebView: UIViewRepresentable {
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            print("Along web view loaded: \(webView.url?.absoluteString ?? "unknown")")
+            bridge.webLoading = false
+            bridge.webError = nil
             Task { @MainActor in bridge.attach(webView) }
+        }
+
+        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!,
+                     withError error: Error) {
+            print("Along provisional navigation failed: \(error.localizedDescription)")
+            bridge.webLoading = false
+            bridge.webError = error.localizedDescription
+        }
+
+        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+            print("Along navigation failed: \(error.localizedDescription)")
+            bridge.webLoading = false
+            bridge.webError = error.localizedDescription
+        }
+
+        func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+            print("Along web content process terminated")
+            bridge.webLoading = false
+            bridge.webError = "页面进程意外退出，请重新打开 App"
         }
 
         func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
                      decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
             guard let url = navigationAction.request.url else { decisionHandler(.cancel); return }
-            decisionHandler(url.scheme == "https" && url.host == "artstur.github.io" &&
-                            url.path.hasPrefix("/Personality-Demo/") ? .allow : .cancel)
+            let trustedRemote = url.scheme == "https" && url.host == "artstur.github.io" &&
+                                url.path.hasPrefix("/Personality-Demo/")
+            let trustedBundled = url.scheme == "along" && url.host == "app"
+            decisionHandler(trustedBundled || trustedRemote ? .allow : .cancel)
         }
     }
+}
+
+final class BundledWebSchemeHandler: NSObject, WKURLSchemeHandler {
+    func webView(_ webView: WKWebView, start urlSchemeTask: WKURLSchemeTask) {
+        guard let requestURL = urlSchemeTask.request.url,
+              requestURL.scheme == "along", requestURL.host == "app" else {
+            urlSchemeTask.didFailWithError(URLError(.badURL)); return
+        }
+        let requested = requestURL.path.removingPercentEncoding ?? requestURL.path
+        let relativePath = requested == "/" ? "index.html" : String(requested.dropFirst())
+        guard !relativePath.contains(".."),
+              let fileURL = Bundle.main.url(forResource: relativePath, withExtension: nil, subdirectory: "Web"),
+              let data = try? Data(contentsOf: fileURL) else {
+            urlSchemeTask.didFailWithError(URLError(.fileDoesNotExist)); return
+        }
+        let ext = fileURL.pathExtension.lowercased()
+        let mimeType: String = switch ext {
+        case "html": "text/html"
+        case "css": "text/css"
+        case "mjs", "js": "text/javascript"
+        case "json": "application/json"
+        case "webmanifest": "application/manifest+json"
+        case "svg": "image/svg+xml"
+        case "png": "image/png"
+        default: "application/octet-stream"
+        }
+        let encoding = ["html", "css", "mjs", "js", "json", "webmanifest", "svg"].contains(ext) ? "utf-8" : nil
+        let response = URLResponse(url: requestURL, mimeType: mimeType,
+                                   expectedContentLength: data.count, textEncodingName: encoding)
+        urlSchemeTask.didReceive(response)
+        urlSchemeTask.didReceive(data)
+        urlSchemeTask.didFinish()
+    }
+
+    func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {}
 }
 
 enum AgentBridgeError: LocalizedError {
