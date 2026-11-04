@@ -20,6 +20,7 @@ let selectedTaskId = null;
 let running = false;
 let agentBusy = false;
 let agentConfig = readStored(AGENT_KEY, {});
+let agentConnection = {status:agentConfig.token?'checking':'unconfigured',error:''};
 let goalCustom = readStored(GOALS_KEY, {health:null, finance:null, custom:null});
 let conversations = readStored(CONVERSATIONS_KEY, {health:[], finance:[], custom:[]});
 const storedLayouts = readStored(ADAPTIVE_LAYOUTS_KEY, {health:null, finance:null, custom:null});
@@ -27,6 +28,13 @@ let goalLayouts = {health:safeAdaptiveLayout(storedLayouts.health,'health'), fin
 let pendingTask = readStored(TICKET_KEY, null);
 let superAgentRuns = readStored(SUPER_AGENT_RUNS_KEY, {});
 let goalSuperAgentRuns = readStored(GOAL_SUPER_AGENT_RUNS_KEY, {});
+function syncAgentViewportHeight() {
+  const height=window.visualViewport?.height || window.innerHeight;
+  document.documentElement.style.setProperty('--agent-viewport-height',`${Math.round(height)}px`);
+}
+syncAgentViewportHeight();
+window.visualViewport?.addEventListener('resize',syncAgentViewportHeight);
+window.addEventListener('resize',syncAgentViewportHeight);
 function saveTicket(ticket) { pendingTask=ticket; if (ticket) localStorage.setItem(TICKET_KEY,JSON.stringify(ticket)); else localStorage.removeItem(TICKET_KEY); }
 localStorage.setItem(KEY, JSON.stringify(state));
 
@@ -37,6 +45,19 @@ function notice(message) {
   toast.textContent = message;
   toast.classList.add('show');
   setTimeout(() => toast.classList.remove('show'), 3200);
+}
+async function refreshAgentConnection() {
+  if (!agentConfig.token) {agentConnection={status:'unconfigured',error:''};return;}
+  agentConnection={status:'checking',error:''};
+  if (screen==='agent') render();
+  try {
+    const status=await agentCall(agentConfig,'/connection/status',{});
+    if (!status?.along || !status?.dsh) throw Error('DSH Along Source 尚未就绪');
+    agentConnection={status:'ready',error:''};
+  } catch(error) {
+    agentConnection={status:'error',error:error.message||'连接检查失败'};
+  }
+  if (screen==='agent') render();
 }
 function saveHealth(next) {
   state = ensureHealthGoal(next);
@@ -55,6 +76,9 @@ function show(html) {
 
 function brand() {
   return `<div class="brand"><img class="brand-symbol" src="./app-icon.png" alt=""><span>along</span></div>`;
+}
+function backButton(action,label) {
+  return `<button class="back-button icon-only" data-action="${esc(action)}" aria-label="${esc(label)}" title="${esc(label)}"><svg viewBox="0 0 12 24" aria-hidden="true"><path d="M9 18l-6-6 6-6"/></svg></button>`;
 }
 function customView() {
   return {
@@ -180,14 +204,14 @@ function adaptiveModule(module, compact=true) {
   if (module.kind==='chips') return `<div class="adaptive-module"><span class="module-title">${esc(module.title)}</span><div class="adaptive-chips">${module.items.map(item=>`<span>${esc(item)}</span>`).join('')}</div></div>`;
   const value=trustedMetric(module.source), numericTarget=typeof module.target==='number'?module.target:null;
   const percent=value!=null&&numericTarget?Math.min(100,Math.max(0,Math.round(value/numericTarget*100))):0;
-  return `<div class="adaptive-module adaptive-metric"><span class="module-title">${esc(module.title)}</span><div class="metric-value"><strong>${value==null?'—':esc(value)}</strong><span>/ ${esc(module.target)} ${esc(module.unit)}</span></div>${numericTarget?`<div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}"><span style="width:${percent}%"></span></div>`:''}${module.note?`<p>${esc(module.note)}</p>`:''}</div>`;
+  return `<div class="adaptive-module adaptive-metric"><span class="module-title">${esc(module.title)}</span><div class="metric-value"><strong>${value==null?'—':esc(value)}</strong><span>/ ${esc(module.target)} ${esc(module.unit)}</span></div>${numericTarget?`<div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}"><span style="width:${percent}%"></span></div>`:''}</div>`;
 }
 function adaptiveGoalCard(layout) {
   const context=layout.modules.find(module=>module.kind==='chips') || layout.modules.find(module=>module.kind==='fact_list') || layout.modules.find(module=>module.kind==='summary');
   const metric=layout.modules.find(module=>module.kind==='metric');
   const visible=[context,metric].filter(Boolean),visibleIds=new Set(visible.map(module=>module.id));
   const more=layout.modules.filter(module=>!visibleIds.has(module.id));
-  return `<section class="goal-card adaptive-goal" aria-label="Along 生成的目标空间"><div class="goal-card-top"><span class="eyebrow">当前目标</span>${layout.badge?`<span class="layout-badge">${esc(layout.badge)}</span>`:''}</div><h1>${esc(layout.title)}</h1><p class="adaptive-summary">${esc(layout.summary)}</p>${visible.map(module=>adaptiveModule(module,true)).join('')}${more.length?`<details class="adaptive-more"><summary>查看目标详情 · ${more.length} 个模块</summary>${more.map(module=>adaptiveModule(module,false)).join('')}</details>`:''}<div class="card-actions"><button class="agent-action" data-action="edit-goal">编辑目标</button></div></section>`;
+  return `<section class="goal-card adaptive-goal" aria-label="Along 生成的目标空间"><h1>${esc(layout.title)}</h1><p class="adaptive-summary">${esc(layout.summary)}</p>${visible.map(module=>adaptiveModule(module,true)).join('')}${more.length?`<details class="adaptive-more"><summary>查看目标详情 · ${more.length} 个模块</summary>${more.map(module=>adaptiveModule(module,false)).join('')}</details>`:''}<div class="card-actions"><button class="agent-action" data-action="edit-goal">编辑目标</button></div></section>`;
 }
 function adaptiveTaskSection(layout) {
   const visible=layout.tasks.slice(0,2),hidden=Math.max(0,layout.tasks.length-visible.length);
@@ -221,7 +245,7 @@ function home() {
         ${state.source === 'demo' && activeGoal === 'health' ? '<button class="minor-action" data-action="clear-health-demo">退出健康演示数据</button>' : ''}
         ${activeGoal === 'finance' && finance.connected ? '<p class="connection-footnote">点“模拟 +¥800”只会更新这份本机演示数据，不会访问账户或发起交易。</p>' : ''}
       </section>`:'';
-  return `<div class="app-shell"><header class="topbar"><div class="topbar-inner">${brand()}<span class="topbar-caption">你的目标空间</span></div></header>
+  return `<div class="app-shell"><header class="topbar"><div class="topbar-inner">${brand()}</div></header>
     <main class="content ${layout?'adaptive-space':''}">
       <div class="goal-switch"><label for="goal-select">当前目标</label><div class="select-wrap"><select id="goal-select" aria-label="切换目标"><option value="health" ${activeGoal === 'health' ? 'selected' : ''}>健康 · ${goalLayouts.health?'个性化计划':'每周运动'}</option><option value="finance" ${activeGoal === 'finance' ? 'selected' : ''}>理财 · ${goalLayouts.finance?'个性化计划':'应急储备'}</option><option value="custom" ${activeGoal === 'custom' ? 'selected' : ''}>${goalLayouts.custom?'我的自定义目标':'＋ 定义新目标'}</option></select><span aria-hidden="true">⌄</span></div></div>
       ${goalContent}
@@ -237,14 +261,14 @@ function taskAgentCard(agent) {
 function taskDetailPage() {
   const task=selectedTask();
   if (!task) {
-    return `<div class="app-shell"><header class="topbar"><div class="topbar-inner">${brand()}<span class="topbar-caption">Along</span></div></header><main class="content task-detail"><button class="back-button" data-action="task-back">← 返回动态任务</button><div class="empty-task"><h1>任务已更新</h1><p>这项动态任务已不在当前计划中，请返回查看最新安排。</p></div></main></div>`;
+    return `<div class="app-shell"><header class="topbar"><div class="topbar-inner">${brand()}<span class="topbar-caption">Along</span></div></header><main class="content task-detail">${backButton('task-back','返回动态任务')}<div class="empty-task"><h1>任务已更新</h1><p>这项动态任务已不在当前计划中，请返回查看最新安排。</p></div></main></div>`;
   }
   const run=currentSuperAgentRun(task);
   const evalText=run.eval?.decision==='accept'?'接受执行':run.eval?.decision==='evaluating'?'正在评估':run.eval?.decision==='ignore'?'未接受':run.eval?.decision||'等待评估';
   const workers=[{name:'DSH Main Session',role:'Orchestrator',status:run.eval?.decision==='evaluating'?'working':run.eval?'done':'queued',objective:'评估任务、建立授权边界并编排 Ticket。',work:run.eval?`Eval：${evalText}`:'等待接收 Trigger',report:null},...run.assignments];
   const mandateText=run.mandate?`${run.mandate.strength==='explicit'?'明确授权':'推断授权'} · 请求者 ${run.mandate.actor?.id||'—'} · Policy ${run.mandate.policyVersion?.slice(0,8)||'—'}`:'尚未生成 Mandate';
   return `<div class="app-shell super-agent-shell"><header class="topbar"><div class="topbar-inner">${brand()}<span class="topbar-caption">Along · 任务协作</span></div></header><main class="content task-detail">
-    <button class="back-button" data-action="task-back">← 返回动态任务</button>
+    ${backButton('task-back','返回动态任务')}
     <section class="task-hero"><div class="task-hero-top"><span class="eyebrow">${esc(task.when)} · ${esc(taskStateLabel[task.state])}</span><span class="run-status ${run.status}"><i></i>${esc(run.statusLabel)}</span></div><h1>${esc(task.title)}</h1><p>${esc(task.detail)}</p><div class="run-progress-head"><span>总体进展</span><strong>${run.progress}%</strong></div><div class="run-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${run.progress}"><span style="width:${run.progress}%"></span></div></section>
 
     <section class="orchestration-section"><div class="section-heading"><h2>编排链路</h2><span>从触发到可交付 Ticket</span></div><div class="orchestration-flow">
@@ -281,6 +305,24 @@ function agentPreview(item,index,goal,domain) {
   const layoutPreview=item.layout?`<span>Along 生成的目标空间</span><strong>${esc(item.layout.title)}</strong><p>${esc(item.layout.summary)}</p><p>${item.layout.modules.length} 个目标模块 · ${item.layout.tasks.length} 项动态任务 · ${item.layout.questions.length} 项待确认</p>`:'';
   return `<div class="proposal-preview">${goalChange}${layoutPreview}<button class="button" data-action="accept-goal" data-index="${index}">${item.proposal?'确认采用目标与界面':'采用这个目标空间'}</button></div>`;
 }
+function agentMessage(item,index,goal,domain) {
+  return `<div class="agent-message ${item.role}"><p>${esc(item.text)}</p>${agentPreview(item,index,goal,domain)}</div>`;
+}
+function agentPending(id) {
+  return `<div class="agent-message assistant pending" data-agent-run="${esc(id)}" role="status"><div class="agent-thinking"><span aria-hidden="true"><i></i><i></i><i></i></span><p>正在连接 DSH Super Agent…</p></div></div>`;
+}
+function setAgentComposerBusy(busy) {
+  const form=app.querySelector('#agent-form');
+  const button=form?.querySelector('.agent-send');
+  if (form) form.setAttribute('aria-busy',String(busy));
+  if (button) button.disabled=busy || !agentConfig.token;
+}
+function scrollAgentConversationToBottom() {
+  requestAnimationFrame(()=>{
+    const scroller=app.querySelector('.agent-scroll');
+    scroller?.scrollTo({top:scroller.scrollHeight,behavior:'smooth'});
+  });
+}
 function goalAgentPage() {
   const domain=activeGoal;
   const goal=currentGoal();
@@ -289,12 +331,13 @@ function goalAgentPage() {
   const goalRunning=goalRun?.status==='working';
   const label=domain==='health'?'健康':domain==='finance'?'理财演示':'自定义目标';
   const targetText=domain==='health'?`${goal.target} 分钟 / 周`:domain==='finance'?`¥${goal.target.toLocaleString('zh-CN')}`:'由你用自然语言定义';
-  const placeholder=domain==='custom'?'例如：未来半年完成第一部长篇小说，每周只有周末能集中写作':'例如：这周运动目标改为 150 分钟，但每天只有 20 分钟';
-  return `<div class="app-shell"><header class="topbar"><div class="topbar-inner">${brand()}<span class="topbar-caption">目标共创</span></div></header><main class="content agent-page"><button class="back-button" data-action="agent-back">← 返回目标</button><div class="agent-title"><span class="eyebrow">${label} · DSH Super Agent</span><h1>${esc(goal.title)}</h1><p>当前目标：${targetText}。提交后由 Main Session 接单，Worker 与真实子 Agent 拆解、分工并生成动态任务；确认后才会改变首页。</p></div>
-  ${agentConfig.token ? `<div class="agent-status"><strong>Along 已连接</strong><span>保持手机与 Mac 在同一网络即可继续使用</span><em>自动保持</em></div>` : `<div class="agent-setup"><h2>首次连接 Along</h2><p>只需设置一次，之后会自动恢复。让 Mac 与 iPhone 保持在同一网络，启动 Along 服务后填入一次连接信息。</p><form id="pair-form"><input name="baseURL" placeholder="Along 服务地址" value="${esc(agentConfig.baseURL||'')}" required><input name="fingerprint" placeholder="连接指纹" value="${esc(agentConfig.fingerprint||'')}" required><input name="code" placeholder="一次性连接码" inputmode="numeric" required><button class="button" ${agentBusy?'disabled':''}>${agentBusy?'连接中…':'连接 Along'}</button></form></div>`}
-  <div class="agent-messages">${history.length?history.map((item,index)=>`<div class="agent-message ${item.role}"><span>${item.role==='user'?'你':'Along'}</span><p>${esc(item.text)}</p>${agentPreview(item,index,goal,domain)}</div>`).join(''):'<p class="agent-empty">说说你希望达成什么、期限、约束和偏好；Along 会先整理并请你确认。</p>'}</div>
+  const connectionText=agentConnection.status==='ready'?['Along 与 DSH 已连接','整条目标编排链路可用','已验证']:
+    agentConnection.status==='error'?['连接需处理',agentConnection.error,'重试中']:['正在检查连接','正在验证 Mac Host 与 DSH Along Source','检查中'];
+  return `<div class="app-shell agent-shell"><header class="topbar"><div class="topbar-inner">${brand()}</div></header><main class="content agent-page"><div class="agent-scroll">${backButton('agent-back','返回目标')}<div class="agent-title"><span class="eyebrow">${label} · DSH Super Agent</span><h1>${esc(goal.title)}</h1><p>当前目标：${targetText}。提交后由 Main Session 接单，Worker 与真实子 Agent 拆解、分工并生成动态任务；确认后才会改变首页。</p></div>
+  ${agentConfig.token ? `<div class="agent-status ${agentConnection.status}"><strong>${esc(connectionText[0])}</strong><span>${esc(connectionText[1])}</span><em>${esc(connectionText[2])}</em></div>` : `<div class="agent-setup"><h2>首次连接 Along</h2><p>只需设置一次，之后会自动恢复。让 Mac 与 iPhone 保持在同一网络，启动 Along 服务后填入一次连接信息。</p><form id="pair-form"><input name="baseURL" placeholder="Along 服务地址" value="${esc(agentConfig.baseURL||'')}" required><input name="fingerprint" placeholder="连接指纹" value="${esc(agentConfig.fingerprint||'')}" required><input name="code" placeholder="一次性连接码" inputmode="numeric" required><button class="button" ${agentBusy?'disabled':''}>${agentBusy?'连接中…':'连接 Along'}</button></form></div>`}
+  <div class="agent-messages" role="log" aria-live="polite">${history.length?history.map((item,index)=>agentMessage(item,index,goal,domain)).join(''):'<p class="agent-empty">说说你希望达成什么、期限、约束和偏好；Along 会先整理并请你确认。</p>'}</div>
   ${goalOrchestrationPanel(goalRun)}
-  <form id="agent-form" class="agent-composer"><textarea name="message" placeholder="${placeholder}" maxlength="800" required ${goalRunning?'disabled':''}></textarea><button class="button" ${agentBusy||goalRunning||!agentConfig.token?'disabled':''}>${goalRunning?'Super Agent 编排中…':agentBusy?'正在提交…':'交给 Super Agent'}</button></form><p class="agent-disclaimer">${domain==='finance'?'理财连接和余额仍是演示；Super Agent 只规划，不交易。':domain==='health'?'仅发送当前目标与所选健康摘要，不发送原始记录。':'只发送你在目标对话中主动提供的信息。'}</p></main></div>`;
+  </div><div class="agent-composer-dock"><form id="agent-form" class="agent-composer" aria-busy="${agentBusy||goalRunning}"><textarea name="message" rows="1" placeholder="描述你的目标" maxlength="800" required ${goalRunning?'disabled':''}></textarea><button class="agent-send" aria-label="交给 Super Agent" title="交给 Super Agent" ${agentBusy||goalRunning||!agentConfig.token?'disabled':''}><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 15V5m0 0L6.5 8.5M10 5l3.5 3.5"/></svg></button></form><p class="agent-disclaimer">${goalRunning?'Super Agent 编排中…':domain==='finance'?'理财连接和余额仍是演示；Super Agent 只规划，不交易。':domain==='health'?'仅发送当前目标与所选健康摘要，不发送原始记录。':'Along · 一起，慢慢向前'}</p></div></main></div>`;
 }
 
 function currentGoal() {
@@ -314,9 +357,15 @@ function experimentPanel() {
   return `<section class="lab-card">${loop ? `<div class="lab-head"><div><strong>本周健身 120 分钟</strong><p>从 75 分钟开始，观察任务何时改变。</p></div><button class="minor-action" data-action="experiment-reset">重新开始</button></div><div class="lab-actions"><button class="button" data-action="event-workout-35" ${running ? 'disabled' : ''}>新增 35 分钟</button><button class="button secondary" data-action="event-workout-1" ${running ? 'disabled' : ''}>仅新增 1 分钟</button><button class="button secondary" data-action="event-steps" ${running ? 'disabled' : ''}>仅步数变化</button></div>${latest ? `<div class="change-card"><span class="eyebrow">${latest.status === 'pending' ? '正在请求 Along…' : latest.status === 'error' ? '建议暂不可用' : latest.source === 'live-along' ? 'Along 实时建议' : 'Along 建议回放'}</span><div class="change-flow"><div><span>原任务</span><strong>${esc(latest.beforeTask)}</strong></div><span class="flow-arrow">→</span><div><span>新任务</span><strong>${esc(latest.suggestion?.task ?? (latest.status === 'error' ? '尚未生成' : '生成中…'))}</strong></div></div><p>${latest.remainingBefore} → ${latest.remainingAfter} 分钟待完成。${esc(latest.reason)} ${esc(latest.suggestion?.reason ?? '')}</p>${latest.status === 'error' ? `<p>${esc(latest.error)}</p>` : ''}${latest.source === 'recorded-along' ? '<p>公网版显示已录制的 Along 运行结果。</p>' : ''}</div>` : '<p class="lab-hint">轻微或无关变化会安静处理；显著变化才请求新任务。</p>'}${quiet ? `<p class="lab-hint">${quiet} 条变化已安静处理，没有调用 Along。</p>` : ''}` : `<div class="lab-head"><div><strong>看一次目标驱动的调整</strong><p>预设本周 120 分钟、已完成 75 分钟。</p></div></div><button class="button lab-start" data-action="experiment-start">开始实验</button>`}</section>`;
 }
 function lab() {
-  return `<div class="app-shell"><header class="topbar"><div class="topbar-inner">${brand()}<span class="topbar-caption">目标变化实验</span></div></header><main class="content lab-content"><button class="back-button" data-action="back-home">← 返回目标</button><h1>当进度变化，下一步会怎样变？</h1><p class="lab-intro">这是与真实健康数据隔离的模拟实验。Along 计算进度，再判断是否需要更新建议。</p>${experimentPanel()}</main></div>`;
+  return `<div class="app-shell"><header class="topbar"><div class="topbar-inner">${brand()}<span class="topbar-caption">目标变化实验</span></div></header><main class="content lab-content">${backButton('back-home','返回目标')}<h1>当进度变化，下一步会怎样变？</h1><p class="lab-intro">这是与真实健康数据隔离的模拟实验。Along 计算进度，再判断是否需要更新建议。</p>${experimentPanel()}</main></div>`;
 }
 function render() { app.innerHTML = screen === 'lab' ? lab() : screen === 'agent' ? goalAgentPage() : screen === 'task' ? taskDetailPage() : home(); }
+window.__alongNavigateBack = () => {
+  const button=app.querySelector('.back-button[data-action]');
+  if (!button) return false;
+  button.click();
+  return true;
+};
 
 function connectInfo() {
   show(`<div class="sheet-head"><h2>连接 Apple Health</h2><button class="icon-button" data-action="close" aria-label="关闭">×</button></div><p class="sheet-copy">只有 iPhone App 可以读取 Apple Health。你可逐项选择、预览摘要，再决定是否导入本机 Along。</p><div class="permission-list"><span>步数</span><span>健身</span><span>体重</span><span>睡眠</span></div><button class="button sheet-main-button" data-action="health-demo">先体验演示数据</button><p class="sheet-footnote">演示数据不会显示为真实连接。</p>`);
@@ -367,6 +416,11 @@ app.addEventListener('change', event => {
   localStorage.setItem(ACTIVE_GOAL_KEY, activeGoal);
   if (activeGoal==='custom' && !goalLayouts.custom) screen='agent';
   render();
+});
+app.addEventListener('input', event => {
+  if (!event.target.matches('#agent-form textarea')) return;
+  event.target.style.height='auto';
+  event.target.style.height=`${Math.min(event.target.scrollHeight,120)}px`;
 });
 app.addEventListener('click', event => {
   const actionTarget=event.target.closest('[data-action]');
@@ -424,29 +478,55 @@ app.addEventListener('submit', async event => {
   event.preventDefault();
   if (agentBusy) return;
   if (event.target.id==='agent-form' && currentGoalSuperAgentRun()?.status==='working') return;
-  const form=new FormData(event.target);
-  agentBusy=true;
-  render();
-  try {
-    if (event.target.id==='pair-form') {
+  const formElement=event.target;
+  const form=new FormData(formElement);
+  if (formElement.id==='pair-form') {
+    agentBusy=true;
+    render();
+    try {
       const config={baseURL:String(form.get('baseURL')).trim().replace(/\/$/,''),fingerprint:String(form.get('fingerprint')).trim().replace(/[^a-fA-F0-9]/g,'').toUpperCase()};
       const result=await agentCall(config,'/pair',{code:String(form.get('code')).trim()});
       agentConfig={...config,token:result.token};
+      agentConnection={status:'ready',error:''};
       localStorage.setItem(AGENT_KEY,JSON.stringify(agentConfig));
       await saveNativeConnection(agentConfig);
       notice('已连接 Along，之后会自动恢复');
-    } else {
-      const message=String(form.get('message')).trim();
-      if (!message) return;
-      const domain=activeGoal;
-      const history=conversations[domain]||[];
-      conversations[domain]=[...history,{role:'user',text:message}].slice(-20);
-      saveConversations();
+    } catch(error) { notice(error.message || 'Along 请求失败'); }
+    finally { agentBusy=false;render(); }
+    return;
+  }
+
+  const message=String(form.get('message')).trim();
+  if (!message) return;
+  const domain=activeGoal;
+  const history=conversations[domain]||[];
+  const goal=currentGoal();
+  const userEntry={role:'user',text:message};
+  const pendingId=crypto.randomUUID();
+  agentBusy=true;
+  conversations[domain]=[...history,userEntry].slice(-20);
+  saveConversations();
+  const messages=app.querySelector('.agent-messages');
+  messages?.querySelector('.agent-empty')?.remove();
+  messages?.insertAdjacentHTML('beforeend',agentMessage(userEntry,conversations[domain].length-1,goal,domain));
+  messages?.insertAdjacentHTML('beforeend',agentPending(pendingId));
+  formElement.querySelector('textarea')?.blur();
+  formElement.reset();
+  const textarea=formElement.querySelector('textarea');
+  if (textarea) textarea.style.height='auto';
+  setAgentComposerBusy(true);
+  scrollAgentConversationToBottom();
+  try {
+    await submitSuperAgentGoal(domain,message,history.map(item=>({role:item.role,text:item.text})));
+  } catch(error) {
+    notice(error.message || 'Along 请求失败');
+  } finally {
+    agentBusy=false;
+    if (screen==='agent' && activeGoal===domain) {
       render();
-      await submitSuperAgentGoal(domain,message,history.map(item=>({role:item.role,text:item.text})));
+      scrollAgentConversationToBottom();
     }
-  } catch(error) { notice(error.message || 'Along 请求失败'); }
-  finally { agentBusy=false;render(); }
+  }
 });
 window.addEventListener('along-health-update', async event => {
   if (state.loop?.experiment === EXPERIMENT) return;
@@ -482,14 +562,17 @@ render();
 async function restoreAlongConnection() {
   if (agentConfig.token) {
     try { await saveNativeConnection(agentConfig); } catch { /* Local storage still keeps the connection. */ }
+    void refreshAgentConnection();
     return;
   }
   try {
     const saved=await loadNativeConnection();
     if (!saved?.baseURL || !saved?.fingerprint || !saved?.token) return;
     agentConfig=saved;
+    agentConnection={status:'checking',error:''};
     localStorage.setItem(AGENT_KEY,JSON.stringify(agentConfig));
     render();
+    void refreshAgentConnection();
   } catch {
     // First launch without a native connection is expected.
   }

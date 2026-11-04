@@ -2,6 +2,8 @@ import SwiftUI
 import WebKit
 import CryptoKit
 import Security
+import CFNetwork
+import ObjectiveC
 
 @main
 struct AlongHealthApp: App {
@@ -248,7 +250,7 @@ enum AlongConnectionStore {
 
 struct AlongWebView: UIViewRepresentable {
     @ObservedObject var bridge: AlongBridgeModel
-    private let site = URL(string: "along://app/index.html?build=12")!
+    private let site = URL(string: "along://app/index.html?build=16")!
 
     func makeCoordinator() -> Coordinator { Coordinator(bridge: bridge) }
 
@@ -266,6 +268,7 @@ struct AlongWebView: UIViewRepresentable {
         configuration.userContentController = controller
         configuration.setURLSchemeHandler(BundledWebSchemeHandler(), forURLScheme: "along")
         let webView = WKWebView(frame: .zero, configuration: configuration)
+        context.coordinator.attach(webView)
         webView.navigationDelegate = context.coordinator
         webView.load(URLRequest(url: site, cachePolicy: .reloadIgnoringLocalCacheData))
         return webView
@@ -316,9 +319,47 @@ struct AlongWebView: UIViewRepresentable {
     })();
     """
 
-    final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
+    final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate, UIGestureRecognizerDelegate {
         let bridge: AlongBridgeModel
-        init(bridge: AlongBridgeModel) { self.bridge = bridge }
+        private weak var webView: WKWebView?
+        private weak var edgeBackGesture: UIScreenEdgePanGestureRecognizer?
+
+        init(bridge: AlongBridgeModel) {
+            self.bridge = bridge
+            super.init()
+        }
+
+        func attach(_ webView: WKWebView) {
+            self.webView = webView
+            if edgeBackGesture == nil {
+                let gesture = UIScreenEdgePanGestureRecognizer(target: self, action: #selector(handleEdgeBack(_:)))
+                gesture.edges = .left
+                gesture.cancelsTouchesInView = false
+                gesture.delegate = self
+                webView.addGestureRecognizer(gesture)
+                edgeBackGesture = gesture
+            }
+            suppressKeyboardAssistant()
+        }
+
+        @objc private func handleEdgeBack(_ gesture: UIScreenEdgePanGestureRecognizer) {
+            guard gesture.state == .ended, let webView else { return }
+            let translation = gesture.translation(in: webView)
+            let velocity = gesture.velocity(in: webView)
+            guard translation.x >= 64, velocity.x > 0, abs(translation.y) < translation.x else { return }
+            webView.evaluateJavaScript("window.__alongNavigateBack?.()")
+        }
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                               shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+            true
+        }
+
+        private func suppressKeyboardAssistant() {
+            guard let webView else { return }
+            webView.removeFormInputAccessoryView()
+            webView.clearInputAssistantButtons()
+        }
 
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
             let origin = message.frameInfo.securityOrigin
@@ -384,7 +425,7 @@ struct AlongWebView: UIViewRepresentable {
                   let fingerprint = input["fingerprint"] as? String,
                   fingerprint.count == 64, fingerprint.allSatisfy(\.isHexDigit),
                   let path = input["path"] as? String,
-                  ["/pair", "/goal/chat", "/goal/event", "/super-agent/tasks", "/super-agent/tasks/status",
+                  ["/pair", "/connection/status", "/goal/chat", "/goal/event", "/super-agent/tasks", "/super-agent/tasks/status",
                    "/super-agent/goals", "/super-agent/goals/status"].contains(path),
                   let body = input["body"] as? [String: Any],
                   let url = URL(string: base + path) else { throw AgentBridgeError.invalidConfiguration }
@@ -397,9 +438,27 @@ struct AlongWebView: UIViewRepresentable {
             }
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
             let delegate = PinnedAgentDelegate(fingerprint: fingerprint.uppercased())
-            let session = URLSession(configuration: .ephemeral, delegate: delegate, delegateQueue: nil)
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.waitsForConnectivity = true
+            configuration.connectionProxyDictionary = [
+                kCFNetworkProxiesHTTPEnable as String: false,
+                kCFNetworkProxiesProxyAutoConfigEnable as String: false
+            ]
+            let session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
             defer { session.finishTasksAndInvalidate() }
-            let (data, response) = try await session.data(for: request)
+            let data: Data
+            let response: URLResponse
+            do {
+                (data, response) = try await session.data(for: request)
+            } catch let error as URLError where [.secureConnectionFailed, .serverCertificateHasBadDate,
+                                                  .serverCertificateUntrusted, .serverCertificateHasUnknownRoot,
+                                                  .serverCertificateNotYetValid].contains(error.code) {
+                print("Along agent TLS request failed: \(error.code.rawValue) \(error.localizedDescription)")
+                throw AgentBridgeError.server("iPhone 到 Mac 的安全连接被代理或 VPN 改写，请允许 Along 直连局域网后重试")
+            } catch {
+                print("Along agent request failed: \(error.localizedDescription)")
+                throw error
+            }
             guard let result = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw AgentBridgeError.invalidResponse }
             guard let response = response as? HTTPURLResponse, (200...299).contains(response.statusCode) else {
                 throw AgentBridgeError.server(result["error"] as? String ?? "Along 请求失败")
@@ -409,6 +468,14 @@ struct AlongWebView: UIViewRepresentable {
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             print("Along web view loaded: \(webView.url?.absoluteString ?? "unknown")")
+            suppressKeyboardAssistant()
+#if DEBUG
+            if ProcessInfo.processInfo.environment["ALONG_OPEN_AGENT"] == "1" {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                    webView.evaluateJavaScript("document.querySelector('[data-action=edit-goal]')?.click()")
+                }
+            }
+#endif
             bridge.webLoading = false
             bridge.webError = nil
             Task { @MainActor in bridge.attach(webView) }
@@ -441,6 +508,55 @@ struct AlongWebView: UIViewRepresentable {
             let trustedBundled = url.scheme == "along" && url.host == "app"
             decisionHandler(trustedBundled || trustedRemote ? .allow : .cancel)
         }
+    }
+}
+
+private extension UIView {
+    func clearInputAssistantButtons() {
+        inputAssistantItem.leadingBarButtonGroups = []
+        inputAssistantItem.trailingBarButtonGroups = []
+        subviews.forEach { $0.clearInputAssistantButtons() }
+    }
+}
+
+private extension WKWebView {
+    func removeFormInputAccessoryView() {
+        guard let contentView = descendant(where: {
+            NSStringFromClass(type(of: $0)).contains("WKContentView")
+        }), let originalClass = object_getClass(contentView) else { return }
+
+        let currentName = NSStringFromClass(originalClass)
+        if currentName.hasPrefix("AlongAccessoryFree_") { return }
+
+        let safeName = currentName.replacingOccurrences(of: ".", with: "_")
+        let subclassName = "AlongAccessoryFree_\(safeName)"
+        let accessoryFreeClass: AnyClass
+        if let existing = NSClassFromString(subclassName) {
+            accessoryFreeClass = existing
+        } else {
+            guard let created = objc_allocateClassPair(originalClass, subclassName, 0) else { return }
+            let selector = #selector(getter: UIResponder.inputAccessoryView)
+            let block: @convention(block) (AnyObject) -> UIView? = { _ in nil }
+            let implementation = imp_implementationWithBlock(block)
+            guard let method = class_getInstanceMethod(UIResponder.self, selector) else {
+                objc_disposeClassPair(created)
+                return
+            }
+            class_addMethod(created, selector, implementation, method_getTypeEncoding(method))
+            objc_registerClassPair(created)
+            accessoryFreeClass = created
+        }
+        object_setClass(contentView, accessoryFreeClass)
+    }
+
+    func descendant(where predicate: (UIView) -> Bool) -> UIView? {
+        var queue = subviews
+        while !queue.isEmpty {
+            let view = queue.removeFirst()
+            if predicate(view) { return view }
+            queue.append(contentsOf: view.subviews)
+        }
+        return nil
     }
 }
 
@@ -503,6 +619,7 @@ final class PinnedAgentDelegate: NSObject, URLSessionDelegate, URLSessionTaskDel
         }
         let digest = SHA256.hash(data: SecCertificateCopyData(certificate) as Data)
             .map { String(format: "%02X", $0) }.joined()
+        if digest != fingerprint { print("Along certificate pin mismatch") }
         completionHandler(digest == fingerprint ? .useCredential : .cancelAuthenticationChallenge,
                           digest == fingerprint ? URLCredential(trust: trust) : nil)
     }

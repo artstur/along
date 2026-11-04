@@ -72,8 +72,10 @@ export function createPendingGoalSuperAgentRun(request, createdAt=Date.now()) {
 }
 
 export function createFailedGoalSuperAgentRun(request, error, updatedAt=Date.now()) {
-  return {...createPendingGoalSuperAgentRun(request,updatedAt),status:'blocked',statusLabel:'DSH 暂不可用',
-    error:cleanText(error,'DSH Super Agent 请求失败',500),updatedAt};
+  const detail=cleanText(error,'DSH Super Agent 请求失败',500);
+  const connectionFailure=/TLS|secure connection|安全连接|certificate|证书|代理|VPN/i.test(detail);
+  return {...createPendingGoalSuperAgentRun(request,updatedAt),status:'blocked',
+    statusLabel:connectionFailure?'Mac 安全连接失败':'DSH 暂不可用',error:detail,updatedAt};
 }
 
 export function safeGoalSuperAgentRun(value) {

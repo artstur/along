@@ -39,4 +39,5 @@ test('creates and validates a real full-goal orchestration request',()=>{
   assert.equal(pending.progress,2);
   assert.equal(safeGoalSuperAgentRun({...pending,actual:true,agents:[],events:[]}).requestId,request.requestId);
   assert.equal(createFailedGoalSuperAgentRun(request,'offline').status,'blocked');
+  assert.equal(createFailedGoalSuperAgentRun(request,'A TLS error caused the secure connection to fail.').statusLabel,'Mac 安全连接失败');
 });

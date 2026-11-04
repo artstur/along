@@ -52,6 +52,16 @@ async function superAgentCall(path,{method='POST',value}={}) {
   if (!response.ok) throw Error(result?.error || `DSH Super Agent 请求失败（${response.status}）`);
   return result;
 }
+async function superAgentReady() {
+  let response;
+  try {
+    response=await fetch(`${superAgentURL}/along-source/api/goals/along-status-probe`,{
+      method:'GET',headers:{'x-along-bridge':'1'},signal:AbortSignal.timeout(5_000)
+    });
+  } catch(error) { throw Error(`DSH Super Agent 未运行：${error.message}`); }
+  if (response.status!==404 && !response.ok) throw Error(`DSH Along Source 未就绪（${response.status}）`);
+  return true;
+}
 function cleanGoal(value) {
   const domain=value?.domain;
   if (!['health','finance','custom'].includes(domain)) throw Error('目标类型无效');
@@ -109,6 +119,12 @@ const server=createServer({key:readFileSync(key),cert:readFileSync(cert)},async(
       return respond(res,200,{token});
     }
     if (!authorized(req)) return respond(res,401,{error:'请先配对这台 Mac'});
+    if (req.method==='POST' && path==='/connection/status') {
+      await body(req);
+      await superAgentReady();
+      console.log(`连接检查通过：iPhone → Along Host → DSH (${new Date().toISOString()})`);
+      return respond(res,200,{along:true,dsh:true});
+    }
     if (req.method==='POST' && path==='/super-agent/tasks') {
       const input=await body(req);
       return respond(res,200,await superAgentCall('/along-source/api/tasks',{value:input}));
