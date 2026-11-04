@@ -19,9 +19,9 @@
 	<key>CFBundleShortVersionString</key>
 	<string>1.0</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>2</string>
 	<key>NSHealthShareUsageDescription</key>
-	<string>仅在你选择后读取步数、健身、体重和睡眠，并在确认后向你的 Along 服务同步最小摘要。</string>
+	<string>仅在你选择后读取步数、健身、体重和睡眠，并在确认后将最小摘要导入本机 Along 页面。</string>
 	<key>NSHealthUpdateUsageDescription</key>
 	<string>Along 不向 Apple Health 写入数据。</string>
 	<key>UISupportedInterfaceOrientations</key>
