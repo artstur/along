@@ -320,18 +320,6 @@ struct HealthSyncSheet: View {
         NavigationStack {
             Form {
                 Section {
-                    Button {
-                        bridge.selectAll()
-                    } label: {
-                        HStack {
-                            Text("一键全部开启").fontWeight(.semibold)
-                            Spacer()
-                            if bridge.selection.count == HealthMetric.allCases.count {
-                                Image(systemName: "checkmark.circle.fill")
-                            }
-                        }
-                    }
-                    .disabled(bridge.busy || bridge.selection.count == HealthMetric.allCases.count)
                     ForEach(HealthMetric.allCases) { metric in
                         Toggle(isOn: Binding(
                             get: { bridge.selection.contains(metric) },
@@ -380,7 +368,15 @@ struct HealthSyncSheet: View {
             }
             .navigationTitle("连接 Apple Health")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .topBarLeading) { Button("取消") { bridge.cancel() }.disabled(bridge.busy) } }
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("取消") { bridge.cancel() }.disabled(bridge.busy)
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("全部连接") { bridge.selectAll() }
+                        .disabled(bridge.busy || bridge.selection.count == HealthMetric.allCases.count)
+                }
+            }
         }
     }
 }
