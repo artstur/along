@@ -311,7 +311,7 @@ struct HealthSyncSheet: View {
                             .font(.footnote).foregroundStyle(.secondary)
                     }
                     Section("导入 Along") {
-                        Text("确认后只把上述摘要交给这台 iPhone 上的 Along 页面，保存在 App 的本地数据中；不会发送给 Mac 服务。")
+                        Text("确认后把上述摘要导入这台 iPhone 上的 Along 页面。只有你另行配对 Mac Agent 后，目标问答或显著的健身时长变化才会把目标和健身分钟数汇总发给这台 Mac；不发送原始记录。")
                             .font(.footnote).foregroundStyle(.secondary)
                         Button("确认导入本机 Along") { bridge.confirmImport() }
                             .disabled(bridge.busy || !preview.hasReadableValue)

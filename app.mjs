@@ -31,7 +31,7 @@ function notice(message) {
 function saveHealth(next) {
   state = ensureHealthGoal(next);
   localStorage.setItem(KEY, JSON.stringify(state));
-  render();
+  if (screen !== 'agent') render();
 }
 function saveFinance(next) {
   finance = next;
@@ -236,14 +236,14 @@ window.addEventListener('along-health-update', async event => {
   const route=routeHealthChange(before,next.snapshot,goal.target);
   if (route.decision==='quiet') return;
   const ticket={id:crypto.randomUUID(),source:'healthkit',trigger:{from:before.workoutMinutes,to:next.snapshot.workoutMinutes},eval:route.decision,mandate:'仅提出任务，用户确认后才采用',reason:route.reason,status:'assigned'};
-  if (!agentConfig.token) { saveTicket({...ticket,status:'waiting',error:'Mac Agent 未连接；进度已更新，任务可稍后再规划。'});render();return; }
-  saveTicket(ticket);render();
+  if (!agentConfig.token) { saveTicket({...ticket,status:'waiting',error:'Mac Agent 未连接；进度已更新，任务可稍后再规划。'});if (screen==='home') render();return; }
+  saveTicket(ticket);if (screen==='home') render();
   try {
     const result=await agentCall(agentConfig,'/goal/event',{goal,before:{workoutMinutes:before.workoutMinutes,selectedTypes:['workout']},after:{workoutMinutes:next.snapshot.workoutMinutes,selectedTypes:['workout']},currentTask:goalCustom.health?.task||healthView(state).primary.title});
     if (result.decision==='replan') saveTicket({...ticket,status:'proposed',reason:result.reason,suggestion:result.suggestion});
     else saveTicket(null);
   } catch(error) { saveTicket({...ticket,status:'waiting',error:error.message}); }
-  render();
+  if (screen==='home') render();
 });
 sheet.addEventListener('click', event => {
   const action = event.target.closest('[data-action]')?.dataset.action;
