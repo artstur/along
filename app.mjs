@@ -254,3 +254,19 @@ sheet.addEventListener('click', event => {
   }
 });
 render();
+let lastNativeRefresh = 0;
+async function refreshFromNative() {
+  if (!window.AlongHealthBridge?.refresh || document.visibilityState === 'hidden' || Date.now() - lastNativeRefresh < 15_000) return;
+  lastNativeRefresh = Date.now();
+  try {
+    const snapshot = await window.AlongHealthBridge.refresh();
+    window.dispatchEvent(new CustomEvent('along-health-update', {detail:snapshot}));
+  } catch {
+    // No prior HealthKit selection is normal before the first connection.
+  }
+}
+void refreshFromNative();
+window.addEventListener('pageshow', () => void refreshFromNative());
+window.addEventListener('focus', () => void refreshFromNative());
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') void refreshFromNative(); });
+setInterval(() => { if (document.visibilityState === 'visible') void refreshFromNative(); }, 60_000);

@@ -71,6 +71,28 @@ final class AlongBridgeModel: ObservableObject {
         }
     }
 
+    func refreshSnapshot(id: String, webView: WKWebView) {
+        let selected = savedSelection
+        guard !selected.isEmpty else {
+            deliver(id: id, result: ["ok": false, "error": "请先连接 Apple Health"], to: webView)
+            return
+        }
+        Task {
+            do {
+                let summary = try await reader.read(selected, requestPermission: false)
+                deliver(id: id, result: ["ok": true, "snapshot": summary.browserSnapshot()], to: webView)
+            } catch {
+                deliver(id: id, result: ["ok": false, "error": error.localizedDescription], to: webView)
+            }
+        }
+    }
+
+    private func deliver(id: String, result: [String: Any], to view: WKWebView) {
+        guard let arguments = try? JSONSerialization.data(withJSONObject: [id, result]),
+              let json = String(data: arguments, encoding: .utf8) else { return }
+        view.evaluateJavaScript("window.__alongHealthBridgeFinish(...\(json))")
+    }
+
     func begin(id: String, webView: WKWebView) {
         guard requestID == nil else { return }
         requestID = id
@@ -128,6 +150,7 @@ struct AlongWebView: UIViewRepresentable {
     func makeUIView(context: Context) -> WKWebView {
         let controller = WKUserContentController()
         controller.add(context.coordinator, name: "alongHealth")
+        controller.add(context.coordinator, name: "alongHealthRefresh")
         controller.add(context.coordinator, name: "alongAgent")
         controller.addUserScript(WKUserScript(source: Self.bridgeScript, injectionTime: .atDocumentStart, forMainFrameOnly: true))
         let configuration = WKWebViewConfiguration()
@@ -154,6 +177,11 @@ struct AlongWebView: UIViewRepresentable {
           const id = crypto.randomUUID();
           pending.set(id, {resolve, reject});
           window.webkit.messageHandlers.alongHealth.postMessage({id, types});
+        }),
+        refresh: () => new Promise((resolve, reject) => {
+          const id = crypto.randomUUID();
+          pending.set(id, {resolve, reject});
+          window.webkit.messageHandlers.alongHealthRefresh.postMessage({id});
         })
       };
       const agentPending = new Map();
@@ -178,12 +206,14 @@ struct AlongWebView: UIViewRepresentable {
         init(bridge: AlongBridgeModel) { self.bridge = bridge }
 
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-            guard ["alongHealth", "alongAgent"].contains(message.name), message.frameInfo.isMainFrame,
+            guard ["alongHealth", "alongHealthRefresh", "alongAgent"].contains(message.name), message.frameInfo.isMainFrame,
                   message.frameInfo.securityOrigin.host == "personality-demo.pages.dev",
                   let body = message.body as? [String: Any], let id = body["id"] as? String,
                   let webView = message.webView else { return }
             if message.name == "alongHealth" {
                 Task { @MainActor in bridge.begin(id: id, webView: webView) }
+            } else if message.name == "alongHealthRefresh" {
+                Task { @MainActor in bridge.refreshSnapshot(id: id, webView: webView) }
             } else {
                 Task {
                     let result: [String: Any]
