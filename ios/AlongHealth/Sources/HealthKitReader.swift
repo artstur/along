@@ -3,8 +3,9 @@ import HealthKit
 
 final class HealthKitReader {
     private let store = HKHealthStore()
+    private var observers: [HKObserverQuery] = []
 
-    func read(_ selection: Set<HealthMetric>) async throws -> HealthSummary {
+    func read(_ selection: Set<HealthMetric>, requestPermission: Bool = true) async throws -> HealthSummary {
         guard HKHealthStore.isHealthDataAvailable() else {
             throw ReaderError.unavailable
         }
@@ -19,7 +20,9 @@ final class HealthKitReader {
             }
         })
         // This requests read access only for the boxes the person checked.
-        try await store.requestAuthorization(toShare: Set<HKSampleType>(), read: types)
+        if requestPermission {
+            try await store.requestAuthorization(toShare: Set<HKSampleType>(), read: types)
+        }
 
         let now = Date()
         var result = HealthSummary(selected: ordered, capturedAt: now)
@@ -32,6 +35,30 @@ final class HealthKitReader {
         if selection.contains(.weight) { result.weightKg = try await latestWeight() }
         if selection.contains(.sleep) { result.sleepMinutes = try await lastNightSleep(now: now) }
         return result
+    }
+
+    func observe(_ selection: Set<HealthMetric>, onChange: @escaping () -> Void) {
+        stopObserving()
+        for metric in selection {
+            let type: HKSampleType
+            switch metric {
+            case .steps: type = HKObjectType.quantityType(forIdentifier: .stepCount)!
+            case .workout: type = .workoutType()
+            case .weight: type = HKObjectType.quantityType(forIdentifier: .bodyMass)!
+            case .sleep: type = HKObjectType.categoryType(forIdentifier: .sleepAnalysis)!
+            }
+            let query = HKObserverQuery(sampleType: type, predicate: nil) { _, completion, error in
+                if error == nil { onChange() }
+                completion()
+            }
+            observers.append(query)
+            store.execute(query)
+        }
+    }
+
+    func stopObserving() {
+        observers.forEach { store.stop($0) }
+        observers.removeAll()
     }
 
     private func todaySteps(now: Date) async throws -> Int? {

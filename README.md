@@ -8,7 +8,8 @@
 
 - 健康示例是「本周累计运动 120 分钟」。在 [iPhone 原生薄壳](ios/README.md)连接 Apple Health 后，按用户选择的摘要计算进度和下一步；普通网页可主动选择演示健康数据。
 - 理财示例是「三个月存下 ¥10,000 应急金」。点击「体验连接」后才出现 ¥3,200 的演示余额；模拟新增 ¥800 后，进度与任务文字随之更新。它没有接入蚂蚁财富或任何真实理财账户，不读取账户，也不转账或交易。
-- 首页只呈现目标、任务和连接状态。点击目标或任务后的 Agent 运行页留待后续迭代。
+- 点击「与 Agent 编辑目标」进入真实 DSH 问答。Agent 可提出目标和下一步；用户点「采用」后才更新首页。iPhone 需要和运行 Agent Host 的 Mac 在同一 Wi-Fi。
+- HealthKit 记录在 App 回到前台、或 App 在前台收到 HealthKit 更新通知时重新读取。小变化安静处理；显著的健身时长变化形成待确认的任务提案。当前没有后台实时同步，也不自动完成运动。
 - 原有「目标变化实验」保留在健康目标页底部：固定 75＋35 分钟场景展示 Along 计算、路由判断与 DSH 建议；轻微或无关变化保持安静。
 - 页面状态保存在当前浏览器的 `localStorage`。iPhone 确认导入后，所选健康摘要保存在 App 内 WKWebView 的本地页面数据中；旧健康目标数据也会保留，不依赖 Mac 同步服务。
 
@@ -26,10 +27,18 @@ npm run build
 
 后续更新：提交并推送 GitHub 后，运行 `npm run build`，再用 `npm exec --yes --package=wrangler@4 -- wrangler pages deploy dist --project-name personality-demo --branch main` 更新静态页面。iPhone 原生代码变更需在 Xcode 重新构建并安装；这两个发布动作都不需要临时公网通道。
 
-本地服务只监听 `127.0.0.1`，`POST /api/health-event` 只接收模拟实验的最少字段，并会复核路由，再决定是否启动 DSH SDK。Cloudflare Pages 是静态站，无法常驻 DSH 进程；公网版不会向事件接口发送页面状态，只在固定 75＋35 场景回放一次真实 DSH 输出，并在界面标明「DSH 建议回放」。它不会把其他事件假装成实时 Agent 建议。
+`npm run dev` 的本地服务只监听 `127.0.0.1`，`POST /api/health-event` 仍用于原有模拟实验。Cloudflare Pages 是静态站，无法常驻 DSH 进程；原有目标变化实验在固定 75＋35 场景回放一次 DSH 输出，并标明「DSH 建议回放」。
+
+## 同一 Wi-Fi 的真实 DSH Agent
+
+在 Mac 本项目目录运行 `npm run agent-host`。终端显示局域网 HTTPS 地址、SHA-256 证书指纹和 15 分钟有效的一次性配对码。iPhone App 的目标编辑页填入这三项，随后即可问答。Agent Host 默认只绑定 Mac 的 Wi-Fi 地址，退出终端即停止服务；没有公网通道。证书由 Mac 本地生成，iPhone 原生网络层校验指纹后才传输，配对后请求使用随机令牌。
+
+健康目标问答只发送当前目标与已选健身时长的汇总值；不会发送原始 HealthKit 记录。理财目标使用明确标注的模拟余额。DSH 回复先作为提案，用户确认才改变目标或任务。健康变化的流程是 HealthKit 来源 → 有意义变化筛选 → 待处理任务 → DSH 生成提案 → 用户确认；这是借鉴公开 Super-Agent 原型的局部实现，尚未接入官方 Super-Agent Router、Worker 或长期运行服务。
+
+Mac 关闭、网络断开或配对失效时，首页的确定性进度仍可更新，Agent 问答和任务提案会显示不可用。再次启动 Host 后，用新配对码重新配对。
 
 ## iPhone 原生薄壳
 
 原生项目在 [ios/AlongHealth.xcodeproj](ios/AlongHealth.xcodeproj)，运行步骤与数据口径见 [ios/README.md](ios/README.md)。当前导入流程不需要 `cloudflared`、本机同步服务或配对码。旧的 `sync-server.mjs` 留作独立实验代码，不参与 iPhone App 的健康数据流程。
 
-这版是手动导入：每次由用户选择数据、预览并确认。它不会后台读取健康数据，也不会自动执行健身活动。真实健康数据导入后，页面的目标计算会更新；“目标变化实验”仍是独立的模拟事件与 DSH 对照实验。
+首次仍需用户逐项选择、预览并确认。之后 App 在前台观察已选择的类型，回到前台也会刷新摘要。HealthKit 前台通知只表明数据发生变化；Along 会重新查询，并不会保证秒级同步。后台交付尚未启用。
