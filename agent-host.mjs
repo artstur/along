@@ -29,6 +29,7 @@ try {
 let busy = false;
 const port = Number(process.env.ALONG_AGENT_PORT) || 4176;
 const lanHost = process.env.ALONG_AGENT_HOST || networkInterfaces().en0?.find(item=>item.family==='IPv4'&&!item.internal)?.address || '127.0.0.1';
+const superAgentURL = (process.env.ALONG_SUPERAGENT_URL || 'http://127.0.0.1:3082').replace(/\/$/,'');
 
 function respond(res,status,data) { res.writeHead(status,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}).end(JSON.stringify(data)); }
 async function body(req) {
@@ -39,6 +40,17 @@ async function body(req) {
 function authorized(req) {
   const token=req.headers.authorization?.match(/^Bearer ([a-f0-9]{64})$/)?.[1];
   return !!(token && tokenHash && timingSafeEqual(createHash('sha256').update(token).digest(),tokenHash));
+}
+async function superAgentCall(path,{method='POST',value}={}) {
+  let response;
+  try {
+    response=await fetch(`${superAgentURL}${path}`,{method,headers:{'x-along-bridge':'1',...(value===undefined?{}:{'content-type':'application/json'})},
+      ...(value===undefined?{}:{body:JSON.stringify(value)}),signal:AbortSignal.timeout(15_000)});
+  } catch(error) { throw Error(`DSH Super Agent 未运行：${error.message}`); }
+  let result;
+  try { result=await response.json(); } catch { throw Error(`DSH Super Agent 返回了无效响应（${response.status}）`); }
+  if (!response.ok) throw Error(result?.error || `DSH Super Agent 请求失败（${response.status}）`);
+  return result;
 }
 function cleanGoal(value) {
   const domain=value?.domain;
@@ -85,6 +97,15 @@ const server=createServer({key:readFileSync(key),cert:readFileSync(cert)},async(
       return respond(res,200,{token});
     }
     if (!authorized(req)) return respond(res,401,{error:'请先配对这台 Mac'});
+    if (req.method==='POST' && path==='/super-agent/tasks') {
+      const input=await body(req);
+      return respond(res,200,await superAgentCall('/along-source/api/tasks',{value:input}));
+    }
+    if (req.method==='POST' && path==='/super-agent/tasks/status') {
+      const input=await body(req),requestId=String(input?.requestId??'');
+      if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$/.test(requestId)) throw Error('Super Agent requestId 无效');
+      return respond(res,200,await superAgentCall(`/along-source/api/tasks/${encodeURIComponent(requestId)}`,{method:'GET'}));
+    }
     if (req.method==='POST' && path==='/goal/chat') {
       const input=await body(req);
       const goal=cleanGoal(input.goal), snapshot=cleanSnapshot(input.snapshot,goal.domain);

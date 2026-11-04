@@ -1,152 +1,49 @@
-export const SUPER_AGENT_RUNS_KEY = 'along.super-agent-runs.v1';
+export const SUPER_AGENT_RUNS_KEY = 'along.super-agent-runs.v2';
 
 const TASK_STATES = new Set(['temporary', 'planned', 'deferred']);
-const DOMAINS = new Set(['health', 'finance']);
-
-const STAGES = [
-  {
-    progress:18,
-    label:'已接收',
-    agents:[
-      ['working',32,'正在确认任务边界'],
-      ['queued',0,'等待获取最小必要情境'],
-      ['queued',0,'等待情境结果'],
-      ['queued',0,'等待审查方案'],
-    ],
-  },
-  {
-    progress:42,
-    label:'理解情境',
-    agents:[
-      ['done',100,'已建立 Ticket 与任务边界'],
-      ['working',62,'正在整理目标、进度与约束'],
-      ['queued',0,'等待情境结果'],
-      ['queued',0,'等待审查方案'],
-    ],
-  },
-  {
-    progress:68,
-    label:'并行规划',
-    agents:[
-      ['done',100,'已完成拆解与分工'],
-      ['done',100,'已交付可信情境摘要'],
-      ['working',58,'正在生成具体行动步骤'],
-      ['working',34,'正在检查数据与操作边界'],
-    ],
-  },
-  {
-    progress:86,
-    label:'检查交付',
-    agents:[
-      ['done',100,'等待汇总交付'],
-      ['done',100,'情境摘要已锁定'],
-      ['done',100,'行动方案已交付'],
-      ['working',78,'正在完成最后边界审查'],
-    ],
-  },
-  {
-    progress:100,
-    label:'已就绪',
-    agents:[
-      ['done',100,'已汇总为可执行交付'],
-      ['done',100,'情境摘要已交付'],
-      ['done',100,'行动方案已交付'],
-      ['done',100,'边界审查已通过'],
-    ],
-  },
-];
+const DOMAINS = new Set(['health', 'finance', 'custom']);
 
 function cleanText(value, fallback, max=180) {
   const text=String(value ?? fallback).trim();
   return (text || fallback).slice(0,max);
 }
-
 function stableId(value) {
   let hash=2166136261;
-  for (const char of String(value)) {
-    hash^=char.codePointAt(0);
-    hash=Math.imul(hash,16777619);
-  }
+  for (const char of String(value)) { hash^=char.codePointAt(0);hash=Math.imul(hash,16777619); }
   return (hash>>>0).toString(36);
 }
-
-function roleDefinitions(domain, task) {
-  const contextSource=domain==='health' ? 'Apple Health 的已选摘要' : '用户确认的目标与演示结余';
-  const boundary=domain==='health' ? '不作医疗判断，不读取未授权的健康数据' : '不访问真实账户，不发起交易或转账';
-  return [
-    {key:'orchestrator',name:'Along',mark:'A',role:'协调',objective:`将「${task.title}」拆成可验收的分工，负责调度与汇总。`,output:'Ticket、Mandate 与执行顺序'},
-    {key:'context',name:'Along',mark:'A',role:'情境',objective:`只从${contextSource}提取完成任务所需的信息。`,output:'目标、进度、时间与约束摘要'},
-    {key:'planner',name:'Along',mark:'A',role:'计划',objective:`围绕「${task.detail}」形成当下可执行的下一步。`,output:'行动步骤、时机与完成标准'},
-    {key:'guardian',name:'Along',mark:'A',role:'守护',objective:`检查方案是否越过用户授权；${boundary}。`,output:'风险边界与待用户确认项'},
-  ];
-}
-
-function eventLog(step, createdAt) {
-  const entries=[
-    ['trigger','Along 接收到动态任务触发'],
-    ['eval','Eval 根据目标与任务状态接受请求'],
-    ['ticket','Along 创建 Ticket 并设定 Mandate'],
-    ['assign','Along 已完成情境、计划与守护检查'],
-    ['deliver','Along 已汇总产出，等待用户行动'],
-  ];
-  return entries.slice(0,Math.min(entries.length,step+2)).map((entry,index)=>({
-    id:entry[0],
-    text:entry[1],
-    at:createdAt+index*60_000,
-  }));
-}
-
-export function createSuperAgentRun({task, domain='health', goal=null, createdAt=Date.now()}) {
-  if (!DOMAINS.has(domain)) throw Error('任务领域无效');
+function cleanTask(task) {
   if (!task || typeof task!=='object') throw Error('动态任务无效');
-  const cleanTask={
-    id:cleanText(task.id,'task',64).replace(/[^a-z0-9_-]/gi,'-'),
-    title:cleanText(task.title,'未命名任务',100),
-    detail:cleanText(task.detail,'等待补充任务说明',300),
-    when:cleanText(task.when,'现在',80),
-    state:TASK_STATES.has(task.state)?task.state:'temporary',
-  };
-  const initialStep=cleanTask.state==='deferred'?0:cleanTask.state==='temporary'?1:2;
-  const id=`ticket-${domain}-${stableId(`${cleanTask.id}:${cleanTask.title}`)}`;
-  const run={
-    version:1,
-    id,
-    domain,
-    task:cleanTask,
-    goal:goal ? {title:cleanText(goal.title,'当前目标',100),target:goal.target ?? null} : null,
-    source:{kind:'along.dynamic-task',label:'Along 动态任务'},
-    trigger:{kind:'task.opened',label:`${cleanTask.when} · 任务被打开`},
-    eval:{decision:cleanTask.state==='deferred'?'observe':'accept',reason:cleanTask.state==='deferred'?'尚未到执行时机，先建立可观察 Ticket。':'任务与当前目标直接相关。'},
-    mandate:`只为「${cleanTask.title}」整理下一步；不扩大目标，需要外部操作时等待用户确认。`,
-    step:initialStep,
-    createdAt,
-    updatedAt:createdAt,
-  };
-  return materializeSuperAgentRun(run);
-}
-
-export function materializeSuperAgentRun(value) {
-  if (!value || value.version!==1 || !DOMAINS.has(value.domain) || !value.task) throw Error('Along 运行记录无效');
-  const step=Math.max(0,Math.min(STAGES.length-1,Number.isInteger(value.step)?value.step:0));
-  const stage=STAGES[step];
-  const roles=roleDefinitions(value.domain,value.task);
   return {
-    ...value,
-    step,
-    status:stage.progress===100?'done':'working',
-    statusLabel:stage.label,
-    progress:stage.progress,
-    agents:roles.map((role,index)=>({...role,status:stage.agents[index][0],progress:stage.agents[index][1],work:stage.agents[index][2]})),
-    events:eventLog(step,value.createdAt),
+    id:cleanText(task.id,'task',64).replace(/[^a-z0-9_-]/gi,'-'),
+    title:cleanText(task.title,'未命名任务',120),detail:cleanText(task.detail,'等待补充任务说明',1200),
+    when:cleanText(task.when,'现在',120),state:TASK_STATES.has(task.state)?task.state:'temporary',
   };
 }
 
-export function advanceSuperAgentRun(value, updatedAt=Date.now()) {
-  const run=materializeSuperAgentRun(value);
-  return materializeSuperAgentRun({...run,step:Math.min(STAGES.length-1,run.step+1),updatedAt});
+export function createSuperAgentRequest({task,domain='health',goal=null,context={}}) {
+  if (!DOMAINS.has(domain)) throw Error('任务领域无效');
+  const safeTask=cleanTask(task);
+  const requestId=`along-${domain}-${stableId(`${safeTask.id}:${safeTask.title}:${safeTask.detail}`)}`;
+  return {requestId,task:safeTask,goal:goal?{domain,title:cleanText(goal.title,'当前目标',120),target:Number.isFinite(goal.target)?goal.target:null}:null,context};
+}
+
+export function createPendingSuperAgentRun(request, createdAt=Date.now()) {
+  return {
+    version:2,actual:false,runtime:'dsh-superagent',requestId:request.requestId,task:request.task,
+    source:{kind:'along',label:'Along 动态任务'},trigger:{kind:'dynamic-task',label:'正在提交给 DSH'},
+    eval:null,ticket:null,mandate:null,assignments:[],events:[],status:'working',statusLabel:'连接 DSH Super Agent',progress:2,
+    createdAt,updatedAt:createdAt,
+  };
+}
+
+export function createFailedSuperAgentRun(request, error, updatedAt=Date.now()) {
+  return {...createPendingSuperAgentRun(request,updatedAt),status:'blocked',statusLabel:'DSH 暂不可用',error:cleanText(error,'DSH Super Agent 请求失败',500),updatedAt};
 }
 
 export function safeSuperAgentRun(value) {
-  try { return materializeSuperAgentRun(value); }
-  catch { return null; }
+  if (!value || value.runtime!=='dsh-superagent' || typeof value.requestId!=='string') return null;
+  if (value.actual===true && (!value.source || !value.trigger || !Array.isArray(value.assignments) || !Array.isArray(value.events))) return null;
+  if (value.version===2 || value.actual===true) return value;
+  return null;
 }

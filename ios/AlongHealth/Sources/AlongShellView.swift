@@ -384,7 +384,7 @@ struct AlongWebView: UIViewRepresentable {
                   let fingerprint = input["fingerprint"] as? String,
                   fingerprint.count == 64, fingerprint.allSatisfy(\.isHexDigit),
                   let path = input["path"] as? String,
-                  ["/pair", "/goal/chat", "/goal/event"].contains(path),
+                  ["/pair", "/goal/chat", "/goal/event", "/super-agent/tasks", "/super-agent/tasks/status"].contains(path),
                   let body = input["body"] as? [String: Any],
                   let url = URL(string: base + path) else { throw AgentBridgeError.invalidConfiguration }
             var request = URLRequest(url: url)
