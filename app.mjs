@@ -326,8 +326,9 @@ app.addEventListener('submit', async event => {
   if (!['pair-form','agent-form'].includes(event.target.id)) return;
   event.preventDefault();
   if (agentBusy) return;
-  agentBusy=true;
   const form=new FormData(event.target);
+  agentBusy=true;
+  render();
   try {
     if (event.target.id==='pair-form') {
       const config={baseURL:String(form.get('baseURL')).trim().replace(/\/$/,''),fingerprint:String(form.get('fingerprint')).trim().replace(/[^a-fA-F0-9]/g,'').toUpperCase()};
