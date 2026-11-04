@@ -3,7 +3,7 @@ import {randomBytes, randomInt, createHash, timingSafeEqual} from 'node:crypto';
 import {execFileSync} from 'node:child_process';
 import {homedir, networkInterfaces} from 'node:os';
 import {join} from 'node:path';
-import {mkdirSync, readFileSync, existsSync, chmodSync} from 'node:fs';
+import {mkdirSync, readFileSync, writeFileSync, existsSync, chmodSync} from 'node:fs';
 import {DeepSeekHarness} from '@deepseek-ai/dsh-sdk-client';
 import {routeHealthChange, requestedTargetFromMessage, validateGoalReply, validateTaskReply} from './goal-agent-core.mjs';
 
@@ -19,7 +19,12 @@ const fingerprint = createHash('sha256').update(certDER).digest('hex').toUpperCa
 const code = String(randomInt(10000000, 99999999));
 const codeExpiry = Date.now() + 15*60_000;
 let pairFailures = 0;
+const pairingPath=join(dir,'pairing.json');
 let tokenHash = null;
+try {
+  const saved=JSON.parse(readFileSync(pairingPath,'utf8'));
+  if (typeof saved.hash==='string' && /^[a-f0-9]{64}$/.test(saved.hash)) tokenHash=Buffer.from(saved.hash,'hex');
+} catch (error) { if (error.code!=='ENOENT') throw error; }
 let busy = false;
 const port = Number(process.env.ALONG_AGENT_PORT) || 4176;
 const lanHost = process.env.ALONG_AGENT_HOST || networkInterfaces().en0?.find(item=>item.family==='IPv4'&&!item.internal)?.address || '127.0.0.1';
@@ -70,6 +75,7 @@ const server=createServer({key:readFileSync(key),cert:readFileSync(cert)},async(
       if (Date.now()>codeExpiry || pairFailures>=5 || input?.code!==code) {pairFailures++; return respond(res,403,{error:'配对码无效或已过期'});}
       const token=randomBytes(32).toString('hex');
       tokenHash=createHash('sha256').update(token).digest();
+      writeFileSync(pairingPath,JSON.stringify({hash:tokenHash.toString('hex')}),{mode:0o600});
       pairFailures=5;
       return respond(res,200,{token});
     }
