@@ -24,11 +24,8 @@ final class AlongBridgeModel: ObservableObject {
     @Published var preview: HealthSummary?
     @Published var busy = false
     @Published var errorMessage: String?
-    @Published var serviceURL = UserDefaults.standard.string(forKey: "along.sync.url") ?? ""
-    @Published var pairCode = ""
 
     private let reader = HealthKitReader()
-    private let syncClient = AlongSyncClient()
     private var requestID: String?
     private weak var webView: WKWebView?
 
@@ -39,7 +36,6 @@ final class AlongBridgeModel: ObservableObject {
         selection = []
         preview = nil
         errorMessage = nil
-        pairCode = ""
         showSheet = true
     }
 
@@ -59,32 +55,13 @@ final class AlongBridgeModel: ObservableObject {
         }
     }
 
-    func confirmSync() {
-        guard !busy, let preview else { return }
-        busy = true
-        errorMessage = nil
-        Task {
-            defer { busy = false }
-            do {
-                guard preview.hasReadableValue else { throw SyncError.noReadableData }
-                let endpoint = serviceURL.trimmingCharacters(in: .whitespacesAndNewlines)
-                let token: String
-                if !pairCode.isEmpty {
-                    token = try await syncClient.pair(serviceURL: endpoint, code: pairCode)
-                    SyncTokenStore.save(token, for: endpoint)
-                    pairCode = ""
-                } else if let existing = SyncTokenStore.read(for: endpoint) {
-                    token = existing
-                } else { throw SyncError.missingPairCode }
-                try await syncClient.sync(preview, serviceURL: endpoint, token: token)
-                UserDefaults.standard.set(endpoint, forKey: "along.sync.url")
-                finish(snapshot: preview.browserSnapshot())
-            } catch { errorMessage = error.localizedDescription }
-        }
+    func confirmImport() {
+        guard !busy, let preview, preview.hasReadableValue else { return }
+        finish(snapshot: preview.browserSnapshot())
     }
 
-    func cancel() { finish(error: "已取消健康数据同步") }
-    func dismissIfPending() { if requestID != nil { finish(error: "已取消健康数据同步") } }
+    func cancel() { finish(error: "已取消健康数据导入") }
+    func dismissIfPending() { if requestID != nil { finish(error: "已取消健康数据导入") } }
 
     private func finish(snapshot: [String: Any]? = nil, error: String? = nil) {
         guard let id = requestID else { return }
@@ -125,7 +102,7 @@ struct AlongWebView: UIViewRepresentable {
         const item = pending.get(id); if (!item) return;
         pending.delete(id);
         if (result.ok) item.resolve(result.snapshot);
-        else item.reject(new Error(result.error || '同步已取消'));
+        else item.reject(new Error(result.error || '导入已取消'));
       };
       window.AlongHealthBridge = {
         connect: ({types} = {}) => new Promise((resolve, reject) => {
@@ -184,22 +161,18 @@ struct HealthSyncSheet: View {
                         .disabled(bridge.selection.isEmpty || bridge.busy)
                 }
                 if let preview = bridge.preview {
-                    Section("发送前预览") {
+                    Section("导入前预览") {
                         ForEach(preview.selected) { metric in
                             LabeledContent(metric.title, value: preview.displayValue(for: metric))
                         }
-                        Text("仅发送这些汇总值，不发送原始记录、精确时间点或设备信息。无可读取记录可能意味着尚无记录，也可能是没有读取权限。")
+                        Text("仅将这些汇总值导入本机页面，不导入原始记录、精确时间点或设备信息。无可读取记录可能意味着尚无记录，也可能是没有读取权限。")
                             .font(.footnote).foregroundStyle(.secondary)
                     }
-                    Section("Along 服务") {
-                        TextField("https://…trycloudflare.com", text: $bridge.serviceURL)
-                            .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
-                        SecureField("一次性配对码（首次连接时输入）", text: $bridge.pairCode)
-                            .keyboardType(.numberPad)
-                        Text("确认后才会向上方地址发送所选摘要；没有后台自动同步。")
+                    Section("导入 Along") {
+                        Text("确认后只把上述摘要交给这台 iPhone 上的 Along 页面，保存在 App 的本地数据中；不会发送给 Mac 服务。")
                             .font(.footnote).foregroundStyle(.secondary)
-                        Button(bridge.busy ? "正在同步…" : "确认并同步到 Along") { bridge.confirmSync() }
-                            .disabled(bridge.busy || !preview.hasReadableValue || bridge.serviceURL.isEmpty)
+                        Button("确认导入本机 Along") { bridge.confirmImport() }
+                            .disabled(bridge.busy || !preview.hasReadableValue)
                     }
                 }
                 if let error = bridge.errorMessage {

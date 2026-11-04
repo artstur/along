@@ -3,6 +3,24 @@ import {initialState, setSnapshot} from './health.mjs';
 export const EXPERIMENT = 'weekly-workout-120-v1';
 export const ORIGINAL_TASK = '本周安排一次 45 分钟健身';
 
+// The previous state may contain the user's real HealthKit snapshot.
+// Send only the fixed simulation fields needed by the local Agent endpoint.
+export function agentRequestPayload(before, event) {
+  return {
+    before: {
+      source: before.source,
+      snapshot: {
+        workoutMinutes: before.snapshot.workoutMinutes,
+        workoutCount: before.snapshot.workoutCount,
+        steps: before.snapshot.steps,
+      },
+      goals: [{id: EXPERIMENT, type: 'workout', target: 120}],
+      loop: {experiment: EXPERIMENT, currentTask: before.loop.currentTask},
+    },
+    event: {type: event.type, amount: event.amount},
+  };
+}
+
 export function startExperiment(previous = initialState()) {
   const previousState = previous.loop?.experiment === EXPERIMENT ? previous.loop.previousState ?? initialState() : previous;
   const state = setSnapshot(initialState(), {

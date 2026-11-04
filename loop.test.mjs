@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {startExperiment, routeHealthEvent, acceptAgentSuggestion, ORIGINAL_TASK} from './loop.mjs';
+import {startExperiment, routeHealthEvent, acceptAgentSuggestion, agentRequestPayload, ORIGINAL_TASK} from './loop.mjs';
 import {initialState, addGoal} from './health.mjs';
 
 test('35-minute workout reroutes 75 of 120 to exactly 10 remaining',()=>{
@@ -37,4 +37,15 @@ test('experiment keeps a restorable copy of the previous goals',()=>{
   assert.equal(experiment.goals.length,1);
   assert.equal(experiment.loop.previousState.goals.length,1);
   assert.deepEqual(startExperiment(experiment).loop.previousState,previous);
+});
+
+test('local Agent request omits the restored HealthKit state',()=>{
+  const previous={...initialState(),source:'healthkit',snapshot:{steps:12345,weightKg:61.2,workoutMinutes:99,sleepMinutes:480}};
+  const experiment=startExperiment(previous);
+  const payload=agentRequestPayload(experiment,{type:'workout',amount:35});
+  assert.equal(payload.before.snapshot.workoutMinutes,75);
+  assert.equal(payload.before.loop.currentTask,ORIGINAL_TASK);
+  assert.equal(payload.before.loop.previousState,undefined);
+  assert.doesNotMatch(JSON.stringify(payload),/12345|61\.2|480|healthkit/);
+  assert.equal(routeHealthEvent(payload.before,payload.event).remainingAfter,10);
 });
