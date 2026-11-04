@@ -477,6 +477,11 @@ struct AlongWebView: UIViewRepresentable {
         func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
                      decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
             guard let url = navigationAction.request.url else { decisionHandler(.cancel); return }
+            if url.scheme == "https", ["duolingo.com", "www.duolingo.com"].contains(url.host ?? "") {
+                UIApplication.shared.open(url)
+                decisionHandler(.cancel)
+                return
+            }
             let trustedRemote = url.scheme == "https" && url.host == "artstur.github.io" &&
                                 url.path.hasPrefix("/Personality-Demo/")
             let trustedBundled = url.scheme == "along" && url.host == "app"

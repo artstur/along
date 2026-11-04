@@ -64,3 +64,12 @@ test('multiple custom goals keep independent keys and labels',()=>{
     {key:'custom:second-goal',title:'学会吉他'},
   ]);
 });
+
+test('Japanese learning plans carry a Duolingo connection recommendation',()=>{
+  const japanese={...structuredClone(valid),title:'60 天日语阅读入门',summary:'从五十音到 N5 短文',modules:valid.modules.filter(item=>item.kind!=='metric')};
+  const migrated=validateAdaptiveLayout(japanese,'custom');
+  assert.equal(migrated.connections[0].id,'duolingo');
+  assert.equal(migrated.connections[0].status,'recommended');
+  const planned=validateAdaptiveLayout({...japanese,connections:[{id:'duolingo',name:'Duolingo',reason:'每日练习',capability:'课程入口',status:'recommended'}]},'custom');
+  assert.equal(planned.connections[0].name,'Duolingo');
+});

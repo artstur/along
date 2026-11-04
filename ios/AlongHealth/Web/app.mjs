@@ -77,7 +77,7 @@ function customView(goalKey=activeGoal) {
     primary:{title:'从一句话开始',detail:'可以包含期限、偏好、限制、已知条件和你不希望发生的事情。',status:'待定义'},secondary:[],connection:null,
   };
 }
-const taskStateLabel={temporary:'临时',planned:'已规划',deferred:'到时生成'};
+const taskStateLabel={temporary:'进行中',planned:'已规划',deferred:'到时生成'};
 const agentStateLabel={queued:'等待',working:'工作中',done:'已完成',blocked:'需处理'};
 function currentTaskRecords() {
   const layout=goalLayouts[activeGoal];
@@ -220,6 +220,10 @@ function adaptiveTaskSection(layout) {
   const visible=layout.tasks.slice(0,2),hidden=Math.max(0,layout.tasks.length-visible.length);
   return `<section class="task-section adaptive-tasks" aria-label="动态任务"><div class="section-heading"><h2>动态任务</h2><span>Along 根据目标与情境生成</span></div><div class="adaptive-task-card"><div class="generated-status">${layout.tasks.length} 项已生成 · 点击任务查看协作</div>${visible.map(task=>`<button class="generated-task generated-task-button" data-action="open-task" data-task-id="${esc(task.id)}"><div class="task-meta"><span>${esc(task.when)}</span><span class="state-pill">${esc(taskStateLabel[task.state])}</span></div><strong>${esc(task.title)}</strong><p>${esc(task.detail)}</p><span class="task-open-hint">查看任务协作</span></button>`).join('')}${hidden?`<p class="hidden-count">还有 ${hidden} 项未来触发任务，将在相关时间出现。</p>`:''}${layout.questions.length?`<div class="missing-strip">待确认 ${layout.questions.length} 项：${esc(layout.questions[0])}</div>`:''}<div class="card-actions"><button class="agent-action" data-action="edit-goal">补充信息</button></div></div></section>`;
 }
+function adaptiveConnectionSection(layout) {
+  if (!layout.connections?.length) return '';
+  return `<section class="connection-section" aria-label="Along 推荐的连接"><div class="section-heading"><h2>连接</h2><span>在规划中发现的可用能力</span></div>${layout.connections.map(connection=>`<div class="connection-card"><div class="connection-symbol" aria-hidden="true">${connection.id==='duolingo'?'D':'·'}</div><div class="connection-copy"><div class="connection-name"><strong>${esc(connection.name)}</strong><span class="source-tag">${connection.status==='recommended'?'推荐连接':'待确认'}</span></div><p>${esc(connection.reason)}</p></div><button class="agent-action connection-agent-action" data-action="connection-detail" data-connection-id="${esc(connection.id)}">查看</button></div>`).join('')}</section>`;
+}
 function home() {
   const model = activeGoal === 'finance' ? financeView(finance, goalCustom.finance) : isCustomGoalKey(activeGoal) ? customView(activeGoal) : healthView(state, goalCustom.health);
   const layout=goalLayouts[activeGoal];
@@ -251,12 +255,14 @@ function home() {
         ${state.source === 'demo' && activeGoal === 'health' ? '<button class="minor-action" data-action="clear-health-demo">退出健康演示数据</button>' : ''}
         ${activeGoal === 'finance' && finance.connected ? '<p class="connection-footnote">点“模拟 +¥800”只会更新这份本机演示数据，不会访问账户或发起交易。</p>' : ''}
       </section>`:'';
+  const recommendedConnectionContent=layout?adaptiveConnectionSection(layout):'';
   return `<div class="app-shell"><header class="topbar"><div class="topbar-inner">${brand()}</div></header>
     <main class="content ${layout?'adaptive-space':''}">
-      <div class="goal-switch"><label for="goal-select">当前目标</label><div class="goal-switch-actions"><div class="select-wrap"><select id="goal-select" aria-label="切换目标"><option value="health" ${activeGoal === 'health' ? 'selected' : ''}>健康 · ${goalLayouts.health?'个性化计划':'每周运动'}</option><option value="finance" ${activeGoal === 'finance' ? 'selected' : ''}>理财 · ${goalLayouts.finance?'个性化计划':'应急储备'}</option>${customOptions}<option value="new-custom">＋ 新建目标</option></select><span aria-hidden="true">⌄</span></div><button class="goal-add-button" data-action="new-goal">新建</button></div></div>
+      <div class="goal-switch"><label for="goal-select">当前目标</label><div class="select-wrap"><select id="goal-select" aria-label="切换目标"><option value="health" ${activeGoal === 'health' ? 'selected' : ''}>健康 · ${goalLayouts.health?'个性化计划':'每周运动'}</option><option value="finance" ${activeGoal === 'finance' ? 'selected' : ''}>理财 · ${goalLayouts.finance?'个性化计划':'应急储备'}</option>${customOptions}<option value="new-custom">＋ 新建目标</option></select><span aria-hidden="true">⌄</span></div></div>
       ${goalContent}
       ${taskContent}
       ${connectionContent}
+      ${recommendedConnectionContent}
     </main><footer>Along · 一起，慢慢向前</footer></div>`;
 }
 
@@ -475,7 +481,12 @@ app.addEventListener('click', event => {
   const actionTarget=event.target.closest('[data-action]');
   const action = actionTarget?.dataset.action;
   if (!action) return;
-  if (action === 'new-goal') { beginNewGoal(); return; }
+  if (action === 'connection-detail') {
+    const connection=goalLayouts[activeGoal]?.connections?.find(item=>item.id===actionTarget.dataset.connectionId);
+    if (!connection) return;
+    show(`<div class="sheet-head"><h2>${esc(connection.name)}</h2><button class="icon-button" data-action="close" aria-label="关闭">×</button></div><p class="sheet-copy">${esc(connection.reason)}</p><div class="permission-list"><span>${esc(connection.capability)}</span></div>${connection.id==='duolingo'?'<button class="button sheet-main-button" data-action="open-duolingo">打开 Duolingo</button>':''}<p class="sheet-footnote">当前版本不会冒充账户已连接；学习进度只会在获得 Duolingo 授权后同步。</p>`);
+    return;
+  }
   if (action === 'open-task') {
     selectedTaskId=actionTarget.dataset.taskId || null;
     if (!selectedTaskId) return;
@@ -597,6 +608,7 @@ window.addEventListener('along-health-update', async event => {
 sheet.addEventListener('click', event => {
   const action = event.target.closest('[data-action]')?.dataset.action;
   if (action === 'close') sheet.close();
+  if (action === 'open-duolingo') window.location.href='https://www.duolingo.com/learn';
   if (action === 'health-demo') {
     saveHealth(setSnapshot(state, {steps:6842, weightKg:64.2, workoutMinutes:75, workoutCount:2, sleepMinutes:437}, 'demo'));
     sheet.close();

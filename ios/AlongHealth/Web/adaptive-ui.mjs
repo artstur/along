@@ -77,6 +77,24 @@ function cleanTask(value) {
   };
 }
 
+function cleanConnection(value) {
+  const connection=object(value, '推荐连接');
+  return {
+    id:id(connection.id, '连接 ID'),
+    name:text(connection.name, '连接名称', 60),
+    reason:text(connection.reason, '推荐原因', 240),
+    capability:text(connection.capability, '连接能力', 160),
+    status:'recommended',
+  };
+}
+
+function inferredConnections(layout, domain, connections) {
+  if (connections.length || domain!=='custom') return connections;
+  const context=[layout.title,layout.summary,...layout.tasks.map(task=>`${task.title} ${task.detail}`)].join(' ');
+  if (!/(日语|N5|五十音|假名|Japanese)/i.test(context)) return connections;
+  return [{id:'duolingo',name:'Duolingo',reason:'把每日练习放进现有学习习惯，降低启动成本。',capability:'打开日语课程；账户进度需经 Duolingo 授权后才能同步。',status:'recommended'}];
+}
+
 export function validateAdaptiveLayout(value, domain='health') {
   if (!['health','finance','custom'].includes(domain)) throw Error('目标类型无效');
   const layout=object(value, '个性化页面');
@@ -84,7 +102,8 @@ export function validateAdaptiveLayout(value, domain='health') {
   const modules=list(layout.modules, '页面模块', 6).map(item=>cleanModule(item,domain));
   const tasks=list(layout.tasks, '动态任务', 6).map(cleanTask);
   const questions=list(layout.questions, '待确认问题', 6).map(item=>text(item, '待确认问题', 240));
-  const ids=[...modules.map(item=>item.id),...tasks.map(item=>item.id)];
+  const connections=inferredConnections(layout,domain,list(layout.connections??[], '推荐连接', 4).map(cleanConnection));
+  const ids=[...modules.map(item=>item.id),...tasks.map(item=>item.id),...connections.map(item=>item.id)];
   if (new Set(ids).size !== ids.length) throw Error('页面模块 ID 重复');
   return {
     version:1,
@@ -94,6 +113,7 @@ export function validateAdaptiveLayout(value, domain='health') {
     modules,
     tasks,
     questions,
+    connections,
   };
 }
 
