@@ -20,7 +20,7 @@ let selectedTaskId = null;
 let running = false;
 let agentBusy = false;
 let agentConfig = readStored(AGENT_KEY, {});
-let agentRuntime = safeAgentRuntime(localStorage.getItem(AGENT_RUNTIME_KEY));
+let agentRuntime = safeAgentRuntime(localStorage.getItem(AGENT_RUNTIME_KEY) || KIMI_RUNTIME);
 let agentConnection = {status:agentConfig.token?'checking':'unconfigured',error:''};
 let goalCustom = readStored(GOALS_KEY, {health:null, finance:null, custom:null});
 let conversations = readStored(CONVERSATIONS_KEY, {health:[], finance:[], custom:[]});
@@ -270,6 +270,7 @@ function home() {
   return `<div class="app-shell"><header class="topbar"><div class="topbar-inner">${brand()}</div></header>
     <main class="content ${layout?'adaptive-space':''}">
       <div class="goal-switch"><label for="goal-select">当前目标</label><div class="select-wrap"><select id="goal-select" aria-label="切换目标"><option value="health" ${activeGoal === 'health' ? 'selected' : ''}>健康 · ${goalLayouts.health?'个性化计划':'每周运动'}</option><option value="finance" ${activeGoal === 'finance' ? 'selected' : ''}>理财 · ${goalLayouts.finance?'个性化计划':'应急储备'}</option><option value="custom" ${activeGoal === 'custom' ? 'selected' : ''}>${goalLayouts.custom?'我的自定义目标':'＋ 定义新目标'}</option></select><span aria-hidden="true">⌄</span></div></div>
+      <div class="runtime-switch home-runtime-switch" role="group" aria-label="选择 Agent 运行时"><button type="button" data-action="select-runtime" data-runtime="${DSH_RUNTIME}" class="${agentRuntime===DSH_RUNTIME?'active':''}" aria-pressed="${agentRuntime===DSH_RUNTIME}">DSH Agents</button><button type="button" data-action="select-runtime" data-runtime="${KIMI_RUNTIME}" class="${agentRuntime===KIMI_RUNTIME?'active':''}" aria-pressed="${agentRuntime===KIMI_RUNTIME}">Kimi Swarm</button></div>
       ${goalContent}
       ${taskContent}
       ${connectionContent}
