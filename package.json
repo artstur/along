@@ -10,7 +10,7 @@
     "agent-host": "./node_modules/node/bin/node agent-host.mjs",
     "build": "node build.mjs",
     "test": "node --test engine.test.mjs",
-    "check": "node --check app.mjs && node --check health.mjs && node --check workspace.mjs && node --check loop.mjs && node --check agent-client.mjs && node --check goal-agent-core.mjs && node --check adaptive-ui.mjs && node --check super-agent.mjs && node --check codex-agent.mjs && node --check agent-host.mjs && node --check server.mjs && node --check sync-server.mjs && node --test health.test.mjs && node --test workspace.test.mjs && node --test loop.test.mjs && node --test sync-server.test.mjs && node --test engine.test.mjs && node --test goal-agent-core.test.mjs && node --test adaptive-ui.test.mjs && node --test super-agent.test.mjs && node --test codex-agent.test.mjs"
+    "check": "node --check app.mjs && node --check health.mjs && node --check workspace.mjs && node --check loop.mjs && node --check agent-client.mjs && node --check goal-agent-core.mjs && node --check adaptive-ui.mjs && node --check super-agent.mjs && node --check codex-agent.mjs && node --check kimi-code-agent.mjs && node --check agent-host.mjs && node --check server.mjs && node --check sync-server.mjs && node --test health.test.mjs && node --test workspace.test.mjs && node --test loop.test.mjs && node --test sync-server.test.mjs && node --test engine.test.mjs && node --test goal-agent-core.test.mjs && node --test adaptive-ui.test.mjs && node --test super-agent.test.mjs && node --test codex-agent.test.mjs && node --test kimi-code-agent.test.mjs"
   },
   "engines": {
     "node": ">=22.19"

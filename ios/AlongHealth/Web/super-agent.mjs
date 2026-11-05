@@ -1,8 +1,20 @@
 export const SUPER_AGENT_RUNS_KEY = 'along.super-agent-runs.v2';
 export const GOAL_SUPER_AGENT_RUNS_KEY = 'along.goal-super-agent-runs.v1';
+export const AGENT_RUNTIME_KEY = 'along.agent-runtime.v1';
+export const DSH_RUNTIME = 'dsh-superagent';
+export const KIMI_RUNTIME = 'kimi-code-swarm';
 
 const TASK_STATES = new Set(['temporary', 'planned', 'deferred']);
 const DOMAINS = new Set(['health', 'finance', 'custom']);
+const RUNTIMES = new Set([DSH_RUNTIME, KIMI_RUNTIME]);
+
+export function safeAgentRuntime(value) { return RUNTIMES.has(value)?value:DSH_RUNTIME; }
+export function agentRuntimeLabel(runtime) { return safeAgentRuntime(runtime)===KIMI_RUNTIME?'Kimi Swarm':'DSH Agents'; }
+function runtimeCopy(runtime) {
+  return safeAgentRuntime(runtime)===KIMI_RUNTIME
+    ? {submit:'正在提交给 Kimi',connecting:'连接 Kimi Code Swarm',unavailable:'Kimi Swarm 暂不可用',failed:'Kimi Code Swarm 请求失败'}
+    : {submit:'正在提交给 DSH',connecting:'连接 DSH Super Agent',unavailable:'DSH 暂不可用',failed:'DSH Super Agent 请求失败'};
+}
 
 function cleanText(value, fallback, max=180) {
   const text=String(value ?? fallback).trim();
@@ -29,21 +41,24 @@ export function createSuperAgentRequest({task,domain='health',goal=null,context=
   return {requestId,task:safeTask,goal:goal?{domain,title:cleanText(goal.title,'当前目标',120),target:Number.isFinite(goal.target)?goal.target:null}:null,context};
 }
 
-export function createPendingSuperAgentRun(request, createdAt=Date.now()) {
+export function createPendingSuperAgentRun(request, createdAt=Date.now(), runtime=DSH_RUNTIME) {
+  runtime=safeAgentRuntime(runtime);
+  const copy=runtimeCopy(runtime);
   return {
-    version:2,actual:false,runtime:'dsh-superagent',requestId:request.requestId,task:request.task,
-    source:{kind:'along',label:'Along 动态任务'},trigger:{kind:'dynamic-task',label:'正在提交给 DSH'},
-    eval:null,ticket:null,mandate:null,assignments:[],events:[],status:'working',statusLabel:'连接 DSH Super Agent',progress:2,
+    version:2,actual:false,runtime,requestId:request.requestId,task:request.task,
+    source:{kind:'along',label:'Along 动态任务'},trigger:{kind:'dynamic-task',label:copy.submit},
+    eval:null,ticket:null,mandate:null,assignments:[],events:[],status:'working',statusLabel:copy.connecting,progress:2,
     createdAt,updatedAt:createdAt,
   };
 }
 
-export function createFailedSuperAgentRun(request, error, updatedAt=Date.now()) {
-  return {...createPendingSuperAgentRun(request,updatedAt),status:'blocked',statusLabel:'DSH 暂不可用',error:cleanText(error,'DSH Super Agent 请求失败',500),updatedAt};
+export function createFailedSuperAgentRun(request, error, updatedAt=Date.now(), runtime=DSH_RUNTIME) {
+  const copy=runtimeCopy(runtime);
+  return {...createPendingSuperAgentRun(request,updatedAt,runtime),status:'blocked',statusLabel:copy.unavailable,error:cleanText(error,copy.failed,500),updatedAt};
 }
 
 export function safeSuperAgentRun(value) {
-  if (!value || value.runtime!=='dsh-superagent' || typeof value.requestId!=='string') return null;
+  if (!value || !RUNTIMES.has(value.runtime) || typeof value.requestId!=='string') return null;
   if (value.actual===true && (!value.source || !value.trigger || !Array.isArray(value.assignments) || !Array.isArray(value.events))) return null;
   if (value.version===2 || value.actual===true) return value;
   return null;
@@ -63,23 +78,26 @@ export function createGoalSuperAgentRequest({domain='health',goal,snapshot={},me
   };
 }
 
-export function createPendingGoalSuperAgentRun(request, createdAt=Date.now()) {
+export function createPendingGoalSuperAgentRun(request, createdAt=Date.now(), runtime=DSH_RUNTIME) {
+  runtime=safeAgentRuntime(runtime);
+  const copy=runtimeCopy(runtime);
   return {
-    version:1,actual:false,runtime:'dsh-superagent',kind:'goal',requestId:request.requestId,input:{goal:request.goal,message:request.message},
-    source:{kind:'along',label:'Along 目标'},trigger:{kind:'goal',label:'正在提交给 DSH'},eval:null,ticket:null,mandate:null,
-    assignments:[],agents:[],events:[],result:null,status:'working',statusLabel:'连接 DSH Super Agent',progress:2,createdAt,updatedAt:createdAt,
+    version:1,actual:false,runtime,kind:'goal',requestId:request.requestId,input:{goal:request.goal,message:request.message},
+    source:{kind:'along',label:'Along 目标'},trigger:{kind:'goal',label:copy.submit},eval:null,ticket:null,mandate:null,
+    assignments:[],agents:[],events:[],result:null,status:'working',statusLabel:copy.connecting,progress:2,createdAt,updatedAt:createdAt,
   };
 }
 
-export function createFailedGoalSuperAgentRun(request, error, updatedAt=Date.now()) {
-  const detail=cleanText(error,'DSH Super Agent 请求失败',500);
+export function createFailedGoalSuperAgentRun(request, error, updatedAt=Date.now(), runtime=DSH_RUNTIME) {
+  const copy=runtimeCopy(runtime);
+  const detail=cleanText(error,copy.failed,500);
   const connectionFailure=/TLS|secure connection|安全连接|certificate|证书|代理|VPN/i.test(detail);
-  return {...createPendingGoalSuperAgentRun(request,updatedAt),status:'blocked',
-    statusLabel:connectionFailure?'Mac 安全连接失败':'DSH 暂不可用',error:detail,updatedAt};
+  return {...createPendingGoalSuperAgentRun(request,updatedAt,runtime),status:'blocked',
+    statusLabel:connectionFailure?'Mac 安全连接失败':copy.unavailable,error:detail,updatedAt};
 }
 
 export function safeGoalSuperAgentRun(value) {
-  if (!value || value.kind!=='goal' || value.runtime!=='dsh-superagent' || typeof value.requestId!=='string') return null;
+  if (!value || value.kind!=='goal' || !RUNTIMES.has(value.runtime) || typeof value.requestId!=='string') return null;
   if (value.actual===true && (!value.source || !value.trigger || !Array.isArray(value.agents) || !Array.isArray(value.events))) return null;
   return value.version===1 || value.actual===true ? value : null;
 }

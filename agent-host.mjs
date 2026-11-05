@@ -7,6 +7,8 @@ import {mkdirSync, readFileSync, writeFileSync, existsSync, chmodSync} from 'nod
 import {routeHealthChange, requestedTargetFromMessage, validateGoalReply, validateTaskReply} from './goal-agent-core.mjs';
 import {safeAdaptiveLayout} from './adaptive-ui.mjs';
 import {runTaskCodex} from './codex-agent.mjs';
+import {KimiCodeAgent} from './kimi-code-agent.mjs';
+import {DSH_RUNTIME, KIMI_RUNTIME, safeAgentRuntime} from './super-agent.mjs';
 
 const dir = join(homedir(), '.along', 'agent-host');
 mkdirSync(dir, {recursive:true, mode:0o700});
@@ -30,6 +32,7 @@ let busy = false;
 const port = Number(process.env.ALONG_AGENT_PORT) || 4176;
 const lanHost = process.env.ALONG_AGENT_HOST || networkInterfaces().en0?.find(item=>item.family==='IPv4'&&!item.internal)?.address || '127.0.0.1';
 const superAgentURL = (process.env.ALONG_SUPERAGENT_URL || 'http://127.0.0.1:3082').replace(/\/$/,'');
+const kimiAgent = new KimiCodeAgent({workspace:process.env.ALONG_KIMI_WORKSPACE||process.cwd()});
 
 function respond(res,status,data) { res.writeHead(status,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}).end(JSON.stringify(data)); }
 async function body(req) {
@@ -94,6 +97,10 @@ function requestId(value) {
   if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$/.test(id)) throw Error('Super Agent requestId 无效');
   return id;
 }
+function requestedRuntime(value) {
+  if (value!==undefined && ![DSH_RUNTIME,KIMI_RUNTIME].includes(value)) throw Error('Super Agent 运行时无效');
+  return safeAgentRuntime(value);
+}
 function normalizeGoalRun(run) {
   if (!run?.result) return run;
   const domain=run.input?.goal?.domain;
@@ -120,30 +127,40 @@ const server=createServer({key:readFileSync(key),cert:readFileSync(cert)},async(
     }
     if (!authorized(req)) return respond(res,401,{error:'请先配对这台 Mac'});
     if (req.method==='POST' && path==='/connection/status') {
-      await body(req);
+      const input=await body(req),runtime=requestedRuntime(input?.runtime);
+      if (runtime===KIMI_RUNTIME) {
+        const kimi=await kimiAgent.ready();
+        console.log(`连接检查通过：iPhone → Along Host → Kimi Code Swarm (${new Date().toISOString()})`);
+        return respond(res,200,{along:true,runtime,ready:true,kimi});
+      }
       await superAgentReady();
       console.log(`连接检查通过：iPhone → Along Host → DSH (${new Date().toISOString()})`);
-      return respond(res,200,{along:true,dsh:true});
+      return respond(res,200,{along:true,runtime,ready:true,dsh:true});
     }
     if (req.method==='POST' && path==='/super-agent/tasks') {
-      const input=await body(req);
-      return respond(res,200,await superAgentCall('/along-source/api/tasks',{value:input}));
+      const input=await body(req),runtime=requestedRuntime(input?.runtime);
+      const {runtime:_runtime,...dshInput}=input;
+      if (runtime===KIMI_RUNTIME) return respond(res,200,await kimiAgent.startTask(dshInput));
+      return respond(res,200,await superAgentCall('/along-source/api/tasks',{value:dshInput}));
     }
     if (req.method==='POST' && path==='/super-agent/tasks/status') {
-      const input=await body(req),id=requestId(input?.requestId);
+      const input=await body(req),id=requestId(input?.requestId),runtime=requestedRuntime(input?.runtime);
+      if (runtime===KIMI_RUNTIME) return respond(res,200,await kimiAgent.taskStatus(id));
       return respond(res,200,await superAgentCall(`/along-source/api/tasks/${encodeURIComponent(id)}`,{method:'GET'}));
     }
     if (req.method==='POST' && path==='/super-agent/goals') {
-      const input=await body(req);
+      const input=await body(req),runtime=requestedRuntime(input?.runtime);
       const goal=cleanGoal(input.goal), snapshot=cleanSnapshot(input.snapshot,goal.domain);
       const message=String(input.message??'').trim();
       if (!message||message.length>800) throw Error('消息长度需在 1 至 800 字之间');
       const history=Array.isArray(input.history)?input.history.slice(-12).map(item=>({role:item.role==='assistant'?'assistant':'user',text:String(item.text??'').slice(0,1200)})).filter(item=>item.text.trim()):[];
+      if (runtime===KIMI_RUNTIME) return respond(res,200,await kimiAgent.startGoal({requestId:requestId(input.requestId),goal,snapshot,message,history}));
       const response=await superAgentCall('/along-source/api/goals',{value:{requestId:requestId(input.requestId),goal,snapshot,message,history}});
       return respond(res,200,{...response,run:normalizeGoalRun(response.run)});
     }
     if (req.method==='POST' && path==='/super-agent/goals/status') {
-      const input=await body(req),id=requestId(input?.requestId);
+      const input=await body(req),id=requestId(input?.requestId),runtime=requestedRuntime(input?.runtime);
+      if (runtime===KIMI_RUNTIME) return respond(res,200,await kimiAgent.goalStatus(id));
       return respond(res,200,normalizeGoalRun(await superAgentCall(`/along-source/api/goals/${encodeURIComponent(id)}`,{method:'GET'})));
     }
     if (req.method==='POST' && path==='/goal/chat') {
