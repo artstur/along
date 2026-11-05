@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {validateAdaptiveLayout,safeAdaptiveLayout} from './adaptive-ui.mjs';
+import {customGoalEntries,findInitialCustomGoalCandidate,goalDomain,isCustomGoalKey,validateAdaptiveLayout,safeAdaptiveLayout} from './adaptive-ui.mjs';
 
 const valid={
   version:1,title:'在晚班作息里保持健康',badge:'试运行 · 第 1 周',summary:'先验证真实作息，再逐步调整。',
@@ -37,4 +37,29 @@ test('custom goals support generated text modules but no invented metrics',()=>{
   const custom=structuredClone(valid);custom.modules=custom.modules.filter(item=>item.kind!=='metric');
   assert.equal(validateAdaptiveLayout(custom,'custom').modules.length,2);
   assert.throws(()=>validateAdaptiveLayout(valid,'custom'),/指标来源不受信任/);
+});
+
+test('a complete first custom goal can be adopted without a hidden confirmation step',()=>{
+  const layout=structuredClone(valid);layout.modules=layout.modules.filter(item=>item.kind!=='metric');
+  const history=[
+    {role:'user',text:'60 天学会基础日语'},
+    {role:'assistant',text:'先从 N5 阅读入门',proposal:{title:'日语学习',target:null,task:'从五十音开始',reason:'目标明确'},layout},
+  ];
+  const candidate=findInitialCustomGoalCandidate(history);
+  assert.equal(candidate.index,1);
+  assert.equal(candidate.item.proposal.title,'日语学习');
+  assert.equal(findInitialCustomGoalCandidate(history,{title:'已有目标'},null),null);
+});
+
+test('multiple custom goals keep independent keys and labels',()=>{
+  assert.equal(isCustomGoalKey('custom'),true);
+  assert.equal(isCustomGoalKey('custom:second-goal'),true);
+  assert.equal(goalDomain('custom:second-goal'),'custom');
+  assert.deepEqual(customGoalEntries(
+    {custom:{title:'日语学习'},'custom:second-goal':{title:'学会吉他'},health:{title:'健康'}},
+    {},
+  ),[
+    {key:'custom',title:'日语学习'},
+    {key:'custom:second-goal',title:'学会吉他'},
+  ]);
 });

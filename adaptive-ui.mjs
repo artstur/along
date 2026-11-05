@@ -1,5 +1,21 @@
 export const ADAPTIVE_LAYOUTS_KEY = 'along.adaptive-layouts.v1';
 
+export function isCustomGoalKey(value) {
+  return value === 'custom' || (typeof value === 'string' && value.startsWith('custom:'));
+}
+
+export function goalDomain(value) {
+  return isCustomGoalKey(value) ? 'custom' : value;
+}
+
+export function customGoalEntries(goals={}, layouts={}) {
+  const keys=new Set([...Object.keys(goals),...Object.keys(layouts)]);
+  return [...keys]
+    .filter(isCustomGoalKey)
+    .map(key=>({key,title:goals[key]?.title || layouts[key]?.title || ''}))
+    .filter(item=>item.title);
+}
+
 const MODULE_KINDS = new Set(['summary', 'fact_list', 'chips', 'metric']);
 const TASK_STATES = new Set(['temporary', 'planned', 'deferred']);
 const METRIC_SOURCES = {
@@ -84,4 +100,15 @@ export function validateAdaptiveLayout(value, domain='health') {
 export function safeAdaptiveLayout(value, domain='health') {
   try { return validateAdaptiveLayout(value,domain); }
   catch { return null; }
+}
+
+export function findInitialCustomGoalCandidate(history, existingGoal=null, existingLayout=null) {
+  if (existingGoal || existingLayout || !Array.isArray(history)) return null;
+  for (let index=history.length-1; index>=0; index-=1) {
+    const item=history[index];
+    if (item?.role !== 'assistant' || item.proposal?.target !== null || !item.proposal?.title || !item.layout?.title) continue;
+    if (!Array.isArray(item.layout.tasks) || item.layout.tasks.length === 0) continue;
+    return {index,item};
+  }
+  return null;
 }

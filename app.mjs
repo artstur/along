@@ -3,7 +3,7 @@ import {ACTIVE_GOAL_KEY, FINANCE_KEY, ensureHealthGoal, loadFinance, connectFina
 import {EXPERIMENT, startExperiment, routeHealthEvent, acceptAgentSuggestion, agentRequestPayload} from './loop.mjs';
 import {routeHealthChange} from './goal-agent-core.mjs';
 import {AGENT_KEY, GOALS_KEY, CONVERSATIONS_KEY, readStored, agentCall, loadNativeConnection, saveNativeConnection} from './agent-client.mjs';
-import {ADAPTIVE_LAYOUTS_KEY, safeAdaptiveLayout, validateAdaptiveLayout} from './adaptive-ui.mjs';
+import {ADAPTIVE_LAYOUTS_KEY, customGoalEntries, findInitialCustomGoalCandidate, goalDomain, isCustomGoalKey, safeAdaptiveLayout, validateAdaptiveLayout} from './adaptive-ui.mjs';
 import {GOAL_SUPER_AGENT_RUNS_KEY, SUPER_AGENT_RUNS_KEY, createFailedGoalSuperAgentRun, createFailedSuperAgentRun,
   createGoalSuperAgentRequest, createPendingGoalSuperAgentRun, createPendingSuperAgentRun, createSuperAgentRequest,
   safeGoalSuperAgentRun, safeSuperAgentRun, AGENT_RUNTIME_KEY, DSH_RUNTIME, KIMI_RUNTIME, agentRuntimeLabel, safeAgentRuntime} from './super-agent.mjs';
@@ -14,8 +14,10 @@ const sheet = document.querySelector('#sheet');
 const toast = document.querySelector('#toast');
 let state = ensureHealthGoal(loadState(localStorage.getItem(KEY)));
 let finance = loadFinance(localStorage.getItem(FINANCE_KEY));
-let activeGoal = ['finance','custom'].includes(localStorage.getItem(ACTIVE_GOAL_KEY)) ? localStorage.getItem(ACTIVE_GOAL_KEY) : 'health';
+const storedActiveGoal=localStorage.getItem(ACTIVE_GOAL_KEY);
+let activeGoal = storedActiveGoal === 'finance' || isCustomGoalKey(storedActiveGoal) ? storedActiveGoal : 'health';
 let screen = 'home';
+let previousGoalBeforeDraft = null;
 let selectedTaskId = null;
 let running = false;
 let agentBusy = false;
@@ -25,7 +27,8 @@ let agentConnection = {status:agentConfig.token?'checking':'unconfigured',error:
 let goalCustom = readStored(GOALS_KEY, {health:null, finance:null, custom:null});
 let conversations = readStored(CONVERSATIONS_KEY, {health:[], finance:[], custom:[]});
 const storedLayouts = readStored(ADAPTIVE_LAYOUTS_KEY, {health:null, finance:null, custom:null});
-let goalLayouts = {health:safeAdaptiveLayout(storedLayouts.health,'health'), finance:safeAdaptiveLayout(storedLayouts.finance,'finance'), custom:safeAdaptiveLayout(storedLayouts.custom,'custom')};
+let goalLayouts = Object.fromEntries(Object.entries(storedLayouts).map(([key,value])=>[key,safeAdaptiveLayout(value,goalDomain(key))]));
+goalLayouts={health:goalLayouts.health||null,finance:goalLayouts.finance||null,...goalLayouts};
 let pendingTask = readStored(TICKET_KEY, null);
 let superAgentRuns = readStored(SUPER_AGENT_RUNS_KEY, {});
 let goalSuperAgentRuns = readStored(GOAL_SUPER_AGENT_RUNS_KEY, {});
@@ -94,9 +97,9 @@ function brand() {
 function backButton(action,label) {
   return `<button class="back-button icon-only" data-action="${esc(action)}" aria-label="${esc(label)}" title="${esc(label)}"><svg viewBox="0 0 12 24" aria-hidden="true"><path d="M9 18l-6-6 6-6"/></svg></button>`;
 }
-function customView() {
+function customView(goalKey=activeGoal) {
   return {
-    id:'custom',category:'自定义目标',title:goalCustom.custom?.title || '定义一个真正属于你的目标',measure:'—',measureUnit:'',percent:0,
+    id:'custom',category:'个人目标',title:goalCustom[goalKey]?.title || '定义一个真正属于你的目标',measure:'—',measureUnit:'',percent:0,
     progressText:'先把想实现的改变告诉 Along',note:'Along 会整理目标、待确认信息和动态任务；采用后才更新首页。',
     primary:{title:'从一句话开始',detail:'可以包含期限、偏好、限制、已知条件和你不希望发生的事情。',status:'待定义'},secondary:[],connection:null,
   };
@@ -111,7 +114,7 @@ function runtimeMeta(runtime=agentRuntime) {
 function currentTaskRecords() {
   const layout=goalLayouts[activeGoal];
   if (layout) return layout.tasks;
-  const model=activeGoal==='finance'?financeView(finance,goalCustom.finance):healthView(state,goalCustom.health);
+  const model=activeGoal==='finance'?financeView(finance,goalCustom.finance):isCustomGoalKey(activeGoal)?customView(activeGoal):healthView(state,goalCustom.health);
   const normalize=(task,id,index)=>({
     id,
     when:index===0?(task.status || '现在'):(task.status || '之后'),
@@ -125,7 +128,7 @@ function saveSuperAgentRuns() { localStorage.setItem(SUPER_AGENT_RUNS_KEY,JSON.s
 function runKey(taskId,runtime=agentRuntime) { return `${activeGoal}:${runtime}:${taskId}`; }
 function selectedTask() { return currentTaskRecords().find(task=>task.id===selectedTaskId) || null; }
 const superAgentRequests=new Set();
-function taskRequest(task) { return {...createSuperAgentRequest({task,domain:activeGoal,goal:currentGoal(),context:currentSummary()}),runtime:agentRuntime}; }
+function taskRequest(task) { return {...createSuperAgentRequest({task,domain:goalDomain(activeGoal),goal:currentGoal(),context:currentSummary()}),runtime:agentRuntime}; }
 function currentSuperAgentRun(task) {
   const key=runKey(task.id);
   const saved=safeSuperAgentRun(superAgentRuns[key]) || (agentRuntime===DSH_RUNTIME?safeSuperAgentRun(superAgentRuns[`${activeGoal}:${task.id}`]):null);
@@ -160,57 +163,70 @@ async function refreshSuperAgentTask(task) {
   } finally { superAgentRequests.delete(request.requestId); }
 }
 function saveGoalSuperAgentRuns() { localStorage.setItem(GOAL_SUPER_AGENT_RUNS_KEY,JSON.stringify(goalSuperAgentRuns)); }
-function goalRunKey(domain=activeGoal,runtime=agentRuntime) { return `${domain}:${runtime}`; }
-function currentGoalSuperAgentRun(domain=activeGoal) {
-  return safeGoalSuperAgentRun(goalSuperAgentRuns[goalRunKey(domain)]) || (agentRuntime===DSH_RUNTIME?safeGoalSuperAgentRun(goalSuperAgentRuns[domain]):null);
+function goalRunKey(goalKey=activeGoal,runtime=agentRuntime) { return `${goalKey}:${runtime}`; }
+function currentGoalSuperAgentRun(goalKey=activeGoal) {
+  return safeGoalSuperAgentRun(goalSuperAgentRuns[goalRunKey(goalKey)]) || (agentRuntime===DSH_RUNTIME?safeGoalSuperAgentRun(goalSuperAgentRuns[goalKey]):null);
 }
 const goalSuperAgentRequests=new Set();
-function saveGoalRun(domain,run) {
-  goalSuperAgentRuns={...goalSuperAgentRuns,[goalRunKey(domain,run?.runtime||agentRuntime)]:run};
+function saveGoalRun(goalKey,run) {
+  goalSuperAgentRuns={...goalSuperAgentRuns,[goalRunKey(goalKey,run?.runtime||agentRuntime)]:run};
   saveGoalSuperAgentRuns();
 }
-function applyGoalRun(domain,value) {
+function applyGoalRun(goalKey,value) {
   let run=safeGoalSuperAgentRun(value);
   if (!run) throw Error(`${agentRuntimeLabel(agentRuntime)} 没有返回真实目标编排记录`);
   if (run.status==='done' && run.result && !run.applied) {
-    const history=conversations[domain]||[];
+    const history=conversations[goalKey]||[];
     if (!history.some(item=>item.requestId===run.requestId)) {
-      conversations[domain]=[...history,{role:'assistant',text:run.result.reply,proposal:run.result.proposal,layout:run.result.layout,
+      conversations[goalKey]=[...history,{role:'assistant',text:run.result.reply,proposal:run.result.proposal,layout:run.result.layout,
         requestId:run.requestId}].slice(-20);
+      const candidate=goalDomain(goalKey)==='custom'
+        ? findInitialCustomGoalCandidate(conversations[goalKey],goalCustom[goalKey],goalLayouts[goalKey])
+        : null;
+      if (candidate?.index===conversations[goalKey].length-1) {
+        applyGeneratedGoal(goalKey,candidate.item);
+        conversations[goalKey][candidate.index]={...candidate.item,proposal:null,layout:null};
+        activeGoal=goalKey;
+        localStorage.setItem(ACTIVE_GOAL_KEY,activeGoal);
+        previousGoalBeforeDraft=null;
+        if (screen==='agent') screen='home';
+        notice('新目标和动态任务已创建');
+      }
       saveConversations();
     }
     run={...run,applied:true};
   }
-  saveGoalRun(domain,run);
+  saveGoalRun(goalKey,run);
   return run;
 }
-async function submitSuperAgentGoal(domain,message,history) {
-  const request={...createGoalSuperAgentRequest({domain,goal:currentGoal(),snapshot:currentSummary(),message,history}),runtime:agentRuntime};
-  saveGoalRun(domain,createPendingGoalSuperAgentRun(request,Date.now(),agentRuntime));
+async function submitSuperAgentGoal(goalKey,message,history) {
+  const request={...createGoalSuperAgentRequest({domain:goalDomain(goalKey),goal:currentGoal(),snapshot:currentSummary(),message,history}),runtime:agentRuntime};
+  saveGoalRun(goalKey,createPendingGoalSuperAgentRun(request,Date.now(),agentRuntime));
   goalSuperAgentRequests.add(request.requestId);
   try {
     const response=await agentCall(agentConfig,'/super-agent/goals',request);
     if (!response?.run?.actual) throw Error(`${agentRuntimeLabel(agentRuntime)} 没有返回真实目标编排记录`);
-    applyGoalRun(domain,response.run);
+    applyGoalRun(goalKey,response.run);
   } catch(error) {
-    saveGoalRun(domain,createFailedGoalSuperAgentRun(request,error.message,Date.now(),agentRuntime));
+    saveGoalRun(goalKey,createFailedGoalSuperAgentRun(request,error.message,Date.now(),agentRuntime));
     throw error;
   } finally { goalSuperAgentRequests.delete(request.requestId); }
 }
-async function refreshSuperAgentGoal(domain=activeGoal) {
-  const current=currentGoalSuperAgentRun(domain);
+async function refreshSuperAgentGoal(goalKey=activeGoal) {
+  const current=currentGoalSuperAgentRun(goalKey);
   if (!current?.actual || current.status!=='working' || goalSuperAgentRequests.has(current.requestId) || !agentConfig.token) return;
   goalSuperAgentRequests.add(current.requestId);
   try {
     const run=await agentCall(agentConfig,'/super-agent/goals/status',{requestId:current.requestId,runtime:current.runtime});
-    applyGoalRun(domain,run);
-    if (screen==='agent'&&activeGoal===domain) renderAgentUpdate();
+    applyGoalRun(goalKey,run);
+    if (screen==='agent'&&activeGoal===goalKey) renderAgentUpdate();
   } catch(error) {
-    if (!current.actual) saveGoalRun(domain,{...current,status:'blocked',statusLabel:`${agentRuntimeLabel(current.runtime)} 状态读取失败`,error:error.message});
+    if (!current.actual) saveGoalRun(goalKey,{...current,status:'blocked',statusLabel:`${agentRuntimeLabel(current.runtime)} 状态读取失败`,error:error.message});
   } finally { goalSuperAgentRequests.delete(current.requestId); }
 }
 function trustedMetric(source) {
   if (activeGoal==='finance') return source==='saved' && finance.connected ? finance.saved : null;
+  if (isCustomGoalKey(activeGoal)) return null;
   const selected=state.snapshot?.selectedTypes;
   const type={workoutMinutes:'workout',sleepMinutes:'sleep',weightKg:'weight'}[source];
   if (!state.snapshot || (state.source==='healthkit' && Array.isArray(selected) && !selected.includes(type))) return null;
@@ -239,9 +255,15 @@ function adaptiveTaskSection(layout) {
   const visible=layout.tasks.slice(0,2),hidden=Math.max(0,layout.tasks.length-visible.length);
   return `<section class="task-section adaptive-tasks" aria-label="动态任务"><div class="section-heading"><h2>动态任务</h2><span>Along 根据目标与情境生成</span></div><div class="adaptive-task-card"><div class="generated-status">${layout.tasks.length} 项已生成 · 点击任务查看协作</div>${visible.map(task=>`<button class="generated-task generated-task-button" data-action="open-task" data-task-id="${esc(task.id)}"><div class="task-meta"><span>${esc(task.when)}</span><span class="state-pill">${esc(taskStateLabel[task.state])}</span></div><strong>${esc(task.title)}</strong><p>${esc(task.detail)}</p><span class="task-open-hint">查看任务协作</span></button>`).join('')}${hidden?`<p class="hidden-count">还有 ${hidden} 项未来触发任务，将在相关时间出现。</p>`:''}${layout.questions.length?`<div class="missing-strip">待确认 ${layout.questions.length} 项：${esc(layout.questions[0])}</div>`:''}<div class="card-actions"><button class="agent-action" data-action="edit-goal">补充信息</button></div></div></section>`;
 }
+function goalListTitle(title) {
+  return /(日语|Japanese|N5|五十音)/i.test(title)?'日语学习':title;
+}
 function home() {
-  const model = activeGoal === 'finance' ? financeView(finance, goalCustom.finance) : activeGoal==='custom' ? customView() : healthView(state, goalCustom.health);
+  const model = activeGoal === 'finance' ? financeView(finance, goalCustom.finance) : isCustomGoalKey(activeGoal) ? customView(activeGoal) : healthView(state, goalCustom.health);
   const layout=goalLayouts[activeGoal];
+  const customOptions=customGoalEntries(goalCustom,goalLayouts)
+    .map(item=>`<option value="${esc(item.key)}" ${activeGoal===item.key?'selected':''}>${esc(goalListTitle(item.title))}</option>`)
+    .join('');
   const connection = model.connection;
   const sourceTime = activeGoal === 'health' && state.snapshot?.updatedAt && state.source === 'healthkit'
     ? ` · ${formatDate(state.snapshot.updatedAt)} 已检查` : '';
@@ -269,7 +291,7 @@ function home() {
       </section>`:'';
   return `<div class="app-shell"><header class="topbar"><div class="topbar-inner">${brand()}</div></header>
     <main class="content ${layout?'adaptive-space':''}">
-      <div class="goal-switch"><label for="goal-select">当前目标</label><div class="select-wrap"><select id="goal-select" aria-label="切换目标"><option value="health" ${activeGoal === 'health' ? 'selected' : ''}>健康 · ${goalLayouts.health?'个性化计划':'每周运动'}</option><option value="finance" ${activeGoal === 'finance' ? 'selected' : ''}>理财 · ${goalLayouts.finance?'个性化计划':'应急储备'}</option><option value="custom" ${activeGoal === 'custom' ? 'selected' : ''}>${goalLayouts.custom?'我的自定义目标':'＋ 定义新目标'}</option></select><span aria-hidden="true">⌄</span></div></div>
+      <div class="goal-switch"><label for="goal-select">当前目标</label><div class="goal-switch-actions"><div class="select-wrap"><select id="goal-select" aria-label="切换目标"><option value="health" ${activeGoal === 'health' ? 'selected' : ''}>健康 · ${goalLayouts.health?'个性化计划':'每周运动'}</option><option value="finance" ${activeGoal === 'finance' ? 'selected' : ''}>理财 · ${goalLayouts.finance?'个性化计划':'应急储备'}</option>${customOptions}<option value="new-custom">＋ 新建目标</option></select><span aria-hidden="true">⌄</span></div><button class="goal-add-button" data-action="new-goal">新建</button></div></div>
       <div class="runtime-switch home-runtime-switch" role="group" aria-label="选择 Agent 运行时"><button type="button" data-action="select-runtime" data-runtime="${DSH_RUNTIME}" class="${agentRuntime===DSH_RUNTIME?'active':''}" aria-pressed="${agentRuntime===DSH_RUNTIME}">DSH Agents</button><button type="button" data-action="select-runtime" data-runtime="${KIMI_RUNTIME}" class="${agentRuntime===KIMI_RUNTIME?'active':''}" aria-pressed="${agentRuntime===KIMI_RUNTIME}">Kimi Swarm</button></div>
       ${goalContent}
       ${taskContent}
@@ -349,13 +371,14 @@ function scrollAgentConversationToBottom() {
   });
 }
 function goalAgentPage() {
-  const domain=activeGoal;
+  const goalKey=activeGoal;
+  const domain=goalDomain(goalKey);
   const goal=currentGoal();
-  const history=conversations[domain] || [];
-  const goalRun=currentGoalSuperAgentRun(domain);
+  const history=conversations[goalKey] || [];
+  const goalRun=currentGoalSuperAgentRun(goalKey);
   const goalRunning=goalRun?.status==='working';
   const meta=runtimeMeta();
-  const label=domain==='health'?'健康':domain==='finance'?'理财演示':'自定义目标';
+  const label=domain==='health'?'健康':domain==='finance'?'理财演示':goalCustom[goalKey]?.title?goalListTitle(goalCustom[goalKey].title):'新建目标';
   const targetText=domain==='health'?`${goal.target} 分钟 / 周`:domain==='finance'?`¥${goal.target.toLocaleString('zh-CN')}`:'由你用自然语言定义';
   const connectionText=agentConnection.status==='ready'?[`Along 与 ${meta.short} 已连接`,'整条目标编排链路可用','已验证']:
     agentConnection.status==='error'?['连接需处理',agentConnection.error,'需处理']:['正在检查连接',`正在验证 Mac Host 与 ${meta.full}`,'检查中'];
@@ -368,7 +391,7 @@ function goalAgentPage() {
 }
 
 function currentGoal() {
-  return activeGoal==='health' ? {domain:'health',title:goalCustom.health?.title || `本周累计运动 ${state.goals.find(item=>item.type==='workout')?.target||120} 分钟`,target:state.goals.find(item=>item.type==='workout')?.target||120} : activeGoal==='finance' ? {domain:'finance',title:goalCustom.finance?.title || '三个月存下 ¥10,000 应急金',target:goalCustom.finance?.target||10000} : {domain:'custom',title:goalCustom.custom?.title || '定义我的新目标',target:null};
+  return activeGoal==='health' ? {domain:'health',title:goalCustom.health?.title || `本周累计运动 ${state.goals.find(item=>item.type==='workout')?.target||120} 分钟`,target:state.goals.find(item=>item.type==='workout')?.target||120} : activeGoal==='finance' ? {domain:'finance',title:goalCustom.finance?.title || '三个月存下 ¥10,000 应急金',target:goalCustom.finance?.target||10000} : {domain:'custom',title:goalCustom[activeGoal]?.title || '定义我的新目标',target:null};
 }
 function currentSummary() {
   return activeGoal==='health' ? {workoutMinutes:state.snapshot?.workoutMinutes ?? null,selectedTypes:state.source==='healthkit' && state.snapshot?.selectedTypes?.includes('workout')?['workout']:[]} : activeGoal==='finance' ? {saved:finance.connected?finance.saved:null} : {};
@@ -376,6 +399,30 @@ function currentSummary() {
 function saveConversations() { localStorage.setItem(CONVERSATIONS_KEY,JSON.stringify(conversations)); }
 function saveGoalCustom() { localStorage.setItem(GOALS_KEY,JSON.stringify(goalCustom)); }
 function saveGoalLayouts() { localStorage.setItem(ADAPTIVE_LAYOUTS_KEY,JSON.stringify(goalLayouts)); }
+function applyGeneratedGoal(goalKey,item) {
+  if (!item?.proposal && !item?.layout) return false;
+  const domain=goalDomain(goalKey);
+  const validatedLayout=item.layout?validateAdaptiveLayout(item.layout,domain):null;
+  if (item.proposal) {
+    goalCustom[goalKey]={...item.proposal};
+    if (goalKey==='health') saveHealth({...state,goals:state.goals.map(goal=>goal.type==='workout'?{...goal,target:item.proposal.target}:goal)});
+  }
+  if (validatedLayout) goalLayouts[goalKey]=validatedLayout;
+  saveGoalCustom();saveGoalLayouts();
+  return true;
+}
+function consumeGoalProposal(goalKey,index) {
+  conversations[goalKey]=conversations[goalKey].map((entry,i)=>i===index?{...entry,proposal:null,layout:null}:entry);
+  saveConversations();
+}
+function beginNewGoal() {
+  previousGoalBeforeDraft=activeGoal;
+  activeGoal=`custom:${crypto.randomUUID()}`;
+  conversations[activeGoal]=[];
+  screen='agent';
+  render();
+  if (agentConfig.token) void refreshAgentConnection();
+}
 
 function experimentPanel() {
   const loop = state.loop?.experiment === EXPERIMENT ? state.loop : null;
@@ -449,9 +496,9 @@ async function injectEvent(event) {
 
 app.addEventListener('change', event => {
   if (event.target.id !== 'goal-select') return;
-  activeGoal = ['finance','custom'].includes(event.target.value) ? event.target.value : 'health';
+  if (event.target.value==='new-custom') { beginNewGoal();return; }
+  activeGoal = event.target.value === 'finance' || isCustomGoalKey(event.target.value) ? event.target.value : 'health';
   localStorage.setItem(ACTIVE_GOAL_KEY, activeGoal);
-  if (activeGoal==='custom' && !goalLayouts.custom) screen='agent';
   render();
 });
 app.addEventListener('input', event => {
@@ -463,6 +510,7 @@ app.addEventListener('click', event => {
   const actionTarget=event.target.closest('[data-action]');
   const action = actionTarget?.dataset.action;
   if (!action) return;
+  if (action === 'new-goal') { beginNewGoal();return; }
   if (action === 'select-runtime') {
     const next=safeAgentRuntime(actionTarget.dataset.runtime);
     if (next===agentRuntime) return;
@@ -483,21 +531,23 @@ app.addEventListener('click', event => {
   }
   if (action === 'task-back') { selectedTaskId=null;screen='home';render(); }
   if (action === 'edit-goal') { screen='agent'; render();if (agentConfig.token) void refreshAgentConnection(); }
-  if (action === 'agent-back') { screen='home'; render(); }
+  if (action === 'agent-back') {
+    if (isCustomGoalKey(activeGoal) && !goalCustom[activeGoal] && !goalLayouts[activeGoal]) {
+      delete conversations[activeGoal];
+      activeGoal=previousGoalBeforeDraft || 'health';
+      previousGoalBeforeDraft=null;
+    }
+    screen='home';render();
+  }
   if (action === 'accept-goal') {
-    const index=Number(event.target.dataset.index),item=conversations[activeGoal]?.[index];
+    const index=Number(actionTarget.dataset.index),item=conversations[activeGoal]?.[index];
     if (!item?.proposal && !item?.layout) return;
-    if (item.proposal) {
-      goalCustom[activeGoal]={...item.proposal};
-      saveGoalCustom();
-      if (activeGoal==='health') saveHealth({...state,goals:state.goals.map(goal=>goal.type==='workout'?{...goal,target:item.proposal.target}:goal)});
+    applyGeneratedGoal(activeGoal,item);
+    consumeGoalProposal(activeGoal,index);
+    if (isCustomGoalKey(activeGoal)) {
+      localStorage.setItem(ACTIVE_GOAL_KEY,activeGoal);
+      previousGoalBeforeDraft=null;
     }
-    if (item.layout) {
-      goalLayouts[activeGoal]=validateAdaptiveLayout(item.layout,activeGoal);
-      saveGoalLayouts();
-    }
-    conversations[activeGoal]=conversations[activeGoal].map((entry,i)=>i===index?{...entry,proposal:null,layout:null}:entry);
-    saveConversations();
     screen='home';render();notice(item.proposal?'目标、界面和下一步已更新':'目标空间已更新');
   }
   if (action === 'accept-task' && pendingTask?.suggestion) {
@@ -545,17 +595,18 @@ app.addEventListener('submit', async event => {
 
   const message=String(form.get('message')).trim();
   if (!message) return;
-  const domain=activeGoal;
-  const history=conversations[domain]||[];
+  const goalKey=activeGoal;
+  const domain=goalDomain(goalKey);
+  const history=conversations[goalKey]||[];
   const goal=currentGoal();
   const userEntry={role:'user',text:message};
   const pendingId=crypto.randomUUID();
   agentBusy=true;
-  conversations[domain]=[...history,userEntry].slice(-20);
+  conversations[goalKey]=[...history,userEntry].slice(-20);
   saveConversations();
   const messages=app.querySelector('.agent-messages');
   messages?.querySelector('.agent-empty')?.remove();
-  messages?.insertAdjacentHTML('beforeend',agentMessage(userEntry,conversations[domain].length-1,goal,domain));
+  messages?.insertAdjacentHTML('beforeend',agentMessage(userEntry,conversations[goalKey].length-1,goal,domain));
   messages?.insertAdjacentHTML('beforeend',agentPending(pendingId));
   formElement.querySelector('textarea')?.blur();
   formElement.reset();
@@ -564,12 +615,12 @@ app.addEventListener('submit', async event => {
   setAgentComposerBusy(true);
   scrollAgentConversationToBottom();
   try {
-    await submitSuperAgentGoal(domain,message,history.map(item=>({role:item.role,text:item.text})));
+    await submitSuperAgentGoal(goalKey,message,history.map(item=>({role:item.role,text:item.text})));
   } catch(error) {
     notice(error.message || 'Along 请求失败');
   } finally {
     agentBusy=false;
-    if (screen==='agent' && activeGoal===domain) {
+    if (screen==='agent' && activeGoal===goalKey) {
       renderAgentUpdate({follow:true});
     }
   }

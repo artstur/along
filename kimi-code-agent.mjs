@@ -97,7 +97,7 @@ ${String(swarm?.output||'').slice(0,50_000)}
 
 Required JSON shape:
 {"reply":"Chinese response","proposal":{"active":true,"title":"goal title","target":number_or_null,"task":"next step","reason":"reason"},"layout":{"version":1,"title":"space title","badge":"status","summary":"summary","modules":[...],"tasks":[...],"questions":["question"]}}
-Use at most 6 modules, 6 tasks and 6 questions. Each module has kind, id and title. A summary module has content; a fact_list module has items shaped as [{"label":"...","value":"..."}]; a chips module has string items. Do not use metric modules for this custom goal. Each task must include id, when, title, detail, state (temporary|planned|deferred). Questions must be strings. proposal.target must be null. Preserve 60 days, about 30 minutes per day, reading-first, and no listening/speaking requirement. Keep all user-facing text in Chinese.`;
+Use at most 6 modules, 6 tasks and 6 questions. Each module has kind, id and title. A summary module has content; a fact_list module has items shaped as [{"label":"...","value":"..."}]; a chips module has string items. Do not use metric modules for a custom goal. Each task must include id, when, title, detail, state (temporary|planned|deferred). Questions must be strings. For a custom goal, proposal.target must be null. Preserve every explicit number, deadline, preference and constraint in the Along input. Keep all user-facing text in Chinese.`;
 }
 function layoutForAlong(value,domain) {
   if (!value||typeof value!=='object') return value;
