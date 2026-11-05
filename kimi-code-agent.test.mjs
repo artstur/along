@@ -27,7 +27,8 @@ test('starts a real swarm session and maps child sessions into Along agents',asy
     if (path==='/api/v1/sessions/session-main/prompts') return json({accepted:true});
     if (path==='/api/v1/sessions/session-main') return json({id:'session-main',busy:false,last_turn_reason:'completed',pending_interaction:'none',updated_at:'2026-11-05T08:00:00Z'});
     if (path==='/api/v1/sessions/session-main/messages') return json({items:[{id:'m1',session_id:'session-main',role:'assistant',created_at:'2026-11-05T08:00:00Z',content:[{type:'text',text:JSON.stringify(result)}]}]});
-    if (path==='/api/v1/sessions/session-main/children') return json({items:[{id:'child-1',title:'目标策略',busy:false,last_turn_reason:'completed',updated_at:'2026-11-05T07:59:00Z'}]});
+    if (path==='/api/v1/sessions/session-main/children') return json({items:[]});
+    if (path==='/api/v1/sessions/session-main/transcript') return json({items:[{kind:'turn',steps:[{frames:[{kind:'tool',name:'AgentSwarm',input:{items:['目标策略师：设计分阶段路径','风险评审：检查约束','任务设计师：生成动态任务']},output:'<agent_swarm_result><summary>completed: 3</summary><subagent agent_id="agent-0" item="目标策略师：设计分阶段路径" outcome="completed">路径已完成</subagent><subagent agent_id="agent-1" item="风险评审：检查约束" outcome="completed">风险已完成</subagent><subagent agent_id="agent-2" item="任务设计师：生成动态任务" outcome="completed">任务已完成</subagent></agent_swarm_result>'}]}]}]});
     throw Error(`unexpected ${path}`);
   };
   try {
@@ -35,7 +36,8 @@ test('starts a real swarm session and maps child sessions into Along agents',asy
     const response=await agent.startGoal({requestId:'along-goal-health-test',goal:{domain:'health',title:'运动',target:120},snapshot:{},message:'做一个计划',history:[]});
     assert.equal(response.run.runtime,'kimi-code-swarm');
     assert.equal(response.run.status,'done');
-    assert.equal(response.run.agents[0].name,'目标策略');
+    assert.equal(response.run.agents.length,3);
+    assert.equal(response.run.agents[0].name,'目标策略师');
     assert.equal(response.run.result.layout.title,layout.title);
     const profile=calls.find(call=>call.path.endsWith('/profile'));
     assert.equal(profile.body.agent_config.swarm_mode,true);
