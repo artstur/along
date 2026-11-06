@@ -23,8 +23,3 @@ export async function saveNativeConnection(config) {
   if (!window.AlongAgentBridge?.connection) return;
   await window.AlongAgentBridge.connection('save', config);
 }
-
-export async function clearNativeConnection() {
-  if (!window.AlongAgentBridge?.connection) return;
-  await window.AlongAgentBridge.connection('clear');
-}

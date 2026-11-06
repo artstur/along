@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {startExperiment, routeHealthEvent, acceptAgentSuggestion, agentRequestPayload, ORIGINAL_TASK} from '../web/loop.mjs';
-import {initialState, addGoal} from '../web/health.mjs';
+import {initialState} from '../web/health.mjs';
 
 test('35-minute workout reroutes 75 of 120 to exactly 10 remaining',()=>{
   const before=startExperiment();
@@ -32,7 +32,7 @@ test('agent suggestion cannot alter Along arithmetic',()=>{
 });
 
 test('experiment keeps a restorable copy of the previous goals',()=>{
-  const previous=addGoal(initialState(),'weight',2);
+  const previous={...initialState(),goals:[{id:'previous-goal',type:'workout',target:60}]};
   const experiment=startExperiment(previous);
   assert.equal(experiment.goals.length,1);
   assert.equal(experiment.loop.previousState.goals.length,1);

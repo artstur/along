@@ -22,7 +22,7 @@
 
 ## 3. 怎样算改完
 
-- 跑 `npm run check`，这是 CI 用的检查（语法检查加全部测试）。`npm test` 只跑 `test/engine.test.mjs`，不能替代它。
+- 跑 `npm run check`，这是 CI 用的检查（语法检查加全部测试）。`npm test` 只跑全部测试，不能替代它。
 - `check` 按目录匹配：`web/`、`host/` 下的 `.mjs` 自动做语法检查，`test/*.test.mjs` 自动运行。新文件放对目录即可，不用改 `package.json`。
 - 推送 `main` 不会自动部署：GitHub Pages 只能手动触发；iPhone 要先 build，再在 Xcode 里重新安装。
 
@@ -30,7 +30,6 @@
 
 - Agent 有两种运行时，在 `web/super-agent.mjs` 里定义：`dsh-superagent` 和 `kimi-code-swarm`。用户没选过时，前端默认用 Kimi。Host 的路由在 `host/agent-host.mjs`。
 - Mac 本地状态存在 `~/.along/agent-host/`，环境变量见 `README.md`。
-- `host/sync-server.mjs` 是独立的实验代码，不在 App 的健康数据链路里。
 
 ## 5. 红线
 

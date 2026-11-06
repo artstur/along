@@ -70,26 +70,4 @@ struct HealthSummary {
          "wristTemperatureC": wristTemperatureC as Any? ?? NSNull(),
          "selectedTypes": selected.map(\.rawValue)]
     }
-
-    func syncPayload() -> [String: Any] {
-        var snapshot: [String: Any] = [:]
-        for metric in selected {
-            switch metric {
-            case .steps: snapshot["steps"] = steps as Any? ?? NSNull()
-            case .workout:
-                snapshot["workoutMinutes"] = workoutMinutes as Any? ?? NSNull()
-                snapshot["workoutCount"] = workoutCount as Any? ?? NSNull()
-            case .activeEnergy: snapshot["activeEnergyKcal"] = activeEnergyKcal as Any? ?? NSNull()
-            case .weight: snapshot["weightKg"] = weightKg as Any? ?? NSNull()
-            case .restingHeartRate: snapshot["restingHeartRate"] = restingHeartRate as Any? ?? NSNull()
-            case .wristTemperature: snapshot["wristTemperatureC"] = wristTemperatureC as Any? ?? NSNull()
-            case .sleep: snapshot["sleepMinutes"] = sleepMinutes as Any? ?? NSNull()
-            }
-        }
-        return ["schema": 1,
-                "source": "healthkit",
-                "selectedTypes": selected.map(\.rawValue),
-                "capturedAt": ISO8601DateFormatter().string(from: capturedAt),
-                "snapshot": snapshot]
-    }
 }

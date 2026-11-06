@@ -6,17 +6,13 @@
   "description": "A mobile-first goal workspace with adaptive tasks.",
   "scripts": {
     "dev": "./node_modules/node/bin/node host/server.mjs",
-    "sync-server": "./node_modules/node/bin/node host/sync-server.mjs",
     "agent-host": "./node_modules/node/bin/node host/agent-host.mjs",
     "build": "node tools/build.mjs",
-    "test": "node --test test/engine.test.mjs",
+    "test": "node --test test/*.test.mjs",
     "check": "for f in web/*.mjs web/sw.js host/*.mjs tools/build.mjs; do node --check \"$f\" || exit 1; done && node --test test/*.test.mjs"
   },
   "engines": {
     "node": ">=22.19"
-  },
-  "dependencies": {
-    "@deepseek-ai/dsh-sdk-client": "0.2.1-rc.3"
   },
   "devDependencies": {
     "node": "22.23.4"

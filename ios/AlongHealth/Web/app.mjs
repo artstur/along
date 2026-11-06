@@ -21,7 +21,6 @@ let previousGoalBeforeDraft = null;
 let selectedTaskId = null;
 let running = false;
 let agentBusy = false;
-let activeAgentRun = null;
 let agentConfig = readStored(AGENT_KEY, {});
 let agentRuntime = safeAgentRuntime(localStorage.getItem(AGENT_RUNTIME_KEY) || KIMI_RUNTIME);
 let agentConnection = {status:agentConfig.token?'checking':'unconfigured',error:''};
@@ -362,15 +361,6 @@ function agentPreview(item,index,goal,domain) {
 }
 function agentMessage(item,index,goal,domain) {
   return `<div class="agent-message ${item.role}"><p>${esc(item.text)}</p>${agentPreview(item,index,goal,domain)}</div>`;
-}
-function agentThinking(run) {
-  return `<div class="agent-message assistant pending" data-agent-run="${esc(run.id)}" role="status"><div class="agent-thinking"><span aria-hidden="true"><i></i><i></i><i></i></span><p>${esc(run.phase)}</p></div></div>`;
-}
-function updateAgentRunPhase(id,phase) {
-  if (activeAgentRun?.id !== id) return;
-  activeAgentRun={...activeAgentRun,phase};
-  const text=app.querySelector(`[data-agent-run="${id}"] .agent-thinking p`);
-  if (text) text.textContent=phase;
 }
 function agentPending(id) {
   return `<div class="agent-message assistant pending" data-agent-run="${esc(id)}" role="status"><div class="agent-thinking"><span aria-hidden="true"><i></i><i></i><i></i></span><p>正在连接 ${esc(runtimeMeta().full)}…</p></div></div>`;

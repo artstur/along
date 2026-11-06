@@ -209,16 +209,6 @@ enum AlongConnectionStore {
         return clean
     }
 
-    static func clear() {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-        ]
-        SecItemDelete(query as CFDictionary)
-        UserDefaults.standard.removeObject(forKey: legacyKey)
-    }
-
 #if DEBUG
     static func bootstrapFromEnvironment() {
         guard let json = ProcessInfo.processInfo.environment["ALONG_CONNECTION"],
@@ -250,7 +240,7 @@ enum AlongConnectionStore {
 
 struct AlongWebView: UIViewRepresentable {
     @ObservedObject var bridge: AlongBridgeModel
-    private let site = URL(string: "along://app/index.html?build=20")!
+    private let site = URL(string: "along://app/index.html?build=21")!
 
     func makeCoordinator() -> Coordinator { Coordinator(bridge: bridge) }
 
@@ -400,9 +390,6 @@ struct AlongWebView: UIViewRepresentable {
                 guard let value = input["value"] as? [String: Any],
                       let saved = AlongConnectionStore.save(value) else { throw AgentBridgeError.invalidConfiguration }
                 return saved
-            case "clear":
-                AlongConnectionStore.clear()
-                return [:]
             default: throw AgentBridgeError.invalidConfiguration
             }
         }
@@ -425,7 +412,7 @@ struct AlongWebView: UIViewRepresentable {
                   let fingerprint = input["fingerprint"] as? String,
                   fingerprint.count == 64, fingerprint.allSatisfy(\.isHexDigit),
                   let path = input["path"] as? String,
-                  ["/pair", "/connection/status", "/goal/chat", "/goal/event", "/super-agent/tasks", "/super-agent/tasks/status",
+                  ["/pair", "/connection/status", "/goal/event", "/super-agent/tasks", "/super-agent/tasks/status",
                    "/super-agent/goals", "/super-agent/goals/status"].contains(path),
                   let body = input["body"] as? [String: Any],
                   let url = URL(string: base + path) else { throw AgentBridgeError.invalidConfiguration }
