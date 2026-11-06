@@ -1,4 +1,4 @@
-# Along iPhone 薄壳
+# Along for iPhone
 
 这是一层原生 HealthKit 连接页，承载现有 Along 网页。只有人在 iPhone 上选择数据类型、看过摘要并确认后，才会把所选摘要导入这台手机上的 Along 页面。
 

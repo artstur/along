@@ -1,42 +1,147 @@
-# Along · 目标工作台 Demo
+<p align="center">
+  <img src="web/app-icon.png" width="96" alt="Along">
+</p>
 
-手机优先的目标工作台：顶部下拉切换健康、理财示例与用户自定义目标；首页突出目标进度和动态任务，连接来源只显示与当前目标相关的状态。
+<h1 align="center">Along</h1>
 
-在线体验：[artstur.github.io/Personality-Demo](https://artstur.github.io/Personality-Demo/)（GitHub Pages）。
+<p align="center">
+  <b>你的目标，陪你一步步实现</b><br>
+  从目标到行动，Along 帮你分析拆解、持续追踪，并随着进展实时调整方向，直到达成目标。
+</p>
 
-## 当前能体验什么
+<p align="center">
+  <a href="https://artstur.github.io/Personality-Demo/"><img src="https://img.shields.io/badge/demo-在线体验-2ea44f" alt="Live demo"></a>
+  <img src="https://img.shields.io/badge/node-%3E%3D22.19-339933?logo=node.js&logoColor=white" alt="Node >= 22.19">
+  <img src="https://img.shields.io/badge/platform-iPhone%20%7C%20Web-lightgrey?logo=apple" alt="iPhone | Web">
+  <img src="https://img.shields.io/badge/agents-DSH%20%7C%20Kimi%20Swarm-6f42c1" alt="DSH | Kimi Swarm">
+  <img src="https://img.shields.io/badge/build-no%20bundler-informational" alt="No bundler">
+</p>
 
-- 健康示例是「本周累计运动 120 分钟」。在 [iPhone 原生薄壳](ios/README.md)连接 Apple Health 后，按用户选择的摘要计算进度和下一步；连接页支持一键选择全部可读指标，已保存的选项再次打开时保持开启。普通网页可主动选择演示健康数据。
-- 理财示例是「三个月存下 ¥10,000 应急金」。点击「体验连接」后才出现 ¥3,200 的演示余额；模拟新增 ¥800 后，进度与任务文字随之更新。它没有接入蚂蚁财富或任何真实理财账户，不读取账户，也不转账或交易。
-- 下拉选择「＋ 定义新目标」，即可用自然语言告诉 Along 期限、偏好和约束。目标页可在 `DSH Agents` 和 `Kimi Swarm` 之间切换；两者的运行记录相互隔离。移动端实时展示拆解、分工、执行与综合结果。最终目标空间仍受白名单约束，用户点「采用」后才更新首页。iPhone 需要和运行 Along Agent Host 的 Mac 在同一 Wi-Fi。
-- 动态任务卡片可点击进入真实 DSH Super Agent 协作视图。点击会通过已配对的 Mac Host 进入独立 `superagent` Profile 的 Along Source，形成 Trigger → Eval → Ticket → Assignment；页面轮询 DSH 的持久化状态，展示 Main Session、Worker Session、Report 与 Mandate，不再用本地计时器模拟进度。
-- HealthKit 记录在 App 打开、回到前台、收到前台 HealthKit 更新通知时重新读取；页面可见期间还每 60 秒兜底检查。小变化安静处理；显著的健身时长变化形成待确认的任务提案。当前没有后台实时同步，也不自动完成运动。
-- 原有「目标变化实验」保留在健康目标页底部：固定 75＋35 分钟场景展示 Along 计算、路由判断与 Along 建议；轻微或无关变化保持安静。
-- 页面状态保存在当前浏览器的 `localStorage`。iPhone 确认导入后，所选健康摘要保存在 App 内 WKWebView 的本地页面数据中；旧健康目标数据也会保留，不依赖 Mac 同步服务。
+<p align="center">
+  <a href="#快速开始">快速开始</a> ·
+  <a href="#它是怎么工作的">工作原理</a> ·
+  <a href="#连接-agent">连接 Agent</a> ·
+  <a href="ios/README.md">iPhone App</a> ·
+  <a href="#开发与发布">开发与发布</a>
+</p>
 
-## 运行与构建
+---
 
-先运行 `npm install`。开发服务使用项目安装的 Node 22.23.4。DSH 路径需要本机 DSH Super Agent 已启动并加载 Along Source；Kimi 路径需要 Kimi Code 2.5.0 或更新版本、已登录账号和本机 Web Server。
+## 为什么是 Along
 
-```sh
-npm run dev
-npm run check
-npm run build
+大多数目标写下来就静止了：「本周运动 120 分钟」挂在那里，你得自己算还差多少、今天该做什么、计划被打乱后怎么补。
+
+Along 把一个目标拆成三样东西，并让它们保持联动：
+
+| | 是什么 | 例子 |
+| --- | --- | --- |
+| **目标** | 你想达成的结果 | 本周累计运动 120 分钟 |
+| **来源** | 与这个目标有关的真实数据 | Apple Health 的本周健身记录 |
+| **动态任务** | 根据进度算出来的下一步 | 「本周只差 35 分钟，找一个活动时段」 |
+
+来源一变，进度和任务就重新计算；变化足够显著时，Agent 才会提出新的安排，等你点「采用」后生效。小变化保持安静，不打扰你。
+
+## 能体验什么
+
+顶部下拉即可在目标之间切换。一屏只做一件事：看清进度，知道下一步。
+
+| 目标 | 数据从哪来 | 你能看到 |
+| --- | --- | --- |
+| **健康** · 本周累计运动 120 分钟 | iPhone App 连接 Apple Health；普通网页可选演示数据 | 按所选摘要计算进度与下一步，连接页可一键选择全部可读指标 |
+| **理财** · 三个月存下 ¥10,000 应急金 | 纯演示：点「体验连接」出现 ¥3,200 余额 | 「模拟 +¥800」后进度与任务文字随之更新 |
+| **＋ 定义新目标** | 你用自然语言描述期限、偏好和约束 | Agent 实时拆解、分工、执行与综合，结果经校验后由你采用 |
+
+此外还有两处值得一看：
+
+- **动态任务详情**：点任意任务卡片，进入真实的 DSH Super Agent 协作视图，看到 Trigger → Eval → Ticket → Assignment，以及 Main Session、Worker Session、Report 与 Mandate。进度来自 DSH 的持久化状态，不是本地计时器。
+- **目标变化实验**：健康目标页底部，固定 75 + 35 分钟场景，展示 Along 怎样计算、判断路由并给出建议；轻微或无关的变化保持安静。
+
+> [!NOTE]
+> 理财目标只用演示数据，没有接入蚂蚁财富或任何真实账户，不读取账户，也不转账或交易。
+
+## 它是怎么工作的
+
+```mermaid
+flowchart LR
+    A[Apple Health / 演示来源] --> B{有意义的变化?}
+    B -- 轻微或无关 --> Q[安静更新进度]
+    B -- 显著 --> C[待处理任务]
+    C --> D[Agent 生成提案<br/>DSH Agents / Kimi Swarm]
+    D --> E[严格校验<br/>JSON Schema + 白名单]
+    E --> F{用户点「采用」?}
+    F -- 是 --> G[更新目标空间]
+    F -- 否 --> Q
 ```
 
-Kimi 路径的 Mac 端准备：
+几条贯穿全局的约定：
+
+- **确定性的部分在本地算**。进度、剩余量、默认下一步都由前端直接计算，Mac 关机或断网时首页照样更新。
+- **生成式的部分交给 Agent**。新目标的拆解和显著变化后的重排，经由 Mac 上的 Agent Host 调用 DSH Super Agent 或 Kimi Code Swarm。
+- **Agent 的输出不会直接生效**。结果先过 `validateGoalReply` 与 `safeAdaptiveLayout`，绑定可信指标后再渲染，最后由你决定是否采用。
+
+## 快速开始
+
+### 只想看看
+
+直接打开 [在线体验](https://artstur.github.io/Personality-Demo/)。健康和理财示例都能在纯网页里用演示数据跑通。
+
+### 本地运行
+
+```sh
+npm install        # 会安装项目自带的 Node 22.23.4
+npm run dev        # http://localhost:4173，仅监听 127.0.0.1
+```
+
+没有打包器：`web/` 就是前端唯一源码，改完刷新即可。
+
+### 连接 Agent
+
+「定义新目标」和任务提案需要在 Mac 上运行 Along Agent Host。目标页可以在两种运行时之间切换，两者的运行记录相互隔离；没选过时默认用 Kimi。
+
+<details open>
+<summary><b>Kimi Swarm</b>：需要 Kimi Code 2.5.0 或更新版本</summary>
 
 ```sh
 curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash
-kimi
-# 在 Kimi Code 中输入 /login 完成登录，然后退出
-kimi web --no-open --port 58627
+kimi                                  # 输入 /login 完成登录后退出
+kimi web --no-open --port 58627       # 启动本机 Web Server
 npm run agent-host
 ```
 
-Along Host 只从 Mac 本机读取 `~/.kimi-code/server.token`，不会把 Kimi token 发给 iPhone 或写入运行结果。Kimi 未登录或 Web Server 未运行时，仅 `Kimi Swarm` 会显示不可用，`DSH Agents` 可继续使用。
+Agent Host 只从 Mac 本机读取 `~/.kimi-code/server.token`，不会把它发给 iPhone，也不会写进运行结果。Kimi 未登录或 Web Server 未运行时，只有 `Kimi Swarm` 显示不可用，`DSH Agents` 可继续使用。
 
-可选环境变量（都有默认值，一般无需设置）：
+</details>
+
+<details>
+<summary><b>DSH Agents</b>：需要本机 DSH Super Agent</summary>
+
+先启动 DSH Super Agent（默认 `http://127.0.0.1:3082`）并加载 Along Source，然后：
+
+```sh
+npm run agent-host
+```
+
+Super Agent 只监听 Along Source。GitHub 账号仅用于 Worker 的分支、提交和 PR 交付，默认不自动合并。
+
+</details>
+
+### 和 iPhone 配对
+
+`npm run agent-host` 启动后，终端会打印三样东西：
+
+```text
+局域网 HTTPS 地址     https://192.168.x.x:4176
+证书 SHA-256 指纹     AB:CD:...
+一次性配对码          15 分钟内有效
+```
+
+在 iPhone App 的目标编辑页填入这三项即可开始问答，只需首次填写；之后正常重启、升级或重新安装 App 都会自动恢复。iPhone 需要和 Mac 在同一 Wi-Fi。
+
+iPhone App 的签名、安装与 HealthKit 读取口径见 [ios/README.md](ios/README.md)。
+
+## 配置
+
+所有变量都有默认值，一般无需设置。Mac 本地状态保存在 `~/.along/agent-host/`。
 
 | 变量 | 默认值 | 作用 |
 | --- | --- | --- |
@@ -50,22 +155,79 @@ Along Host 只从 Mac 本机读取 `~/.kimi-code/server.token`，不会把 Kimi 
 | `ALONG_KIMI_WORKSPACE` | 当前目录 | Kimi 会话工作目录 |
 | `CODEX_BIN` | `~/.local/bin/codex`，否则 PATH 中的 `codex` | 健康变化任务提案使用的 Codex |
 
-本地地址 `http://localhost:4173`；静态文件在 `dist/`。
+## 隐私与安全
 
-后续更新：GitHub Pages 工作流 `.github/workflows/pages.yml` 只支持手动触发（GitHub Actions → Deploy GitHub Pages → Run workflow，或 `gh workflow run pages.yml --ref main`），推送 `main` 不会自动部署；工作流依次运行 `npm ci`、`npm run check`、`npm run build` 并发布 `dist/`。iPhone 使用随 App 打包的 `ios/AlongHealth/Web`：`npm run build` 会同时写入 `dist/` 和该目录，之后在 Xcode 重新构建并安装。
+Along 处理的是健康这类敏感数据，所以边界写得很死：
 
-`npm run dev` 的本地服务只监听 `127.0.0.1`，`POST /api/health-event` 仍用于原有模拟实验。GitHub Pages 是静态站，无法常驻生成进程；目标共创仍通过同一 Wi-Fi 的 Mac 上的 Along 服务完成。
+| 原则 | 具体做法 |
+| --- | --- |
+| 只发汇总，不发原始样本 | 目标问答只发送当前目标与已选健身时长的汇总值；自定义目标只发送你主动输入的文本 |
+| 数据留在手机 | 健康摘要保存在 App 内 WKWebView 的本地页面数据中，不依赖 Mac 同步服务 |
+| Token 留在 Mac | Kimi token 和配对 token 不发给 iPhone，也不写进运行结果 |
+| 只在局域网 | Agent Host 默认只绑定 Mac 的 Wi-Fi 地址，没有公网通道，退出终端即停止 |
+| 证书钉扎 | 证书由 Mac 本地生成，iPhone 原生网络层校验指纹后才传输，连接后使用随机令牌 |
+| 你说了算 | Agent 结果需通过校验，并由你点「采用」后才改变目标空间 |
 
-## 同一 Wi-Fi 的 Along 服务
+连接凭证的哈希保存在 Mac 的 `~/.along/agent-host/pairing.json`，连接信息同时保存在 iPhone Keychain。
 
-在 Mac 本项目目录运行 `npm run agent-host`。终端显示局域网 HTTPS 地址、SHA-256 证书指纹和 15 分钟有效的一次性配对码。iPhone App 的目标编辑页只需首次填入这三项，随后即可问答；正常重启或升级后会自动恢复。Along 服务默认只绑定 Mac 的 Wi-Fi 地址，退出终端即停止服务；没有公网通道。证书由 Mac 本地生成，iPhone 原生网络层校验指纹后才传输，连接后请求使用随机令牌。
+## 项目结构
 
-健康目标问答只发送当前目标与已选健身时长的汇总值，不发送原始 HealthKit 记录；自定义目标只发送用户主动输入的目标文本。新目标的拆解、分工、执行和综合全部经由官方 Super Agent Router、Main Session、Ticket、Worker 与真实子 Agent；动态任务点击也使用同一套 DSH 运行链路。Along 对最终结果执行严格 JSON Schema 和客户端二次验证，绑定可信指标后再渲染；用户确认后才改变目标空间。健康变化的流程是 Apple Health 来源 → 有意义变化筛选 → 待处理任务 → Along 生成提案 → 用户确认。Super Agent 只监听 Along Source，GitHub 账号仅用于 Worker 的分支、提交和 PR 交付，默认不自动合并。
+```text
+.
+├── web/                                   # 前端唯一源码（保持平铺）
+│   ├── index.html  app.mjs  style.css     # 页面与交互
+│   ├── sw.js  manifest.webmanifest        # 离线缓存与 PWA
+│   ├── engine.mjs  health.mjs  loop.mjs   # 目标进度、健康摘要与变化循环
+│   ├── workspace.mjs  adaptive-ui.mjs     # 目标空间与自适应布局校验
+│   ├── goal-agent-core.mjs                # Agent 回复解析、路由与校验
+│   └── super-agent.mjs  agent-client.mjs  # 运行时定义与前端 Agent 客户端
+├── host/                                  # 在 Mac 上运行的服务
+│   ├── agent-host.mjs                     # HTTPS Agent Host
+│   ├── kimi-code-agent.mjs  dsh-agent.mjs  codex-agent.mjs   # 各 Agent 运行时适配
+│   ├── server.mjs                         # npm run dev 本地服务
+│   ├── sync-server.mjs                    # 独立实验代码，不在健康数据链路里
+│   └── schemas/                           # Agent 输出的 JSON Schema
+├── test/                                  # *.test.mjs，npm run check 自动运行
+├── tools/                                 # build.mjs 与图标脚本
+└── ios/                                   # iPhone App（HealthKit + WKWebView）
+```
 
-Mac 关闭或网络断开时，首页的确定性进度仍可更新，Along 问答和任务提案会显示不可用。连接凭证的哈希值保存在 Mac 本机 `~/.along/agent-host/pairing.json`，连接信息同时保存在 iPhone Keychain；正常重启、升级或重新安装 App 后无需重新输入，页面也不提供一键清除入口。
+`host/` 会从 `../web/` 引用共享校验逻辑，所以这些共享文件必须同时能在浏览器和 Node 里运行。
 
-## iPhone 原生薄壳
+## 开发与发布
 
-原生项目在 [ios/AlongHealth.xcodeproj](ios/AlongHealth.xcodeproj)，运行步骤与数据口径见 [ios/README.md](ios/README.md)。当前导入流程不需要 `cloudflared`、本机同步服务或配对码。旧的 `sync-server.mjs` 留作独立实验代码，不参与 iPhone App 的健康数据流程。
+```sh
+npm run check   # CI 同款：语法检查 + 全部测试
+npm run build   # 产出 dist/（GitHub Pages）与 ios/AlongHealth/Web/（App 内置页面）
+```
 
-首次仍需用户逐项选择、预览并确认。之后 App 在前台观察已选择的类型，回到前台也会刷新摘要。HealthKit 前台通知只表明数据发生变化；Along 会重新查询，并不会保证秒级同步。后台交付尚未启用。
+> [!IMPORTANT]
+> `npm test` 只跑 `test/engine.test.mjs`，不能替代 `npm run check`。`check` 按目录匹配：`web/`、`host/` 下的 `.mjs` 自动做语法检查，`test/*.test.mjs` 自动运行，新文件放对目录即可。
+
+**一份源码，两份产物。** `tools/build.mjs` 按白名单把 `web/` 里的文件复制到 `dist/` 和 `ios/AlongHealth/Web/`，不要手改这两个目录。新增前端文件时，放进 `web/`，并同时登记到 `tools/build.mjs` 的 `files` 和 `web/sw.js` 的 `FILES`。
+
+**用户可见的改动要让旧缓存失效**，以下版本号一起提高，漏一处手机上就可能还是旧页面：
+
+- `web/index.html` 的 `?v=`
+- `web/sw.js` 的 `CACHE`
+- `ios/AlongHealth/Sources/AlongShellView.swift` 的 `build=`
+- 需要重新安装 App 时，再提高 `ios/AlongHealth/Info.plist` 的 `CFBundleVersion`
+
+**推送 `main` 不会自动部署：**
+
+- GitHub Pages：手动触发工作流（GitHub Actions → Deploy GitHub Pages → Run workflow，或 `gh workflow run pages.yml --ref main`），依次执行 `npm ci`、`npm run check`、`npm run build` 并发布 `dist/`。
+- iPhone：先 `npm run build`，再在 Xcode 里重新构建并安装。
+
+## 当前边界
+
+坦白说，这还是一个 Demo，下面这些是有意为之或尚未完成的：
+
+- **没有后台同步**。HealthKit 在 App 打开、回到前台、收到前台更新通知时重新读取，页面可见期间每 60 秒兜底检查；不保证秒级，也不会自动标记运动完成。
+- **Agent 依赖 Mac**。Mac 关闭或网络断开时，首页确定性进度照常更新，Agent 问答和任务提案显示不可用；GitHub Pages 是静态站，无法常驻生成进程。
+- **理财只是演示**。不接真实账户，不转账，不交易。
+- **个人团队签名**。Xcode 个人团队的配置文件通常 7 天后到期，需要重新构建安装。
+
+## 相关文档
+
+- [ios/README.md](ios/README.md)：iPhone App 的运行步骤、HealthKit 读取范围与数据口径
+- [AGENTS.md](AGENTS.md)：参与开发前必读的项目约定与红线
