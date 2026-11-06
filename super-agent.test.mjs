@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createFailedGoalSuperAgentRun, createFailedSuperAgentRun, createGoalSuperAgentRequest, createPendingGoalSuperAgentRun,
-  createPendingSuperAgentRun, createSuperAgentRequest, safeGoalSuperAgentRun, safeSuperAgentRun} from './super-agent.mjs';
+  createPendingSuperAgentRun, createSuperAgentRequest, safeGoalSuperAgentRun, safeSuperAgentRun, KIMI_RUNTIME, safeAgentRuntime} from './super-agent.mjs';
 
 const task={id:'walk-20',when:'今晚',title:'完成 20 分钟快走',detail:'在晚饭后完成一次快走。',state:'planned'};
 
@@ -27,6 +27,15 @@ test('records connection failures and rejects legacy simulated runs',()=>{
   assert.equal(safeSuperAgentRun({version:1,runtime:'local'}),null);
 });
 
+test('keeps Kimi runs separate while falling back unknown runtimes to DSH',()=>{
+  const request=createSuperAgentRequest({task,domain:'health'});
+  const kimi=createPendingSuperAgentRun(request,1000,KIMI_RUNTIME);
+  assert.equal(kimi.runtime,KIMI_RUNTIME);
+  assert.match(kimi.statusLabel,/Kimi/);
+  assert.equal(safeSuperAgentRun(kimi),kimi);
+  assert.equal(safeAgentRuntime('unknown'),'dsh-superagent');
+});
+
 test('creates and validates a real full-goal orchestration request',()=>{
   const request=createGoalSuperAgentRequest({domain:'custom',goal:{title:'定义目标',target:null},message:'半年完成一部长篇小说',
     requestId:'along-goal-custom-novel',history:[{role:'user',text:'我只有周末有空'}]});
@@ -39,4 +48,5 @@ test('creates and validates a real full-goal orchestration request',()=>{
   assert.equal(pending.progress,2);
   assert.equal(safeGoalSuperAgentRun({...pending,actual:true,agents:[],events:[]}).requestId,request.requestId);
   assert.equal(createFailedGoalSuperAgentRun(request,'offline').status,'blocked');
+  assert.equal(createFailedGoalSuperAgentRun(request,'A TLS error caused the secure connection to fail.').statusLabel,'Mac 安全连接失败');
 });

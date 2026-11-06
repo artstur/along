@@ -8,7 +8,7 @@
 
 - 健康示例是「本周累计运动 120 分钟」。在 [iPhone 原生薄壳](ios/README.md)连接 Apple Health 后，按用户选择的摘要计算进度和下一步；连接页支持一键选择全部可读指标，已保存的选项再次打开时保持开启。普通网页可主动选择演示健康数据。
 - 理财示例是「三个月存下 ¥10,000 应急金」。点击「体验连接」后才出现 ¥3,200 的演示余额；模拟新增 ¥800 后，进度与任务文字随之更新。它没有接入蚂蚁财富或任何真实理财账户，不读取账户，也不转账或交易。
-- 下拉选择「＋ 定义新目标」，即可用自然语言告诉 Along 期限、偏好和约束。输入会进入真实 DSH Super Agent 的 Source → Main Session → Ticket → Worker → 子 Agent 链路；移动端实时展示拆解、分工、执行与综合结果。最终目标空间仍受白名单约束，用户点「采用」后才更新首页。iPhone 需要和运行 Along 与 DSH 服务的 Mac 在同一 Wi-Fi。
+- 下拉选择「＋ 定义新目标」，即可用自然语言告诉 Along 期限、偏好和约束。目标页可在 `DSH Agents` 和 `Kimi Swarm` 之间切换；两者的运行记录相互隔离。移动端实时展示拆解、分工、执行与综合结果。最终目标空间仍受白名单约束，用户点「采用」后才更新首页。iPhone 需要和运行 Along Agent Host 的 Mac 在同一 Wi-Fi。
 - 动态任务卡片可点击进入真实 DSH Super Agent 协作视图。点击会通过已配对的 Mac Host 进入独立 `superagent` Profile 的 Along Source，形成 Trigger → Eval → Ticket → Assignment；页面轮询 DSH 的持久化状态，展示 Main Session、Worker Session、Report 与 Mandate，不再用本地计时器模拟进度。
 - HealthKit 记录在 App 打开、回到前台、收到前台 HealthKit 更新通知时重新读取；页面可见期间还每 60 秒兜底检查。小变化安静处理；显著的健身时长变化形成待确认的任务提案。当前没有后台实时同步，也不自动完成运动。
 - 原有「目标变化实验」保留在健康目标页底部：固定 75＋35 分钟场景展示 Along 计算、路由判断与 Along 建议；轻微或无关变化保持安静。
@@ -16,13 +16,25 @@
 
 ## 运行与构建
 
-先运行 `npm install`。开发服务使用项目安装的 Node 22.23.4；目标共创和动态任务需要本机 DSH Super Agent 已启动，并加载 Along Source。
+先运行 `npm install`。开发服务使用项目安装的 Node 22.23.4。DSH 路径需要本机 DSH Super Agent 已启动并加载 Along Source；Kimi 路径需要 Kimi Code 2.5.0 或更新版本、已登录账号和本机 Web Server。
 
 ```sh
 npm run dev
 npm run check
 npm run build
 ```
+
+Kimi 路径的 Mac 端准备：
+
+```sh
+curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash
+kimi
+# 在 Kimi Code 中输入 /login 完成登录，然后退出
+kimi web --no-open --port 58627
+npm run agent-host
+```
+
+Along Host 只从 Mac 本机读取 `~/.kimi-code/server.token`，不会把 Kimi token 发给 iPhone 或写入运行结果。Kimi 未登录或 Web Server 未运行时，仅 `Kimi Swarm` 会显示不可用，`DSH Agents` 可继续使用。
 
 本地地址 `http://localhost:4173`；静态文件在 `dist/`。
 

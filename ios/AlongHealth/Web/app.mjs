@@ -6,7 +6,7 @@ import {AGENT_KEY, GOALS_KEY, CONVERSATIONS_KEY, readStored, agentCall, loadNati
 import {ADAPTIVE_LAYOUTS_KEY, customGoalEntries, findInitialCustomGoalCandidate, goalDomain, isCustomGoalKey, safeAdaptiveLayout, validateAdaptiveLayout} from './adaptive-ui.mjs';
 import {GOAL_SUPER_AGENT_RUNS_KEY, SUPER_AGENT_RUNS_KEY, createFailedGoalSuperAgentRun, createFailedSuperAgentRun,
   createGoalSuperAgentRequest, createPendingGoalSuperAgentRun, createPendingSuperAgentRun, createSuperAgentRequest,
-  safeGoalSuperAgentRun, safeSuperAgentRun} from './super-agent.mjs';
+  safeGoalSuperAgentRun, safeSuperAgentRun, AGENT_RUNTIME_KEY, DSH_RUNTIME, KIMI_RUNTIME, agentRuntimeLabel, safeAgentRuntime} from './super-agent.mjs';
 const TICKET_KEY = 'along.goal-ticket.v1';
 
 const app = document.querySelector('#app');
@@ -23,6 +23,8 @@ let running = false;
 let agentBusy = false;
 let activeAgentRun = null;
 let agentConfig = readStored(AGENT_KEY, {});
+let agentRuntime = safeAgentRuntime(localStorage.getItem(AGENT_RUNTIME_KEY) || KIMI_RUNTIME);
+let agentConnection = {status:agentConfig.token?'checking':'unconfigured',error:''};
 let goalCustom = readStored(GOALS_KEY, {health:null, finance:null, custom:null});
 let conversations = readStored(CONVERSATIONS_KEY, {health:[], finance:[], custom:[]});
 const storedLayouts = readStored(ADAPTIVE_LAYOUTS_KEY, {health:null, finance:null, custom:null});
@@ -49,6 +51,32 @@ function notice(message) {
   toast.classList.add('show');
   setTimeout(() => toast.classList.remove('show'), 3200);
 }
+async function refreshAgentConnection() {
+  if (!agentConfig.token) {agentConnection={status:'unconfigured',error:''};return;}
+  agentConnection={status:'checking',error:''};
+  if (screen==='agent') renderAgentUpdate();
+  try {
+    const status=await agentCall(agentConfig,'/connection/status',{runtime:agentRuntime});
+    if (!status?.along || !status?.ready || status.runtime!==agentRuntime) throw Error(`${agentRuntimeLabel(agentRuntime)} 尚未就绪`);
+    agentConnection={status:'ready',error:''};
+    const failedRun=currentGoalSuperAgentRun(activeGoal);
+    if (failedRun?.status==='blocked' && failedRun.actual!==true) {
+      const key=goalRunKey(activeGoal);
+      const {[key]:_discarded,...remainingRuns}=goalSuperAgentRuns;
+      goalSuperAgentRuns=remainingRuns;
+      saveGoalSuperAgentRuns();
+    }
+    const history=conversations[activeGoal]||[];
+    const cleaned=history.filter(item=>!(item.role==='assistant' && /^这次没有完成：目标输入已迁移到 DSH Super Agent/.test(item.text)));
+    if (cleaned.length!==history.length) {
+      conversations[activeGoal]=cleaned;
+      saveConversations();
+    }
+  } catch(error) {
+    agentConnection={status:'error',error:error.message||'连接检查失败'};
+  }
+  if (screen==='agent') renderAgentUpdate();
+}
 function saveHealth(next) {
   state = ensureHealthGoal(next);
   localStorage.setItem(KEY, JSON.stringify(state));
@@ -72,13 +100,18 @@ function backButton(action,label) {
 }
 function customView(goalKey=activeGoal) {
   return {
-    id:'custom',category:'自定义目标',title:goalCustom[goalKey]?.title || '定义一个真正属于你的目标',measure:'—',measureUnit:'',percent:0,
+    id:'custom',category:'个人目标',title:goalCustom[goalKey]?.title || '定义一个真正属于你的目标',measure:'—',measureUnit:'',percent:0,
     progressText:'先把想实现的改变告诉 Along',note:'Along 会整理目标、待确认信息和动态任务；采用后才更新首页。',
     primary:{title:'从一句话开始',detail:'可以包含期限、偏好、限制、已知条件和你不希望发生的事情。',status:'待定义'},secondary:[],connection:null,
   };
 }
 const taskStateLabel={temporary:'进行中',planned:'已规划',deferred:'到时生成'};
 const agentStateLabel={queued:'等待',working:'工作中',done:'已完成',blocked:'需处理'};
+function runtimeMeta(runtime=agentRuntime) {
+  return safeAgentRuntime(runtime)===KIMI_RUNTIME
+    ? {short:'Kimi Swarm',full:'Kimi Code Agent Swarm',main:'Kimi Main Session',worker:'Subagents',description:'Main Session 启动真实 Swarm，并行子 Agent 拆解、复核并生成动态任务。'}
+    : {short:'DSH Agents',full:'DSH Super Agent',main:'DSH Main Session',worker:'Worker',description:'Main Session 接单，Worker 与真实子 Agent 拆解、分工并生成动态任务。'};
+}
 function currentTaskRecords() {
   const layout=goalLayouts[activeGoal];
   if (layout) return layout.tasks;
@@ -93,15 +126,15 @@ function currentTaskRecords() {
   return [normalize(model.primary,'primary',0),...model.secondary.map((task,index)=>normalize(task,`follow-up-${index}`,index+1))];
 }
 function saveSuperAgentRuns() { localStorage.setItem(SUPER_AGENT_RUNS_KEY,JSON.stringify(superAgentRuns)); }
-function runKey(taskId) { return `${activeGoal}:${taskId}`; }
+function runKey(taskId,runtime=agentRuntime) { return `${activeGoal}:${runtime}:${taskId}`; }
 function selectedTask() { return currentTaskRecords().find(task=>task.id===selectedTaskId) || null; }
 const superAgentRequests=new Set();
-function taskRequest(task) { return createSuperAgentRequest({task,domain:goalDomain(activeGoal),goal:currentGoal(),context:currentSummary()}); }
+function taskRequest(task) { return {...createSuperAgentRequest({task,domain:goalDomain(activeGoal),goal:currentGoal(),context:currentSummary()}),runtime:agentRuntime}; }
 function currentSuperAgentRun(task) {
   const key=runKey(task.id);
-  const saved=safeSuperAgentRun(superAgentRuns[key]);
+  const saved=safeSuperAgentRun(superAgentRuns[key]) || (agentRuntime===DSH_RUNTIME?safeSuperAgentRun(superAgentRuns[`${activeGoal}:${task.id}`]):null);
   if (saved) return saved;
-  const created=createPendingSuperAgentRun(taskRequest(task));
+  const created=createPendingSuperAgentRun(taskRequest(task),Date.now(),agentRuntime);
   superAgentRuns={...superAgentRuns,[key]:created};
   saveSuperAgentRuns();
   return created;
@@ -113,9 +146,9 @@ async function submitSuperAgentTask(task) {
   try {
     if (!agentConfig.token) throw Error('请先在“编辑目标”中连接这台 Mac');
     const response=await agentCall(agentConfig,'/super-agent/tasks',request);
-    if (!response?.run?.actual) throw Error('Along 没有返回可用的运行记录');
+    if (!response?.run?.actual) throw Error(`${agentRuntimeLabel(agentRuntime)} 没有返回真实运行记录`);
     superAgentRuns={...superAgentRuns,[key]:response.run};
-  } catch(error) { superAgentRuns={...superAgentRuns,[key]:createFailedSuperAgentRun(request,error.message)}; }
+  } catch(error) { superAgentRuns={...superAgentRuns,[key]:createFailedSuperAgentRun(request,error.message,Date.now(),agentRuntime)}; }
   finally { superAgentRequests.delete(request.requestId);saveSuperAgentRuns();if (screen==='task'&&selectedTaskId===task.id) render(); }
 }
 async function refreshSuperAgentTask(task) {
@@ -123,23 +156,26 @@ async function refreshSuperAgentTask(task) {
   if (!agentConfig.token || superAgentRequests.has(request.requestId)) return;
   superAgentRequests.add(request.requestId);
   try {
-    const run=await agentCall(agentConfig,'/super-agent/tasks/status',{requestId:request.requestId});
+    const run=await agentCall(agentConfig,'/super-agent/tasks/status',{requestId:request.requestId,runtime:agentRuntime});
     if (run?.actual) {superAgentRuns={...superAgentRuns,[key]:run};saveSuperAgentRuns();if (screen==='task'&&selectedTaskId===task.id) render();}
   } catch(error) {
     const current=safeSuperAgentRun(superAgentRuns[key]);
-    if (!current?.actual) {superAgentRuns={...superAgentRuns,[key]:createFailedSuperAgentRun(request,error.message)};saveSuperAgentRuns();render();}
+    if (!current?.actual) {superAgentRuns={...superAgentRuns,[key]:createFailedSuperAgentRun(request,error.message,Date.now(),agentRuntime)};saveSuperAgentRuns();render();}
   } finally { superAgentRequests.delete(request.requestId); }
 }
 function saveGoalSuperAgentRuns() { localStorage.setItem(GOAL_SUPER_AGENT_RUNS_KEY,JSON.stringify(goalSuperAgentRuns)); }
-function currentGoalSuperAgentRun(goalKey=activeGoal) { return safeGoalSuperAgentRun(goalSuperAgentRuns[goalKey]); }
+function goalRunKey(goalKey=activeGoal,runtime=agentRuntime) { return `${goalKey}:${runtime}`; }
+function currentGoalSuperAgentRun(goalKey=activeGoal) {
+  return safeGoalSuperAgentRun(goalSuperAgentRuns[goalRunKey(goalKey)]) || (agentRuntime===DSH_RUNTIME?safeGoalSuperAgentRun(goalSuperAgentRuns[goalKey]):null);
+}
 const goalSuperAgentRequests=new Set();
 function saveGoalRun(goalKey,run) {
-  goalSuperAgentRuns={...goalSuperAgentRuns,[goalKey]:run};
+  goalSuperAgentRuns={...goalSuperAgentRuns,[goalRunKey(goalKey,run?.runtime||agentRuntime)]:run};
   saveGoalSuperAgentRuns();
 }
 function applyGoalRun(goalKey,value) {
   let run=safeGoalSuperAgentRun(value);
-  if (!run) throw Error('Along 没有返回可用的目标记录');
+  if (!run) throw Error(`${agentRuntimeLabel(agentRuntime)} 没有返回真实目标编排记录`);
   if (run.status==='done' && run.result && !run.applied) {
     const history=conversations[goalKey]||[];
     if (!history.some(item=>item.requestId===run.requestId)) {
@@ -165,15 +201,15 @@ function applyGoalRun(goalKey,value) {
   return run;
 }
 async function submitSuperAgentGoal(goalKey,message,history) {
-  const request=createGoalSuperAgentRequest({domain:goalDomain(goalKey),goal:currentGoal(),snapshot:currentSummary(),message,history});
-  saveGoalRun(goalKey,createPendingGoalSuperAgentRun(request));
+  const request={...createGoalSuperAgentRequest({domain:goalDomain(goalKey),goal:currentGoal(),snapshot:currentSummary(),message,history}),runtime:agentRuntime};
+  saveGoalRun(goalKey,createPendingGoalSuperAgentRun(request,Date.now(),agentRuntime));
   goalSuperAgentRequests.add(request.requestId);
   try {
     const response=await agentCall(agentConfig,'/super-agent/goals',request);
-    if (!response?.run?.actual) throw Error('Along 没有返回可用的目标记录');
+    if (!response?.run?.actual) throw Error(`${agentRuntimeLabel(agentRuntime)} 没有返回真实目标编排记录`);
     applyGoalRun(goalKey,response.run);
   } catch(error) {
-    saveGoalRun(goalKey,createFailedGoalSuperAgentRun(request,error.message));
+    saveGoalRun(goalKey,createFailedGoalSuperAgentRun(request,error.message,Date.now(),request.runtime));
     throw error;
   } finally { goalSuperAgentRequests.delete(request.requestId); }
 }
@@ -182,11 +218,12 @@ async function refreshSuperAgentGoal(goalKey=activeGoal) {
   if (!current?.actual || current.status!=='working' || goalSuperAgentRequests.has(current.requestId) || !agentConfig.token) return;
   goalSuperAgentRequests.add(current.requestId);
   try {
-    const run=await agentCall(agentConfig,'/super-agent/goals/status',{requestId:current.requestId});
+    const run=await agentCall(agentConfig,'/super-agent/goals/status',{requestId:current.requestId,runtime:current.runtime});
     applyGoalRun(goalKey,run);
-    if (screen==='agent'&&activeGoal===goalKey) render();
+    if (screen==='agent'&&activeGoal===goalKey) renderAgentUpdate();
+    else if (screen==='home'&&activeGoal===goalKey) render();
   } catch(error) {
-    if (!current.actual) saveGoalRun(goalKey,{...current,status:'blocked',statusLabel:'Along 状态读取失败',error:error.message});
+    if (!current.actual) saveGoalRun(goalKey,{...current,status:'blocked',statusLabel:`${agentRuntimeLabel(current.runtime)} 状态读取失败`,error:error.message});
   } finally { goalSuperAgentRequests.delete(current.requestId); }
 }
 function trustedMetric(source) {
@@ -224,11 +261,14 @@ function adaptiveConnectionSection(layout) {
   if (!layout.connections?.length) return '';
   return `<section class="connection-section" aria-label="Along 推荐的连接"><div class="section-heading"><h2>连接</h2><span>在规划中发现的可用能力</span></div>${layout.connections.map(connection=>`<div class="connection-card"><div class="connection-symbol" aria-hidden="true">${connection.id==='duolingo'?'D':'·'}</div><div class="connection-copy"><div class="connection-name"><strong>${esc(connection.name)}</strong><span class="source-tag">${connection.status==='recommended'?'推荐连接':'待确认'}</span></div><p>${esc(connection.reason)}</p></div><button class="agent-action connection-agent-action" data-action="connection-detail" data-connection-id="${esc(connection.id)}">查看</button></div>`).join('')}</section>`;
 }
+function goalListTitle(title) {
+  return /(日语|Japanese|N5|五十音)/i.test(title)?'日语学习':title;
+}
 function home() {
   const model = activeGoal === 'finance' ? financeView(finance, goalCustom.finance) : isCustomGoalKey(activeGoal) ? customView(activeGoal) : healthView(state, goalCustom.health);
   const layout=goalLayouts[activeGoal];
   const customOptions=customGoalEntries(goalCustom,goalLayouts)
-    .map(item=>`<option value="${esc(item.key)}" ${activeGoal===item.key?'selected':''}>${esc(item.title)}</option>`)
+    .map(item=>`<option value="${esc(item.key)}" ${activeGoal===item.key?'selected':''}>${esc(goalListTitle(item.title))}</option>`)
     .join('');
   const connection = model.connection;
   const sourceTime = activeGoal === 'health' && state.snapshot?.updatedAt && state.source === 'healthkit'
@@ -258,7 +298,8 @@ function home() {
   const recommendedConnectionContent=layout?adaptiveConnectionSection(layout):'';
   return `<div class="app-shell"><header class="topbar"><div class="topbar-inner">${brand()}</div></header>
     <main class="content ${layout?'adaptive-space':''}">
-      <div class="goal-switch"><label for="goal-select">当前目标</label><div class="select-wrap"><select id="goal-select" aria-label="切换目标"><option value="health" ${activeGoal === 'health' ? 'selected' : ''}>健康 · ${goalLayouts.health?'个性化计划':'每周运动'}</option><option value="finance" ${activeGoal === 'finance' ? 'selected' : ''}>理财 · ${goalLayouts.finance?'个性化计划':'应急储备'}</option>${customOptions}<option value="new-custom">＋ 新建目标</option></select><span aria-hidden="true">⌄</span></div></div>
+      <div class="goal-switch"><label for="goal-select">当前目标</label><div class="goal-switch-actions"><div class="select-wrap"><select id="goal-select" aria-label="切换目标"><option value="health" ${activeGoal === 'health' ? 'selected' : ''}>健康 · ${goalLayouts.health?'个性化计划':'每周运动'}</option><option value="finance" ${activeGoal === 'finance' ? 'selected' : ''}>理财 · ${goalLayouts.finance?'个性化计划':'应急储备'}</option>${customOptions}<option value="new-custom">＋ 新建目标</option></select><span aria-hidden="true">⌄</span></div><button class="goal-add-button" data-action="new-goal">新建</button></div></div>
+      <div class="runtime-switch home-runtime-switch" role="group" aria-label="选择 Agent 运行时"><button type="button" data-action="select-runtime" data-runtime="${DSH_RUNTIME}" class="${agentRuntime===DSH_RUNTIME?'active':''}" aria-pressed="${agentRuntime===DSH_RUNTIME}">DSH Agents</button><button type="button" data-action="select-runtime" data-runtime="${KIMI_RUNTIME}" class="${agentRuntime===KIMI_RUNTIME?'active':''}" aria-pressed="${agentRuntime===KIMI_RUNTIME}">Kimi Swarm</button></div>
       ${goalContent}
       ${taskContent}
       ${connectionContent}
@@ -276,14 +317,15 @@ function taskDetailPage() {
     return `<div class="app-shell"><header class="topbar"><div class="topbar-inner">${brand()}<span class="topbar-caption">Along</span></div></header><main class="content task-detail">${backButton('task-back','返回动态任务')}<div class="empty-task"><h1>任务已更新</h1><p>这项动态任务已不在当前计划中，请返回查看最新安排。</p></div></main></div>`;
   }
   const run=currentSuperAgentRun(task);
+  const meta=runtimeMeta(run.runtime);
   const evalText=run.eval?.decision==='accept'?'接受执行':run.eval?.decision==='evaluating'?'正在评估':run.eval?.decision==='ignore'?'未接受':run.eval?.decision||'等待评估';
-  const workers=[{name:'Along',role:'协调',status:run.eval?.decision==='evaluating'?'working':run.eval?'done':'queued',objective:'评估任务、建立授权边界并编排 Ticket。',work:run.eval?`Eval：${evalText}`:'等待接收 Trigger',report:null},...run.assignments];
+  const workers=[{name:meta.main,role:'Orchestrator',status:run.eval?.decision==='evaluating'?'working':run.eval?'done':'queued',objective:'评估任务、建立授权边界并编排并行工作。',work:run.eval?`Eval：${evalText}`:'等待接收 Trigger',report:null},...run.assignments];
   const mandateText=run.mandate?`${run.mandate.strength==='explicit'?'明确授权':'推断授权'} · 请求者 ${run.mandate.actor?.id||'—'} · Policy ${run.mandate.policyVersion?.slice(0,8)||'—'}`:'尚未生成 Mandate';
   return `<div class="app-shell super-agent-shell"><header class="topbar"><div class="topbar-inner">${brand()}<span class="topbar-caption">Along · 任务协作</span></div></header><main class="content task-detail">
     ${backButton('task-back','返回动态任务')}
     <section class="task-hero"><div class="task-hero-top"><span class="eyebrow">${esc(task.when)} · ${esc(taskStateLabel[task.state])}</span><span class="run-status ${run.status}"><i></i>${esc(run.statusLabel)}</span></div><h1>${esc(task.title)}</h1><p>${esc(task.detail)}</p><div class="run-progress-head"><span>总体进展</span><strong>${run.progress}%</strong></div><div class="run-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${run.progress}"><span style="width:${run.progress}%"></span></div></section>
 
-    <section class="orchestration-section"><div class="section-heading"><h2>编排链路</h2><span>从触发到可交付 Ticket</span></div><div class="orchestration-flow">
+    <section class="orchestration-section"><div class="section-heading"><h2>编排链路</h2><span>${run.runtime===KIMI_RUNTIME?'Kimi Session 到并行 Subagents':'从触发到可交付 Ticket'}</span></div><div class="orchestration-flow">
       <div><span>Source</span><strong>${esc(run.source.label)}</strong></div><b aria-hidden="true">→</b>
       <div><span>Trigger</span><strong>${esc(run.trigger.label)}</strong></div><b aria-hidden="true">→</b>
       <div><span>Eval</span><strong>${esc(evalText)}</strong></div><b aria-hidden="true">→</b>
@@ -294,16 +336,17 @@ function taskDetailPage() {
 
     <section class="activity-section"><div class="section-heading"><h2>工作记录</h2><span>只记录有意义的状态变化</span></div><div class="activity-list">${run.events.map((event,index)=>`<div class="activity-row"><span class="activity-dot ${index===run.events.length-1&&run.status!=='done'?'active':''}"></span><div><strong>${esc(event.text)}</strong><span>${formatTime(event.at)}</span></div></div>`).join('')}</div></section>
 
-    <aside class="architecture-note"><strong>${run.actual?'Along 实时运行':'等待 Along'}</strong><p>${esc(run.error||'以上状态来自 Along 的真实任务记录，不是本地动画模拟。')}</p></aside>
+    <aside class="architecture-note"><strong>${run.actual?`真实 ${meta.full} 运行`:'等待真实运行'}</strong><p>${esc(run.error||`以上状态来自本机 ${meta.full} 的真实会话与子 Agent；没有用定时动画模拟。`)}</p></aside>
   </main></div>`;
 }
 
 function goalOrchestrationPanel(run) {
   if (!run) return '';
+  const meta=runtimeMeta(run.runtime);
   const events=(run.events||[]).slice(-5);
   const mandateText=typeof run.mandate==='string'?run.mandate:run.mandate?.scope||'仅围绕本次目标进行拆解、规划与可交付执行。';
-  return `<section class="goal-orchestration ${run.status}" aria-live="polite"><div class="goal-run-head"><div><span class="eyebrow">Along 正在协作</span><h2>${esc(run.statusLabel)}</h2></div><strong>${run.progress}%</strong></div><div class="run-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${run.progress}"><span style="width:${run.progress}%"></span></div>
-  <div class="orchestration-flow compact"><div><span>输入</span><strong>目标输入</strong></div><b aria-hidden="true">→</b><div><span>理解</span><strong>${run.eval?.decision==='accept'?'已接单':run.eval?.decision==='evaluating'?'评估中':'等待'}</strong></div><b aria-hidden="true">→</b><div><span>任务</span><strong>${run.ticket?esc(run.ticket.id.slice(0,8)):'创建中'}</strong></div><b aria-hidden="true">→</b><div><span>协作</span><strong>${run.agents?.length||0} 个单元</strong></div></div>
+  return `<section class="goal-orchestration ${run.status}" aria-live="polite"><div class="goal-run-head"><div><span class="eyebrow">真实 ${esc(meta.full)}</span><h2>${esc(run.statusLabel)}</h2></div><strong>${run.progress}%</strong></div><div class="run-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${run.progress}"><span style="width:${run.progress}%"></span></div>
+  <div class="orchestration-flow compact"><div><span>Source</span><strong>目标输入</strong></div><b aria-hidden="true">→</b><div><span>${run.runtime===KIMI_RUNTIME?'Session':'Main Session'}</span><strong>${run.eval?.decision==='accept'?'已接单':run.eval?.decision==='evaluating'?'评估中':'等待'}</strong></div><b aria-hidden="true">→</b><div><span>${run.runtime===KIMI_RUNTIME?'Swarm':'Ticket'}</span><strong>${run.runtime===KIMI_RUNTIME?'已开启':run.ticket?esc(run.ticket.id.slice(0,8)):'创建中'}</strong></div><b aria-hidden="true">→</b><div><span>${esc(meta.worker)}</span><strong>${run.agents?.length||0} 个 Agent</strong></div></div>
   ${run.mandate?`<div class="mandate-card"><span>Mandate · 本次授权边界</span><p>${esc(mandateText)}</p></div>`:''}
   ${run.agents?.length?`<div class="worker-grid">${run.agents.map(taskAgentCard).join('')}</div>`:''}
   ${events.length?`<div class="goal-run-events">${events.map(event=>`<p><span>${formatTime(event.at)}</span>${esc(event.text)}</p>`).join('')}</div>`:''}
@@ -329,6 +372,9 @@ function updateAgentRunPhase(id,phase) {
   const text=app.querySelector(`[data-agent-run="${id}"] .agent-thinking p`);
   if (text) text.textContent=phase;
 }
+function agentPending(id) {
+  return `<div class="agent-message assistant pending" data-agent-run="${esc(id)}" role="status"><div class="agent-thinking"><span aria-hidden="true"><i></i><i></i><i></i></span><p>正在连接 ${esc(runtimeMeta().full)}…</p></div></div>`;
+}
 function setAgentComposerBusy(busy) {
   const form=app.querySelector('#agent-form');
   const button=form?.querySelector('.agent-send');
@@ -348,12 +394,17 @@ function goalAgentPage() {
   const history=conversations[goalKey] || [];
   const goalRun=currentGoalSuperAgentRun(goalKey);
   const goalRunning=goalRun?.status==='working';
-  const label=domain==='health'?'健康':domain==='finance'?'理财演示':'自定义目标';
+  const meta=runtimeMeta();
+  const label=domain==='health'?'健康':domain==='finance'?'理财演示':goalCustom[goalKey]?.title?goalListTitle(goalCustom[goalKey].title):'新建目标';
   const targetText=domain==='health'?`${goal.target} 分钟 / 周`:domain==='finance'?`¥${goal.target.toLocaleString('zh-CN')}`:'由你用自然语言定义';
-  return `<div class="app-shell agent-shell"><header class="topbar"><div class="topbar-inner">${brand()}</div></header><main class="content agent-page"><div class="agent-scroll">${backButton('agent-back','返回目标')}<div class="agent-title"><span class="eyebrow">${label} · Along</span><h1>${esc(goal.title)}</h1><p>当前目标：${targetText}。你提出想法，Along 生成目标空间和动态任务；确认后才会改变首页。</p></div>
-  ${agentConfig.token ? `<div class="agent-status"><strong>Along 已连接</strong><span>保持手机与 Mac 在同一网络即可继续使用</span><em>自动保持</em></div>` : `<div class="agent-setup"><h2>首次连接 Along</h2><p>只需设置一次，之后会自动恢复。让 Mac 与 iPhone 保持在同一网络，启动 Along 服务后填入一次连接信息。</p><form id="pair-form"><input name="baseURL" placeholder="Along 服务地址" value="${esc(agentConfig.baseURL||'')}" required><input name="fingerprint" placeholder="连接指纹" value="${esc(agentConfig.fingerprint||'')}" required><input name="code" placeholder="一次性连接码" inputmode="numeric" required><button class="button" ${agentBusy?'disabled':''}>${agentBusy?'连接中…':'连接 Along'}</button></form></div>`}
-  <div class="agent-messages" role="log" aria-live="polite">${history.length?history.map((item,index)=>agentMessage(item,index,goal,domain)).join(''):'<p class="agent-empty">说说你希望达成什么、期限、约束和偏好；Along 会先整理并请你确认。</p>'}</div>${goalOrchestrationPanel(goalRun)}</div>
-  <div class="agent-composer-dock"><form id="agent-form" class="agent-composer" aria-busy="${agentBusy||goalRunning}"><textarea name="message" rows="1" placeholder="描述你的目标" maxlength="800" required ${goalRunning?'disabled':''}></textarea><button class="agent-send" aria-label="发送" title="发送" ${agentBusy||goalRunning||!agentConfig.token?'disabled':''}><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 15V5m0 0L6.5 8.5M10 5l3.5 3.5"/></svg></button></form><p class="agent-disclaimer">Along · 一起，慢慢向前</p></div></main></div>`;
+  const connectionText=agentConnection.status==='ready'?[`Along 与 ${meta.short} 已连接`,'整条目标编排链路可用','已验证']:
+    agentConnection.status==='error'?['连接需处理',agentConnection.error,'需处理']:['正在检查连接',`正在验证 Mac Host 与 ${meta.full}`,'检查中'];
+  return `<div class="app-shell agent-shell"><header class="topbar"><div class="topbar-inner">${brand()}</div></header><main class="content agent-page"><div class="agent-scroll">${backButton('agent-back','返回目标')}<div class="agent-title"><span class="eyebrow">${label} · ${esc(meta.full)}</span><h1>${esc(goal.title)}</h1><p>当前目标：${targetText}。${esc(meta.description)}确认后才会改变首页。</p></div>
+  <div class="runtime-switch" role="group" aria-label="选择 Agent 运行时"><button type="button" data-action="select-runtime" data-runtime="${DSH_RUNTIME}" class="${agentRuntime===DSH_RUNTIME?'active':''}" aria-pressed="${agentRuntime===DSH_RUNTIME}">DSH Agents</button><button type="button" data-action="select-runtime" data-runtime="${KIMI_RUNTIME}" class="${agentRuntime===KIMI_RUNTIME?'active':''}" aria-pressed="${agentRuntime===KIMI_RUNTIME}">Kimi Swarm</button></div>
+  ${agentConfig.token ? `<div class="agent-status ${agentConnection.status}"><strong>${esc(connectionText[0])}</strong><span>${esc(connectionText[1])}</span><em>${esc(connectionText[2])}</em></div>` : `<div class="agent-setup"><h2>首次连接 Along</h2><p>只需设置一次，之后会自动恢复。让 Mac 与 iPhone 保持在同一网络，启动 Along 服务后填入一次连接信息。</p><form id="pair-form"><input name="baseURL" placeholder="Along 服务地址" value="${esc(agentConfig.baseURL||'')}" required><input name="fingerprint" placeholder="连接指纹" value="${esc(agentConfig.fingerprint||'')}" required><input name="code" placeholder="一次性连接码" inputmode="numeric" required><button class="button" ${agentBusy?'disabled':''}>${agentBusy?'连接中…':'连接 Along'}</button></form></div>`}
+  <div class="agent-messages" role="log" aria-live="polite">${history.length?history.map((item,index)=>agentMessage(item,index,goal,domain)).join(''):'<p class="agent-empty">说说你希望达成什么、期限、约束和偏好；Along 会先整理并请你确认。</p>'}</div>
+  ${goalOrchestrationPanel(goalRun)}
+  </div><div class="agent-composer-dock"><form id="agent-form" class="agent-composer" aria-busy="${agentBusy||goalRunning}"><textarea name="message" rows="1" placeholder="描述你的目标" maxlength="800" required ${goalRunning?'disabled':''}></textarea><button class="agent-send" aria-label="交给 Super Agent" title="交给 Super Agent" ${agentBusy||goalRunning||!agentConfig.token?'disabled':''}><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 15V5m0 0L6.5 8.5M10 5l3.5 3.5"/></svg></button></form><p class="agent-disclaimer">${goalRunning?'Super Agent 编排中…':domain==='finance'?'理财连接和余额仍是演示；Super Agent 只规划，不交易。':domain==='health'?'仅发送当前目标与所选健康摘要，不发送原始记录。':'Along · 一起，慢慢向前'}</p></div></main></div>`;
 }
 
 function currentGoal() {
@@ -404,6 +455,16 @@ function lab() {
   return `<div class="app-shell"><header class="topbar"><div class="topbar-inner">${brand()}<span class="topbar-caption">目标变化实验</span></div></header><main class="content lab-content">${backButton('back-home','返回目标')}<h1>当进度变化，下一步会怎样变？</h1><p class="lab-intro">这是与真实健康数据隔离的模拟实验。Along 计算进度，再判断是否需要更新建议。</p>${experimentPanel()}</main></div>`;
 }
 function render() { app.innerHTML = screen === 'lab' ? lab() : screen === 'agent' ? goalAgentPage() : screen === 'task' ? taskDetailPage() : home(); }
+function renderAgentUpdate({follow=false}={}) {
+  const previous=app.querySelector('.agent-scroll');
+  if (!previous) {render();return;}
+  const scrollTop=previous.scrollTop;
+  const nearBottom=previous.scrollHeight-previous.scrollTop-previous.clientHeight<160;
+  render();
+  const next=app.querySelector('.agent-scroll');
+  if (!next) return;
+  next.scrollTop=follow||nearBottom?next.scrollHeight:Math.min(scrollTop,Math.max(0,next.scrollHeight-next.clientHeight));
+}
 window.__alongNavigateBack = () => {
   const button=app.querySelector('.back-button[data-action]');
   if (!button) return false;
@@ -460,6 +521,7 @@ function beginNewGoal() {
   conversations[activeGoal]=[];
   screen='agent';
   render();
+  if (agentConfig.token) void refreshAgentConnection();
 }
 
 app.addEventListener('change', event => {
@@ -487,6 +549,17 @@ app.addEventListener('click', event => {
     show(`<div class="sheet-head"><h2>${esc(connection.name)}</h2><button class="icon-button" data-action="close" aria-label="关闭">×</button></div><p class="sheet-copy">${esc(connection.reason)}</p><div class="permission-list"><span>${esc(connection.capability)}</span></div>${connection.id==='duolingo'?'<button class="button sheet-main-button" data-action="open-duolingo">打开 Duolingo</button>':''}<p class="sheet-footnote">当前版本不会冒充账户已连接；学习进度只会在获得 Duolingo 授权后同步。</p>`);
     return;
   }
+  if (action === 'new-goal') { beginNewGoal();return; }
+  if (action === 'select-runtime') {
+    const next=safeAgentRuntime(actionTarget.dataset.runtime);
+    if (next===agentRuntime) return;
+    agentRuntime=next;
+    localStorage.setItem(AGENT_RUNTIME_KEY,agentRuntime);
+    agentConnection={status:agentConfig.token?'checking':'unconfigured',error:''};
+    renderAgentUpdate();
+    if (agentConfig.token) void refreshAgentConnection();
+    return;
+  }
   if (action === 'open-task') {
     selectedTaskId=actionTarget.dataset.taskId || null;
     if (!selectedTaskId) return;
@@ -496,7 +569,7 @@ app.addEventListener('click', event => {
     if (task) void submitSuperAgentTask(task);
   }
   if (action === 'task-back') { selectedTaskId=null;screen='home';render(); }
-  if (action === 'edit-goal') { screen='agent'; render(); }
+  if (action === 'edit-goal') { screen='agent'; render();if (agentConfig.token) void refreshAgentConnection(); }
   if (action === 'agent-back') {
     if (isCustomGoalKey(activeGoal) && !goalCustom[activeGoal] && !goalLayouts[activeGoal]) {
       delete conversations[activeGoal];
@@ -541,9 +614,9 @@ app.addEventListener('submit', async event => {
   if (!['pair-form','agent-form'].includes(event.target.id)) return;
   event.preventDefault();
   if (agentBusy) return;
+  if (event.target.id==='agent-form' && currentGoalSuperAgentRun()?.status==='working') return;
   const formElement=event.target;
-  if (formElement.id==='agent-form' && currentGoalSuperAgentRun()?.status==='working') return;
-  const form=new FormData(event.target);
+  const form=new FormData(formElement);
   if (formElement.id==='pair-form') {
     agentBusy=true;
     render();
@@ -551,6 +624,7 @@ app.addEventListener('submit', async event => {
       const config={baseURL:String(form.get('baseURL')).trim().replace(/\/$/,''),fingerprint:String(form.get('fingerprint')).trim().replace(/[^a-fA-F0-9]/g,'').toUpperCase()};
       const result=await agentCall(config,'/pair',{code:String(form.get('code')).trim()});
       agentConfig={...config,token:result.token};
+      agentConnection={status:'ready',error:''};
       localStorage.setItem(AGENT_KEY,JSON.stringify(agentConfig));
       await saveNativeConnection(agentConfig);
       notice('已连接 Along，之后会自动恢复');
@@ -564,23 +638,31 @@ app.addEventListener('submit', async event => {
   const goalKey=activeGoal;
   const domain=goalDomain(goalKey);
   const history=conversations[goalKey]||[];
+  const goal=currentGoal();
   const userEntry={role:'user',text:message};
+  const pendingId=crypto.randomUUID();
   agentBusy=true;
   conversations[goalKey]=[...history,userEntry].slice(-20);
   saveConversations();
+  const messages=app.querySelector('.agent-messages');
+  messages?.querySelector('.agent-empty')?.remove();
+  messages?.insertAdjacentHTML('beforeend',agentMessage(userEntry,conversations[goalKey].length-1,goal,domain));
+  messages?.insertAdjacentHTML('beforeend',agentPending(pendingId));
   formElement.querySelector('textarea')?.blur();
   formElement.reset();
-  const request=submitSuperAgentGoal(goalKey,message,history.map(item=>({role:item.role,text:item.text})));
-  render();
+  const textarea=formElement.querySelector('textarea');
+  if (textarea) textarea.style.height='auto';
+  setAgentComposerBusy(true);
   scrollAgentConversationToBottom();
   try {
-    await request;
+    await submitSuperAgentGoal(goalKey,message,history.map(item=>({role:item.role,text:item.text})));
   } catch(error) {
     notice(error.message || 'Along 请求失败');
   } finally {
     agentBusy=false;
-    render();
-    if (screen==='agent' && activeGoal===goalKey) scrollAgentConversationToBottom();
+    if (screen==='agent' && activeGoal===goalKey) {
+      renderAgentUpdate({follow:true});
+    } else render();
   }
 });
 window.addEventListener('along-health-update', async event => {
@@ -624,14 +706,17 @@ if (recoveredInitialCustomGoal) notice('已恢复新目标和动态任务');
 async function restoreAlongConnection() {
   if (agentConfig.token) {
     try { await saveNativeConnection(agentConfig); } catch { /* Local storage still keeps the connection. */ }
+    void refreshAgentConnection();
     return;
   }
   try {
     const saved=await loadNativeConnection();
     if (!saved?.baseURL || !saved?.fingerprint || !saved?.token) return;
     agentConfig=saved;
+    agentConnection={status:'checking',error:''};
     localStorage.setItem(AGENT_KEY,JSON.stringify(agentConfig));
     render();
+    void refreshAgentConnection();
   } catch {
     // First launch without a native connection is expected.
   }

@@ -2,6 +2,7 @@ import SwiftUI
 import WebKit
 import CryptoKit
 import Security
+import CFNetwork
 import ObjectiveC
 
 @main
@@ -249,7 +250,7 @@ enum AlongConnectionStore {
 
 struct AlongWebView: UIViewRepresentable {
     @ObservedObject var bridge: AlongBridgeModel
-    private let site = URL(string: "along://app/index.html")!
+    private let site = URL(string: "along://app/index.html?build=19")!
 
     func makeCoordinator() -> Coordinator { Coordinator(bridge: bridge) }
 
@@ -269,7 +270,7 @@ struct AlongWebView: UIViewRepresentable {
         let webView = WKWebView(frame: .zero, configuration: configuration)
         context.coordinator.attach(webView)
         webView.navigationDelegate = context.coordinator
-        webView.load(URLRequest(url: site))
+        webView.load(URLRequest(url: site, cachePolicy: .reloadIgnoringLocalCacheData))
         return webView
     }
 
@@ -424,7 +425,7 @@ struct AlongWebView: UIViewRepresentable {
                   let fingerprint = input["fingerprint"] as? String,
                   fingerprint.count == 64, fingerprint.allSatisfy(\.isHexDigit),
                   let path = input["path"] as? String,
-                  ["/pair", "/goal/chat", "/goal/event", "/super-agent/tasks", "/super-agent/tasks/status",
+                  ["/pair", "/connection/status", "/goal/chat", "/goal/event", "/super-agent/tasks", "/super-agent/tasks/status",
                    "/super-agent/goals", "/super-agent/goals/status"].contains(path),
                   let body = input["body"] as? [String: Any],
                   let url = URL(string: base + path) else { throw AgentBridgeError.invalidConfiguration }
@@ -437,9 +438,27 @@ struct AlongWebView: UIViewRepresentable {
             }
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
             let delegate = PinnedAgentDelegate(fingerprint: fingerprint.uppercased())
-            let session = URLSession(configuration: .ephemeral, delegate: delegate, delegateQueue: nil)
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.waitsForConnectivity = true
+            configuration.connectionProxyDictionary = [
+                kCFNetworkProxiesHTTPEnable as String: false,
+                kCFNetworkProxiesProxyAutoConfigEnable as String: false
+            ]
+            let session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
             defer { session.finishTasksAndInvalidate() }
-            let (data, response) = try await session.data(for: request)
+            let data: Data
+            let response: URLResponse
+            do {
+                (data, response) = try await session.data(for: request)
+            } catch let error as URLError where [.secureConnectionFailed, .serverCertificateHasBadDate,
+                                                  .serverCertificateUntrusted, .serverCertificateHasUnknownRoot,
+                                                  .serverCertificateNotYetValid].contains(error.code) {
+                print("Along agent TLS request failed: \(error.code.rawValue) \(error.localizedDescription)")
+                throw AgentBridgeError.server("iPhone 到 Mac 的安全连接被代理或 VPN 改写，请允许 Along 直连局域网后重试")
+            } catch {
+                print("Along agent request failed: \(error.localizedDescription)")
+                throw error
+            }
             guard let result = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw AgentBridgeError.invalidResponse }
             guard let response = response as? HTTPURLResponse, (200...299).contains(response.statusCode) else {
                 throw AgentBridgeError.server(result["error"] as? String ?? "Along 请求失败")
@@ -450,6 +469,13 @@ struct AlongWebView: UIViewRepresentable {
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             print("Along web view loaded: \(webView.url?.absoluteString ?? "unknown")")
             suppressKeyboardAssistant()
+#if DEBUG
+            if ProcessInfo.processInfo.environment["ALONG_OPEN_AGENT"] == "1" {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                    webView.evaluateJavaScript("document.querySelector('[data-action=edit-goal]')?.click()")
+                }
+            }
+#endif
             bridge.webLoading = false
             bridge.webError = nil
             Task { @MainActor in bridge.attach(webView) }
@@ -496,7 +522,6 @@ private extension UIView {
         inputAssistantItem.trailingBarButtonGroups = []
         subviews.forEach { $0.clearInputAssistantButtons() }
     }
-
 }
 
 private extension WKWebView {
@@ -599,6 +624,7 @@ final class PinnedAgentDelegate: NSObject, URLSessionDelegate, URLSessionTaskDel
         }
         let digest = SHA256.hash(data: SecCertificateCopyData(certificate) as Data)
             .map { String(format: "%02X", $0) }.joined()
+        if digest != fingerprint { print("Along certificate pin mismatch") }
         completionHandler(digest == fingerprint ? .useCredential : .cancelAuthenticationChallenge,
                           digest == fingerprint ? URLCredential(trust: trust) : nil)
     }
