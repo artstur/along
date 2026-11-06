@@ -36,9 +36,23 @@ npm run agent-host
 
 Along Host 只从 Mac 本机读取 `~/.kimi-code/server.token`，不会把 Kimi token 发给 iPhone 或写入运行结果。Kimi 未登录或 Web Server 未运行时，仅 `Kimi Swarm` 会显示不可用，`DSH Agents` 可继续使用。
 
+可选环境变量（都有默认值，一般无需设置）：
+
+| 变量 | 默认值 | 作用 |
+| --- | --- | --- |
+| `PORT` / `HOST` | `4173` / `127.0.0.1` | `npm run dev` 本地服务 |
+| `ALONG_AGENT_PORT` | `4176` | Agent Host 的 HTTPS 端口 |
+| `ALONG_AGENT_HOST` | `en0` 的 IPv4，取不到时为 `127.0.0.1` | Agent Host 绑定地址 |
+| `ALONG_SUPERAGENT_URL` | `http://127.0.0.1:3082` | DSH Super Agent 地址 |
+| `ALONG_KIMI_CODE_URL` | `http://127.0.0.1:58627` | Kimi Code Web Server 地址 |
+| `ALONG_KIMI_CODE_TOKEN` | 读取 `~/.kimi-code/server.token` | 覆盖 Kimi token |
+| `ALONG_KIMI_CODE_MODEL` | `kimi-code/kimi-for-coding` | Kimi 模型 |
+| `ALONG_KIMI_WORKSPACE` | 当前目录 | Kimi 会话工作目录 |
+| `CODEX_BIN` | `~/.local/bin/codex`，否则 PATH 中的 `codex` | 健康变化任务提案使用的 Codex |
+
 本地地址 `http://localhost:4173`；静态文件在 `dist/`。
 
-后续更新：提交并推送 `main` 后，GitHub Actions 自动运行检查、构建并部署 GitHub Pages。iPhone 使用随 App 打包的 `ios/AlongHealth/Web`，网页改动需先运行 `npm run build`，把 `dist/` 同步到该目录，再在 Xcode 重新构建并安装。
+后续更新：GitHub Pages 工作流 `.github/workflows/pages.yml` 只支持手动触发（GitHub Actions → Deploy GitHub Pages → Run workflow，或 `gh workflow run pages.yml --ref main`），推送 `main` 不会自动部署；工作流依次运行 `npm ci`、`npm run check`、`npm run build` 并发布 `dist/`。iPhone 使用随 App 打包的 `ios/AlongHealth/Web`：`npm run build` 会同时写入 `dist/` 和该目录，之后在 Xcode 重新构建并安装。
 
 `npm run dev` 的本地服务只监听 `127.0.0.1`，`POST /api/health-event` 仍用于原有模拟实验。GitHub Pages 是静态站，无法常驻生成进程；目标共创仍通过同一 Wi-Fi 的 Mac 上的 Along 服务完成。
 

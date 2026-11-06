@@ -1,5 +1,6 @@
 dist/
 node_modules/
+.codegraph/
 .artifacts/
 .DS_Store
 .qa/
