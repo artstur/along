@@ -4,7 +4,7 @@ import {mkdtemp,readFile,rm} from 'node:fs/promises';
 import {homedir,tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {acceptAgentSuggestion} from './loop.mjs';
+import {acceptAgentSuggestion} from '../web/loop.mjs';
 
 const goalSchema=fileURLToPath(new URL('./schemas/goal-chat.schema.json',import.meta.url));
 const taskSchema=fileURLToPath(new URL('./schemas/task-reply.schema.json',import.meta.url));

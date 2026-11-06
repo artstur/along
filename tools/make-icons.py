@@ -11,4 +11,4 @@ for size in (192, 512):
     draw.line([(round(x * scale), round(y * scale)) for x, y in points], fill="white", width=round(11 * scale), joint="curve")
     draw.line((round(67 * scale), round(102 * scale), round(126 * scale), round(102 * scale)), fill="white", width=round(11 * scale))
     draw.ellipse((round(128 * scale), round(49 * scale), round(144 * scale), round(65 * scale)), fill="#a1a1a1")
-    image.save(root / f"icon-{size}.png")
+    image.save(root / "web" / f"icon-{size}.png")

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createFailedGoalSuperAgentRun, createFailedSuperAgentRun, createGoalSuperAgentRequest, createPendingGoalSuperAgentRun,
-  createPendingSuperAgentRun, createSuperAgentRequest, safeGoalSuperAgentRun, safeSuperAgentRun, KIMI_RUNTIME, safeAgentRuntime} from './super-agent.mjs';
+  createPendingSuperAgentRun, createSuperAgentRequest, safeGoalSuperAgentRun, safeSuperAgentRun, KIMI_RUNTIME, safeAgentRuntime} from '../web/super-agent.mjs';
 
 const task={id:'walk-20',when:'今晚',title:'完成 20 分钟快走',detail:'在晚饭后完成一次快走。',state:'planned'};
 

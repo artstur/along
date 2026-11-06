@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {mkdtemp, rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {createHealthSyncServer,validateHealthSummary} from './sync-server.mjs';
+import {createHealthSyncServer,validateHealthSummary} from '../host/sync-server.mjs';
 
 const summary={schema:1,source:'healthkit',selectedTypes:['steps','workout'],capturedAt:'2026-11-03T10:00:00.000Z',snapshot:{steps:6520,workoutMinutes:75,workoutCount:2}};
 

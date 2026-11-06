@@ -1,7 +1,7 @@
 import {homedir} from 'node:os';
 import {join} from 'node:path';
 import {DeepSeekHarness} from '@deepseek-ai/dsh-sdk-client';
-import {acceptAgentSuggestion} from './loop.mjs';
+import {acceptAgentSuggestion} from '../web/loop.mjs';
 
 export async function proposeNextStep({oldTask, eventMinutes, completed, target, remaining}) {
   const harness = new DeepSeekHarness({

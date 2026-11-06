@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {initialState, setSnapshot} from './health.mjs';
-import {ensureHealthGoal, healthView, loadFinance, connectFinanceDemo, addFinanceDemoRecord, financeView} from './workspace.mjs';
+import {initialState, setSnapshot} from '../web/health.mjs';
+import {ensureHealthGoal, healthView, loadFinance, connectFinanceDemo, addFinanceDemoRecord, financeView} from '../web/workspace.mjs';
 
 test('existing HealthKit summary survives the new goal view', () => {
   const state = ensureHealthGoal(setSnapshot(initialState(), {

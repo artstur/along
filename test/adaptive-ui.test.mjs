@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {customGoalEntries,findInitialCustomGoalCandidate,goalDomain,isCustomGoalKey,validateAdaptiveLayout,safeAdaptiveLayout} from './adaptive-ui.mjs';
+import {customGoalEntries,findInitialCustomGoalCandidate,goalDomain,isCustomGoalKey,validateAdaptiveLayout,safeAdaptiveLayout} from '../web/adaptive-ui.mjs';
 
 const valid={
   version:1,title:'在晚班作息里保持健康',badge:'试运行 · 第 1 周',summary:'先验证真实作息，再逐步调整。',

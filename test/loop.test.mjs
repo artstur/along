@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {startExperiment, routeHealthEvent, acceptAgentSuggestion, agentRequestPayload, ORIGINAL_TASK} from './loop.mjs';
-import {initialState, addGoal} from './health.mjs';
+import {startExperiment, routeHealthEvent, acceptAgentSuggestion, agentRequestPayload, ORIGINAL_TASK} from '../web/loop.mjs';
+import {initialState, addGoal} from '../web/health.mjs';
 
 test('35-minute workout reroutes 75 of 120 to exactly 10 remaining',()=>{
   const before=startExperiment();

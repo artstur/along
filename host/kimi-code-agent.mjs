@@ -1,9 +1,9 @@
 import {homedir} from 'node:os';
 import {dirname, join} from 'node:path';
 import {existsSync, mkdirSync, readFileSync, writeFileSync} from 'node:fs';
-import {validateGoalReply} from './goal-agent-core.mjs';
-import {safeAdaptiveLayout} from './adaptive-ui.mjs';
-import {KIMI_RUNTIME} from './super-agent.mjs';
+import {validateGoalReply} from '../web/goal-agent-core.mjs';
+import {safeAdaptiveLayout} from '../web/adaptive-ui.mjs';
+import {KIMI_RUNTIME} from '../web/super-agent.mjs';
 
 const DEFAULT_URL='http://127.0.0.1:58627';
 const DEFAULT_TOKEN_PATH=join(homedir(),'.kimi-code','server.token');

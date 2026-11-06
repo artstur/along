@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {routeHealthChange,requestedTargetFromMessage,validateGoalReply,validateTaskReply} from './goal-agent-core.mjs';
+import {routeHealthChange,requestedTargetFromMessage,validateGoalReply,validateTaskReply} from '../web/goal-agent-core.mjs';
 
 test('health router stays quiet for unrelated or small changes and replans a meaningful change',()=>{
   assert.equal(routeHealthChange({workoutMinutes:75},{workoutMinutes:75,steps:12000},120).decision,'quiet');

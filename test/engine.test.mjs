@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {createState,loadState,triggerChange,suggest,financePreview,applyProposal,toggleTask,editMemory,saveSkill} from './engine.mjs';
+import {createState,loadState,triggerChange,suggest,financePreview,applyProposal,toggleTask,editMemory,saveSkill} from '../web/engine.mjs';
 const choose=(s,patch={})=>applyProposal(s,{finance:'extend',practice:'pause',remember:true,note:'线下瑜伽对我很重要。',...patch});
 test('initial assumptions never become confirmed memory on their own',()=>{
  const s=triggerChange(createState()),p=suggest(s);

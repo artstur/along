@@ -4,11 +4,11 @@ import {execFileSync} from 'node:child_process';
 import {homedir, networkInterfaces} from 'node:os';
 import {join} from 'node:path';
 import {mkdirSync, readFileSync, writeFileSync, existsSync, chmodSync} from 'node:fs';
-import {routeHealthChange, requestedTargetFromMessage, validateGoalReply, validateTaskReply} from './goal-agent-core.mjs';
-import {safeAdaptiveLayout} from './adaptive-ui.mjs';
+import {routeHealthChange, requestedTargetFromMessage, validateGoalReply, validateTaskReply} from '../web/goal-agent-core.mjs';
+import {safeAdaptiveLayout} from '../web/adaptive-ui.mjs';
 import {runTaskCodex} from './codex-agent.mjs';
 import {KimiCodeAgent} from './kimi-code-agent.mjs';
-import {DSH_RUNTIME, KIMI_RUNTIME, safeAgentRuntime} from './super-agent.mjs';
+import {DSH_RUNTIME, KIMI_RUNTIME, safeAgentRuntime} from '../web/super-agent.mjs';
 
 const dir = join(homedir(), '.along', 'agent-host');
 mkdirSync(dir, {recursive:true, mode:0o700});

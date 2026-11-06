@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {rmSync} from 'node:fs';
-import {KimiCodeAgent} from './kimi-code-agent.mjs';
+import {KimiCodeAgent} from '../host/kimi-code-agent.mjs';
 
 const layout={
   version:1,title:'日语阅读 60 天',badge:'试运行',summary:'每天用碎片时间阅读。',

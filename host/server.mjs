@@ -1,8 +1,8 @@
 import {createServer} from 'node:http';
 import {readFile,stat} from 'node:fs/promises';
 import {resolve,extname,sep} from 'node:path';
-import {routeHealthEvent} from './loop.mjs';
-const root=resolve(process.argv.includes('--dist')?'dist':'.');
+import {routeHealthEvent} from '../web/loop.mjs';
+const root=resolve(process.argv.includes('--dist')?'dist':'web');
 const types={'.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.mjs':'text/javascript; charset=utf-8','.js':'text/javascript; charset=utf-8','.svg':'image/svg+xml','.png':'image/png','.webmanifest':'application/manifest+json'};
 function json(res,status,value){res.writeHead(status,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'}).end(JSON.stringify(value));}
 async function parseBody(req){let raw='';for await(const part of req){raw+=part;if(raw.length>8192)throw Error('请求过大');}return JSON.parse(raw);}

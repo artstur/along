@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {initialState,addGoal,setSnapshot,advanceDemo,taskPlan,loadState} from './health.mjs';
+import {initialState,addGoal,setSnapshot,advanceDemo,taskPlan,loadState} from '../web/health.mjs';
 
 test('workout progress and task change after a new record',()=>{
   const goal=addGoal(initialState(),'workout',2);
