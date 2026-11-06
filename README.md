@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://artstur.github.io/Personality-Demo/"><img src="https://img.shields.io/badge/demo-在线体验-2ea44f" alt="Live demo"></a>
+  <a href="https://artstur.github.io/along/"><img src="https://img.shields.io/badge/demo-在线体验-2ea44f" alt="Live demo"></a>
   <img src="https://img.shields.io/badge/node-%3E%3D22.19-339933?logo=node.js&logoColor=white" alt="Node >= 22.19">
   <img src="https://img.shields.io/badge/platform-iPhone%20%7C%20Web-lightgrey?logo=apple" alt="iPhone | Web">
   <img src="https://img.shields.io/badge/agents-DSH%20%7C%20Kimi%20Swarm-6f42c1" alt="DSH | Kimi Swarm">
@@ -83,7 +83,7 @@ flowchart LR
 
 ### 只想看看
 
-直接打开 [在线体验](https://artstur.github.io/Personality-Demo/)。健康和理财示例都能在纯网页里用演示数据跑通。
+直接打开 [在线体验](https://artstur.github.io/along/)。健康和理财示例都能在纯网页里用演示数据跑通。
 
 ### 本地运行
 
@@ -177,18 +177,17 @@ Along 处理的是健康这类敏感数据，所以边界写得很死：
 ├── web/                                   # 前端唯一源码（保持平铺）
 │   ├── index.html  app.mjs  style.css     # 页面与交互
 │   ├── sw.js  manifest.webmanifest        # 离线缓存与 PWA
-│   ├── engine.mjs  health.mjs  loop.mjs   # 目标进度、健康摘要与变化循环
+│   ├── health.mjs  loop.mjs               # 目标进度、健康摘要与变化循环
 │   ├── workspace.mjs  adaptive-ui.mjs     # 目标空间与自适应布局校验
 │   ├── goal-agent-core.mjs                # Agent 回复解析、路由与校验
 │   └── super-agent.mjs  agent-client.mjs  # 运行时定义与前端 Agent 客户端
 ├── host/                                  # 在 Mac 上运行的服务
 │   ├── agent-host.mjs                     # HTTPS Agent Host
-│   ├── kimi-code-agent.mjs  dsh-agent.mjs  codex-agent.mjs   # 各 Agent 运行时适配
+│   ├── kimi-code-agent.mjs  codex-agent.mjs # 各 Agent 运行时适配
 │   ├── server.mjs                         # npm run dev 本地服务
-│   ├── sync-server.mjs                    # 独立实验代码，不在健康数据链路里
 │   └── schemas/                           # Agent 输出的 JSON Schema
 ├── test/                                  # *.test.mjs，npm run check 自动运行
-├── tools/                                 # build.mjs 与图标脚本
+├── tools/                                 # build.mjs 构建脚本
 └── ios/                                   # iPhone App（HealthKit + WKWebView）
 ```
 
@@ -202,7 +201,7 @@ npm run build   # 产出 dist/（GitHub Pages）与 ios/AlongHealth/Web/（App �
 ```
 
 > [!IMPORTANT]
-> `npm test` 只跑 `test/engine.test.mjs`，不能替代 `npm run check`。`check` 按目录匹配：`web/`、`host/` 下的 `.mjs` 自动做语法检查，`test/*.test.mjs` 自动运行，新文件放对目录即可。
+> `npm test` 跑全部测试，`npm run check` 在此之上再加一遍语法检查。`check` 按目录匹配：`web/`、`host/` 下的 `.mjs` 自动做语法检查，`test/*.test.mjs` 自动运行，新文件放对目录即可。
 
 **一份源码，两份产物。** `tools/build.mjs` 按白名单把 `web/` 里的文件复制到 `dist/` 和 `ios/AlongHealth/Web/`，不要手改这两个目录。新增前端文件时，放进 `web/`，并同时登记到 `tools/build.mjs` 的 `files` 和 `web/sw.js` 的 `FILES`。
 

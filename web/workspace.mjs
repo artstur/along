@@ -1,7 +1,7 @@
 export const ACTIVE_GOAL_KEY = 'along.active-goal.v1';
 export const FINANCE_KEY = 'along.finance-demo.v1';
-export const HEALTH_GOAL_ID = 'along-health-weekly-workout';
-export const FINANCE_TARGET = 10000;
+const HEALTH_GOAL_ID = 'along-health-weekly-workout';
+const FINANCE_TARGET = 10000;
 
 export function ensureHealthGoal(state) {
   if (state.goals.some(goal => goal.type === 'workout')) return state;

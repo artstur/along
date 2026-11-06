@@ -15,6 +15,23 @@ test('existing HealthKit summary survives the new goal view', () => {
   assert.equal(ensureHealthGoal(state).goals.length, 1);
 });
 
+test('workout progress and next task update after a new record',()=>{
+  const first=ensureHealthGoal(setSnapshot(initialState(),{workoutMinutes:75,workoutCount:2,selectedTypes:['workout']},'healthkit'));
+  assert.equal(healthView(first).percent,63);
+  assert.match(healthView(first).primary.detail,/还差 45 分钟/);
+  const next=ensureHealthGoal(setSnapshot(first,{workoutMinutes:110,workoutCount:3,selectedTypes:['workout']},'healthkit'));
+  assert.equal(healthView(next).percent,92);
+  assert.match(healthView(next).primary.detail,/只差 10 分钟/);
+});
+
+test('partial HealthKit selection never reports missing workouts as zero progress',()=>{
+  const state=ensureHealthGoal(setSnapshot(initialState(),{steps:6000,selectedTypes:['steps']},'healthkit'));
+  const view=healthView(state);
+  assert.equal(view.measure,'—');
+  assert.equal(view.percent,0);
+  assert.equal(view.progressText,'等待健身记录');
+});
+
 test('finance connection stays explicitly simulated and changes the task', () => {
   const empty = loadFinance(null);
   assert.equal(financeView(empty).measure, '—');

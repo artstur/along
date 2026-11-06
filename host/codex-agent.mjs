@@ -6,7 +6,6 @@ import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {acceptAgentSuggestion} from '../web/loop.mjs';
 
-const goalSchema=fileURLToPath(new URL('./schemas/goal-chat.schema.json',import.meta.url));
 const taskSchema=fileURLToPath(new URL('./schemas/task-reply.schema.json',import.meta.url));
 
 function codexBinary() {
@@ -39,21 +38,6 @@ async function runCodexJSON(prompt,schema,{timeoutMs=105_000}={}) {
   }
 }
 
-function normalizeGoalAnswer(answer) {
-  const proposal=answer?.proposal?.active ? {
-    title:answer.proposal.title,target:answer.proposal.target,task:answer.proposal.task,reason:answer.proposal.reason,
-  } : null;
-  const modules=(answer?.layout?.modules ?? []).map(module=>{
-    const base={kind:module.kind,id:module.id,title:module.title};
-    if(module.kind==='summary')return {...base,content:module.content};
-    if(module.kind==='fact_list')return {...base,items:module.facts};
-    if(module.kind==='chips')return {...base,items:module.chips};
-    return {...base,source:module.source,target:module.target,unit:module.unit,note:module.note};
-  });
-  return {...answer,proposal,layout:{...answer.layout,modules}};
-}
-
-export async function runGoalCodex(prompt) { return normalizeGoalAnswer(await runCodexJSON(prompt,goalSchema)); }
 export function runTaskCodex(prompt) { return runCodexJSON(prompt,taskSchema); }
 
 export async function proposeNextStep({oldTask,eventMinutes,completed,target,remaining}) {

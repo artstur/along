@@ -25,7 +25,7 @@ export function requestedTargetFromMessage(message, domain) {
   return Number.isInteger(amount) && amount >= 1 && amount <= 10000000 ? amount : null;
 }
 
-export function readAgentJSON(value) {
+function readAgentJSON(value) {
   if (value && typeof value === 'object' && !Array.isArray(value) && typeof value.finalResponse !== 'string') return value;
   const raw = typeof value === 'string' ? value : value?.finalResponse;
   if (typeof raw !== 'string') throw Error('Agent 没有返回内容');
