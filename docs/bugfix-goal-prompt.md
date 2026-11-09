@@ -97,10 +97,10 @@ Along 是手机优先的目标工作台：把一个目标拆成「目标 / 来�
 - **补回归测试。** 放 `test/`，命名体现被钉住的不变量（例：`test('health router stays quiet when the target is already met')`），不要 `fix-bug-123`。
 - **共享文件双端可用。** 改 `web/goal-agent-core.mjs`、`web/adaptive-ui.mjs`、`web/super-agent.mjs`、`web/loop.mjs` 时，必须同时能在浏览器和 Node 里跑通，不得引入 Node 专用模块。
 - **同步产物与版本号**（用户可见的改动，漏一处手机上就还是旧页面）：
-  - `web/index.html` 的 `?v=`（当前 44）
-  - `web/sw.js` 的 `CACHE`（当前 `along-shell-v44`）
-  - `ios/AlongHealth/Sources/AlongShellView.swift` 的 `build=`（当前 44）
-  - 需要重新安装 App 时，再提 `ios/AlongHealth/Info.plist` 的 `CFBundleVersion`（当前 38）
+  - `web/index.html` 的 `?v=`（当前 45）
+  - `web/sw.js` 的 `CACHE`（当前 `along-shell-v45`）
+  - `ios/AlongHealth/Sources/AlongShellView.swift` 的 `build=`（当前 45）
+  - 需要重新安装 App 时，再提 `ios/AlongHealth/Info.plist` 的 `CFBundleVersion`（当前 39）
 - **新增前端文件**要同时登记到 `tools/build.mjs` 的 `files` 和 `web/sw.js` 的 `FILES`，并保持 `web/` 平铺。
 - **改源码，不手改产物。** `dist/` 和 `ios/AlongHealth/Web/` 由 `npm run build` 生成；`ios/AlongHealth/Web/` 被 git 跟踪，build 后要连同源码一起提交。
 
@@ -191,6 +191,10 @@ Along 是手机优先的目标工作台：把一个目标拆成「目标 / 来�
 - **类型不对的文本不要兜底成 "[object Object]"**：那种脏文本会直接出现在用户的首页上。只有字符串和数字算文本；对象、数组、布尔都不是。
 - **共享归一要覆盖回复与提案，不只是目标空间**：目标空间统一了口径，回复与提案却还分叉（一边截断收下、一边整份作废），同一份模型输出在两条运行时上结论依旧相反。两边都要用的归一就都搬进共享层，不要只搬一半。
 - **改读体实现时别顺手改上限的量纲**：中文一个字是三个字节，上限从「字符」改成「字节」等于把可用长度缩到三分之一，一次正常的中文长对话会被判「请求过大」。
+- **沙盒状态不该跨重启留在用户主屏上**：实验把演示快照写进真实摘要那把钥匙，用户的真实数据塞进备份里。存储里留着实验标记，重启后首页就一直显示演示数据，真实进度被顶掉——只有自己找到出口点「返回目标」才会恢复。沙盒是当次会话的事：重启时把备份里的真实数据恢复回顶层，备份形状不对就用初始状态，别让整个 App 起不来。
+- **运行记录里的文本字段也要守「只有字符串和数字算文本」**：白名单只做结构校验，渲染层再用 `String()` 兜底，用户就在「工作记录」和「协作单元」里看到 `"[object Object]"`。白名单是共享层，顺手把文本字段归一：类型不对的工作记录整条丢掉（没有可读文本的时间线记录没有意义），类型不对的协作单元字段换成占位说明。宿主侧同样不能 `String()` 兜底——它洗出来的 `"[object Object]"` 是字符串，客户端再也认不出来。
+- **用户写下的东西在落地前也要落盘**：新建目标只改内存，App 恰好在 Agent 回话落地前被重启，目标和那句话一起没了。草稿也要有回去的路：当前目标与对话先落盘，重启后回到那一页；放弃草稿时把废弃对话从存储里一起删掉。
+- **改契约时既有测试要按真实流程改写**：旧测试钉的是旧形状。改写时要把要保的 invariants 一条条搬到新流程上（真实摘要照样能清掉、原生侧照样停读），而不是删掉断言。
 
 === END GOAL PROMPT ===
 
