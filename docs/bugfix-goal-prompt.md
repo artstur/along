@@ -97,10 +97,10 @@ Along 是手机优先的目标工作台：把一个目标拆成「目标 / 来�
 - **补回归测试。** 放 `test/`，命名体现被钉住的不变量（例：`test('health router stays quiet when the target is already met')`），不要 `fix-bug-123`。
 - **共享文件双端可用。** 改 `web/goal-agent-core.mjs`、`web/adaptive-ui.mjs`、`web/super-agent.mjs`、`web/loop.mjs` 时，必须同时能在浏览器和 Node 里跑通，不得引入 Node 专用模块。
 - **同步产物与版本号**（用户可见的改动，漏一处手机上就还是旧页面）：
-  - `web/index.html` 的 `?v=`（当前 21）
-  - `web/sw.js` 的 `CACHE`（当前 `along-shell-v21`）
-  - `ios/AlongHealth/Sources/AlongShellView.swift` 的 `build=`（当前 21）
-  - 需要重新安装 App 时，再提 `ios/AlongHealth/Info.plist` 的 `CFBundleVersion`（当前 15）
+  - `web/index.html` 的 `?v=`（当前 32）
+  - `web/sw.js` 的 `CACHE`（当前 `along-shell-v32`）
+  - `ios/AlongHealth/Sources/AlongShellView.swift` 的 `build=`（当前 32）
+  - 需要重新安装 App 时，再提 `ios/AlongHealth/Info.plist` 的 `CFBundleVersion`（当前 26）
 - **新增前端文件**要同时登记到 `tools/build.mjs` 的 `files` 和 `web/sw.js` 的 `FILES`，并保持 `web/` 平铺。
 - **改源码，不手改产物。** `dist/` 和 `ios/AlongHealth/Web/` 由 `npm run build` 生成；`ios/AlongHealth/Web/` 被 git 跟踪，build 后要连同源码一起提交。
 
@@ -159,6 +159,8 @@ Along 是手机优先的目标工作台：把一个目标拆成「目标 / 来�
 - **App 内置页面不是安全上下文**：`along://` 是自定义 scheme，WKWebView 不把它当安全上下文（无公开 API 可改），`crypto.randomUUID` 是 `[SecureContext]` 方法，可能压根不存在；一旦缺失，新建目标、发消息、HealthKit 桥接、Agent 桥接会整体抛 `TypeError`。需要随机 id 时用 `web/super-agent.mjs` 的 `newId()`，它自带降级。
 - **自然语言里提取「目标数值」的启发式会一直在误判与漏检之间摆动**：误判会让守卫要求 Agent 匹配一个用户从没说过的数字 → 整单请求被 HTTP 400 拒掉；漏检只是少一道安全网。方向不对称，所以**宁可漏检不可误判**，并且要把语料钉成回归基线（`test/goal-agent-core.test.mjs` 的 `PHRASE_CORPUS`）。每加一条规则都要让独立核实者用「上一版 vs 新版」的差分再跑一遍——本轮就是这样连迭代 6 轮才收敛。
 - **自然语言改动词表是长期任务，不是一次性修复**：`目标调整为 / 提高到 / 减到 / 调到` 这类目标词限定的写法要能识别，但「今天运动量提高到 150 分钟」这种事实陈述不能被读成目标；理财域的金额必须带货币标记，否则「目标是 60 公斤」会被读成金额。
+- **一次 Agent 运行必须收敛到终态**：前端只在状态不再是 `working` 时停止轮询（`web/app.mjs`），所以宿主与前端都不许让一次运行永远停在 `working`。两处都要查：`host/kimi-code-agent.mjs` 的终态判定（别把终态挂在「子 Agent 花名册完整」这种观察不到的条件上），以及前端读状态失败时的兜底（`web/super-agent.mjs` 的 `withRunError`）。判定终态要用**权威信号**（会话是否结束、有没有校验过的产出），不要用分页窗口（`transcript?page_size=20`）里碰巧看得到的东西。
+- **终态条件一旦改动就要做变异测试**：回退其中一条条件，看对应测试是否真的会红。2026-11 这一轮就有两条修复在「全部测试通过」的情况下其实零覆盖。
 
 === END GOAL PROMPT ===
 
