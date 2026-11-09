@@ -110,6 +110,14 @@ function inferredConnections(layout, domain, connections) {
   return [{id:'duolingo',name:'Duolingo',reason:'把每日练习放进现有学习习惯，降低启动成本。',capability:'打开日语课程；账户进度需经 Duolingo 授权后才能同步。',status:'recommended'}];
 }
 
+// 待确认问题：两条运行时必须给出同一个判断。Kimi 运行时先把模型给的列表归一，
+// DSH 运行时不归一——同一份模型输出会让一边作废整份目标空间、一边照单全收。
+// 这里把两边的口径统一：不是列表就当没有，最多取 6 条，每条截到 240 字。
+export function normalizeQuestions(value) {
+  const questions=Array.isArray(value)?value:[];
+  return questions.slice(0,6).map(question=>String(question??'待确认问题').trim().slice(0,240)||'待确认问题');
+}
+
 export function validateAdaptiveLayout(value, domain='health') {
   if (!['health','finance','custom'].includes(domain)) throw Error('目标类型无效');
   const layout=object(value, '个性化页面');
