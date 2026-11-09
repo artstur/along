@@ -243,8 +243,10 @@ export class KimiCodeAgent {
     const blocked=needsMac||sessionFailed||activeSession.pending_interaction==='approval'||activeSession.pending_interaction==='question'||(!parsedResult&&agents.some(agent=>agent.status==='blocked'));
     // 综合会话已经交付了校验过的结果，就算主会话还在跑，这次运行也该结束。
     const done=!blocked&&(entry.kind==='task'?swarmOver:(swarmOver||synthesisFinished)&&!!parsedResult);
+    // 运行记录的时间基准不能是 undefined：拿它比期限会变成 NaN 比较，永远不会超时。
+    const startedAt=Number(entry.createdAt)||0;
     // 兜底：Kimi 服务挂死时不能让 iPhone 永远转圈。
-    const timedOut=!done&&!blocked&&Date.now()-entry.createdAt>KIMI_RUN_TIMEOUT_MS;
+    const timedOut=!done&&!blocked&&Date.now()-startedAt>KIMI_RUN_TIMEOUT_MS;
     const timeoutError=timedOut?'Kimi 长时间没有返回结果，已停止等待':null;
     const halted=blocked||timedOut;
     const failed=!done&&(outputError||noOutput)&&(synthesisFinished||(!entry.synthesisSessionId&&mainFinished));
@@ -254,15 +256,15 @@ export class KimiCodeAgent {
     const finished=agents.filter(agent=>agent.status==='done').length;
     const progress=done?100:halted?Math.max(12,agents.length?65:12):activeSession.busy?Math.min(96,25+agents.length*12+finished*10+(entry.synthesisSessionId?4:0)):8;
     const events=[
-      {at:entry.createdAt,text:'Along 已建立 Kimi Main Session'},
-      {at:entry.createdAt+1,text:'Swarm Mode 已显式开启'},
-      ...agents.map((agent,index)=>({at:timestamp(children[index]?.updated_at,entry.createdAt+index+2),text:`${agent.name}：${agent.work}`})),
-      ...(entry.synthesisSessionId?[{at:entry.createdAt+agents.length+2,text:'Kimi Main Session 正在综合子 Agent 结果'}]:[]),
+      {at:startedAt,text:'Along 已建立 Kimi Main Session'},
+      {at:startedAt+1,text:'Swarm Mode 已显式开启'},
+      ...agents.map((agent,index)=>({at:timestamp(children[index]?.updated_at,startedAt+index+2),text:`${agent.name}：${agent.work}`})),
+      ...(entry.synthesisSessionId?[{at:startedAt+agents.length+2,text:'Kimi Main Session 正在综合子 Agent 结果'}]:[]),
       ...(done?[{at:timestamp(activeSession.updated_at),text:'Main Session 已完成汇总'}]:[]),
     ];
     // 状态标签要说清卡在哪：等用户在 Mac 上动手 > 产出要重试 > 已经放弃 > 正常进行。
     const statusLabel=needsMac?'需要在 Mac 处理':(error||timeoutError)?'输出需要重试':blocked?'需要在 Mac 处理':done?'Kimi Swarm 已完成':entry.synthesisSessionId?'Kimi Main Session 正在综合':agents.length?`${agents.length} 个 Kimi Subagent 并行中`:'Kimi Main Session 正在拆解';
-    const common={actual:true,runtime:KIMI_RUNTIME,requestId,source:{kind:'along',label:entry.kind==='goal'?'Along 目标':'Along 动态任务'},trigger:{kind:entry.kind,label:'Kimi Code Web Server'},eval:{decision:halted?'blocked':done?'accept':'evaluating'},ticket:{id:entry.sessionId},mandate:'只规划目标与动态任务；不执行外部写操作。',events,status:error||halted?'blocked':done?'done':'working',statusLabel,progress,createdAt:entry.createdAt,updatedAt:timestamp(activeSession.updated_at)};
+    const common={actual:true,runtime:KIMI_RUNTIME,requestId,source:{kind:'along',label:entry.kind==='goal'?'Along 目标':'Along 动态任务'},trigger:{kind:entry.kind,label:'Kimi Code Web Server'},eval:{decision:halted?'blocked':done?'accept':'evaluating'},ticket:{id:entry.sessionId},mandate:'只规划目标与动态任务；不执行外部写操作。',events,status:error||halted?'blocked':done?'done':'working',statusLabel,progress,createdAt:startedAt,updatedAt:timestamp(activeSession.updated_at)};
     if (entry.kind==='task') return {version:2,...common,task:entry.input.task,assignments:agents,error:timeoutError||(blocked?blockedError:undefined)};
     const result=done?parsedResult:null;
     return {version:1,kind:'goal',...common,input:{goal:entry.input.goal,message:entry.input.message},assignments:[],agents,result,error:error||timeoutError||(blocked?blockedError:undefined)};
