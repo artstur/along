@@ -34,6 +34,15 @@ struct AlongHealthApp: App {
     }
 }
 
+// 健康导入一次只允许一个：后来的请求也必须拿到明确的答复，不能被悄悄丢掉，
+// 否则网页那边的 Promise 会永远悬着，用户只会看到「点了没反应」。
+enum HealthImportAdmission {
+    /// 返回 nil 表示可以开始导入；否则是必须答复给网页的失败结果。
+    static func refusal(pending: String?) -> [String: Any]? {
+        pending == nil ? nil : ["ok": false, "error": "已有健康数据导入正在进行"]
+    }
+}
+
 @MainActor
 final class AlongBridgeModel: ObservableObject {
     @Published var showSheet = false
@@ -49,6 +58,8 @@ final class AlongBridgeModel: ObservableObject {
     private weak var webView: WKWebView?
     private var refreshing = false
     private var lastRefresh = Date.distantPast
+    // 清除数据后，在途的读取不能再把旧摘要送回网页。
+    private var healthEpoch = 0
 
     func attach(_ webView: WKWebView) {
         self.webView = webView
@@ -70,6 +81,7 @@ final class AlongBridgeModel: ObservableObject {
 
     func refreshHealth() {
         let selected = savedSelection
+        let epoch = healthEpoch
         guard !selected.isEmpty, !refreshing, Date().timeIntervalSince(lastRefresh) > 8 else { return }
         refreshing = true
         lastRefresh = Date()
@@ -77,6 +89,7 @@ final class AlongBridgeModel: ObservableObject {
             defer { refreshing = false }
             do {
                 let summary = try await reader.read(selected, requestPermission: false)
+                guard epoch == healthEpoch else { return }
                 guard let data = try? JSONSerialization.data(withJSONObject: summary.browserSnapshot()),
                       let json = String(data: data, encoding: .utf8) else { return }
                 _ = try? await webView?.evaluateJavaScript("window.dispatchEvent(new CustomEvent('along-health-update', {detail: \(json)}))")
@@ -86,6 +99,7 @@ final class AlongBridgeModel: ObservableObject {
 
     func refreshSnapshot(id: String, webView: WKWebView) {
         let selected = savedSelection
+        let epoch = healthEpoch
         guard !selected.isEmpty else {
             deliver(id: id, result: ["ok": false, "error": "请先连接 Apple Health"], to: webView)
             return
@@ -93,11 +107,27 @@ final class AlongBridgeModel: ObservableObject {
         Task {
             do {
                 let summary = try await reader.read(selected, requestPermission: false)
+                guard epoch == healthEpoch else {
+                    deliver(id: id, result: ["ok": false, "error": "健康数据已被清除"], to: webView)
+                    return
+                }
                 deliver(id: id, result: ["ok": true, "snapshot": summary.browserSnapshot()], to: webView)
             } catch {
                 deliver(id: id, result: ["ok": false, "error": error.localizedDescription], to: webView)
             }
         }
+    }
+
+    func clearHealth(id: String, webView: WKWebView) {
+        // 清除本机保存的读取选择并停掉观察：只清网页里的摘要，下一轮刷新还会被读回来。
+        UserDefaults.standard.removeObject(forKey: "along.health.selectedTypes")
+        reader.stopObserving()
+        selection = []
+        preview = nil
+        errorMessage = nil
+        // 让在途的读取作废：它们返回时不能再把旧摘要送回网页。
+        healthEpoch += 1
+        deliver(id: id, result: ["ok": true], to: webView)
     }
 
     private func deliver(id: String, result: [String: Any], to view: WKWebView) {
@@ -107,7 +137,11 @@ final class AlongBridgeModel: ObservableObject {
     }
 
     func begin(id: String, webView: WKWebView) {
-        guard requestID == nil else { return }
+        // 在途导入已经有一个请求时，这次要明确答复，不能直接丢掉。
+        if let refusal = HealthImportAdmission.refusal(pending: requestID) {
+            deliver(id: id, result: refusal, to: webView)
+            return
+        }
         requestID = id
         self.webView = webView
         selection = savedSelection
@@ -182,8 +216,10 @@ enum AlongConnectionStore {
 
         guard let legacy = UserDefaults.standard.dictionary(forKey: legacyKey),
               let clean = clean(legacy) else { return nil }
-        _ = save(clean.mapValues { $0 as Any })
-        UserDefaults.standard.removeObject(forKey: legacyKey)
+        // 迁移到钥匙串成功之后才删旧键：写失败还照删，就只剩一份凭证，而且再也回不来。
+        if save(clean.mapValues { $0 as Any }) != nil {
+            UserDefaults.standard.removeObject(forKey: legacyKey)
+        }
         return clean
     }
 
@@ -240,7 +276,7 @@ enum AlongConnectionStore {
 
 struct AlongWebView: UIViewRepresentable {
     @ObservedObject var bridge: AlongBridgeModel
-    private let site = URL(string: "along://app/index.html?build=21")!
+    private let site = URL(string: "along://app/index.html?build=46")!
 
     func makeCoordinator() -> Coordinator { Coordinator(bridge: bridge) }
 
@@ -252,6 +288,7 @@ struct AlongWebView: UIViewRepresentable {
         let controller = WKUserContentController()
         controller.add(context.coordinator, name: "alongHealth")
         controller.add(context.coordinator, name: "alongHealthRefresh")
+        controller.add(context.coordinator, name: "alongHealthClear")
         controller.add(context.coordinator, name: "alongAgent")
         controller.addUserScript(WKUserScript(source: Self.bridgeScript, injectionTime: .atDocumentStart, forMainFrameOnly: true))
         let configuration = WKWebViewConfiguration()
@@ -268,6 +305,9 @@ struct AlongWebView: UIViewRepresentable {
 
     static let bridgeScript = """
     (() => {
+      // along:// 是自定义 scheme，不是安全上下文，crypto.randomUUID 可能不存在。
+      // 这些 id 只用于本机把一次请求和一次结果对上，不需要密码学强度。
+      const newId = () => (globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : `id-${Date.now().toString(36)}-${Math.random().toString(36).slice(2).padEnd(8,'0')}`);
       const pending = new Map();
       window.__alongHealthBridgeFinish = (id, result) => {
         const item = pending.get(id); if (!item) return;
@@ -277,14 +317,19 @@ struct AlongWebView: UIViewRepresentable {
       };
       window.AlongHealthBridge = {
         connect: ({types} = {}) => new Promise((resolve, reject) => {
-          const id = crypto.randomUUID();
+          const id = newId();
           pending.set(id, {resolve, reject});
           window.webkit.messageHandlers.alongHealth.postMessage({id, types});
         }),
         refresh: () => new Promise((resolve, reject) => {
-          const id = crypto.randomUUID();
+          const id = newId();
           pending.set(id, {resolve, reject});
           window.webkit.messageHandlers.alongHealthRefresh.postMessage({id});
+        }),
+        clear: () => new Promise((resolve, reject) => {
+          const id = newId();
+          pending.set(id, {resolve, reject});
+          window.webkit.messageHandlers.alongHealthClear.postMessage({id});
         })
       };
       const agentPending = new Map();
@@ -296,12 +341,12 @@ struct AlongWebView: UIViewRepresentable {
       };
       window.AlongAgentBridge = {
         request: ({baseURL, fingerprint, path, token, body}) => new Promise((resolve, reject) => {
-          const id = crypto.randomUUID();
+          const id = newId();
           agentPending.set(id, {resolve, reject});
           window.webkit.messageHandlers.alongAgent.postMessage({id, baseURL, fingerprint, path, token, body});
         }),
         connection: (action, value = null) => new Promise((resolve, reject) => {
-          const id = crypto.randomUUID();
+          const id = newId();
           agentPending.set(id, {resolve, reject});
           window.webkit.messageHandlers.alongAgent.postMessage({id, operation: 'connection', action, value});
         })
@@ -355,7 +400,7 @@ struct AlongWebView: UIViewRepresentable {
             let origin = message.frameInfo.securityOrigin
             let trustedOrigin = (origin.protocol == "along" && origin.host == "app") ||
                                 (origin.protocol == "https" && origin.host == "artstur.github.io")
-            guard ["alongHealth", "alongHealthRefresh", "alongAgent"].contains(message.name), message.frameInfo.isMainFrame,
+            guard ["alongHealth", "alongHealthRefresh", "alongHealthClear", "alongAgent"].contains(message.name), message.frameInfo.isMainFrame,
                   trustedOrigin,
                   let body = message.body as? [String: Any], let id = body["id"] as? String,
                   let webView = message.webView else { return }
@@ -363,6 +408,8 @@ struct AlongWebView: UIViewRepresentable {
                 Task { @MainActor in bridge.begin(id: id, webView: webView) }
             } else if message.name == "alongHealthRefresh" {
                 Task { @MainActor in bridge.refreshSnapshot(id: id, webView: webView) }
+            } else if message.name == "alongHealthClear" {
+                Task { @MainActor in bridge.clearHealth(id: id, webView: webView) }
             } else {
                 if body["operation"] as? String == "connection" {
                     let result: [String: Any]

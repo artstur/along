@@ -9,3 +9,6 @@ node_modules/
 .openai/*.local.*
 ios/*.xcodeproj/xcuserdata/
 ios/*.xcodeproj/project.xcworkspace/xcuserdata/
+
+# Xcode 的本机构建产物，不要提交
+ios/build/

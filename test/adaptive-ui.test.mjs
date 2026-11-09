@@ -20,6 +20,30 @@ test('adaptive layout keeps only the whitelisted declarative UI schema',()=>{
   assert.equal(value.modules[2].source,'workoutMinutes');
 });
 
+test('an empty optional field does not throw away the whole layout',()=>{
+  const empty=structuredClone(valid);
+  empty.badge='';
+  empty.modules[2].unit='';
+  empty.modules[2].note='';
+  const value=safeAdaptiveLayout(empty,'health');
+  assert.ok(value,'可选字段为空不该让整份布局作废');
+  assert.equal(value.badge,'');
+  assert.equal(value.modules[2].unit,'');
+  assert.equal(value.modules[2].note,'');
+  // 必填字段为空仍然要拒绝。
+  assert.equal(safeAdaptiveLayout({...valid,summary:''},'health'),null);
+});
+
+test('a layout without pending questions is still a usable goal space',()=>{
+  const noQuestions=structuredClone(valid);
+  delete noQuestions.questions;
+  const value=safeAdaptiveLayout(noQuestions,'health');
+  assert.ok(value,'少一个可选列表不该让整份目标空间作废');
+  assert.deepEqual(value.questions,[]);
+  // 真的不是列表仍然要拒绝：缺失可以，畸形不行。
+  assert.equal(safeAdaptiveLayout({...noQuestions,questions:'还有问题吗？'},'health'),null);
+});
+
 test('adaptive layout rejects invented metric sources and executable module kinds',()=>{
   const badMetric=structuredClone(valid);badMetric.modules[2].source='agentEstimatedMinutes';
   assert.throws(()=>validateAdaptiveLayout(badMetric,'health'),/指标来源不受信任/);
@@ -63,6 +87,25 @@ test('multiple custom goals keep independent keys and labels',()=>{
     {key:'custom',title:'60 天日语阅读入门'},
     {key:'custom:second-goal',title:'学会吉他'},
   ]);
+});
+
+test('a metric target must be a usable number inside the domain range',()=>{
+  const metric=target=>structuredClone({...valid,modules:[{kind:'metric',id:'m',title:'本周运动',source:'workoutMinutes',target,unit:'分钟'}]});
+  assert.throws(()=>validateAdaptiveLayout(metric(-5),'health'),/指标目标/);
+  assert.throws(()=>validateAdaptiveLayout(metric(0),'health'),/指标目标/);
+  assert.throws(()=>validateAdaptiveLayout(metric(1e9),'health'),/指标目标/);
+  assert.equal(validateAdaptiveLayout(metric(120),'health').modules[0].target,120);
+});
+
+test('a metric target written as a number-like string is still range checked',()=>{
+  const metric=(target,source='workoutMinutes')=>structuredClone({...valid,modules:[{kind:'metric',id:'m',title:'本周运动',source,target,unit:'分钟'}]});
+  assert.equal(validateAdaptiveLayout(metric('120'),'health').modules[0].target,120,'数字字符串就是那个数字，不能因此丢掉进度条');
+  assert.equal(validateAdaptiveLayout(metric('10,000','saved'),'finance').modules[0].target,10000);
+  assert.throws(()=>validateAdaptiveLayout(metric('999999999'),'health'),/指标目标/,'数字字符串不能绕过范围校验');
+  assert.throws(()=>validateAdaptiveLayout(metric('-5'),'health'),/指标目标/);
+  assert.throws(()=>validateAdaptiveLayout(metric('0'),'health'),/指标目标/);
+  // 不是数字的说明文字仍然只用来显示。
+  assert.equal(validateAdaptiveLayout(metric('每天 30 分钟'),'health').modules[0].target,'每天 30 分钟');
 });
 
 test('Japanese learning plans carry a Duolingo connection recommendation',()=>{

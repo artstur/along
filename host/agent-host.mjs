@@ -4,11 +4,13 @@ import {execFileSync} from 'node:child_process';
 import {homedir, networkInterfaces} from 'node:os';
 import {join} from 'node:path';
 import {mkdirSync, readFileSync, writeFileSync, existsSync, chmodSync} from 'node:fs';
-import {routeHealthChange, requestedTargetFromMessage, validateGoalReply, validateTaskReply} from '../web/goal-agent-core.mjs';
-import {safeAdaptiveLayout} from '../web/adaptive-ui.mjs';
+import {routeHealthChange, validateGoalReply, normalizeGoalReply, validateTaskReply} from '../web/goal-agent-core.mjs';
+import {safeAdaptiveLayout, normalizeAdaptiveLayout} from '../web/adaptive-ui.mjs';
 import {runTaskCodex} from './codex-agent.mjs';
 import {KimiCodeAgent} from './kimi-code-agent.mjs';
 import {DSH_RUNTIME, KIMI_RUNTIME, safeAgentRuntime} from '../web/super-agent.mjs';
+import {readJsonBody} from './request-body.mjs';
+import {HostError, upstream, statusForError} from './host-error.mjs';
 
 const dir = join(homedir(), '.along', 'agent-host');
 mkdirSync(dir, {recursive:true, mode:0o700});
@@ -35,11 +37,7 @@ const superAgentURL = (process.env.ALONG_SUPERAGENT_URL || 'http://127.0.0.1:308
 const kimiAgent = new KimiCodeAgent({workspace:process.env.ALONG_KIMI_WORKSPACE||process.cwd()});
 
 function respond(res,status,data) { res.writeHead(status,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}).end(JSON.stringify(data)); }
-async function body(req) {
-  let text='';
-  for await (const chunk of req) { text+=chunk; if (text.length>32_000) throw Error('请求过大'); }
-  return JSON.parse(text);
-}
+async function body(req) { return readJsonBody(req,32_000); }
 function authorized(req) {
   const token=req.headers.authorization?.match(/^Bearer ([a-f0-9]{64})$/)?.[1];
   return !!(token && tokenHash && timingSafeEqual(createHash('sha256').update(token).digest(),tokenHash));
@@ -49,10 +47,10 @@ async function superAgentCall(path,{method='POST',value}={}) {
   try {
     response=await fetch(`${superAgentURL}${path}`,{method,headers:{'x-along-bridge':'1',...(value===undefined?{}:{'content-type':'application/json'})},
       ...(value===undefined?{}:{body:JSON.stringify(value)}),signal:AbortSignal.timeout(15_000)});
-  } catch(error) { throw Error(`Along 服务暂不可用：${error.message}`); }
+  } catch(error) { throw new HostError(`Along 服务暂不可用：${error.message}`,502); }
   let result;
-  try { result=await response.json(); } catch { throw Error(`Along 返回了无效响应（${response.status}）`); }
-  if (!response.ok) throw Error(result?.error || `Along 请求失败（${response.status}）`);
+  try { result=await response.json(); } catch { throw new HostError(`Along 返回了无效响应（${response.status}）`,502); }
+  if (!response.ok) throw new HostError(result?.error || `Along 请求失败（${response.status}）`,502);
   return result;
 }
 async function superAgentReady() {
@@ -61,24 +59,32 @@ async function superAgentReady() {
     response=await fetch(`${superAgentURL}/along-source/api/goals/along-status-probe`,{
       method:'GET',headers:{'x-along-bridge':'1'},signal:AbortSignal.timeout(5_000)
     });
-  } catch(error) { throw Error(`DSH Super Agent 未运行：${error.message}`); }
-  if (response.status!==404 && !response.ok) throw Error(`DSH Along Source 未就绪（${response.status}）`);
+  } catch(error) { throw new HostError(`DSH Super Agent 未运行：${error.message}`,503); }
+  if (response.status!==404 && !response.ok) throw new HostError(`DSH Along Source 未就绪（${response.status}）`,503);
   return true;
+}
+// 目标名称必须真的是字符串：String() 会把对象变成 "[object Object]"，
+// 这样的假标题会被当成用户目标送进模型。
+function cleanGoalTitle(value) {
+  const title=typeof value==='string'?value.trim():'';
+  if (!title||title.length>80) throw Error('目标名称无效');
+  return title;
+}
+// 客户端发来的自由文本也必须真的是字符串：String() 兜底会把对象变成
+// "[object Object]"，混过长度检查后送进模型。
+function clientText(value) {
+  return typeof value==='string'?value:'';
 }
 function cleanGoal(value) {
   const domain=value?.domain;
   if (!['health','finance','custom'].includes(domain)) throw Error('目标类型无效');
   if (domain==='custom') {
-    const title=String(value?.title??'').trim();
-    if (!title||title.length>80) throw Error('目标名称无效');
-    return {domain,target:null,title};
+    return {domain,target:null,title:cleanGoalTitle(value?.title)};
   }
   const limit=domain==='health'?10080:10000000;
   const target=value?.target;
   if (!Number.isInteger(target)||target<1||target>limit) throw Error('目标数值无效');
-  const title=String(value?.title??'').trim();
-  if (!title||title.length>80) throw Error('目标名称无效');
-  return {domain,target,title};
+  return {domain,target,title:cleanGoalTitle(value?.title)};
 }
 function cleanSnapshot(value,domain) {
   if (domain==='custom') return {source:'暂无连接'};
@@ -103,14 +109,24 @@ function requestedRuntime(value) {
 }
 function normalizeGoalRun(run) {
   if (!run?.result) return run;
-  const domain=run.input?.goal?.domain;
-  if (!['health','finance','custom'].includes(domain)) throw Error('Along 返回的目标类型无效');
-  const output=validateGoalReply(run.result,domain);
-  const layout=run.result.layout==null?null:safeAdaptiveLayout(run.result.layout,domain);
-  if (run.result.layout!=null && !layout) throw Error('Along 返回的目标空间格式不正确');
-  const requested=requestedTargetFromMessage(String(run.input?.message??''),domain);
-  if (requested!=null && output.proposal?.target!==requested) throw Error(`Along 目标数值与用户指定的 ${requested} 不一致`);
-  return {...run,result:{...output,layout}};
+  try {
+    const domain=run.input?.goal?.domain;
+    if (!['health','finance','custom'].includes(domain)) throw Error('Along 返回的目标类型无效');
+    const output=validateGoalReply(normalizeGoalReply(run.result),domain,String(run.input?.message??''));
+    // 待确认问题这一项要和 Kimi 运行时用同一套口径：否则同一份模型输出，
+    // 一边被作废整份目标空间、一边照单全收。
+    // 归一放在共享层：两条运行时对同一份模型输出必须给出同一个结论。
+    const rawLayout=run.result.layout==null?null:normalizeAdaptiveLayout(run.result.layout,domain);
+    const layout=rawLayout==null?null:safeAdaptiveLayout(rawLayout,domain);
+    if (run.result.layout!=null && !layout) throw Error('Along 返回的目标空间格式不正确');
+    return {...run,result:{...output,layout}};
+  } catch(error) {
+    // 输出校验失败是确定性的错误：这一次运行不会再变好，必须落到终态。
+    // 抛成 5xx 的话，前端会把它当成「暂时读不到状态」继续轮询，
+    // 运行永远停在 working，用户被锁在转圈里最长 30 分钟。
+    // Kimi 那条路径就是把校验失败落成终态的，两边要一样。
+    return {...run,status:'blocked',statusLabel:'输出需要重试',result:null,error:`DSH 已完成，但输出校验失败：${error.message}`};
+  }
 }
 const server=createServer({key:readFileSync(key),cert:readFileSync(cert)},async(req,res)=>{
   try {
@@ -129,39 +145,44 @@ const server=createServer({key:readFileSync(key),cert:readFileSync(cert)},async(
     if (req.method==='POST' && path==='/connection/status') {
       const input=await body(req),runtime=requestedRuntime(input?.runtime);
       if (runtime===KIMI_RUNTIME) {
-        const kimi=await kimiAgent.ready();
+        const kimi=await upstream(()=>kimiAgent.ready());
         console.log(`连接检查通过：iPhone → Along Host → Kimi Code Swarm (${new Date().toISOString()})`);
         return respond(res,200,{along:true,runtime,ready:true,kimi});
       }
-      await superAgentReady();
+      await upstream(()=>superAgentReady());
       console.log(`连接检查通过：iPhone → Along Host → DSH (${new Date().toISOString()})`);
       return respond(res,200,{along:true,runtime,ready:true,dsh:true});
     }
     if (req.method==='POST' && path==='/super-agent/tasks') {
       const input=await body(req),runtime=requestedRuntime(input?.runtime);
       const {runtime:_runtime,...dshInput}=input;
-      if (runtime===KIMI_RUNTIME) return respond(res,200,await kimiAgent.startTask(dshInput));
-      return respond(res,200,await superAgentCall('/along-source/api/tasks',{value:dshInput}));
+      if (runtime===KIMI_RUNTIME) return respond(res,200,await upstream(()=>kimiAgent.startTask(dshInput)));
+      return respond(res,200,await upstream(()=>superAgentCall('/along-source/api/tasks',{value:dshInput})));
     }
     if (req.method==='POST' && path==='/super-agent/tasks/status') {
       const input=await body(req),id=requestId(input?.requestId),runtime=requestedRuntime(input?.runtime);
-      if (runtime===KIMI_RUNTIME) return respond(res,200,await kimiAgent.taskStatus(id));
-      return respond(res,200,await superAgentCall(`/along-source/api/tasks/${encodeURIComponent(id)}`,{method:'GET'}));
+      if (runtime===KIMI_RUNTIME) return respond(res,200,await upstream(()=>kimiAgent.taskStatus(id)));
+      return respond(res,200,await upstream(()=>superAgentCall(`/along-source/api/tasks/${encodeURIComponent(id)}`,{method:'GET'})));
     }
     if (req.method==='POST' && path==='/super-agent/goals') {
       const input=await body(req),runtime=requestedRuntime(input?.runtime);
       const goal=cleanGoal(input.goal), snapshot=cleanSnapshot(input.snapshot,goal.domain);
-      const message=String(input.message??'').trim();
+      // 客户端发来的必须是真字符串：String() 兜底会把对象变成 "[object Object]"，
+      // 混过长度检查后送进模型（和目标标题那一条同一个坑）。
+      const message=clientText(input.message).trim();
       if (!message||message.length>800) throw Error('消息长度需在 1 至 800 字之间');
-      const history=Array.isArray(input.history)?input.history.slice(-12).map(item=>({role:item.role==='assistant'?'assistant':'user',text:String(item.text??'').slice(0,1200)})).filter(item=>item.text.trim()):[];
-      if (runtime===KIMI_RUNTIME) return respond(res,200,await kimiAgent.startGoal({requestId:requestId(input.requestId),goal,snapshot,message,history}));
-      const response=await superAgentCall('/along-source/api/goals',{value:{requestId:requestId(input.requestId),goal,snapshot,message,history}});
-      return respond(res,200,{...response,run:normalizeGoalRun(response.run)});
+      const history=Array.isArray(input.history)?input.history.slice(-12).map(item=>({role:item.role==='assistant'?'assistant':'user',text:clientText(item.text).slice(0,1200)})).filter(item=>item.text.trim()):[];
+      // requestId 是客户端给的，要在包上游之前校验：发错了仍然是 400。
+      const id=requestId(input.requestId);
+      if (runtime===KIMI_RUNTIME) return respond(res,200,await upstream(()=>kimiAgent.startGoal({requestId:id,goal,snapshot,message,history})));
+      const response=await upstream(()=>superAgentCall('/along-source/api/goals',{value:{requestId:id,goal,snapshot,message,history}}));
+      return respond(res,200,{...response,run:await upstream(()=>normalizeGoalRun(response.run))});
     }
     if (req.method==='POST' && path==='/super-agent/goals/status') {
       const input=await body(req),id=requestId(input?.requestId),runtime=requestedRuntime(input?.runtime);
-      if (runtime===KIMI_RUNTIME) return respond(res,200,await kimiAgent.goalStatus(id));
-      return respond(res,200,normalizeGoalRun(await superAgentCall(`/along-source/api/goals/${encodeURIComponent(id)}`,{method:'GET'})));
+      if (runtime===KIMI_RUNTIME) return respond(res,200,await upstream(()=>kimiAgent.goalStatus(id)));
+      const raw=await upstream(()=>superAgentCall(`/along-source/api/goals/${encodeURIComponent(id)}`,{method:'GET'}));
+      return respond(res,200,await upstream(()=>normalizeGoalRun(raw)));
     }
     if (req.method==='POST' && path==='/goal/chat') {
       return respond(res,409,{error:'目标输入已升级，请更新 Along 后重试'});
@@ -172,13 +193,14 @@ const server=createServer({key:readFileSync(key),cert:readFileSync(cert)},async(
       const before=cleanSnapshot(input.before,'health'),after=cleanSnapshot(input.after,'health');
       const route=routeHealthChange(before,after,goal.target);
       if (route.decision==='quiet') return respond(res,200,{...route,source:'router'});
-      const currentTask=String(input.currentTask??'').slice(0,120);
+      const currentTask=clientText(input.currentTask).slice(0,120);
       const prompt=`你是 Along 的任务调整 Agent。确定性进度由 Along 算好，不要自行修改。不得调用工具，不要给医学建议。只输出 JSON：{"task":"具体可执行的下一步","reason":"解释为什么调整","remaining":${route.remaining}}。目标：${JSON.stringify(goal)}。原任务：${currentTask}。变化：${route.reason}。任务应与剩余 ${route.remaining} 分钟相符；若已完成则建议查看成果。`;
-      const suggestion=validateTaskReply(await runExclusive(()=>runTaskCodex(prompt)),route.remaining);
+      const raw=await runExclusive(()=>upstream(()=>runTaskCodex(prompt)));
+      const suggestion=await upstream(()=>validateTaskReply(raw,route.remaining));
       return respond(res,200,{...route,suggestion,source:'live-along'});
     }
     return respond(res,404,{error:'未找到接口'});
-  } catch(error) { respond(res,error.message.includes('正在处理')?429:400,{error:error.message}); }
+  } catch(error) { respond(res,statusForError(error),{error:error.message}); }
 });
 server.listen(port,lanHost,()=>{
   console.log(`Along 服务: https://${lanHost}:${port}`);

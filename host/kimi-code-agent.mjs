@@ -1,15 +1,25 @@
 import {homedir} from 'node:os';
 import {dirname, join} from 'node:path';
-import {existsSync, mkdirSync, readFileSync, writeFileSync} from 'node:fs';
-import {validateGoalReply} from '../web/goal-agent-core.mjs';
-import {safeAdaptiveLayout} from '../web/adaptive-ui.mjs';
-import {KIMI_RUNTIME} from '../web/super-agent.mjs';
+import {existsSync, mkdirSync, readFileSync, renameSync, writeFileSync} from 'node:fs';
+import {validateGoalReply, normalizeGoalReply} from '../web/goal-agent-core.mjs';
+import {safeAdaptiveLayout, normalizeAdaptiveLayout} from '../web/adaptive-ui.mjs';
+import {KIMI_RUNTIME, AGENT_RUN_TIMEOUT_MS} from '../web/super-agent.mjs';
 
 const DEFAULT_URL='http://127.0.0.1:58627';
 const DEFAULT_TOKEN_PATH=join(homedir(),'.kimi-code','server.token');
 const DEFAULT_STATE_PATH=join(homedir(),'.along','agent-host','kimi-runs.json');
+// 一次 Kimi 运行最多等这么久；超过还没拿到结果就明确停住，不让 iPhone 永远转圈。
+export const KIMI_RUN_TIMEOUT_MS=AGENT_RUN_TIMEOUT_MS;
 
-function clean(value,fallback='',max=500) { return String(value??fallback).trim().slice(0,max)||fallback; }
+// 只有字符串和数字算文本：对象、数组、布尔都不是。
+// String() 兜底会把对象变成 "[object Object]"，混过类型检查后当成协作单元的说明。
+function clean(value,fallback='',max=500) {
+  const text=typeof value==='string'?value:typeof value==='number'&&Number.isFinite(value)?String(value):'';
+  return text.trim().slice(0,max)||fallback;
+}
+// 回复与提案的字段由共享校验层 validateGoalReply 判断：这里只截断过长的字符串，
+// 非字符串原样传过去让它拒绝。String() 兜底会把对象变成 "[object Object]"，
+// 混过类型检查后当成 Along 的回复或用户的目标标题。
 function timestamp(value,fallback=Date.now()) {
   const parsed=typeof value==='number'?value:Date.parse(value);
   return Number.isFinite(parsed)?parsed:fallback;
@@ -99,42 +109,10 @@ Required JSON shape:
 {"reply":"Chinese response","proposal":{"active":true,"title":"goal title","target":number_or_null,"task":"next step","reason":"reason"},"layout":{"version":1,"title":"space title","badge":"status","summary":"summary","modules":[...],"tasks":[...],"questions":["question"]}}
 Use at most 6 modules, 6 tasks and 6 questions. Each module has kind, id and title. A summary module has content; a fact_list module has items shaped as [{"label":"...","value":"..."}]; a chips module has string items. Do not use metric modules for a custom goal. Each task must include id, when, title, detail, state (temporary|planned|deferred). Questions must be strings. For a custom goal, proposal.target must be null. Preserve every explicit number, deadline, preference and constraint in the Along input. Keep all user-facing text in Chinese.`;
 }
-function layoutForAlong(value,domain) {
-  if (!value||typeof value!=='object') return value;
-  const used=new Set();
-  const nextId=(raw,prefix,index)=>{
-    const base=String(raw||`${prefix}-${index+1}`).toLowerCase().replace(/[^a-z0-9_-]+/g,'-').replace(/^-+|-+$/g,'').slice(0,52)||`${prefix}-${index+1}`;
-    let id=base,n=2;while(used.has(id)) id=`${base.slice(0,48)}-${n++}`;used.add(id);return id;
-  };
-  const modules=(Array.isArray(value.modules)?value.modules:[]).filter(module=>module&&['summary','fact_list','chips','metric'].includes(module.kind)&&!(domain==='custom'&&module.kind==='metric')).slice(0,6).map((module,index)=>{
-    const base={kind:module.kind,id:nextId(module.id,'module',index),title:clean(module.title,`模块 ${index+1}`,60)};
-    if (module.kind==='summary') return {...base,content:clean(module.content||module.note,'待补充',500)};
-    if (module.kind==='fact_list') {
-      const facts=Array.isArray(module.items)?module.items:Array.isArray(module.facts)?module.facts:[];
-      return {...base,items:facts.slice(0,6).map((fact,factIndex)=>typeof fact==='object'&&fact?{label:clean(fact.label,`要点 ${factIndex+1}`,40),value:clean(fact.value,'待补充',180)}:{label:`要点 ${factIndex+1}`,value:clean(fact,'待补充',180)})};
-    }
-    if (module.kind==='chips') {
-      const chips=Array.isArray(module.items)?module.items:Array.isArray(module.chips)?module.chips:[];
-      return {...base,items:chips.slice(0,8).map(chip=>clean(chip,'要点',32))};
-    }
-    return {...base,source:clean(module.source,'',30),target:module.target,unit:module.unit==null?null:clean(module.unit,'',20),note:module.note==null?null:clean(module.note,'',180)};
-  });
-  const tasks=(Array.isArray(value.tasks)?value.tasks:[]).slice(0,6).map((task,index)=>({
-    id:nextId(task?.id,'task',index),when:clean(task?.when,'待安排',80),title:clean(task?.title,`任务 ${index+1}`,100),detail:clean(task?.detail,'待补充',300),
-    state:['temporary','planned','deferred'].includes(task?.state)?task.state:'planned',
-  }));
-  return {version:1,title:clean(value.title,'我的目标',80),badge:value.badge==null?null:clean(value.badge,'',40),summary:clean(value.summary,'目标计划已生成',600),modules,tasks,
-    questions:(Array.isArray(value.questions)?value.questions:[]).slice(0,6).map(question=>clean(question,'待确认问题',240))};
-}
-function goalResultFromOutput(output,domain) {
-  const normalized={...output,reply:clean(output?.reply,'',1200),proposal:output?.proposal==null?null:{
-    ...output.proposal,
-    title:clean(output.proposal.title,'',80),
-    task:clean(output.proposal.task,'',120),
-    reason:clean(output.proposal.reason,'',300),
-  }};
-  const validated=validateGoalReply(normalized,domain);
-  const layout=output?.layout==null?null:safeAdaptiveLayout(layoutForAlong(output.layout,domain),domain);
+function goalResultFromOutput(output,domain,message) {
+  // 归一放在共享层：两条运行时对同一份模型输出必须给出同一个结论。
+  const validated=validateGoalReply(normalizeGoalReply(output),domain,message);
+  const layout=output?.layout==null?null:safeAdaptiveLayout(normalizeAdaptiveLayout(output.layout,domain),domain);
   if (output?.layout!=null&&!layout) throw Error('Kimi 返回的目标空间格式不正确');
   return {...validated,layout};
 }
@@ -143,7 +121,15 @@ export class KimiCodeAgent {
   constructor({baseURL=process.env.ALONG_KIMI_CODE_URL||DEFAULT_URL,token=process.env.ALONG_KIMI_CODE_TOKEN,tokenPath=DEFAULT_TOKEN_PATH,statePath=DEFAULT_STATE_PATH,workspace=process.cwd(),model=process.env.ALONG_KIMI_CODE_MODEL||'kimi-code/kimi-for-coding',fetchImpl=fetch}={}) {
     this.baseURL=baseURL.replace(/\/$/,'');this.token=token;this.tokenPath=tokenPath;this.statePath=statePath;this.workspace=workspace;this.model=model;this.fetch=fetchImpl;
     this.runs={};this.synthesisRequests=new Set();
-    try { this.runs=JSON.parse(readFileSync(this.statePath,'utf8')); } catch(error) { if (error.code!=='ENOENT') throw error; }
+    // 状态文件坏了不能让整台服务起不来：解析失败就当成没有记录继续。
+    // 这些记录只是「在跑的那次会话」的指针，Kimi 侧的会话本身还在。
+    try {
+      const parsed=JSON.parse(readFileSync(this.statePath,'utf8'));
+      this.runs=parsed&&typeof parsed==='object'&&!Array.isArray(parsed)?parsed:{};
+    } catch(error) {
+      if (error.code!=='ENOENT') console.warn(`Along：运行记录无法读取，已按空记录继续（${error.message}）`);
+      this.runs={};
+    }
   }
   authToken() {
     if (this.token) return this.token;
@@ -162,7 +148,11 @@ export class KimiCodeAgent {
   }
   save() {
     mkdirSync(dirname(this.statePath),{recursive:true,mode:0o700});
-    writeFileSync(this.statePath,JSON.stringify(this.runs,null,2),{mode:0o600});
+    // 先写临时文件再改名：直接覆盖时进程被杀会留下半截 JSON，
+    // 下一次启动就再也起不来。
+    const temp=`${this.statePath}.tmp`;
+    writeFileSync(temp,JSON.stringify(this.runs,null,2),{mode:0o600});
+    renameSync(temp,this.statePath);
   }
   async ready() {
     const [meta,auth,user]=await Promise.all([this.call('/api/v1/meta'),this.call('/api/v1/auth'),this.call('/api/v1/oauth/userinfo')]);
@@ -207,12 +197,16 @@ export class KimiCodeAgent {
     const transcriptOutput=[...transcriptFrames(transcript)].reverse().map(frame=>frame?.kind==='text'?jsonFromText(frame.text):null).find(Boolean);
     let output=jsonFromText(textFromMessage(assistant))||transcriptOutput;
     let parsedResult=null,outputError=null;
-    if (entry.kind==='goal'&&output) { try { parsedResult=goalResultFromOutput(output,entry.input.goal.domain); } catch(error) { outputError=error; } }
+    if (entry.kind==='goal'&&output) { try { parsedResult=goalResultFromOutput(output,entry.input.goal.domain,entry.input.message); } catch(error) { outputError=error; } }
     const transcriptAgents=swarmAgentsFromTranscript(transcript);
     const agents=transcriptAgents.length?transcriptAgents:children.map(childAgent);
     const swarmFinished=agents.length>0&&agents.every(agent=>['done','blocked'].includes(agent.status));
     const mainFinished=!session.busy&&session.last_turn_reason==='completed';
-    if (entry.kind==='goal'&&!parsedResult&&swarmFinished&&(mainFinished||!!output)&&!entry.synthesisSessionId) await this.ensureSynthesis(requestId,entry,transcript);
+    // 主会话要用户去 Mac 上处理时，等着就好，不要另开综合会话。
+    const needsMac=session.pending_interaction==='approval'||session.pending_interaction==='question';
+    // AgentSwarm 是阻塞调用：主回合结束就代表 Swarm 已经返回，子 Agent 是否回传不该再挡住终态。
+    const swarmOver=swarmFinished||mainFinished;
+    if (entry.kind==='goal'&&!parsedResult&&swarmOver&&!needsMac&&!entry.synthesisSessionId) await this.ensureSynthesis(requestId,entry,transcript);
     let activeSession=session;
     if (entry.synthesisSessionId&&!parsedResult) {
       const synthesisId=encodeURIComponent(entry.synthesisSessionId);
@@ -224,27 +218,44 @@ export class KimiCodeAgent {
       const candidate=jsonFromText(textFromMessage(synthesisAssistant))||synthesisOutput;
       if (candidate) {
         output=candidate;
-        try { parsedResult=goalResultFromOutput(candidate,entry.input.goal.domain);outputError=null; } catch(error) { outputError=error; }
+        try { parsedResult=goalResultFromOutput(candidate,entry.input.goal.domain,entry.input.message);outputError=null; } catch(error) { outputError=error; }
       }
       activeSession=synthesisSession;
     }
-    const blocked=activeSession.pending_interaction==='approval'||activeSession.pending_interaction==='question'||activeSession.last_turn_reason==='failed'||agents.some(agent=>agent.status==='blocked');
-    const done=!blocked&&(entry.kind==='task'?swarmFinished:swarmFinished&&!!parsedResult);
+    const synthesisFinished=!!entry.synthesisSessionId&&!activeSession.busy&&activeSession.last_turn_reason==='completed';
+    // 会话结束了却一个字都没给：不是校验失败，是根本没有产出，同样要落到终态。
+    const noOutput=entry.kind==='goal'&&!parsedResult&&!output&&!outputError&&(entry.synthesisSessionId?synthesisFinished:mainFinished);
+    // 主会话要人处理或已经失败时，不能被综合会话遮住。
+    const sessionFailed=session.last_turn_reason==='failed'||activeSession.last_turn_reason==='failed';
+    // 一个子 Agent 失败不再连坐整单：已经有校验过的结果就交付，失败的子 Agent 自己在卡片上标注。
+    const blocked=needsMac||sessionFailed||activeSession.pending_interaction==='approval'||activeSession.pending_interaction==='question'||(!parsedResult&&agents.some(agent=>agent.status==='blocked'));
+    // 综合会话已经交付了校验过的结果，就算主会话还在跑，这次运行也该结束。
+    const done=!blocked&&(entry.kind==='task'?swarmOver:(swarmOver||synthesisFinished)&&!!parsedResult);
+    // 运行记录的时间基准不能是 undefined：拿它比期限会变成 NaN 比较，永远不会超时。
+    const startedAt=Number(entry.createdAt)||0;
+    // 兜底：Kimi 服务挂死时不能让 iPhone 永远转圈。
+    const timedOut=!done&&!blocked&&Date.now()-startedAt>KIMI_RUN_TIMEOUT_MS;
+    const timeoutError=timedOut?'Kimi 长时间没有返回结果，已停止等待':null;
+    const halted=blocked||timedOut;
+    const failed=!done&&(outputError||noOutput)&&(synthesisFinished||(!entry.synthesisSessionId&&mainFinished));
+    const error=failed?(noOutput?'Kimi 已完成，但没有返回可用结果':`Kimi 已完成，但输出校验失败：${outputError.message}`):null;
+    // 给用户看的是人话，不把 last_turn_reason 这类机器值直接甩到界面上。
+    const blockedError=needsMac?'Kimi 会话在 Mac 上等着你处理':'Kimi 会话需要处理';
     const finished=agents.filter(agent=>agent.status==='done').length;
-    const progress=done?100:blocked?Math.max(12,agents.length?65:12):activeSession.busy?Math.min(96,25+agents.length*12+finished*10+(entry.synthesisSessionId?4:0)):8;
+    const progress=done?100:halted?Math.max(12,agents.length?65:12):activeSession.busy?Math.min(96,25+agents.length*12+finished*10+(entry.synthesisSessionId?4:0)):8;
     const events=[
-      {at:entry.createdAt,text:'Along 已建立 Kimi Main Session'},
-      {at:entry.createdAt+1,text:'Swarm Mode 已显式开启'},
-      ...agents.map((agent,index)=>({at:timestamp(children[index]?.updated_at,entry.createdAt+index+2),text:`${agent.name}：${agent.work}`})),
-      ...(entry.synthesisSessionId?[{at:entry.createdAt+agents.length+2,text:'Kimi Main Session 正在综合子 Agent 结果'}]:[]),
+      {at:startedAt,text:'Along 已建立 Kimi Main Session'},
+      {at:startedAt+1,text:'Swarm Mode 已显式开启'},
+      ...agents.map((agent,index)=>({at:timestamp(children[index]?.updated_at,startedAt+index+2),text:`${agent.name}：${agent.work}`})),
+      ...(entry.synthesisSessionId?[{at:startedAt+agents.length+2,text:'Kimi Main Session 正在综合子 Agent 结果'}]:[]),
       ...(done?[{at:timestamp(activeSession.updated_at),text:'Main Session 已完成汇总'}]:[]),
     ];
-    const common={actual:true,runtime:KIMI_RUNTIME,requestId,source:{kind:'along',label:entry.kind==='goal'?'Along 目标':'Along 动态任务'},trigger:{kind:entry.kind,label:'Kimi Code Web Server'},eval:{decision:blocked?'blocked':done?'accept':'evaluating'},ticket:{id:entry.sessionId},mandate:'只规划目标与动态任务；不执行外部写操作。',events,status:blocked?'blocked':done?'done':'working',statusLabel:blocked?'需要在 Mac 处理':done?'Kimi Swarm 已完成':entry.synthesisSessionId?'Kimi Main Session 正在综合':agents.length?`${agents.length} 个 Kimi Subagent 并行中`:'Kimi Main Session 正在拆解',progress,createdAt:entry.createdAt,updatedAt:timestamp(activeSession.updated_at)};
-    if (entry.kind==='task') return {version:2,...common,task:entry.input.task,assignments:agents,error:blocked?clean(session.last_turn_reason,'Kimi 会话需要处理'):undefined};
+    // 状态标签要说清卡在哪：等用户在 Mac 上动手 > 产出要重试 > 已经放弃 > 正常进行。
+    const statusLabel=needsMac?'需要在 Mac 处理':(error||timeoutError)?'输出需要重试':blocked?'需要在 Mac 处理':done?'Kimi Swarm 已完成':entry.synthesisSessionId?'Kimi Main Session 正在综合':agents.length?`${agents.length} 个 Kimi Subagent 并行中`:'Kimi Main Session 正在拆解';
+    const common={actual:true,runtime:KIMI_RUNTIME,requestId,source:{kind:'along',label:entry.kind==='goal'?'Along 目标':'Along 动态任务'},trigger:{kind:entry.kind,label:'Kimi Code Web Server'},eval:{decision:halted?'blocked':done?'accept':'evaluating'},ticket:{id:entry.sessionId},mandate:'只规划目标与动态任务；不执行外部写操作。',events,status:error||halted?'blocked':done?'done':'working',statusLabel,progress,createdAt:startedAt,updatedAt:timestamp(activeSession.updated_at)};
+    if (entry.kind==='task') return {version:2,...common,task:entry.input.task,assignments:agents,error:timeoutError||(blocked?blockedError:undefined)};
     const result=done?parsedResult:null;
-    const synthesisFinished=entry.synthesisSessionId&&!activeSession.busy&&activeSession.last_turn_reason==='completed';
-    const error=!done&&outputError&&(synthesisFinished||(!entry.synthesisSessionId&&mainFinished))?`Kimi 已完成，但输出校验失败：${outputError.message}`:null;
-    return {version:1,kind:'goal',...common,input:{goal:entry.input.goal,message:entry.input.message},assignments:[],agents,result,status:error?'blocked':common.status,statusLabel:error?'输出需要重试':common.statusLabel,error:error||(blocked?clean(session.last_turn_reason,'Kimi 会话需要处理'):undefined)};
+    return {version:1,kind:'goal',...common,input:{goal:entry.input.goal,message:entry.input.message},assignments:[],agents,result,error:error||timeoutError||(blocked?blockedError:undefined)};
   }
   goalStatus(requestId) { return this.status(requestId,'goal'); }
   taskStatus(requestId) { return this.status(requestId,'task'); }
