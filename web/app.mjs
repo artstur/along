@@ -46,11 +46,29 @@ goalLayouts={health:goalLayouts.health||null,finance:goalLayouts.finance||null,.
 let pendingTask = readStored(TICKET_KEY, null);
 let superAgentRuns = readStored(SUPER_AGENT_RUNS_KEY, {});
 let goalSuperAgentRuns = readStored(GOAL_SUPER_AGENT_RUNS_KEY, {});
-// 上次停在「还没确认的新目标」上：App 在 Agent 回话落地前被关掉时，
-// 用户写下的目标和那句话不能因为重启就再也看不见。回到那一页去。
-if (isCustomGoalKey(activeGoal) && !goalCustom[activeGoal] && !goalLayouts[activeGoal] &&
-    ((conversations[activeGoal]?.length||0)>0 || Object.keys(goalSuperAgentRuns).some(key=>key.startsWith(`${activeGoal}:`)))) {
-  screen='agent';
+// 当前目标可能是一个还没确认的新目标（草稿）。
+// - 有内容可恢复（写下的消息、没跑完的运行）：回到那一页，用户写下的东西
+//   不能因为重启就再也看不见。
+// - 什么都没有的草稿不是目标：回到健康目标，别让首页渲染出一个幽灵自定义目标。
+// - 上次停在一个还没拿到结果的请求上：那次请求在 App 关掉时就没有下文了，
+//   落成明确终态，别把用户锁在一页禁用的输入框上。
+const draftKey=isCustomGoalKey(activeGoal)&&!goalCustom[activeGoal]&&!goalLayouts[activeGoal]?activeGoal:null;
+if (draftKey) {
+  const draftRunKey=Object.keys(goalSuperAgentRuns).find(key=>key.startsWith(`${draftKey}:`));
+  const draftRun=draftRunKey?goalSuperAgentRuns[draftRunKey]:null;
+  if ((conversations[draftKey]?.length||0)>0 || draftRun) {
+    screen='agent';
+    if (draftRun && draftRun.actual!==true && draftRun.status==='working') {
+      goalSuperAgentRuns={...goalSuperAgentRuns,[draftRunKey]:{...draftRun,status:'blocked',statusLabel:'需要重发',
+        error:'App 关闭时这次请求没有收到结果；要继续请再发一次。'}};
+      saveGoalSuperAgentRuns();
+    }
+  } else {
+    delete conversations[draftKey];
+    saveConversations();
+    activeGoal='health';
+    localStorage.setItem(ACTIVE_GOAL_KEY,activeGoal);
+  }
 }
 function syncAgentViewportHeight() {
   const height=window.visualViewport?.height || window.innerHeight;
@@ -699,11 +717,24 @@ app.addEventListener('click', event => {
   if (action === 'edit-goal') { screen='agent'; render();if (agentConfig.token) void refreshAgentConnection(); }
   if (action === 'agent-back') {
     if (isCustomGoalKey(activeGoal) && !goalCustom[activeGoal] && !goalLayouts[activeGoal]) {
-      delete conversations[activeGoal];
-      // 放弃了这份草稿：存储里也要删掉，别把废弃的对话留在本机。
+      const draft=activeGoal;
+      delete conversations[draft];
+      // 放弃了这份草稿：存储里要删干净——对话、运行记录、当前目标指针。
+      // 少删一样，草稿就会在下一次重启时自己复活，用户被弹回他刚放弃的页面。
+      const keptRuns=Object.fromEntries(Object.entries(goalSuperAgentRuns).filter(([key])=>!key.startsWith(`${draft}:`)));
+      if (Object.keys(keptRuns).length!==Object.keys(goalSuperAgentRuns).length) {
+        goalSuperAgentRuns=keptRuns;
+        saveGoalSuperAgentRuns();
+      }
+      const keptTasks=Object.fromEntries(Object.entries(superAgentRuns).filter(([key])=>!key.startsWith(`${draft}:`)));
+      if (Object.keys(keptTasks).length!==Object.keys(superAgentRuns).length) {
+        superAgentRuns=keptTasks;
+        saveSuperAgentRuns();
+      }
       saveConversations();
       activeGoal=previousGoalBeforeDraft || 'health';
       previousGoalBeforeDraft=null;
+      localStorage.setItem(ACTIVE_GOAL_KEY,activeGoal);
     }
     screen='home';
     render();
