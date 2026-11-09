@@ -12,6 +12,11 @@ const TICKET_KEY = 'along.goal-ticket.v1';
 const app = document.querySelector('#app');
 const sheet = document.querySelector('#sheet');
 const toast = document.querySelector('#toast');
+// 离线缓存：只有浏览器支持时才注册（App 内的 along:// 不是安全上下文，会自动跳过）。
+if ('serviceWorker' in navigator) {
+  try { void navigator.serviceWorker.register('./sw.js').catch(()=>{}); }
+  catch { /* 注册失败不影响正常使用。 */ }
+}
 let state = ensureHealthGoal(loadState(localStorage.getItem(KEY)));
 let finance = loadFinance(localStorage.getItem(FINANCE_KEY));
 const storedActiveGoal=localStorage.getItem(ACTIVE_GOAL_KEY);
