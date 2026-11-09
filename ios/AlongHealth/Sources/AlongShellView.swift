@@ -34,6 +34,15 @@ struct AlongHealthApp: App {
     }
 }
 
+// 健康导入一次只允许一个：后来的请求也必须拿到明确的答复，不能被悄悄丢掉，
+// 否则网页那边的 Promise 会永远悬着，用户只会看到「点了没反应」。
+enum HealthImportAdmission {
+    /// 返回 nil 表示可以开始导入；否则是必须答复给网页的失败结果。
+    static func refusal(pending: String?) -> [String: Any]? {
+        pending == nil ? nil : ["ok": false, "error": "已有健康数据导入正在进行"]
+    }
+}
+
 @MainActor
 final class AlongBridgeModel: ObservableObject {
     @Published var showSheet = false
@@ -128,7 +137,11 @@ final class AlongBridgeModel: ObservableObject {
     }
 
     func begin(id: String, webView: WKWebView) {
-        guard requestID == nil else { return }
+        // 在途导入已经有一个请求时，这次要明确答复，不能直接丢掉。
+        if let refusal = HealthImportAdmission.refusal(pending: requestID) {
+            deliver(id: id, result: refusal, to: webView)
+            return
+        }
         requestID = id
         self.webView = webView
         selection = savedSelection
