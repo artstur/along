@@ -153,6 +153,13 @@ Along 是手机优先的目标工作台：把一个目标拆成「目标 / 来�
 - `npm run check`（CI 同款：语法检查 + 全部测试）、`npm test`（只跑测试）、`npm run build`（生成 `dist/` 与 `ios/AlongHealth/Web/`）
 - 推 `main` 不会自动部署：GitHub Pages 要手动触发工作流（`gh workflow run pages.yml --ref main`），iPhone 要在 Xcode 里重新构建安装
 
+## 7. 这个仓库已经踩过的坑（别再踩一遍）
+
+- **`web/app.mjs` 在 Node 里没法 import**：模块顶层就访问 `document` / `localStorage`，历史上等于零测试覆盖。仓库里已有最小 DOM 桩 `test/dom-stub.mjs`（`installDomStub()`），装上桩后 `await import('../web/app.mjs')` 就能驱动真实的渲染、点击与提交；要给 app.mjs 的行为补测试，先用它，别自己重写一份。
+- **App 内置页面不是安全上下文**：`along://` 是自定义 scheme，WKWebView 不把它当安全上下文（无公开 API 可改），`crypto.randomUUID` 是 `[SecureContext]` 方法，可能压根不存在；一旦缺失，新建目标、发消息、HealthKit 桥接、Agent 桥接会整体抛 `TypeError`。需要随机 id 时用 `web/super-agent.mjs` 的 `newId()`，它自带降级。
+- **自然语言里提取「目标数值」的启发式会一直在误判与漏检之间摆动**：误判会让守卫要求 Agent 匹配一个用户从没说过的数字 → 整单请求被 HTTP 400 拒掉；漏检只是少一道安全网。方向不对称，所以**宁可漏检不可误判**，并且要把语料钉成回归基线（`test/goal-agent-core.test.mjs` 的 `PHRASE_CORPUS`）。每加一条规则都要让独立核实者用「上一版 vs 新版」的差分再跑一遍——本轮就是这样连迭代 6 轮才收敛。
+- **自然语言改动词表是长期任务，不是一次性修复**：`目标调整为 / 提高到 / 减到 / 调到` 这类目标词限定的写法要能识别，但「今天运动量提高到 150 分钟」这种事实陈述不能被读成目标；理财域的金额必须带货币标记，否则「目标是 60 公斤」会被读成金额。
+
 === END GOAL PROMPT ===
 
 ---
