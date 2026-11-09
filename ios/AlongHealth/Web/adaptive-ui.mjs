@@ -118,6 +118,62 @@ export function normalizeQuestions(value) {
   return questions.slice(0,6).map(question=>String(question??'待确认问题').trim().slice(0,240)||'待确认问题');
 }
 
+// 模型给的布局常常有点毛刺：标题太长、模块 id 重复、给了第 7 个模块、
+// 混进了没被允许的模块类型。两条运行时必须对同一份输出给出同一个结论，
+// 所以归一放在共享层，两条运行时都用它。
+// 能修的修掉（截断、编号、去重、丢掉超量与未知类型）；修不了的（文本类型
+// 不对）原样留给共享校验层拒绝——不兜底成 "[object Object]"，那种脏文本会
+// 直接出现在用户的首页上。
+// 只有字符串和数字算文本；对象、数组、布尔都不是。
+function layoutText(value) {
+  if (typeof value==='string') return value;
+  if (typeof value==='number'&&Number.isFinite(value)) return String(value);
+  return value;
+}
+export function normalizeAdaptiveLayout(value, domain='health') {
+  if (!value||typeof value!=='object') return value;
+  const used=new Set();
+  const nextId=(raw,prefix,index)=>{
+    const base=String(raw||`${prefix}-${index+1}`).toLowerCase().replace(/[^a-z0-9_-]+/g,'-').replace(/^-+|-+$/g,'').slice(0,52)||`${prefix}-${index+1}`;
+    let id=base,n=2;while(used.has(id)) id=`${base.slice(0,48)}-${n++}`;used.add(id);return id;
+  };
+  // 截断真的文本；类型不对的值原样留着，交给共享校验层拒收。
+  const trim=(raw,max,fallback)=>{
+    if (raw==null) return fallback;
+    const text=layoutText(raw);
+    if (typeof text!=='string') return text;
+    return text.trim().slice(0,max)||fallback;
+  };
+  const modules=(Array.isArray(value.modules)?value.modules:[]).filter(module=>module&&['summary','fact_list','chips','metric'].includes(module.kind)&&!(domain==='custom'&&module.kind==='metric')).slice(0,6).map((module,index)=>{
+    const base={kind:module.kind,id:nextId(module.id,'module',index),title:trim(module.title,60,`模块 ${index+1}`)};
+    if (module.kind==='summary') return {...base,content:trim(module.content||module.note,500,'待补充')};
+    if (module.kind==='fact_list') {
+      const facts=Array.isArray(module.items)?module.items:Array.isArray(module.facts)?module.facts:[];
+      return {...base,items:facts.slice(0,6).map((fact,factIndex)=>fact&&typeof fact==='object'
+        ? {label:trim(fact.label,40,`要点 ${factIndex+1}`),value:trim(fact.value,180,'待补充')}
+        : {label:`要点 ${factIndex+1}`,value:trim(fact,180,'待补充')})};
+    }
+    if (module.kind==='chips') {
+      const chips=Array.isArray(module.items)?module.items:Array.isArray(module.chips)?module.chips:[];
+      return {...base,items:chips.slice(0,8).map(chip=>trim(chip,32,'要点'))};
+    }
+    return {...base,source:trim(module.source,30,''),target:module.target,unit:module.unit==null?null:trim(module.unit,20,''),note:module.note==null?null:trim(module.note,180,'')};
+  });
+  const tasks=(Array.isArray(value.tasks)?value.tasks:[]).slice(0,6).map((task,index)=>({
+    id:nextId(task?.id,'task',index),when:trim(task?.when,80,'待安排'),title:trim(task?.title,100,`任务 ${index+1}`),detail:trim(task?.detail,300,'待补充'),
+    state:['temporary','planned','deferred'].includes(task?.state)?task.state:'planned',
+  }));
+  return {
+    version:1,
+    title:trim(value.title,80,'我的目标'),
+    badge:value.badge==null?null:trim(value.badge,40,''),
+    summary:trim(value.summary,600,'目标计划已生成'),
+    modules,tasks,
+    questions:normalizeQuestions(value.questions),
+    connections:Array.isArray(value.connections)?value.connections.slice(0,4):[],
+  };
+}
+
 export function validateAdaptiveLayout(value, domain='health') {
   if (!['health','finance','custom'].includes(domain)) throw Error('目标类型无效');
   const layout=object(value, '个性化页面');
