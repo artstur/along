@@ -76,8 +76,13 @@ async function refreshAgentConnection() {
     const failedRun=currentGoalSuperAgentRun(activeGoal);
     if (failedRun?.status==='blocked' && failedRun.actual!==true) {
       const key=goalRunKey(activeGoal);
+      const legacyKey=activeGoal;
+      const legacyRun=goalSuperAgentRuns[legacyKey];
       const {[key]:_discarded,...remainingRuns}=goalSuperAgentRuns;
-      goalSuperAgentRuns=remainingRuns;
+      const {[legacyKey]:_legacyDiscarded,...cleanRuns}=remainingRuns;
+      // 旧键里存着的也是一条过不了白名单的坏记录时一起清掉：
+      // 只清新键的话，那条坏记录会一直挂在存储里，用户每次打开都撞上它。
+      goalSuperAgentRuns=legacyRun&&!safeGoalSuperAgentRun(legacyRun)?cleanRuns:remainingRuns;
       saveGoalSuperAgentRuns();
     }
     const history=conversations[activeGoal]||[];
@@ -195,8 +200,31 @@ async function refreshSuperAgentTask(task) {
 function saveGoalSuperAgentRuns() { localStorage.setItem(GOAL_SUPER_AGENT_RUNS_KEY,JSON.stringify(goalSuperAgentRuns)); }
 function goalRunKey(goalKey=activeGoal,runtime=agentRuntime) { return `${goalKey}:${runtime}`; }
 function currentGoalSuperAgentRun(goalKey=activeGoal) {
-  return safeGoalSuperAgentRun(goalSuperAgentRuns[goalRunKey(goalKey)]) || (agentRuntime===DSH_RUNTIME?safeGoalSuperAgentRun(goalSuperAgentRuns[goalKey]):null);
+  const key=goalRunKey(goalKey);
+  const stored=goalSuperAgentRuns[key];
+  // 旧版本的记录存在不带运行时前缀的键里，两边都要一样处理。
+  const legacy=agentRuntime===DSH_RUNTIME?goalSuperAgentRuns[goalKey]:null;
+  const saved=safeGoalSuperAgentRun(stored)||safeGoalSuperAgentRun(legacy);
+  if (saved) return saved;
+  // 存着的记录过不了白名单：那是宿主返回了我们不认的形状。
+  // 不能静默地当成「没有记录」——那样整个编排面板会消失，
+  // 宿主给的原因用户永远看不到。
+  const untrusted=stored??legacy;
+  if (untrusted) return createFailedGoalSuperAgentRun(untrustedGoalRequest(goalKey,untrusted),untrustedGoalReason(untrusted),Date.now(),agentRuntime);
+  return null;
 }
+// 存着的记录不可信时，要给它一个能落到失败状态的形状：还能用的部分捡回来，
+// 剩下的用当前目标补齐——失败卡片要能说清「是谁、为什么」。
+function untrustedGoalRequest(goalKey,value) {
+  const input=value&&typeof value==='object'&&value.input&&typeof value.input==='object'?value.input:null;
+  const goal=currentGoal();
+  return {
+    requestId:typeof value?.requestId==='string'&&value.requestId?value.requestId:newId('req'),
+    goal:input?.goal&&typeof input.goal==='object'?input.goal:{domain:goalDomain(goalKey),title:goal.title,target:goal.target},
+    message:typeof input?.message==='string'?input.message:'',
+  };
+}
+const untrustedGoalReason = value => typeof value?.error==='string'&&value.error?value.error:'宿主返回了无法识别的目标编排记录';
 const goalSuperAgentRequests=new Set();
 function saveGoalRun(goalKey,run) {
   goalSuperAgentRuns={...goalSuperAgentRuns,[goalRunKey(goalKey,run?.runtime||agentRuntime)]:run};
