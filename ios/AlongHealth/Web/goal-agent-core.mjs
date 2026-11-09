@@ -116,9 +116,27 @@ function readAgentJSON(value) {
   catch { throw Error('Agent 返回了无法解析的内容'); }
 }
 
+// 回复与提案：只截断过长字符串；类型不对的值原样留着，交给共享校验层拒绝。
+// 两条运行时都要用这一份——否则同一份模型输出，一边被截断收下、一边整份作废
+// （和目标空间那一条是同一个坑）。
+export function normalizeGoalReply(value) {
+  const answer=readAgentJSON(value);
+  if (!answer||typeof answer!=='object'||Array.isArray(answer)) return answer;
+  const trim=(text,max)=>typeof text==='string'?text.trim().slice(0,max):text;
+  return {
+    ...answer,
+    reply:trim(answer.reply,1200),
+    proposal:answer.proposal==null?null:{
+      ...answer.proposal,
+      title:trim(answer.proposal.title,80),
+      task:trim(answer.proposal.task,120),
+      reason:trim(answer.proposal.reason,300),
+    },
+  };
+}
+
 export function validateGoalReply(value, domain, message) {
-  const answer = readAgentJSON(value);
-  if (typeof answer.reply !== 'string' || !answer.reply.trim() || answer.reply.length > 1200) throw Error('Agent 回复格式不正确');
+  const answer = readAgentJSON(value);  if (typeof answer.reply !== 'string' || !answer.reply.trim() || answer.reply.length > 1200) throw Error('Agent 回复格式不正确');
   let proposal = null;
   if (answer.proposal != null) {
     const p = answer.proposal;
