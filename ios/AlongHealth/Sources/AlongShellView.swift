@@ -100,6 +100,16 @@ final class AlongBridgeModel: ObservableObject {
         }
     }
 
+    func clearHealth(id: String, webView: WKWebView) {
+        // 清除本机保存的读取选择并停掉观察：只清网页里的摘要，下一轮刷新还会被读回来。
+        UserDefaults.standard.removeObject(forKey: "along.health.selectedTypes")
+        reader.stopObserving()
+        selection = []
+        preview = nil
+        errorMessage = nil
+        deliver(id: id, result: ["ok": true], to: webView)
+    }
+
     private func deliver(id: String, result: [String: Any], to view: WKWebView) {
         guard let arguments = try? JSONSerialization.data(withJSONObject: [id, result]),
               let json = String(data: arguments, encoding: .utf8) else { return }
@@ -240,7 +250,7 @@ enum AlongConnectionStore {
 
 struct AlongWebView: UIViewRepresentable {
     @ObservedObject var bridge: AlongBridgeModel
-    private let site = URL(string: "along://app/index.html?build=33")!
+    private let site = URL(string: "along://app/index.html?build=34")!
 
     func makeCoordinator() -> Coordinator { Coordinator(bridge: bridge) }
 
@@ -252,6 +262,7 @@ struct AlongWebView: UIViewRepresentable {
         let controller = WKUserContentController()
         controller.add(context.coordinator, name: "alongHealth")
         controller.add(context.coordinator, name: "alongHealthRefresh")
+        controller.add(context.coordinator, name: "alongHealthClear")
         controller.add(context.coordinator, name: "alongAgent")
         controller.addUserScript(WKUserScript(source: Self.bridgeScript, injectionTime: .atDocumentStart, forMainFrameOnly: true))
         let configuration = WKWebViewConfiguration()
@@ -288,6 +299,11 @@ struct AlongWebView: UIViewRepresentable {
           const id = newId();
           pending.set(id, {resolve, reject});
           window.webkit.messageHandlers.alongHealthRefresh.postMessage({id});
+        }),
+        clear: () => new Promise((resolve, reject) => {
+          const id = newId();
+          pending.set(id, {resolve, reject});
+          window.webkit.messageHandlers.alongHealthClear.postMessage({id});
         })
       };
       const agentPending = new Map();
@@ -358,7 +374,7 @@ struct AlongWebView: UIViewRepresentable {
             let origin = message.frameInfo.securityOrigin
             let trustedOrigin = (origin.protocol == "along" && origin.host == "app") ||
                                 (origin.protocol == "https" && origin.host == "artstur.github.io")
-            guard ["alongHealth", "alongHealthRefresh", "alongAgent"].contains(message.name), message.frameInfo.isMainFrame,
+            guard ["alongHealth", "alongHealthRefresh", "alongHealthClear", "alongAgent"].contains(message.name), message.frameInfo.isMainFrame,
                   trustedOrigin,
                   let body = message.body as? [String: Any], let id = body["id"] as? String,
                   let webView = message.webView else { return }
@@ -366,6 +382,8 @@ struct AlongWebView: UIViewRepresentable {
                 Task { @MainActor in bridge.begin(id: id, webView: webView) }
             } else if message.name == "alongHealthRefresh" {
                 Task { @MainActor in bridge.refreshSnapshot(id: id, webView: webView) }
+            } else if message.name == "alongHealthClear" {
+                Task { @MainActor in bridge.clearHealth(id: id, webView: webView) }
             } else {
                 if body["operation"] as? String == "connection" {
                     let result: [String: Any]

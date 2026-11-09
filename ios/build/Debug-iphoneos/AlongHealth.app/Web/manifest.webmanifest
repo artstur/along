@@ -1,0 +1,15 @@
+{
+  "id": "./",
+  "name": "Along · 目标工作台",
+  "short_name": "Along",
+  "lang": "zh-CN",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f7f7f7",
+  "theme_color": "#f7f7f7",
+  "icons": [
+    {"src":"./app-icon.png","sizes":"1024x1024","type":"image/png","purpose":"any"},
+    {"src":"./app-icon.png","sizes":"1024x1024","type":"image/png","purpose":"maskable"}
+  ]
+}
