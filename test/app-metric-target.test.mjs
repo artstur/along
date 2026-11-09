@@ -18,6 +18,15 @@ const state={
   goals:[{id:'along-health-weekly-workout',type:'workout',target:180}],
 };
 
+test('a metric target stored as a number-like string still gets a progress bar',async()=>{
+  const dom=installDomStub({storage:{
+    [HEALTH_KEY]:JSON.stringify({...state,snapshot:{...state.snapshot,selectedTypes:['workout','sleep']}}),
+    [LAYOUTS_KEY]:JSON.stringify({health:{...layout,modules:[{kind:'metric',id:'sleep',title:'睡眠',source:'sleepMinutes',target:'480',unit:'分钟'}]},finance:null,custom:null}),
+  }});
+  await import('../web/app.mjs?metric-target-string');
+  assert.match(dom.app.innerHTML,/aria-valuenow="91"/,'目标写成数字字符串时也要算得出进度，不能静默丢掉进度条');
+});
+
 test('the metric in the generated space follows the current goal target',async()=>{
   const dom=installDomStub({storage:{
     [HEALTH_KEY]:JSON.stringify(state),

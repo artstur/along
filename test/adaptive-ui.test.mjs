@@ -97,6 +97,17 @@ test('a metric target must be a usable number inside the domain range',()=>{
   assert.equal(validateAdaptiveLayout(metric(120),'health').modules[0].target,120);
 });
 
+test('a metric target written as a number-like string is still range checked',()=>{
+  const metric=(target,source='workoutMinutes')=>structuredClone({...valid,modules:[{kind:'metric',id:'m',title:'本周运动',source,target,unit:'分钟'}]});
+  assert.equal(validateAdaptiveLayout(metric('120'),'health').modules[0].target,120,'数字字符串就是那个数字，不能因此丢掉进度条');
+  assert.equal(validateAdaptiveLayout(metric('10,000','saved'),'finance').modules[0].target,10000);
+  assert.throws(()=>validateAdaptiveLayout(metric('999999999'),'health'),/指标目标/,'数字字符串不能绕过范围校验');
+  assert.throws(()=>validateAdaptiveLayout(metric('-5'),'health'),/指标目标/);
+  assert.throws(()=>validateAdaptiveLayout(metric('0'),'health'),/指标目标/);
+  // 不是数字的说明文字仍然只用来显示。
+  assert.equal(validateAdaptiveLayout(metric('每天 30 分钟'),'health').modules[0].target,'每天 30 分钟');
+});
+
 test('Japanese learning plans carry a Duolingo connection recommendation',()=>{
   const japanese={...structuredClone(valid),title:'60 天日语阅读入门',summary:'从五十音到 N5 短文',modules:valid.modules.filter(item=>item.kind!=='metric')};
   const migrated=validateAdaptiveLayout(japanese,'custom');
