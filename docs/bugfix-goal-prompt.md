@@ -97,10 +97,10 @@ Along 是手机优先的目标工作台：把一个目标拆成「目标 / 来�
 - **补回归测试。** 放 `test/`，命名体现被钉住的不变量（例：`test('health router stays quiet when the target is already met')`），不要 `fix-bug-123`。
 - **共享文件双端可用。** 改 `web/goal-agent-core.mjs`、`web/adaptive-ui.mjs`、`web/super-agent.mjs`、`web/loop.mjs` 时，必须同时能在浏览器和 Node 里跑通，不得引入 Node 专用模块。
 - **同步产物与版本号**（用户可见的改动，漏一处手机上就还是旧页面）：
-  - `web/index.html` 的 `?v=`（当前 40）
-  - `web/sw.js` 的 `CACHE`（当前 `along-shell-v40`）
-  - `ios/AlongHealth/Sources/AlongShellView.swift` 的 `build=`（当前 40）
-  - 需要重新安装 App 时，再提 `ios/AlongHealth/Info.plist` 的 `CFBundleVersion`（当前 34）
+  - `web/index.html` 的 `?v=`（当前 41）
+  - `web/sw.js` 的 `CACHE`（当前 `along-shell-v41`）
+  - `ios/AlongHealth/Sources/AlongShellView.swift` 的 `build=`（当前 41）
+  - 需要重新安装 App 时，再提 `ios/AlongHealth/Info.plist` 的 `CFBundleVersion`（当前 35）
 - **新增前端文件**要同时登记到 `tools/build.mjs` 的 `files` 和 `web/sw.js` 的 `FILES`，并保持 `web/` 平铺。
 - **改源码，不手改产物。** `dist/` 和 `ios/AlongHealth/Web/` 由 `npm run build` 生成；`ios/AlongHealth/Web/` 被 git 跟踪，build 后要连同源码一起提交。
 
@@ -177,6 +177,8 @@ Along 是手机优先的目标工作台：把一个目标拆成「目标 / 来�
 - **读函数不能有破坏性副作用**：读运行记录的地方一旦发现记录不可信，不能造一条假的「正在连接」把它写回存储——那会让真实状态和失败原因永远看不到，用户只剩一个永久转圈的界面。
 - **等用户操作的状态也要留出口**：还没等到 Agent 建议时，提示卡片上也要有「保留原任务」。否则用户唯一的出路是删掉自己的数据才能脱身。
 - **期限比较要先归一时间基准**：`Date.now()-undefined` 是 `NaN`，和任何数比较都为假——期限永远不到。缺时间的记录要按已过期处理。
+- **格式化时间戳不能直接把脏值喂给 `Intl`**：`Intl.DateTimeFormat.format(new Date(undefined))` 抛 `RangeError: Invalid time value`。如果这行是在 `render()` 里被调用的，一次抛错整个界面就停在旧页面上、之后每次重绘都失败——用户看到的是「点不动的工作台」，而不是「某个时间显示不出来」。空值和非法日期要退化成占位符。
+- **旧键和新键要一样处理**：运行时切过、缓存键改过之后，同一份记录可能存在两处。读的时候只检查新键，旧键里存着的坏数据就会漏过去，然后在别处被当成「没有记录」而造出一条假状态。查两处就要查两遍。
 
 === END GOAL PROMPT ===
 
