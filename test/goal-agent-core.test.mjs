@@ -187,6 +187,10 @@ const PHRASE_CORPUS=[
   ['本月开销改成 500 元','finance',null],
   ['存款改成 5000 元','finance',null],
   ['目标改成 150 分钟，更好','health',null],
+  ['目标改成 150 分钟，如果天气好','health',150],
+  ['目标改成 150 分钟，如果完成就奖励我','health',150],
+  ['改成 200 分钟如果天气好','health',null],
+  ['改成 200 分钟，更好','health',null],
   ['未来半年完成一部长篇小说','custom',null],
 ];
 

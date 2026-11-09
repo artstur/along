@@ -27,8 +27,10 @@ const DEFERRED_TARGET=/下次|以后|之后|回头|再说|将来/;
 // 触发词前一句正好说到另一件事时，那个数字不是目标：每月房租设为 2500 元。
 // 只看句尾，避免「交完房租把目标改成 12000 元」这种真指派被误杀。
 const OTHER_ITEM=/(房租|房费|房贷|学费|水电费|水电|电费|水费|燃气费|燃气|煤气费|餐费|伙食费|宽带费|物业费|话费|网费|车费|油费|饭钱|菜钱|保险费|保险|保费|评分|得分|打分|分数)$/;
-// 数字后面的补语：「改成 200 分钟更好」「改成 200 分钟如果天气好」都不是指派。
-const QUALIFIED_AFTER=/^\s*[，,。；;]?\s*(以内|封顶|如果|要是|假如|万一|假设|更好|就行|好了|再说)/;
+// 数字后面紧贴的补语：「改成 200 分钟如果天气好」「改成 30 分钟以内」都不是指派。
+const QUALIFIED_AFTER=/^\s*(以内|封顶|如果|要是|假如|万一|假设)/;
+// 尾随评注：可以隔一个标点，「改成 200 分钟，更好」与「改成 200 分钟更好」结论一致。
+const TRAILING_COMMENT=/^\s*[，,。；;]?\s*(更好|就行|好了|再说)/;
 // 金额必须带货币标记：没有货币标记的裸数字可能是公斤、步、岁，读成金额会让整单请求失败。
 const HEALTH_TARGET=new RegExp(`(${ANY_CHANGE})\\s*(\\d+(?:\\.\\d+)?)\\s*(小时|分钟|分(?![一-龥]))(?:\\s*(\\d+(?:\\.\\d+)?)\\s*(分钟|分(?![一-龥])))?`,'g');
 const FINANCE_TARGETS=[
@@ -61,7 +63,9 @@ function targetCandidates(message,pattern,readValue) {
     // 「睡眠改成 8 小时」里的数字不是目标；只有空句或提到目标的句子才算指派。
     if (!GOAL_WORD.test(match[1]) && clause.trim() && !GOAL_WORD.test(clause)) continue;
     if (!isGoalAssignment(match[1],clause)) continue;
-    if (QUALIFIED_AFTER.test(message.slice(match.index+match[0].length))) continue;
+    const trailing=message.slice(match.index+match[0].length);
+    if (QUALIFIED_AFTER.test(trailing)) continue;
+    if (TRAILING_COMMENT.test(trailing)) continue;
     const value=readValue(match);
     if (value==null) continue;
     found.push({at:match.index,value});
