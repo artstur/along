@@ -65,20 +65,23 @@ async function superAgentReady() {
   if (response.status!==404 && !response.ok) throw Error(`DSH Along Source 未就绪（${response.status}）`);
   return true;
 }
+// 目标名称必须真的是字符串：String() 会把对象变成 "[object Object]"，
+// 这样的假标题会被当成用户目标送进模型。
+function cleanGoalTitle(value) {
+  const title=typeof value==='string'?value.trim():'';
+  if (!title||title.length>80) throw Error('目标名称无效');
+  return title;
+}
 function cleanGoal(value) {
   const domain=value?.domain;
   if (!['health','finance','custom'].includes(domain)) throw Error('目标类型无效');
   if (domain==='custom') {
-    const title=String(value?.title??'').trim();
-    if (!title||title.length>80) throw Error('目标名称无效');
-    return {domain,target:null,title};
+    return {domain,target:null,title:cleanGoalTitle(value?.title)};
   }
   const limit=domain==='health'?10080:10000000;
   const target=value?.target;
   if (!Number.isInteger(target)||target<1||target>limit) throw Error('目标数值无效');
-  const title=String(value?.title??'').trim();
-  if (!title||title.length>80) throw Error('目标名称无效');
-  return {domain,target,title};
+  return {domain,target,title:cleanGoalTitle(value?.title)};
 }
 function cleanSnapshot(value,domain) {
   if (domain==='custom') return {source:'暂无连接'};
