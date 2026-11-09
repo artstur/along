@@ -83,3 +83,68 @@ test('a goal run event with an invalid time does not freeze the agent page',asyn
   assert.match(dom.app.innerHTML,/goal-run-events/,'目标编排面板要画得出来，不能让 render() 抛错');
   assert.match(dom.app.innerHTML,/—/,'非法时间显示占位符');
 });
+
+test('a goal run with null elements does not freeze the agent page',async()=>{
+  const dom=installDomStub({storage:{
+    [GOAL_RUNS_KEY]:JSON.stringify({'health:dsh-superagent':{
+      ...goalRunWithNumericTicket,ticket:{id:'ticket-abc12345'},
+      agents:[null],events:[null],
+    }}),
+    [AGENT_KEY]:JSON.stringify(agentConfig),
+    [RUNTIME_KEY]:JSON.stringify('dsh-superagent'),
+  }});
+  await import('../web/app.mjs?goal-null-elements');
+  await dom.click({action:'edit-goal'});
+  assert.match(dom.app.innerHTML,/goal-orchestration/,'目标编排面板要画得出来，不能让 render() 抛错');
+});
+
+test('reading an untrusted goal run does not write the failure back to storage',async()=>{
+  const dom=installDomStub({storage:{
+    [GOAL_RUNS_KEY]:JSON.stringify({'health:dsh-superagent':untrustedGoalRun}),
+    [AGENT_KEY]:JSON.stringify(agentConfig),
+    [RUNTIME_KEY]:JSON.stringify('dsh-superagent'),
+  }});
+  await import('../web/app.mjs?goal-read-no-write');
+  await dom.click({action:'edit-goal'});
+  // 读函数不能有破坏性副作用：合成出来的失败状态不能被写回存储。
+  const stored=JSON.parse(dom.storage.get(GOAL_RUNS_KEY));
+  assert.deepEqual(stored['health:dsh-superagent'],untrustedGoalRun,'读记录不能改写存储');
+});
+
+test('no goal run at all is not reported as a failure',async()=>{
+  const dom=installDomStub({storage:{
+    [GOAL_RUNS_KEY]:JSON.stringify({}),
+    [AGENT_KEY]:JSON.stringify(agentConfig),
+    [RUNTIME_KEY]:JSON.stringify('dsh-superagent'),
+  }});
+  await import('../web/app.mjs?goal-no-run');
+  await dom.click({action:'edit-goal'});
+  // 根本没有运行记录 ≠ 有一条不可信的记录：不能误报失败。
+  assert.doesNotMatch(dom.app.innerHTML,/goal-orchestration/,'没有运行记录时不该出现编排面板');
+  assert.doesNotMatch(dom.app.innerHTML,/宿主返回了无法识别的目标编排记录/,'没有运行记录时不该报失败');
+});
+
+test('a legitimate goal run in the legacy key is not cleared',async()=>{
+  const legacyRun={...goalRunWithNumericTicket,ticket:{id:'ticket-abc12345'}};
+  const dom=installDomStub({storage:{
+    // 新键里是一次失败的运行（会被清掉），旧键里是一条合法的记录：清新的那条
+    // 不能顺手把旧的那条也删了。
+    [GOAL_RUNS_KEY]:JSON.stringify({
+      'health:dsh-superagent':{...legacyRun,status:'blocked',statusLabel:'DSH 暂不可用',error:'DSH 暂不可用',actual:false},
+      health:legacyRun,
+    }),
+    [AGENT_KEY]:JSON.stringify(agentConfig),
+    [RUNTIME_KEY]:JSON.stringify('dsh-superagent'),
+  }});
+  globalThis.window.AlongAgentBridge={
+    request:({path})=>Promise.resolve(path==='/connection/status'?{along:true,ready:true,runtime:'dsh-superagent'}:{}),
+  };
+  await import('../web/app.mjs?legacy-legitimate-goal-run');
+  await dom.click({action:'edit-goal'});
+  await new Promise(resolve=>setTimeout(resolve,0));
+  await new Promise(resolve=>setTimeout(resolve,0));
+  const stored=JSON.parse(dom.storage.get(GOAL_RUNS_KEY));
+  // 旧键里存着的是一条能过白名单的记录：清理不能把它误删。
+  assert.ok(stored.health,'旧键里合法的记录不能被误删');
+  assert.equal(stored.health.requestId,legacyRun.requestId);
+});

@@ -48,3 +48,23 @@ test('a malformed run record does not freeze the task page',async()=>{
   assert.match(dom.app.innerHTML,/任务协作/,'任务页要画得出来，不能让 render() 抛错');
   assert.doesNotMatch(dom.app.innerHTML,/连接 Kimi Code Swarm/,'过不了白名单的记录不能被换成假的「正在连接」');
 });
+
+// 白名单只检查数组本身是数组，不检查里面的元素：数组里有 null 时，
+// 渲染层直接读 event.at / agent.status 会抛 TypeError，整个界面卡住。
+const runWithNullElements={
+  actual:true,version:2,runtime:'kimi-code-swarm',requestId:'req-null-1',
+  source:{kind:'along',label:'Along 动态任务'},trigger:{kind:'dynamic-task',label:'正在提交给 Kimi'},
+  assignments:[null],events:[null],status:'working',statusLabel:'Kimi Main Session 正在拆解',progress:20,
+  mandate:{strength:'explicit',actor:{id:'a1'},policyVersion:12345},
+};
+
+test('a run record with null elements or a non-string policy version does not freeze the task page',async()=>{
+  const dom=installDomStub({storage:{
+    [ADAPTIVE_LAYOUTS_KEY]:JSON.stringify({health:layout,finance:null,custom:null}),
+    [RUNS_KEY]:JSON.stringify({'health:kimi-code-swarm:sleep-check':runWithNullElements}),
+  }});
+  await import('../web/app.mjs?null-run-elements');
+  await dom.click({action:'open-task',taskId:'sleep-check'});
+  assert.match(dom.app.innerHTML,/任务协作/,'任务页要画得出来，不能让 render() 抛错');
+  assert.doesNotMatch(dom.app.innerHTML,/12345/,'非字符串的策略版本号不该被当成可显示的文本');
+});
