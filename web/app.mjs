@@ -54,7 +54,9 @@ const ticketTag = value => typeof value==='string'&&value?value.slice(0,8):'—'
 // 旧版本宿主写下的记录里可能没有时间戳：Intl 格式化无效日期会抛 RangeError，
 // 整个 render() 挂掉，界面停在旧页面上再也动不了。
 const formatStamp = (value,options) => {
-  if (value==null) return '—';
+  // 宿主用 0 表示「起始时间未知」（Number(entry.createdAt)||0），
+  // 那不是 1970 年：显示一个看起来很正常的时间，比显示「未知」更糟。
+  if (value==null || value===0) return '—';
   const date=new Date(value);
   return Number.isFinite(date.getTime())?new Intl.DateTimeFormat('zh-CN',options).format(date):'—';
 };
