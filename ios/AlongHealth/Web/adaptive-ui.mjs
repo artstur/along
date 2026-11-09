@@ -61,9 +61,10 @@ function cleanModule(value, domain) {
   if (kind === 'chips') return {...base, items:list(module.items, '标签列表', 8).map(item=>text(item, '标签', 32))};
   const source=text(module.source, '指标来源', 30);
   if (!METRIC_SOURCES[domain]?.has(source)) throw Error('指标来源不受信任');
-  const target = typeof module.target === 'number' && Number.isFinite(module.target)
-    ? module.target
-    : text(module.target, '指标目标', 60);
+  const limit=domain==='finance'?10000000:10080;
+  const numeric=typeof module.target==='number';
+  if (numeric&&(!Number.isFinite(module.target)||module.target<=0||module.target>limit)) throw Error('指标目标格式不正确');
+  const target = numeric ? module.target : text(module.target, '指标目标', 60);
   return {...base, source, target, unit:text(module.unit, '指标单位', 20, {optional:true}), note:text(module.note, '指标说明', 180, {optional:true})};
 }
 

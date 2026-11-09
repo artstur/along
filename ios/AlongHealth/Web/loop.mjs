@@ -1,4 +1,5 @@
 import {initialState, setSnapshot} from './health.mjs';
+import {validateTaskReply, SIGNIFICANT_MINUTES} from './goal-agent-core.mjs';
 
 export const EXPERIMENT = 'weekly-workout-120-v1';
 export const ORIGINAL_TASK = '本周安排一次 45 分钟健身';
@@ -48,7 +49,7 @@ export function routeHealthEvent(before, event) {
   const remainingBefore = Math.max(0, goal.target - previous);
   const remainingAfter = Math.max(0, goal.target - after.snapshot.workoutMinutes);
   const meaningful = event.type === 'workout' && remainingBefore > 0 &&
-    (remainingAfter === 0 || (event.amount >= 20 && remainingAfter < remainingBefore));
+    (remainingAfter === 0 || (event.amount >= SIGNIFICANT_MINUTES && remainingAfter < remainingBefore));
   const reason = event.type !== 'workout' ? '步数变化与本周健身时长目标无关。'
     : !meaningful ? '这次变化较小，暂不打断原有安排。'
     : `新增 ${event.amount} 分钟健身记录，目标还差 ${remainingAfter} 分钟（原来还差 ${remainingBefore} 分钟）。`;
@@ -56,16 +57,5 @@ export function routeHealthEvent(before, event) {
 }
 
 export function acceptAgentSuggestion(value, expectedRemaining) {
-  const raw = typeof value === 'string' ? value : value?.finalResponse;
-  if (typeof raw !== 'string') throw Error('Agent 没有返回任务');
-  const match = raw.trim().match(/(?:```(?:json)?\s*)?(\{[\s\S]*?\})(?:\s*```)?/);
-  if (!match) throw Error('Agent 返回格式不正确');
-  let answer;
-  try { answer = JSON.parse(match[1]); } catch { throw Error('Agent 返回格式不正确'); }
-  if (!answer || !Number.isInteger(answer.minutes) || answer.minutes !== expectedRemaining ||
-      typeof answer.task !== 'string' || !answer.task.trim() || answer.task.length > 100 ||
-      typeof answer.reason !== 'string' || !answer.reason.trim() || answer.reason.length > 240) {
-    throw Error('Along 建议与已计算的剩余分钟不一致');
-  }
-  return {task: answer.task.trim(), reason: answer.reason.trim(), minutes: answer.minutes};
+  return validateTaskReply(value, expectedRemaining);
 }

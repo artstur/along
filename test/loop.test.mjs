@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {startExperiment, routeHealthEvent, acceptAgentSuggestion, agentRequestPayload, ORIGINAL_TASK} from '../web/loop.mjs';
+import {routeHealthChange} from '../web/goal-agent-core.mjs';
 import {initialState} from '../web/health.mjs';
 
 test('35-minute workout reroutes 75 of 120 to exactly 10 remaining',()=>{
@@ -27,8 +28,24 @@ test('minor workout and unrelated steps stay quiet',()=>{
 });
 
 test('agent suggestion cannot alter Along arithmetic',()=>{
-  assert.deepEqual(acceptAgentSuggestion('{"task":"再活动 10 分钟","reason":"剩余变少","minutes":10}',10),{task:'再活动 10 分钟',reason:'剩余变少',minutes:10});
-  assert.throws(()=>acceptAgentSuggestion('{"task":"跑 45 分钟","reason":"错了","minutes":45}',10),/不一致/);
+  assert.deepEqual(acceptAgentSuggestion('{"task":"再活动 10 分钟","reason":"剩余变少","remaining":10}',10),{task:'再活动 10 分钟',reason:'剩余变少',remaining:10});
+  assert.throws(()=>acceptAgentSuggestion('{"task":"跑 45 分钟","reason":"错了","remaining":45}',10),/不一致/);
+});
+
+test('a suggestion that follows the agent output contract is accepted and survives the host round trip',()=>{
+  const accepted=acceptAgentSuggestion('{"task":"再活动 10 分钟","reason":"剩余变少","remaining":10}',10);
+  assert.equal(accepted.task,'再活动 10 分钟');
+  assert.equal(accepted.reason,'剩余变少');
+  assert.doesNotThrow(()=>acceptAgentSuggestion(JSON.stringify(accepted),10));
+  assert.throws(()=>acceptAgentSuggestion('{"task":"跑 45 分钟","reason":"错了","remaining":45}',10),/不一致/);
+});
+
+test('the experiment router and the real router judge significance the same way',()=>{
+  for (const minutes of [1,10,14,15,19,20,35]) {
+    const real=routeHealthChange({workoutMinutes:75},{workoutMinutes:75+minutes},120).decision;
+    const demo=routeHealthEvent(startExperiment(),{type:'workout',amount:minutes}).decision;
+    assert.equal(demo,real,`新增 ${minutes} 分钟时两条路由判断不一致`);
+  }
 });
 
 test('experiment keeps a restorable copy of the previous goals',()=>{

@@ -4,7 +4,7 @@ import {execFileSync} from 'node:child_process';
 import {homedir, networkInterfaces} from 'node:os';
 import {join} from 'node:path';
 import {mkdirSync, readFileSync, writeFileSync, existsSync, chmodSync} from 'node:fs';
-import {routeHealthChange, requestedTargetFromMessage, validateGoalReply, validateTaskReply} from '../web/goal-agent-core.mjs';
+import {routeHealthChange, validateGoalReply, validateTaskReply} from '../web/goal-agent-core.mjs';
 import {safeAdaptiveLayout} from '../web/adaptive-ui.mjs';
 import {runTaskCodex} from './codex-agent.mjs';
 import {KimiCodeAgent} from './kimi-code-agent.mjs';
@@ -105,11 +105,9 @@ function normalizeGoalRun(run) {
   if (!run?.result) return run;
   const domain=run.input?.goal?.domain;
   if (!['health','finance','custom'].includes(domain)) throw Error('Along 返回的目标类型无效');
-  const output=validateGoalReply(run.result,domain);
+  const output=validateGoalReply(run.result,domain,String(run.input?.message??''));
   const layout=run.result.layout==null?null:safeAdaptiveLayout(run.result.layout,domain);
   if (run.result.layout!=null && !layout) throw Error('Along 返回的目标空间格式不正确');
-  const requested=requestedTargetFromMessage(String(run.input?.message??''),domain);
-  if (requested!=null && output.proposal?.target!==requested) throw Error(`Along 目标数值与用户指定的 ${requested} 不一致`);
   return {...run,result:{...output,layout}};
 }
 const server=createServer({key:readFileSync(key),cert:readFileSync(cert)},async(req,res)=>{

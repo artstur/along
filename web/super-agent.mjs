@@ -101,3 +101,8 @@ export function safeGoalSuperAgentRun(value) {
   if (value.actual===true && (!value.source || !value.trigger || !Array.isArray(value.agents) || !Array.isArray(value.events))) return null;
   return value.version===1 || value.actual===true ? value : null;
 }
+
+// 状态读取失败时保留原因，run 继续轮询；下一次成功会覆盖掉这条错误。
+export function withRunError(run, error) {
+  return run ? {...run, error:cleanText(error,'状态读取失败',500)} : null;
+}

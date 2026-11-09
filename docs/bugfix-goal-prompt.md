@@ -1,0 +1,164 @@
+# Along 修 bug 的 Goal Prompt
+
+> 用法：把下面 `=== GOAL PROMPT ===` 之间的正文整段粘贴进 goal 模式的 objective。
+> 括号里的 `（bug 现象：…）` 是要替换的槽位；没有指定 bug 时走第 2.0 节的巡检分支。
+>
+> 运行环境假设：MCode / MiniMax Code 目标模式，核实阶段用 `task` 工具的 `verifier` 子代理。
+
+---
+
+=== GOAL PROMPT ===
+
+你正在 `~/workspace/along` 里修复 bug。
+
+Along 是手机优先的目标工作台：把一个目标拆成「目标 / 来源 / 动态任务」三样联动的东西，确定性的部分在本地算，生成式的部分交给 Agent，Agent 的产出必须被校验且由用户点「采用」后才生效。
+
+项目是「一份源码，两份产物」的纯前端 + Mac 宿主结构：
+
+- `web/` —— 前端唯一源码（保持平铺）
+- `host/` —— Mac 上运行的服务；它会从 `../web/` 引用 `goal-agent-core.mjs`、`adaptive-ui.mjs`、`super-agent.mjs`、`loop.mjs`
+- `test/` —— `*.test.mjs`，`npm run check` 自动运行
+- `tools/build.mjs` —— 按 `files` 白名单把 `web/` 复制到 `dist/` 和 `ios/AlongHealth/Web/`
+- `dist/` —— gitignore 的本地产物；`ios/AlongHealth/Web/` —— **被 git 跟踪**的产物，`npm run build` 后要一起提交
+
+动手前先读 `README.md`（产品说明）和 `AGENTS.md`（项目约定与红线）。接口和参数以代码为准。
+
+要修的 bug：（bug 现象：在此写用户的原话或问题描述）
+
+---
+
+## 0. 成功标准
+
+一个 bug 算修好，当且仅当同时满足这四条：
+
+1. 有一个**先失败后通过**的自动化测试钉住它（放在 `test/` 下，`node --test` 能跑）；
+2. `npm run check` 全绿（语法检查 + 全部测试）——`npm test` 不能顶替它；
+3. 复现用的那条命令，现在返回期望结果；
+4. 没有违反第 4 节任何一条红线。
+
+「报错消失了」「看起来对了」「改到测试过了」都不算修好。
+
+## 1. 第一性原理
+
+修 bug 不是让报错消失，而是**恢复被违反的不变量**。所以先判断，再动手：
+
+- **先还原正确行为。** 从 `README.md` / `AGENTS.md` / 代码意图推出「这个场景下应该发生什么」，把这句话写出来，再对照现状找偏差。写不出「应该是什么」，就没有 bug，只有猜测。
+- **定位偏差在哪一层。** Along 的分层是：`web/` 前端逻辑 → `host/` 服务与路由 → 共享校验层（`web/goal-agent-core.mjs`、`web/adaptive-ui.mjs`、`web/super-agent.mjs`、`web/loop.mjs`，`host/` 从 `../web/` 引用它们）→ 缓存版本号 → 构建产物 → iOS 壳（`ios/AlongHealth/`）。**bug 常常不在你以为的那一层**：报错显示在页面上，根因可能是 `host/` 没同步共享文件、缓存版本号没升导致手机还在跑旧代码、或产物没重新 build。
+- **不要把症状当根因。** 修完问一句：「这个不变量在别的路径上还有没有被绕过？」
+- **优先确定性。** 能用确定性代码表达的，不引入 Agent 调用；反过来，Agent 产出的一切仍必须被 `validateGoalReply` / `safeAdaptiveLayout` 校验兜住，不能因为「让模型更听话」而放宽校验。
+- **默认做减法。** 修 bug 不新增入口、开关、模式、配置、页面。
+
+## 2. 工作流
+
+### 2.0 若没有指定具体 bug
+
+先做一轮巡检，产出候选清单再逐个走下面的流程：
+
+- 跑 `npm run check`，把失败项按「确定失败 / 环境问题」分开；
+- 重点看 `web/goal-agent-core.mjs`、`web/adaptive-ui.mjs`、`web/loop.mjs` 的边界（空值、越界、非整数、缺字段、超长字符串、重复 ID）；
+- 重点看 `host/agent-host.mjs` 的入参清洗与 `host/kimi-code-agent.mjs` 的 JSON 解析容错路径；
+- 每个候选写清：现象、复现方式、违反的不变量。按影响面排序，一次只修一个。
+
+### 2.1 阶段 1 · 复现（Reproduce）
+
+把 bug 描述翻译成一个**可证伪的最小复现**：最小输入 → 期望输出 → 实际输出。
+
+- 优先写成 `test/` 下一个**失败的测试**，跑它，确认它以预期方式失败——是断言失败，不是语法错误、不是环境缺失、不是端口没开。
+- 复现必须能脱离本次会话独立重跑：不依赖临时脚本、手改的环境变量、真实 HealthKit 数据、真实账户、真实 iPhone。
+- **复现不成立就停下。** 不要去修一个无法证伪的东西。停下来报告：三种可能哪个成立（已被修掉 / 描述不准确 / 需要特定环境）、你验证过什么、还需要什么信息。拿到新信息后重新进阶段 1。
+
+### 2.2 阶段 2 · 独立核实（Independent verification）
+
+**派一个独立的、只读的核实代理去核实，不要自己给自己盖章。** 用 `task` 工具，`agent_name: "verifier"`（只读、不改文件、独立取证、返回 `VERDICT: PASS | FAIL | PARTIAL`）。
+
+给它的材料**只有事实，不许给结论**：
+
+- 仓库路径 `~/workspace/along`
+- bug 的原始描述（用户的原话）
+- 复现步骤与复现命令
+- 让它自己回答的中立问题
+
+**绝对不要**把「我认为根因是 X」写进它的任务描述——那会把你的猜测污染成它的证据。
+
+让它回答：
+
+1. 复现是否真的成立？（它要自己跑一遍复现命令）
+2. 这个场景下**正确行为**应该是什么（不变量是什么）？
+3. 根因在哪一层？有没有比你的假设更简单的解释？
+4. 提议的修复方向会不会踩到第 4 节的红线（token 外发、原始健康样本、绕过 Agent 校验、动理财演示数据边界、直改产物目录、新增入口）？
+5. 有没有更上游的成因（缓存版本没升、`web/` 与 `host/` 的共享文件不同步、产物没重新 build、校验层与渲染层假设不一致）？
+
+**核实结论与你的判断冲突时，以核实者为准**：回到阶段 1 重新收敛，而不是硬修。核实者否定了你的复现，也要信它——重新复现。
+
+### 2.3 阶段 3 · 修复（Fix）
+
+- **最小改动、根因修复。** 不做无关重构，不顺手改别的 bug（发现了就单独记录，别混进这次修复）。
+- **不放宽校验。** 如果修复确实要动 `validateGoalReply` / `safeAdaptiveLayout` / `cleanGoal` / `cleanSnapshot` 这类校验逻辑，必须在报告里单独说明：为什么这是恢复不变量，而不是绕过红线。
+- **补回归测试。** 放 `test/`，命名体现被钉住的不变量（例：`test('health router stays quiet when the target is already met')`），不要 `fix-bug-123`。
+- **共享文件双端可用。** 改 `web/goal-agent-core.mjs`、`web/adaptive-ui.mjs`、`web/super-agent.mjs`、`web/loop.mjs` 时，必须同时能在浏览器和 Node 里跑通，不得引入 Node 专用模块。
+- **同步产物与版本号**（用户可见的改动，漏一处手机上就还是旧页面）：
+  - `web/index.html` 的 `?v=`（当前 21）
+  - `web/sw.js` 的 `CACHE`（当前 `along-shell-v21`）
+  - `ios/AlongHealth/Sources/AlongShellView.swift` 的 `build=`（当前 21）
+  - 需要重新安装 App 时，再提 `ios/AlongHealth/Info.plist` 的 `CFBundleVersion`（当前 15）
+- **新增前端文件**要同时登记到 `tools/build.mjs` 的 `files` 和 `web/sw.js` 的 `FILES`，并保持 `web/` 平铺。
+- **改源码，不手改产物。** `dist/` 和 `ios/AlongHealth/Web/` 由 `npm run build` 生成；`ios/AlongHealth/Web/` 被 git 跟踪，build 后要连同源码一起提交。
+
+### 2.4 阶段 4 · 回归验证（Re-verify）
+
+修复不是终点，验证才是。依次给出证据：
+
+1. `npm run check` 全绿。
+2. 重跑阶段 1 的**同一条复现命令**，贴出现在的输出，证明同一个输入得到期望结果——证明 bug 真的消失，不是被绕过、也不是测试迁就了实现。
+3. 检查有没有把问题挪到别处：全量测试 + 相邻路径（`host/` 的校验与路由、缓存版本号、`dist/` 与 `ios/AlongHealth/Web/` 是否与 `web/` 一致）。
+4. 用户可见的改动 → `npm run build`，确认 `dist/` 和 `ios/AlongHealth/Web/` 已更新且内容与 `web/` 一致。
+5. 报告里贴命令与关键输出，不要只写「已修复」。
+
+## 3. 什么时候停下来问人
+
+- 复现不成立
+- 核实结论与你的判断冲突，且无法用证据决出胜负
+- 修复必须动红线（token / 健康数据 / Agent 校验 / 理财演示数据边界）
+- 修复需要新增依赖、改变产品行为（不只是修 bug），或需要新增入口 / 开关
+- 同一个 bug 修了两轮仍不通过
+- 需要真机、签名或重新安装 App 才能验证
+
+其余情况自己判断并推进，不要反复确认。
+
+## 4. 红线（违反即回滚，不是「权衡」）
+
+- Token 只留在 Mac：Kimi token、配对 token 不发给 iPhone、不写进运行结果、不进日志
+- Agent 的输出不能直接生效：先过 `validateGoalReply` 与 `safeAdaptiveLayout`，用户点「采用」才改变目标空间
+- 健康数据只发汇总值，不发原始 HealthKit 样本
+- 理财只用演示数据：不接真实账户、不读取账户、不转账、不交易
+- 不手改 `dist/` 和 `ios/AlongHealth/Web/`
+- `web/` 与 `host/` 共享的文件不得引入 Node 专用模块
+- 默认做减法：不加新入口、开关、说明、状态、页面；一屏只服务一个主要任务
+
+## 5. 每次修复的报告格式
+
+1. **Bug**：一句话 + 它违反了哪条不变量
+2. **复现证据**：命令 + 实际失败输出
+3. **核实结论**：核实者怎么说，尤其是它否定或修正了你的哪一点
+4. **根因**：在哪一层，为什么
+5. **改动清单**：文件 + 一句话理由 + 是否用户可见 + 版本号是否已升
+6. **验证证据**：`npm run check` 结果 + 复现命令现在的输出
+7. **遗留**：还没解决的、没验证的、需要真机才能验的
+
+## 6. 命令与工作区
+
+- 仓库根 `~/workspace/along`，分支 `main`，远端 `git@github.com:artstur/along.git`
+- **工具链**：本机 PATH 上默认没有 `node`，也没有 `npm`（先 `command -v npm` 确认）。`npm install` 本身需要 npm，没有就先装一个 Node ≥ 22.19（例如 `brew install node`）。
+- 只需要 `npm install` 一次：它会把项目自带的 Node 22.23.4 装到 `node_modules/node/bin/node`，并通过 `node_modules/.bin/node` 暴露给脚本。npm 运行脚本时会把 `node_modules/.bin` 加进 PATH，所以 `npm run check` 里的 `node` 用的就是这份 22.23.4，不需要系统 Node（`npm run dev` 直接写死 `./node_modules/node/bin/node`，同一个道理）。
+- `npm run check`（CI 同款：语法检查 + 全部测试）、`npm test`（只跑测试）、`npm run build`（生成 `dist/` 与 `ios/AlongHealth/Web/`）
+- 推 `main` 不会自动部署：GitHub Pages 要手动触发工作流（`gh workflow run pages.yml --ref main`），iPhone 要在 Xcode 里重新构建安装
+
+=== END GOAL PROMPT ===
+
+---
+
+## 变体
+
+- **换成 Codex 执行**：把阶段 2 的 `task` / `verifier` 换成「开一个独立的 Codex 只读会话」，其余不变。
+- **只要修 bug，不巡检**：删掉第 2.0 节。
+- **想在别的仓库用**：把第 0 / 1 / 4 节里的 Along 专属内容换成目标仓库自己的不变量与红线。

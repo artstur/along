@@ -126,14 +126,14 @@ function layoutForAlong(value,domain) {
   return {version:1,title:clean(value.title,'我的目标',80),badge:value.badge==null?null:clean(value.badge,'',40),summary:clean(value.summary,'目标计划已生成',600),modules,tasks,
     questions:(Array.isArray(value.questions)?value.questions:[]).slice(0,6).map(question=>clean(question,'待确认问题',240))};
 }
-function goalResultFromOutput(output,domain) {
+function goalResultFromOutput(output,domain,message) {
   const normalized={...output,reply:clean(output?.reply,'',1200),proposal:output?.proposal==null?null:{
     ...output.proposal,
     title:clean(output.proposal.title,'',80),
     task:clean(output.proposal.task,'',120),
     reason:clean(output.proposal.reason,'',300),
   }};
-  const validated=validateGoalReply(normalized,domain);
+  const validated=validateGoalReply(normalized,domain,message);
   const layout=output?.layout==null?null:safeAdaptiveLayout(layoutForAlong(output.layout,domain),domain);
   if (output?.layout!=null&&!layout) throw Error('Kimi 返回的目标空间格式不正确');
   return {...validated,layout};
@@ -207,7 +207,7 @@ export class KimiCodeAgent {
     const transcriptOutput=[...transcriptFrames(transcript)].reverse().map(frame=>frame?.kind==='text'?jsonFromText(frame.text):null).find(Boolean);
     let output=jsonFromText(textFromMessage(assistant))||transcriptOutput;
     let parsedResult=null,outputError=null;
-    if (entry.kind==='goal'&&output) { try { parsedResult=goalResultFromOutput(output,entry.input.goal.domain); } catch(error) { outputError=error; } }
+    if (entry.kind==='goal'&&output) { try { parsedResult=goalResultFromOutput(output,entry.input.goal.domain,entry.input.message); } catch(error) { outputError=error; } }
     const transcriptAgents=swarmAgentsFromTranscript(transcript);
     const agents=transcriptAgents.length?transcriptAgents:children.map(childAgent);
     const swarmFinished=agents.length>0&&agents.every(agent=>['done','blocked'].includes(agent.status));
@@ -224,7 +224,7 @@ export class KimiCodeAgent {
       const candidate=jsonFromText(textFromMessage(synthesisAssistant))||synthesisOutput;
       if (candidate) {
         output=candidate;
-        try { parsedResult=goalResultFromOutput(candidate,entry.input.goal.domain);outputError=null; } catch(error) { outputError=error; }
+        try { parsedResult=goalResultFromOutput(candidate,entry.input.goal.domain,entry.input.message);outputError=null; } catch(error) { outputError=error; }
       }
       activeSession=synthesisSession;
     }

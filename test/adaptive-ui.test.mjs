@@ -65,6 +65,14 @@ test('multiple custom goals keep independent keys and labels',()=>{
   ]);
 });
 
+test('a metric target must be a usable number inside the domain range',()=>{
+  const metric=target=>structuredClone({...valid,modules:[{kind:'metric',id:'m',title:'本周运动',source:'workoutMinutes',target,unit:'分钟'}]});
+  assert.throws(()=>validateAdaptiveLayout(metric(-5),'health'),/指标目标/);
+  assert.throws(()=>validateAdaptiveLayout(metric(0),'health'),/指标目标/);
+  assert.throws(()=>validateAdaptiveLayout(metric(1e9),'health'),/指标目标/);
+  assert.equal(validateAdaptiveLayout(metric(120),'health').modules[0].target,120);
+});
+
 test('Japanese learning plans carry a Duolingo connection recommendation',()=>{
   const japanese={...structuredClone(valid),title:'60 天日语阅读入门',summary:'从五十音到 N5 短文',modules:valid.modules.filter(item=>item.kind!=='metric')};
   const migrated=validateAdaptiveLayout(japanese,'custom');

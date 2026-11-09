@@ -47,6 +47,38 @@ test('starts a real swarm session and maps child sessions into Along agents',asy
   } finally { rmSync(statePath,{force:true}); }
 });
 
+test('the Kimi runtime refuses a target the user did not ask for',async()=>{
+  const statePath=join(tmpdir(),`along-kimi-${crypto.randomUUID()}.json`);
+  const drifted={reply:'已按你的要求调整方案。',proposal:{active:true,title:'每周运动 160 分钟',target:160,task:'本周安排 3 次运动',reason:'按 160 分钟分配更均匀'},layout};
+  let sessionCount=0;
+  const fetchImpl=async(url,options={})=>{
+    const path=new URL(url).pathname;
+    if (path==='/api/v1/meta') return json({server_version:'2.5.0',features:[{name:'swarm',state:'Active'}]});
+    if (path==='/api/v1/auth') return json({models_ready:true});
+    if (path==='/api/v1/oauth/userinfo') return json({kind:'ok',userInfo:{userLevelName:'Pro'}});
+    if (path==='/api/v1/sessions'&&options.method==='POST') return json({id:`session-${++sessionCount}`});
+    const session=path.match(/^\/api\/v1\/sessions\/([^/]+)(\/.*)?$/);
+    if (session) {
+      const id=decodeURIComponent(session[1]),rest=session[2]||'';
+      if (rest==='/profile') return json({id,agent_config:{swarm_mode:true}});
+      if (rest==='/prompts') return json({accepted:true});
+      if (rest==='') return json({id,busy:false,last_turn_reason:'completed',pending_interaction:'none',updated_at:'2026-11-05T08:00:00Z'});
+      if (rest==='/messages') return json({items:[{id:'m1',session_id:id,role:'assistant',created_at:'2026-11-05T08:00:00Z',content:[{type:'text',text:JSON.stringify(drifted)}]}]});
+      if (rest==='/children') return json({items:[]});
+      if (rest==='/transcript') return json({items:[{kind:'turn',steps:[{frames:[{kind:'tool',name:'AgentSwarm',input:{items:['目标策略师','风险评审','任务设计师']},output:'<subagent agent_id="agent-0" item="目标策略师" outcome="completed">ok</subagent><subagent agent_id="agent-1" item="风险评审" outcome="completed">ok</subagent><subagent agent_id="agent-2" item="任务设计师" outcome="completed">ok</subagent>'}]}]}]});
+    }
+    throw Error(`unexpected ${path}`);
+  };
+  try {
+    const agent=new KimiCodeAgent({token:'secret-token',statePath,workspace:'/along',fetchImpl});
+    const response=await agent.startGoal({requestId:'along-goal-health-target',goal:{domain:'health',title:'运动',target:120},snapshot:{},message:'这周运动目标改为 150 分钟',history:[]});
+    assert.notEqual(response.run.result?.proposal?.target,160);
+    assert.equal(response.run.status,'blocked');
+    assert.equal(response.run.result,null);
+    assert.match(response.run.error,/目标数值与用户指定的 150 不一致/);
+  } finally { rmSync(statePath,{force:true}); }
+});
+
 test('reports login as a readiness requirement',async()=>{
   const agent=new KimiCodeAgent({token:'token',statePath:join(tmpdir(),`along-kimi-${crypto.randomUUID()}.json`),fetchImpl:async url=>{
     const path=new URL(url).pathname;
