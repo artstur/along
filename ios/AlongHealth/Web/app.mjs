@@ -6,7 +6,7 @@ import {AGENT_KEY, GOALS_KEY, CONVERSATIONS_KEY, readStored, agentCall, loadNati
 import {ADAPTIVE_LAYOUTS_KEY, customGoalEntries, findInitialCustomGoalCandidate, goalDomain, isCustomGoalKey, safeAdaptiveLayout, validateAdaptiveLayout} from './adaptive-ui.mjs';
 import {GOAL_SUPER_AGENT_RUNS_KEY, SUPER_AGENT_RUNS_KEY, createFailedGoalSuperAgentRun, createFailedSuperAgentRun,
   createGoalSuperAgentRequest, createPendingGoalSuperAgentRun, createPendingSuperAgentRun, createSuperAgentRequest,
-  safeGoalSuperAgentRun, safeSuperAgentRun, withRunError, AGENT_RUNTIME_KEY, DSH_RUNTIME, KIMI_RUNTIME, agentRuntimeLabel, safeAgentRuntime} from './super-agent.mjs';
+  safeGoalSuperAgentRun, safeSuperAgentRun, withRunError, AGENT_RUNTIME_KEY, DSH_RUNTIME, KIMI_RUNTIME, agentRuntimeLabel, safeAgentRuntime, newId} from './super-agent.mjs';
 const TICKET_KEY = 'along.goal-ticket.v1';
 
 const app = document.querySelector('#app');
@@ -488,7 +488,7 @@ async function injectEvent(event) {
   const before = state;
   let route;
   try { route = routeHealthEvent(before, event); } catch (error) { notice(error.message); return; }
-  const id = crypto.randomUUID();
+  const id = newId('change');
   const entry = {id, type:event.type, amount:event.amount, decision:route.decision, reason:route.reason, remainingBefore:route.remainingBefore, remainingAfter:route.remainingAfter, beforeTask:before.loop.currentTask, status:route.decision === 'quiet' ? 'quiet' : 'pending'};
   if (route.decision === 'replan') running = true;
   saveHealth({...route.after, loop:{...before.loop, changes:[entry, ...before.loop.changes]}});
@@ -516,7 +516,7 @@ async function injectEvent(event) {
 
 function beginNewGoal() {
   previousGoalBeforeDraft=activeGoal;
-  activeGoal=`custom:${crypto.randomUUID()}`;
+  activeGoal=`custom:${newId('goal')}`;
   conversations[activeGoal]=[];
   screen='agent';
   render();
@@ -642,7 +642,7 @@ app.addEventListener('submit', async event => {
   const history=conversations[goalKey]||[];
   const goal=currentGoal();
   const userEntry={role:'user',text:message};
-  const pendingId=crypto.randomUUID();
+  const pendingId=newId('pending');
   agentBusy=true;
   conversations[goalKey]=[...history,userEntry].slice(-20);
   saveConversations();
@@ -679,7 +679,7 @@ window.addEventListener('along-health-update', async event => {
   const goal={domain:'health',title:goalCustom.health?.title || '本周运动',target:state.goals.find(item=>item.type==='workout')?.target||120};
   const route=routeHealthChange(before,next.snapshot,goal.target);
   if (route.decision==='quiet') return;
-  const ticket={id:crypto.randomUUID(),source:'healthkit',trigger:{from:before.workoutMinutes,to:next.snapshot.workoutMinutes},eval:route.decision,mandate:'仅提出任务，用户确认后才采用',reason:route.reason,status:'assigned'};
+  const ticket={id:newId('ticket'),source:'healthkit',trigger:{from:before.workoutMinutes,to:next.snapshot.workoutMinutes},eval:route.decision,mandate:'仅提出任务，用户确认后才采用',reason:route.reason,status:'assigned'};
   if (!agentConfig.token) { saveTicket({...ticket,status:'waiting',error:'Along 未连接；进度已更新，任务可稍后再规划。'});if (screen==='home') render();return; }
   saveTicket(ticket);if (screen==='home') render();
   try {
