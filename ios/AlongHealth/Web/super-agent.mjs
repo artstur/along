@@ -29,6 +29,46 @@ function cleanText(value, fallback, max=180) {
   const text=String(value ?? fallback).trim();
   return (text || fallback).slice(0,max);
 }
+// 只有字符串和数字算文本：对象、数组、布尔都不是。
+// 用 String() 兜底会把对象变成 "[object Object]"——那种脏文本会直接显示在用户界面上。
+function isText(value) { return typeof value==='string' || (typeof value==='number' && Number.isFinite(value)); }
+// 一条工作记录：没有可读文本就不进时间线——它本来就不该出现在那里。
+function cleanEvent(event) {
+  if (!event || typeof event!=='object') return null;
+  return isText(event.text) ? event : null;
+}
+// 一个协作单元：类型不对的文本换成占位说明，不让脏文本冒充它的说明。
+function cleanAgent(agent) {
+  if (!agent || typeof agent!=='object') return null;
+  const next={...agent};
+  let changed=false;
+  if (next.objective!=null && !isText(next.objective)) { next.objective='未提供说明'; changed=true; }
+  if (next.work!=null && !isText(next.work)) { next.work=''; changed=true; }
+  if (next.report && typeof next.report==='object' && next.report.summary!=null && !isText(next.report.summary)) {
+    next.report={...next.report,summary:''};
+    changed=true;
+  }
+  return changed ? next : agent;
+}
+function sameList(left,right) { return left.length===right.length && left.every((item,index)=>item===right[index]); }
+// 运行记录里会显示给人看的文本字段：类型不对的不能当成文本显示出去。
+// 干净的记录原样返回——白名单不该无故换掉宿主给的记录对象。
+function normalizeRunText(value, agentField) {
+  const next={...value};
+  let changed=false;
+  if (next.statusLabel!=null && !isText(next.statusLabel)) { next.statusLabel='状态未知'; changed=true; }
+  if (next.error!=null && !isText(next.error)) { delete next.error; changed=true; }
+  for (const key of ['source','trigger']) {
+    const part=next[key];
+    if (part && typeof part==='object' && part.label!=null && !isText(part.label)) { next[key]={...part,label:'未提供说明'}; changed=true; }
+  }
+  if (next.ticket && typeof next.ticket==='object' && next.ticket.id!=null && !isText(next.ticket.id)) { delete next.ticket; changed=true; }
+  const events=next.events.map(cleanEvent).filter(Boolean);
+  if (!sameList(events,next.events)) { next.events=events; changed=true; }
+  const agents=next[agentField].map(cleanAgent).filter(Boolean);
+  if (!sameList(agents,next[agentField])) { next[agentField]=agents; changed=true; }
+  return changed ? next : value;
+}
 function stableId(value) {
   let hash=2166136261;
   for (const char of String(value)) { hash^=char.codePointAt(0);hash=Math.imul(hash,16777619); }
@@ -73,7 +113,7 @@ export function safeSuperAgentRun(value) {
   // 放行缺这些字段的记录——哪怕它不是 actual 的那一条，否则渲染时会抛错，
   // 整个界面停在旧页面上。
   if (!value.source || !value.trigger || !Array.isArray(value.assignments) || !Array.isArray(value.events)) return null;
-  if (value.version===2 || value.actual===true) return value;
+  if (value.version===2 || value.actual===true) return normalizeRunText(value,'assignments');
   return null;
 }
 
@@ -113,7 +153,7 @@ export function safeGoalSuperAgentRun(value) {
   if (!value || value.kind!=='goal' || !RUNTIMES.has(value.runtime) || typeof value.requestId!=='string') return null;
   // 同上：渲染层会直接读 run.source / run.trigger / run.agents / run.events。
   if (!value.source || !value.trigger || !Array.isArray(value.agents) || !Array.isArray(value.events)) return null;
-  return value.version===1 || value.actual===true ? value : null;
+  return value.version===1 || value.actual===true ? normalizeRunText(value,'agents') : null;
 }
 
 // 状态读取失败时保留原因，run 继续轮询；下一次成功会覆盖掉这条错误。
