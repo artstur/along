@@ -111,6 +111,11 @@ function customView(goalKey=activeGoal) {
 }
 const taskStateLabel={temporary:'进行中',planned:'已规划',deferred:'到时生成'};
 const agentStateLabel={queued:'等待',working:'工作中',done:'已完成',blocked:'需处理'};
+// 运行状态与进度会进 class 和 style：只认白名单里的值，Agent 的原样字符串不许进 HTML。
+const RUN_STATUSES=new Set(['done','working','blocked']);
+const AGENT_STATUSES=new Set(['queued','working','done','blocked']);
+function runStatus(value) { return RUN_STATUSES.has(value)?value:''; }
+function runProgress(value) { const n=Number(value); return Number.isFinite(n)?Math.max(0,Math.min(100,n)):0; }
 function runtimeMeta(runtime=agentRuntime) {
   return safeAgentRuntime(runtime)===KIMI_RUNTIME
     ? {short:'Kimi Swarm',full:'Kimi Code Agent Swarm',main:'Kimi Main Session',worker:'Subagents',description:'Main Session 启动真实 Swarm，并行子 Agent 拆解、复核并生成动态任务。'}
@@ -244,6 +249,14 @@ function trustedMetric(source) {
   const value=state.snapshot[source];
   return Number.isFinite(value)?value:null;
 }
+// 目标数值是唯一事实：布局里的指标目标只是它的一份快照，必须跟着当前目标走，
+// 否则目标改成 180、布局还停在 120 时，进度会在没达成时显示 100%。
+function metricTarget(module) {
+  const goal=currentGoal();
+  const ownSource=goal.domain==='health'?'workoutMinutes':goal.domain==='finance'?'saved':null;
+  if (ownSource&&module.source===ownSource&&Number.isFinite(goal.target)) return goal.target;
+  return module.target;
+}
 function adaptiveModule(module, compact=true) {
   if (module.kind==='summary') return `<div class="adaptive-module"><span class="module-title">${esc(module.title)}</span><p>${esc(module.content)}</p></div>`;
   if (module.kind==='fact_list') {
@@ -251,9 +264,9 @@ function adaptiveModule(module, compact=true) {
     return `<div class="adaptive-module"><span class="module-title">${esc(module.title)}</span><div class="adaptive-facts">${items.map(item=>`<div><span>${esc(item.label)}</span><strong>${esc(item.value)}</strong></div>`).join('')}</div>${compact&&module.items.length>items.length?`<p class="module-more">另有 ${module.items.length-items.length} 项已收起</p>`:''}</div>`;
   }
   if (module.kind==='chips') return `<div class="adaptive-module"><span class="module-title">${esc(module.title)}</span><div class="adaptive-chips">${module.items.map(item=>`<span>${esc(item)}</span>`).join('')}</div></div>`;
-  const value=trustedMetric(module.source), numericTarget=typeof module.target==='number'?module.target:null;
+  const value=trustedMetric(module.source), target=metricTarget(module), numericTarget=typeof target==='number'?target:null;
   const percent=value!=null&&numericTarget?Math.min(100,Math.max(0,Math.round(value/numericTarget*100))):0;
-  return `<div class="adaptive-module adaptive-metric"><span class="module-title">${esc(module.title)}</span><div class="metric-value"><strong>${value==null?'—':esc(value)}</strong><span>/ ${esc(module.target)} ${esc(module.unit)}</span></div>${numericTarget?`<div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}"><span style="width:${percent}%"></span></div>`:''}</div>`;
+  return `<div class="adaptive-module adaptive-metric"><span class="module-title">${esc(module.title)}</span><div class="metric-value"><strong>${value==null?'—':esc(value)}</strong><span>/ ${esc(target)} ${esc(module.unit)}</span></div>${numericTarget?`<div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}"><span style="width:${percent}%"></span></div>`:''}</div>`;
 }
 function adaptiveGoalCard(layout) {
   const context=layout.modules.find(module=>module.kind==='chips') || layout.modules.find(module=>module.kind==='fact_list') || layout.modules.find(module=>module.kind==='summary');
@@ -306,7 +319,7 @@ function home() {
         <div class="section-heading"><h2>连接</h2><span>连接和任务相关的数据源</span></div>
         <div class="connection-card"><div class="connection-symbol" aria-hidden="true">${activeGoal === 'health' ? '♥' : '¥'}</div><div class="connection-copy"><div class="connection-name"><strong>${esc(connection.name)}</strong><span class="source-tag ${connection.kind}">${esc(connection.label)}</span></div><p>${esc(connection.detail)}${esc(sourceTime)}</p></div><button class="agent-action connection-agent-action" data-action="${activeGoal === 'health' ? 'connect-health' : connection.kind === 'demo' ? 'finance-event' : 'connect-finance'}">${esc(connection.action)}</button></div>
         ${connection.metrics?.length ? `<div class="connection-metrics">${connection.metrics.map(item=>`<div><span>${esc(item.label)}</span><strong>${esc(item.value)}</strong></div>`).join('')}</div>` : ''}
-        ${activeGoal === 'health' && (state.source === 'demo' || state.source === 'healthkit') ? `<button class="minor-action" data-action="clear-health-data">${state.source === 'demo' ? '退出健康演示数据' : '清除本机健康摘要'}</button>` : ''}
+        ${activeGoal === 'health' && (state.source === 'demo' || state.source === 'healthkit') ? `<button class="minor-action" data-action="clear-health-data">${hasRealHealthData() ? '清除本机健康摘要' : '退出健康演示数据'}</button>` : ''}
         ${activeGoal === 'finance' && finance.connected ? '<p class="connection-footnote">点“模拟 +¥800”只会更新这份本机演示数据，不会访问账户或发起交易。</p>' : ''}
       </section>`:'';
   const recommendedConnectionContent=layout?adaptiveConnectionSection(layout):'';
@@ -323,8 +336,10 @@ function home() {
 }
 
 function taskAgentCard(agent) {
-  const progress=Number.isFinite(agent.progress)?agent.progress:agent.status==='done'?100:agent.status==='working'?55:agent.status==='blocked'?85:0;
-  return `<article class="worker-card ${agent.status}"><div class="worker-card-head"><span class="worker-mark" aria-hidden="true">A</span><div><strong>Along</strong><span>协作单元</span></div><span class="worker-state">${esc(agentStateLabel[agent.status]||agent.status)}</span></div><p class="worker-objective">${esc(agent.objective)}</p><div class="worker-progress"><span style="width:${progress}%"></span></div><p class="worker-now"><span>当前</span>${esc(agent.work)}</p>${agent.report?`<p class="worker-output"><span>报告</span>${esc(agent.report.summary)}</p>`:''}</article>`;
+  const status=AGENT_STATUSES.has(agent.status)?agent.status:'';
+  const raw=Number.isFinite(agent.progress)?agent.progress:agent.status==='done'?100:agent.status==='working'?55:agent.status==='blocked'?85:0;
+  const progress=Math.max(0,Math.min(100,raw));
+  return `<article class="worker-card ${status}"><div class="worker-card-head"><span class="worker-mark" aria-hidden="true">A</span><div><strong>Along</strong><span>协作单元</span></div><span class="worker-state">${esc(agentStateLabel[agent.status]||agent.status)}</span></div><p class="worker-objective">${esc(agent.objective)}</p><div class="worker-progress"><span style="width:${progress}%"></span></div><p class="worker-now"><span>当前</span>${esc(agent.work)}</p>${agent.report?`<p class="worker-output"><span>报告</span>${esc(agent.report.summary)}</p>`:''}</article>`;
 }
 function taskDetailPage() {
   const task=selectedTask();
@@ -338,7 +353,7 @@ function taskDetailPage() {
   const mandateText=run.mandate?`${run.mandate.strength==='explicit'?'明确授权':'推断授权'} · 请求者 ${run.mandate.actor?.id||'—'} · Policy ${run.mandate.policyVersion?.slice(0,8)||'—'}`:'尚未生成 Mandate';
   return `<div class="app-shell super-agent-shell"><header class="topbar"><div class="topbar-inner">${brand()}<span class="topbar-caption">Along · 任务协作</span></div></header><main class="content task-detail">
     ${backButton('task-back','返回动态任务')}
-    <section class="task-hero"><div class="task-hero-top"><span class="eyebrow">${esc(task.when)} · ${esc(taskStateLabel[task.state])}</span><span class="run-status ${run.status}"><i></i>${esc(run.statusLabel)}</span></div><h1>${esc(task.title)}</h1><p>${esc(task.detail)}</p><div class="run-progress-head"><span>总体进展</span><strong>${run.progress}%</strong></div><div class="run-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${run.progress}"><span style="width:${run.progress}%"></span></div></section>
+    <section class="task-hero"><div class="task-hero-top"><span class="eyebrow">${esc(task.when)} · ${esc(taskStateLabel[task.state])}</span><span class="run-status ${runStatus(run.status)}"><i></i>${esc(run.statusLabel)}</span></div><h1>${esc(task.title)}</h1><p>${esc(task.detail)}</p><div class="run-progress-head"><span>总体进展</span><strong>${runProgress(run.progress)}%</strong></div><div class="run-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${runProgress(run.progress)}"><span style="width:${runProgress(run.progress)}%"></span></div></section>
 
     <section class="orchestration-section"><div class="section-heading"><h2>编排链路</h2><span>${run.runtime===KIMI_RUNTIME?'Kimi Session 到并行 Subagents':'从触发到可交付 Ticket'}</span></div><div class="orchestration-flow">
       <div><span>Source</span><strong>${esc(run.source.label)}</strong></div><b aria-hidden="true">→</b>
@@ -360,7 +375,7 @@ function goalOrchestrationPanel(run) {
   const meta=runtimeMeta(run.runtime);
   const events=(run.events||[]).slice(-5);
   const mandateText=typeof run.mandate==='string'?run.mandate:run.mandate?.scope||'仅围绕本次目标进行拆解、规划与可交付执行。';
-  return `<section class="goal-orchestration ${run.status}" aria-live="polite"><div class="goal-run-head"><div><span class="eyebrow">真实 ${esc(meta.full)}</span><h2>${esc(run.statusLabel)}</h2></div><strong>${run.progress}%</strong></div><div class="run-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${run.progress}"><span style="width:${run.progress}%"></span></div>
+  return `<section class="goal-orchestration ${runStatus(run.status)}" aria-live="polite"><div class="goal-run-head"><div><span class="eyebrow">真实 ${esc(meta.full)}</span><h2>${esc(run.statusLabel)}</h2></div><strong>${runProgress(run.progress)}%</strong></div><div class="run-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${runProgress(run.progress)}"><span style="width:${runProgress(run.progress)}%"></span></div>
   <div class="orchestration-flow compact"><div><span>Source</span><strong>目标输入</strong></div><b aria-hidden="true">→</b><div><span>${run.runtime===KIMI_RUNTIME?'Session':'Main Session'}</span><strong>${run.eval?.decision==='accept'?'已接单':run.eval?.decision==='evaluating'?'评估中':'等待'}</strong></div><b aria-hidden="true">→</b><div><span>${run.runtime===KIMI_RUNTIME?'Swarm':'Ticket'}</span><strong>${run.runtime===KIMI_RUNTIME?'已开启':run.ticket?esc(run.ticket.id.slice(0,8)):'创建中'}</strong></div><b aria-hidden="true">→</b><div><span>${esc(meta.worker)}</span><strong>${run.agents?.length||0} 个 Agent</strong></div></div>
   ${run.mandate?`<div class="mandate-card"><span>Mandate · 本次授权边界</span><p>${esc(mandateText)}</p></div>`:''}
   ${run.agents?.length?`<div class="worker-grid">${run.agents.map(taskAgentCard).join('')}</div>`:''}
@@ -491,12 +506,18 @@ async function connectHealth() {
   } catch (error) { notice(error?.message || '连接未完成，请检查健康权限'); }
 }
 
+// 本机是否还留着一份真实健康摘要：界面上这份，或目标变化实验开始前存下的那份备份。
+function hasRealHealthData() { return state.source === 'healthkit' || state.loop?.previousState?.source === 'healthkit'; }
+
 // 清掉本机保存的健康摘要；真实来源还要让原生侧停掉读取，否则下一轮刷新会把它读回来。
 async function clearHealthData() {
-  const real = state.source === 'healthkit';
+  const real = hasRealHealthData();
   let stopped = true;
   if (real) { try { await window.AlongHealthBridge?.clear?.(); } catch { stopped = false; } }
-  saveHealth({...state, source:null, snapshot:null});
+  if (real && pendingTask?.source === 'healthkit') saveTicket(null);
+  const cleared = {...state, source:null, snapshot:null};
+  if (state.loop) cleared.loop = {...state.loop, previousState: state.loop.previousState ? {...state.loop.previousState, source:null, snapshot:null} : undefined};
+  saveHealth(cleared);
   notice(real ? (stopped ? '已清除本机健康摘要，并停止读取 Apple Health' : '已清除本机健康摘要；请到系统设置里撤销 Apple Health 权限') : '已退出健康演示数据');
 }
 
@@ -607,7 +628,7 @@ app.addEventListener('click', event => {
       localStorage.setItem(ACTIVE_GOAL_KEY,activeGoal);
       previousGoalBeforeDraft=null;
     }
-    screen='home';render();notice(item.proposal?'目标、界面和下一步已更新':'目标空间已更新');
+    screen='home';render();notice(item.proposal&&item.layout?'目标、界面和下一步已更新':item.proposal?'目标与下一步已更新':'目标空间已更新');
   }
   if (action === 'accept-task' && pendingTask?.suggestion) {
     goalCustom.health={...goalCustom.health,task:pendingTask.suggestion.task,reason:pendingTask.suggestion.reason};
