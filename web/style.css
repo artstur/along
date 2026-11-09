@@ -188,6 +188,8 @@ footer { padding: 0 0 26px; color: #aaa; text-align: center; font-size: 10px; }
 #toast.show { opacity: 1; }
 
 .lab-content { padding-top: 23px; }
+.lab-entry { width: 100%; display: flex; justify-content: space-between; align-items: center; margin-top: 34px; padding: 16px 0; border: 0; border-top: 1px solid #e6e6e5; background: transparent; color: #858585; text-align: left; font-size: 11px; }
+.lab-entry span { font-size: 16px; }
 .back-button { border: 0; background: none; color: #666; padding: 0; font-size: 12px; }
 .back-button.icon-only { display: flex; width: 44px; height: 44px; margin: -10px 0 -5px; padding: 0; align-items: center; justify-content: flex-start; }
 .back-button.icon-only svg { width: 12px; height: 24px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }

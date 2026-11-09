@@ -310,6 +310,7 @@ function home() {
       ${taskContent}
       ${connectionContent}
       ${recommendedConnectionContent}
+      ${activeGoal === 'health' ? '<button class="lab-entry" data-action="open-lab">查看目标变化实验 <span aria-hidden="true">↗</span></button>' : ''}
     </main><footer>Along · 一起，慢慢向前</footer></div>`;
 }
 
