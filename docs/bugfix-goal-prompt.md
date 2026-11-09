@@ -97,10 +97,10 @@ Along 是手机优先的目标工作台：把一个目标拆成「目标 / 来�
 - **补回归测试。** 放 `test/`，命名体现被钉住的不变量（例：`test('health router stays quiet when the target is already met')`），不要 `fix-bug-123`。
 - **共享文件双端可用。** 改 `web/goal-agent-core.mjs`、`web/adaptive-ui.mjs`、`web/super-agent.mjs`、`web/loop.mjs` 时，必须同时能在浏览器和 Node 里跑通，不得引入 Node 专用模块。
 - **同步产物与版本号**（用户可见的改动，漏一处手机上就还是旧页面）：
-  - `web/index.html` 的 `?v=`（当前 45）
-  - `web/sw.js` 的 `CACHE`（当前 `along-shell-v45`）
-  - `ios/AlongHealth/Sources/AlongShellView.swift` 的 `build=`（当前 45）
-  - 需要重新安装 App 时，再提 `ios/AlongHealth/Info.plist` 的 `CFBundleVersion`（当前 39）
+  - `web/index.html` 的 `?v=`（当前 46）
+  - `web/sw.js` 的 `CACHE`（当前 `along-shell-v46`）
+  - `ios/AlongHealth/Sources/AlongShellView.swift` 的 `build=`（当前 46）
+  - 需要重新安装 App 时，再提 `ios/AlongHealth/Info.plist` 的 `CFBundleVersion`（当前 40）
 - **新增前端文件**要同时登记到 `tools/build.mjs` 的 `files` 和 `web/sw.js` 的 `FILES`，并保持 `web/` 平铺。
 - **改源码，不手改产物。** `dist/` 和 `ios/AlongHealth/Web/` 由 `npm run build` 生成；`ios/AlongHealth/Web/` 被 git 跟踪，build 后要连同源码一起提交。
 
@@ -195,6 +195,10 @@ Along 是手机优先的目标工作台：把一个目标拆成「目标 / 来�
 - **运行记录里的文本字段也要守「只有字符串和数字算文本」**：白名单只做结构校验，渲染层再用 `String()` 兜底，用户就在「工作记录」和「协作单元」里看到 `"[object Object]"`。白名单是共享层，顺手把文本字段归一：类型不对的工作记录整条丢掉（没有可读文本的时间线记录没有意义），类型不对的协作单元字段换成占位说明。宿主侧同样不能 `String()` 兜底——它洗出来的 `"[object Object]"` 是字符串，客户端再也认不出来。
 - **用户写下的东西在落地前也要落盘**：新建目标只改内存，App 恰好在 Agent 回话落地前被重启，目标和那句话一起没了。草稿也要有回去的路：当前目标与对话先落盘，重启后回到那一页；放弃草稿时把废弃对话从存储里一起删掉。
 - **改契约时既有测试要按真实流程改写**：旧测试钉的是旧形状。改写时要把要保的 invariants 一条条搬到新流程上（真实摘要照样能清掉、原生侧照样停读），而不是删掉断言。
+- **改写测试时要看清新断言是不是恒真的**：把「实验备份里还留着真实摘要时清除入口必须在」改成断言清除后 `source`/`snapshot` 是 null，而种子数据里它们本来就是 null——修复整个回退掉，这条用例照样绿。要补上「真实摘要确实回到了顶层」这类前置断言，否则覆盖是假的。
+- **落盘的东西要删干净**：放弃一个草稿只删对话，运行记录和当前目标指针还在，草稿就会在下一次重启时自己复活——用户每次重启都被弹回他刚放弃的页面。删干净要三样一起：对话、运行记录、当前目标指针。
+- **空的状态不该占着用户的主屏**：当前目标指向一个没有消息、没有运行的空草稿时，它不是目标，回到真正的目标上——否则首页会渲染一个幽灵自定义目标，用户真实的健康目标整张卡片不见了。
+- **重启时没拿到结果的请求要落成终态**：存储里那条是请求刚发出时的本地占位记录，轮询要求 `actual` 才推进，重启后它永远停在 working，页面一直显示「编排中…」，输入框一直禁用。App 关掉时那次请求就没有下文了，落成明确终态（需要重发），用户能重新发一次。
 
 === END GOAL PROMPT ===
 
