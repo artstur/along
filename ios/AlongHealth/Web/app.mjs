@@ -48,15 +48,15 @@ function saveTicket(ticket) { pendingTask=ticket; if (ticket) localStorage.setIt
 localStorage.setItem(KEY, JSON.stringify(state));
 
 const esc = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
-// 工单号由仓库外的 Agent 服务给出，不保证是字符串：不能直接对它调用 .slice()，
+// 仓库外的 Agent 服务给出的字段不保证是字符串：不能直接对它调用 .slice()，
 // 那会在 render() 里抛 TypeError，整个界面停在旧页面上再也动不了。
-const ticketTag = value => typeof value==='string'&&value?value.slice(0,8):'—';
+const shortText = (value,max=8) => typeof value==='string'&&value?value.slice(0,max):'—';
 // 旧版本宿主写下的记录里可能没有时间戳：Intl 格式化无效日期会抛 RangeError，
 // 整个 render() 挂掉，界面停在旧页面上再也动不了。
 const formatStamp = (value,options) => {
   // 宿主用 0 表示「起始时间未知」（Number(entry.createdAt)||0），
   // 那不是 1970 年：显示一个看起来很正常的时间，比显示「未知」更糟。
-  if (value==null || value===0) return '—';
+  if (value==null || value===0 || typeof value==='boolean') return '—';
   const date=new Date(value);
   return Number.isFinite(date.getTime())?new Intl.DateTimeFormat('zh-CN',options).format(date):'—';
 };
@@ -400,8 +400,11 @@ function taskDetailPage() {
   const run=currentSuperAgentRun(task);
   const meta=runtimeMeta(run.runtime);
   const evalText=run.eval?.decision==='accept'?'接受执行':run.eval?.decision==='evaluating'?'正在评估':run.eval?.decision==='ignore'?'未接受':run.eval?.decision||'等待评估';
-  const workers=[{name:meta.main,role:'Orchestrator',status:run.eval?.decision==='evaluating'?'working':run.eval?'done':'queued',objective:'评估任务、建立授权边界并编排并行工作。',work:run.eval?`Eval：${evalText}`:'等待接收 Trigger',report:null},...run.assignments];
-  const mandateText=run.mandate?`${run.mandate.strength==='explicit'?'明确授权':'推断授权'} · 请求者 ${run.mandate.actor?.id||'—'} · Policy ${run.mandate.policyVersion?.slice(0,8)||'—'}`:'尚未生成 Mandate';
+  // 数组里可能有 null 元素（宿主给的数据不保证形状）：渲染不能因此抛错。
+  // 数组里可能有 null 元素（宿主给的数据不保证形状）：渲染不能因此抛错。
+  const events=run.events.filter(event=>event&&typeof event==='object');
+  const workers=[{name:meta.main,role:'Orchestrator',status:run.eval?.decision==='evaluating'?'working':run.eval?'done':'queued',objective:'评估任务、建立授权边界并编排并行工作。',work:run.eval?`Eval：${evalText}`:'等待接收 Trigger',report:null},...run.assignments.filter(agent=>agent&&typeof agent==='object')];
+  const mandateText=run.mandate?`${run.mandate.strength==='explicit'?'明确授权':'推断授权'} · 请求者 ${run.mandate.actor?.id||'—'} · Policy ${shortText(run.mandate.policyVersion)}`:'尚未生成 Mandate';
   return `<div class="app-shell super-agent-shell"><header class="topbar"><div class="topbar-inner">${brand()}<span class="topbar-caption">Along · 任务协作</span></div></header><main class="content task-detail">
     ${backButton('task-back','返回动态任务')}
     <section class="task-hero"><div class="task-hero-top"><span class="eyebrow">${esc(task.when)} · ${esc(taskStateLabel[task.state])}</span><span class="run-status ${runStatus(run.status)}"><i></i>${esc(run.statusLabel)}</span></div><h1>${esc(task.title)}</h1><p>${esc(task.detail)}</p><div class="run-progress-head"><span>总体进展</span><strong>${runProgress(run.progress)}%</strong></div><div class="run-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${runProgress(run.progress)}"><span style="width:${runProgress(run.progress)}%"></span></div></section>
@@ -415,7 +418,7 @@ function taskDetailPage() {
 
     <section class="workers-section"><div class="section-heading"><h2>真实分工</h2><span>${workers.filter(agent=>agent.status==='done').length} / ${workers.length} 已完成</span></div><div class="worker-grid">${workers.map(taskAgentCard).join('')}</div></section>
 
-    <section class="activity-section"><div class="section-heading"><h2>工作记录</h2><span>只记录有意义的状态变化</span></div><div class="activity-list">${run.events.map((event,index)=>`<div class="activity-row"><span class="activity-dot ${index===run.events.length-1&&run.status!=='done'?'active':''}"></span><div><strong>${esc(event.text)}</strong><span>${formatTime(event.at)}</span></div></div>`).join('')}</div></section>
+    <section class="activity-section"><div class="section-heading"><h2>工作记录</h2><span>只记录有意义的状态变化</span></div><div class="activity-list">${events.map((event,index)=>`<div class="activity-row"><span class="activity-dot ${index===events.length-1&&run.status!=='done'?'active':''}"></span><div><strong>${esc(event.text)}</strong><span>${formatTime(event.at)}</span></div></div>`).join('')}</div></section>
 
     <aside class="architecture-note"><strong>${run.actual?`真实 ${meta.full} 运行`:'等待真实运行'}</strong><p>${esc(run.error||`以上状态来自本机 ${meta.full} 的真实会话与子 Agent；没有用定时动画模拟。`)}</p></aside>
   </main></div>`;
@@ -424,12 +427,12 @@ function taskDetailPage() {
 function goalOrchestrationPanel(run) {
   if (!run) return '';
   const meta=runtimeMeta(run.runtime);
-  const events=(run.events||[]).slice(-5);
+  const events=(run.events||[]).filter(event=>event&&typeof event==='object').slice(-5);
   const mandateText=typeof run.mandate==='string'?run.mandate:run.mandate?.scope||'仅围绕本次目标进行拆解、规划与可交付执行。';
   return `<section class="goal-orchestration ${runStatus(run.status)}" aria-live="polite"><div class="goal-run-head"><div><span class="eyebrow">真实 ${esc(meta.full)}</span><h2>${esc(run.statusLabel)}</h2></div><strong>${runProgress(run.progress)}%</strong></div><div class="run-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${runProgress(run.progress)}"><span style="width:${runProgress(run.progress)}%"></span></div>
-  <div class="orchestration-flow compact"><div><span>Source</span><strong>目标输入</strong></div><b aria-hidden="true">→</b><div><span>${run.runtime===KIMI_RUNTIME?'Session':'Main Session'}</span><strong>${run.eval?.decision==='accept'?'已接单':run.eval?.decision==='evaluating'?'评估中':'等待'}</strong></div><b aria-hidden="true">→</b><div><span>${run.runtime===KIMI_RUNTIME?'Swarm':'Ticket'}</span><strong>${run.runtime===KIMI_RUNTIME?'已开启':run.ticket?esc(ticketTag(run.ticket?.id)):'创建中'}</strong></div><b aria-hidden="true">→</b><div><span>${esc(meta.worker)}</span><strong>${run.agents?.length||0} 个 Agent</strong></div></div>
+  <div class="orchestration-flow compact"><div><span>Source</span><strong>目标输入</strong></div><b aria-hidden="true">→</b><div><span>${run.runtime===KIMI_RUNTIME?'Session':'Main Session'}</span><strong>${run.eval?.decision==='accept'?'已接单':run.eval?.decision==='evaluating'?'评估中':'等待'}</strong></div><b aria-hidden="true">→</b><div><span>${run.runtime===KIMI_RUNTIME?'Swarm':'Ticket'}</span><strong>${run.runtime===KIMI_RUNTIME?'已开启':run.ticket?esc(shortText(run.ticket?.id)):'创建中'}</strong></div><b aria-hidden="true">→</b><div><span>${esc(meta.worker)}</span><strong>${run.agents?.length||0} 个 Agent</strong></div></div>
   ${run.mandate?`<div class="mandate-card"><span>Mandate · 本次授权边界</span><p>${esc(mandateText)}</p></div>`:''}
-  ${run.agents?.length?`<div class="worker-grid">${run.agents.map(taskAgentCard).join('')}</div>`:''}
+  ${run.agents?.length?`<div class="worker-grid">${run.agents.filter(agent=>agent&&typeof agent==='object').map(taskAgentCard).join('')}</div>`:''}
   ${events.length?`<div class="goal-run-events">${events.map(event=>`<p><span>${formatTime(event.at)}</span>${esc(event.text)}</p>`).join('')}</div>`:''}
   ${run.error?`<p class="goal-run-error">${esc(run.error)}</p>`:''}</section>`;
 }
