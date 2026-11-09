@@ -47,6 +47,21 @@ function id(value, label) {
   return clean;
 }
 
+// 指标目标写成数字字符串时（"120"、"10,000"）它就是那个数字：不能绕过范围
+// 校验，也不能因为类型不是 number 就丢掉进度条。不是数字的说明文字只用来显示。
+const NUMBER_LIKE=/^-?(\d{1,3}(,\d{3})+|\d+)(\.\d+)?$/;
+function metricTargetValue(raw,limit) {
+  if (typeof raw==='number') {
+    if (!Number.isFinite(raw)||raw<=0||raw>limit) throw Error('指标目标格式不正确');
+    return raw;
+  }
+  const label=text(raw, '指标目标', 60);
+  if (!NUMBER_LIKE.test(label)) return label;
+  const value=Number(label.replaceAll(',',''));
+  if (!Number.isFinite(value)||value<=0||value>limit) throw Error('指标目标格式不正确');
+  return value;
+}
+
 function cleanModule(value, domain) {
   const module = object(value, '页面模块');
   const kind = text(module.kind, '模块类型', 20);
@@ -63,9 +78,7 @@ function cleanModule(value, domain) {
   const source=text(module.source, '指标来源', 30);
   if (!METRIC_SOURCES[domain]?.has(source)) throw Error('指标来源不受信任');
   const limit=domain==='finance'?10000000:10080;
-  const numeric=typeof module.target==='number';
-  if (numeric&&(!Number.isFinite(module.target)||module.target<=0||module.target>limit)) throw Error('指标目标格式不正确');
-  const target = numeric ? module.target : text(module.target, '指标目标', 60);
+  const target=metricTargetValue(module.target,limit);
   return {...base, source, target, unit:text(module.unit, '指标单位', 20, {optional:true}), note:text(module.note, '指标说明', 180, {optional:true})};
 }
 
@@ -103,7 +116,8 @@ export function validateAdaptiveLayout(value, domain='health') {
   if (layout.version !== 1) throw Error('个性化页面版本不受支持');
   const modules=list(layout.modules, '页面模块', 6).map(item=>cleanModule(item,domain));
   const tasks=list(layout.tasks, '动态任务', 6).map(cleanTask);
-  const questions=list(layout.questions, '待确认问题', 6).map(item=>text(item, '待确认问题', 240));
+  // 待确认问题是可选列表：没给就当没有，不能因此把整份目标空间作废（和推荐连接一致）。
+  const questions=list(layout.questions ?? [], '待确认问题', 6).map(item=>text(item, '待确认问题', 240));
   const connections=inferredConnections(layout,domain,list(layout.connections??[], '推荐连接', 4).map(cleanConnection));
   const ids=[...modules.map(item=>item.id),...tasks.map(item=>item.id),...connections.map(item=>item.id)];
   if (new Set(ids).size !== ids.length) throw Error('页面模块 ID 重复');
