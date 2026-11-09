@@ -165,6 +165,20 @@ test('a finished synthesis that delivered a valid result ends the run',async()=>
   } finally { cleanup(); }
 });
 
+test('a run record without a start time still reaches a terminal state',async()=>{
+  const {agent,statePath,fetchImpl,cleanup}=withAgent({mainSession:{busy:true,last_turn_reason:'running'}});
+  try {
+    await agent.startGoal({requestId:'req-no-created-at',...goalInput});
+    const saved=JSON.parse(readFileSync(statePath,'utf8'));
+    delete saved['req-no-created-at'].createdAt;
+    writeFileSync(statePath,JSON.stringify(saved));
+    // 运行记录在宿主内存里，改盘上的状态要重新起一个实例才生效。
+    const expired=await new KimiCodeAgent({token:'secret-token',statePath,workspace:'/along',fetchImpl}).goalStatus('req-no-created-at');
+    assert.equal(expired.status,'blocked','缺了起始时间的运行记录也要落到终态，不能永远 working');
+    assert.match(expired.error,/Kimi 长时间/);
+  } finally { cleanup(); }
+});
+
 test('a run that never advances stops waiting instead of working forever',async()=>{
   const {agent,statePath,fetchImpl,cleanup}=withAgent({mainSession:{busy:true,last_turn_reason:'running'}});
   try {
