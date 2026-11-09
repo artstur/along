@@ -301,7 +301,7 @@ function home() {
         <div class="section-heading"><h2>连接</h2><span>连接和任务相关的数据源</span></div>
         <div class="connection-card"><div class="connection-symbol" aria-hidden="true">${activeGoal === 'health' ? '♥' : '¥'}</div><div class="connection-copy"><div class="connection-name"><strong>${esc(connection.name)}</strong><span class="source-tag ${connection.kind}">${esc(connection.label)}</span></div><p>${esc(connection.detail)}${esc(sourceTime)}</p></div><button class="agent-action connection-agent-action" data-action="${activeGoal === 'health' ? 'connect-health' : connection.kind === 'demo' ? 'finance-event' : 'connect-finance'}">${esc(connection.action)}</button></div>
         ${connection.metrics?.length ? `<div class="connection-metrics">${connection.metrics.map(item=>`<div><span>${esc(item.label)}</span><strong>${esc(item.value)}</strong></div>`).join('')}</div>` : ''}
-        ${state.source === 'demo' && activeGoal === 'health' ? '<button class="minor-action" data-action="clear-health-demo">退出健康演示数据</button>' : ''}
+        ${activeGoal === 'health' && (state.source === 'demo' || state.source === 'healthkit') ? `<button class="minor-action" data-action="clear-health-data">${state.source === 'demo' ? '退出健康演示数据' : '清除本机健康摘要'}</button>` : ''}
         ${activeGoal === 'finance' && finance.connected ? '<p class="connection-footnote">点“模拟 +¥800”只会更新这份本机演示数据，不会访问账户或发起交易。</p>' : ''}
       </section>`:'';
   const recommendedConnectionContent=layout?adaptiveConnectionSection(layout):'';
@@ -486,6 +486,15 @@ async function connectHealth() {
   } catch (error) { notice(error?.message || '连接未完成，请检查健康权限'); }
 }
 
+// 清掉本机保存的健康摘要；真实来源还要让原生侧停掉读取，否则下一轮刷新会把它读回来。
+async function clearHealthData() {
+  const real = state.source === 'healthkit';
+  let stopped = true;
+  if (real) { try { await window.AlongHealthBridge?.clear?.(); } catch { stopped = false; } }
+  saveHealth({...state, source:null, snapshot:null});
+  notice(real ? (stopped ? '已清除本机健康摘要，并停止读取 Apple Health' : '已清除本机健康摘要；请到系统设置里撤销 Apple Health 权限') : '已退出健康演示数据');
+}
+
 async function injectEvent(event) {
   if (running) return;
   const before = state;
@@ -603,7 +612,7 @@ app.addEventListener('click', event => {
   if (action === 'connect-health') connectHealth();
   if (action === 'connect-finance') { saveFinance(connectFinanceDemo()); notice('已打开理财演示连接'); }
   if (action === 'finance-event') { saveFinance(addFinanceDemoRecord(finance)); notice('已记录一笔 +¥800 演示结余'); }
-  if (action === 'clear-health-demo') { saveHealth({...state, source:null, snapshot:null}); notice('已退出健康演示数据'); }
+  if (action === 'clear-health-data') void clearHealthData();
   if (action === 'open-lab') { screen = 'lab'; render(); }
   if (action === 'back-home') {
     screen = 'home';
