@@ -9,6 +9,7 @@ import {safeAdaptiveLayout, normalizeQuestions} from '../web/adaptive-ui.mjs';
 import {runTaskCodex} from './codex-agent.mjs';
 import {KimiCodeAgent} from './kimi-code-agent.mjs';
 import {DSH_RUNTIME, KIMI_RUNTIME, safeAgentRuntime} from '../web/super-agent.mjs';
+import {readJsonBody} from './request-body.mjs';
 
 const dir = join(homedir(), '.along', 'agent-host');
 mkdirSync(dir, {recursive:true, mode:0o700});
@@ -50,11 +51,7 @@ function statusForError(error) {
   if (String(error?.message??'').includes('正在处理')) return 429;
   return 400;
 }
-async function body(req) {
-  let text='';
-  for await (const chunk of req) { text+=chunk; if (text.length>32_000) throw Error('请求过大'); }
-  return JSON.parse(text);
-}
+async function body(req) { return readJsonBody(req,32_000); }
 function authorized(req) {
   const token=req.headers.authorization?.match(/^Bearer ([a-f0-9]{64})$/)?.[1];
   return !!(token && tokenHash && timingSafeEqual(createHash('sha256').update(token).digest(),tokenHash));
