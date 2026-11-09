@@ -11,7 +11,12 @@ const DEFAULT_STATE_PATH=join(homedir(),'.along','agent-host','kimi-runs.json');
 // 一次 Kimi 运行最多等这么久；超过还没拿到结果就明确停住，不让 iPhone 永远转圈。
 export const KIMI_RUN_TIMEOUT_MS=AGENT_RUN_TIMEOUT_MS;
 
-function clean(value,fallback='',max=500) { return String(value??fallback).trim().slice(0,max)||fallback; }
+// 只有字符串和数字算文本：对象、数组、布尔都不是。
+// String() 兜底会把对象变成 "[object Object]"，混过类型检查后当成协作单元的说明。
+function clean(value,fallback='',max=500) {
+  const text=typeof value==='string'?value:typeof value==='number'&&Number.isFinite(value)?String(value):'';
+  return text.trim().slice(0,max)||fallback;
+}
 // 回复与提案的字段由共享校验层 validateGoalReply 判断：这里只截断过长的字符串，
 // 非字符串原样传过去让它拒绝。String() 兜底会把对象变成 "[object Object]"，
 // 混过类型检查后当成 Along 的回复或用户的目标标题。

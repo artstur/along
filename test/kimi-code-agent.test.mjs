@@ -79,6 +79,32 @@ test('the Kimi runtime refuses a target the user did not ask for',async()=>{
   } finally { rmSync(statePath,{force:true}); }
 });
 
+test('a swarm item that is not text never becomes a "[object Object]" agent',async()=>{
+  const statePath=join(tmpdir(),`along-kimi-${crypto.randomUUID()}.json`);
+  const fetchImpl=async(url,options={})=>{
+    const path=new URL(url).pathname;
+    if (path==='/api/v1/meta') return json({server_version:'2.5.0',features:[{name:'swarm',state:'Active'}]});
+    if (path==='/api/v1/auth') return json({models_ready:true});
+    if (path==='/api/v1/oauth/userinfo') return json({kind:'ok',userInfo:{userLevelName:'Pro'}});
+    if (path==='/api/v1/sessions'&&options.method==='POST') return json({id:'session-main'});
+    if (path==='/api/v1/sessions/session-main/profile') return json({id:'session-main',agent_config:{swarm_mode:true}});
+    if (path==='/api/v1/sessions/session-main/prompts') return json({accepted:true});
+    if (path==='/api/v1/sessions/session-main') return json({id:'session-main',busy:false,last_turn_reason:'completed',pending_interaction:'none',updated_at:'2026-11-05T08:00:00Z'});
+    if (path==='/api/v1/sessions/session-main/messages') return json({items:[{id:'m1',session_id:'session-main',role:'assistant',created_at:'2026-11-05T08:00:00Z',content:[{type:'text',text:JSON.stringify(result)}]}]});
+    if (path==='/api/v1/sessions/session-main/children') return json({items:[]});
+    // 子 Agent 的角色不是文本（对象）：不能被 String() 兜底成 "[object Object]"。
+    if (path==='/api/v1/sessions/session-main/transcript') return json({items:[{kind:'turn',steps:[{frames:[{kind:'tool',name:'AgentSwarm',input:{items:[{role:'目标策略师'}]},output:'<agent_swarm_result><summary>completed: 1</summary></agent_swarm_result>'}]}]}]});
+    throw Error(`unexpected ${path}`);
+  };
+  try {
+    const agent=new KimiCodeAgent({token:'secret-token',statePath,workspace:'/along',fetchImpl});
+    const response=await agent.startGoal({requestId:'along-goal-health-dirty-item',goal:{domain:'health',title:'运动',target:120},snapshot:{},message:'做一个计划',history:[]});
+    assert.doesNotMatch(JSON.stringify(response),/\[object Object\]/,'脏文本不能混进运行记录');
+    assert.equal(response.run.agents[0].name,'Kimi Subagent 1','角色不是文本时用兜底名');
+    assert.equal(response.run.agents[0].objective,'并行规划子任务','说明不是文本时用兜底说明');
+  } finally { rmSync(statePath,{force:true}); }
+});
+
 test('reports login as a readiness requirement',async()=>{
   const agent=new KimiCodeAgent({token:'token',statePath:join(tmpdir(),`along-kimi-${crypto.randomUUID()}.json`),fetchImpl:async url=>{
     const path=new URL(url).pathname;
