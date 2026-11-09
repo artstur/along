@@ -2,7 +2,7 @@ import {homedir} from 'node:os';
 import {dirname, join} from 'node:path';
 import {existsSync, mkdirSync, readFileSync, writeFileSync} from 'node:fs';
 import {validateGoalReply} from '../web/goal-agent-core.mjs';
-import {safeAdaptiveLayout} from '../web/adaptive-ui.mjs';
+import {safeAdaptiveLayout, normalizeQuestions} from '../web/adaptive-ui.mjs';
 import {KIMI_RUNTIME, AGENT_RUN_TIMEOUT_MS} from '../web/super-agent.mjs';
 
 const DEFAULT_URL='http://127.0.0.1:58627';
@@ -12,6 +12,13 @@ const DEFAULT_STATE_PATH=join(homedir(),'.along','agent-host','kimi-runs.json');
 export const KIMI_RUN_TIMEOUT_MS=AGENT_RUN_TIMEOUT_MS;
 
 function clean(value,fallback='',max=500) { return String(value??fallback).trim().slice(0,max)||fallback; }
+// 回复与提案的字段由共享校验层 validateGoalReply 判断：这里只截断过长的字符串，
+// 非字符串原样传过去让它拒绝。String() 兜底会把对象变成 "[object Object]"，
+// 混过类型检查后当成 Along 的回复或用户的目标标题。
+function strictText(value,max) {
+  if (typeof value!=='string') return value==null?'':value;
+  return value.trim().slice(0,max);
+}
 function timestamp(value,fallback=Date.now()) {
   const parsed=typeof value==='number'?value:Date.parse(value);
   return Number.isFinite(parsed)?parsed:fallback;
@@ -126,14 +133,14 @@ function layoutForAlong(value,domain) {
     state:['temporary','planned','deferred'].includes(task?.state)?task.state:'planned',
   }));
   return {version:1,title:clean(value.title,'我的目标',80),badge:value.badge==null?null:clean(value.badge,'',40),summary:clean(value.summary,'目标计划已生成',600),modules,tasks,
-    questions:(Array.isArray(value.questions)?value.questions:[]).slice(0,6).map(question=>clean(question,'待确认问题',240))};
+    questions:normalizeQuestions(value.questions)};
 }
 function goalResultFromOutput(output,domain,message) {
-  const normalized={...output,reply:clean(output?.reply,'',1200),proposal:output?.proposal==null?null:{
+  const normalized={...output,reply:strictText(output?.reply,1200),proposal:output?.proposal==null?null:{
     ...output.proposal,
-    title:clean(output.proposal.title,'',80),
-    task:clean(output.proposal.task,'',120),
-    reason:clean(output.proposal.reason,'',300),
+    title:strictText(output.proposal.title,80),
+    task:strictText(output.proposal.task,120),
+    reason:strictText(output.proposal.reason,300),
   }};
   const validated=validateGoalReply(normalized,domain,message);
   const layout=output?.layout==null?null:safeAdaptiveLayout(layoutForAlong(output.layout,domain),domain);
