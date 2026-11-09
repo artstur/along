@@ -10,6 +10,13 @@ const RUNTIMES = new Set([DSH_RUNTIME, KIMI_RUNTIME]);
 
 export function safeAgentRuntime(value) { return RUNTIMES.has(value)?value:DSH_RUNTIME; }
 export function agentRuntimeLabel(runtime) { return safeAgentRuntime(runtime)===KIMI_RUNTIME?'Kimi Swarm':'DSH Agents'; }
+
+// App 内置页面走 along:// 自定义 scheme，不是安全上下文，crypto.randomUUID 可能不存在。
+// 这些 id 只用于本机把一次请求和一次结果对上，不需要密码学强度。
+export function newId(prefix='id') {
+  const uuid=globalThis.crypto?.randomUUID?.();
+  return `${prefix}-${uuid??`${Date.now().toString(36)}-${Math.random().toString(36).slice(2,10)}`}`;
+}
 function runtimeCopy(runtime) {
   return safeAgentRuntime(runtime)===KIMI_RUNTIME
     ? {submit:'正在提交给 Kimi',connecting:'连接 Kimi Code Swarm',unavailable:'Kimi Swarm 暂不可用',failed:'Kimi Code Swarm 请求失败'}
@@ -68,7 +75,7 @@ export function createGoalSuperAgentRequest({domain='health',goal,snapshot={},me
   if (!DOMAINS.has(domain)) throw Error('目标领域无效');
   const cleanMessage=cleanText(message,'',800);
   if (!cleanMessage) throw Error('请输入目标');
-  const id=requestId || `along-goal-${domain}-${crypto.randomUUID()}`;
+  const id=requestId || `along-goal-${domain}-${newId('req')}`;
   return {
     requestId:id,
     goal:{domain,title:cleanText(goal?.title,'当前目标',120),target:Number.isFinite(goal?.target)?goal.target:null},

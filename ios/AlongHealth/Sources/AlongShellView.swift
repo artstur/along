@@ -240,7 +240,7 @@ enum AlongConnectionStore {
 
 struct AlongWebView: UIViewRepresentable {
     @ObservedObject var bridge: AlongBridgeModel
-    private let site = URL(string: "along://app/index.html?build=28")!
+    private let site = URL(string: "along://app/index.html?build=29")!
 
     func makeCoordinator() -> Coordinator { Coordinator(bridge: bridge) }
 
@@ -268,6 +268,9 @@ struct AlongWebView: UIViewRepresentable {
 
     static let bridgeScript = """
     (() => {
+      // along:// 是自定义 scheme，不是安全上下文，crypto.randomUUID 可能不存在。
+      // 这些 id 只用于本机把一次请求和一次结果对上，不需要密码学强度。
+      const newId = () => (crypto.randomUUID ? crypto.randomUUID() : `id-${Date.now().toString(36)}-${Math.random().toString(36).slice(2,10)}`);
       const pending = new Map();
       window.__alongHealthBridgeFinish = (id, result) => {
         const item = pending.get(id); if (!item) return;
@@ -277,12 +280,12 @@ struct AlongWebView: UIViewRepresentable {
       };
       window.AlongHealthBridge = {
         connect: ({types} = {}) => new Promise((resolve, reject) => {
-          const id = crypto.randomUUID();
+          const id = newId();
           pending.set(id, {resolve, reject});
           window.webkit.messageHandlers.alongHealth.postMessage({id, types});
         }),
         refresh: () => new Promise((resolve, reject) => {
-          const id = crypto.randomUUID();
+          const id = newId();
           pending.set(id, {resolve, reject});
           window.webkit.messageHandlers.alongHealthRefresh.postMessage({id});
         })
@@ -296,12 +299,12 @@ struct AlongWebView: UIViewRepresentable {
       };
       window.AlongAgentBridge = {
         request: ({baseURL, fingerprint, path, token, body}) => new Promise((resolve, reject) => {
-          const id = crypto.randomUUID();
+          const id = newId();
           agentPending.set(id, {resolve, reject});
           window.webkit.messageHandlers.alongAgent.postMessage({id, baseURL, fingerprint, path, token, body});
         }),
         connection: (action, value = null) => new Promise((resolve, reject) => {
-          const id = crypto.randomUUID();
+          const id = newId();
           agentPending.set(id, {resolve, reject});
           window.webkit.messageHandlers.alongAgent.postMessage({id, operation: 'connection', action, value});
         })
