@@ -25,6 +25,17 @@ test('the real HealthKit summary can be cleared from the app',async()=>{
   assert.equal(saved.source,null);
 });
 
+test('the clear entry shows even when a real summary only survives in the experiment backup',async()=>{
+  const backupOnly={...healthkitState,source:null,snapshot:null,
+    loop:{experiment:'weekly-workout-120-v1',previousState:healthkitState,currentTask:'本周安排一次 45 分钟健身',changes:[]}};
+  const dom=installDomStub({storage:{[HEALTH_KEY]:JSON.stringify(backupOnly)}});
+  await import('../web/app.mjs?clear-health-backup-only');
+  assert.match(dom.app.innerHTML,/清除本机健康摘要/,'实验备份里还留着真实摘要时，清除入口必须在');
+  await dom.click({action:'clear-health-data'});
+  const saved=JSON.parse(dom.storage.get(HEALTH_KEY));
+  assert.equal(saved.loop.previousState.source,null);
+});
+
 test('the demo data can still be left without touching the native bridge',async()=>{
   const demoState={...healthkitState,source:'demo',snapshot:{...healthkitState.snapshot,selectedTypes:null}};
   const dom=installDomStub({storage:{[HEALTH_KEY]:JSON.stringify(demoState)}});
