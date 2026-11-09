@@ -35,6 +35,21 @@ const superAgentURL = (process.env.ALONG_SUPERAGENT_URL || 'http://127.0.0.1:308
 const kimiAgent = new KimiCodeAgent({workspace:process.env.ALONG_KIMI_WORKSPACE||process.cwd()});
 
 function respond(res,status,data) { res.writeHead(status,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}).end(JSON.stringify(data)); }
+// 上游（DSH / Kimi / 模型）出的问题不是客户端请求不合法：要答复 5xx。
+// 400 会把「对方挂了」和「我发错了」在客户端混成同一件事。
+class HostError extends Error {
+  constructor(message,status=502) { super(message); this.status=status; }
+}
+// 上游调用统一包一层：失败按上游故障答复，不当成客户端请求不合法。
+async function upstream(operation) {
+  try { return await operation(); }
+  catch(error) { throw error instanceof HostError ? error : new HostError(error?.message??String(error),502); }
+}
+function statusForError(error) {
+  if (Number.isInteger(error?.status)) return error.status;
+  if (String(error?.message??'').includes('正在处理')) return 429;
+  return 400;
+}
 async function body(req) {
   let text='';
   for await (const chunk of req) { text+=chunk; if (text.length>32_000) throw Error('请求过大'); }
@@ -49,10 +64,10 @@ async function superAgentCall(path,{method='POST',value}={}) {
   try {
     response=await fetch(`${superAgentURL}${path}`,{method,headers:{'x-along-bridge':'1',...(value===undefined?{}:{'content-type':'application/json'})},
       ...(value===undefined?{}:{body:JSON.stringify(value)}),signal:AbortSignal.timeout(15_000)});
-  } catch(error) { throw Error(`Along 服务暂不可用：${error.message}`); }
+  } catch(error) { throw new HostError(`Along 服务暂不可用：${error.message}`,502); }
   let result;
-  try { result=await response.json(); } catch { throw Error(`Along 返回了无效响应（${response.status}）`); }
-  if (!response.ok) throw Error(result?.error || `Along 请求失败（${response.status}）`);
+  try { result=await response.json(); } catch { throw new HostError(`Along 返回了无效响应（${response.status}）`,502); }
+  if (!response.ok) throw new HostError(result?.error || `Along 请求失败（${response.status}）`,502);
   return result;
 }
 async function superAgentReady() {
@@ -61,8 +76,8 @@ async function superAgentReady() {
     response=await fetch(`${superAgentURL}/along-source/api/goals/along-status-probe`,{
       method:'GET',headers:{'x-along-bridge':'1'},signal:AbortSignal.timeout(5_000)
     });
-  } catch(error) { throw Error(`DSH Super Agent 未运行：${error.message}`); }
-  if (response.status!==404 && !response.ok) throw Error(`DSH Along Source 未就绪（${response.status}）`);
+  } catch(error) { throw new HostError(`DSH Super Agent 未运行：${error.message}`,503); }
+  if (response.status!==404 && !response.ok) throw new HostError(`DSH Along Source 未就绪（${response.status}）`,503);
   return true;
 }
 // 目标名称必须真的是字符串：String() 会把对象变成 "[object Object]"，
@@ -130,24 +145,24 @@ const server=createServer({key:readFileSync(key),cert:readFileSync(cert)},async(
     if (req.method==='POST' && path==='/connection/status') {
       const input=await body(req),runtime=requestedRuntime(input?.runtime);
       if (runtime===KIMI_RUNTIME) {
-        const kimi=await kimiAgent.ready();
+        const kimi=await upstream(()=>kimiAgent.ready());
         console.log(`连接检查通过：iPhone → Along Host → Kimi Code Swarm (${new Date().toISOString()})`);
         return respond(res,200,{along:true,runtime,ready:true,kimi});
       }
-      await superAgentReady();
+      await upstream(()=>superAgentReady());
       console.log(`连接检查通过：iPhone → Along Host → DSH (${new Date().toISOString()})`);
       return respond(res,200,{along:true,runtime,ready:true,dsh:true});
     }
     if (req.method==='POST' && path==='/super-agent/tasks') {
       const input=await body(req),runtime=requestedRuntime(input?.runtime);
       const {runtime:_runtime,...dshInput}=input;
-      if (runtime===KIMI_RUNTIME) return respond(res,200,await kimiAgent.startTask(dshInput));
-      return respond(res,200,await superAgentCall('/along-source/api/tasks',{value:dshInput}));
+      if (runtime===KIMI_RUNTIME) return respond(res,200,await upstream(()=>kimiAgent.startTask(dshInput)));
+      return respond(res,200,await upstream(()=>superAgentCall('/along-source/api/tasks',{value:dshInput})));
     }
     if (req.method==='POST' && path==='/super-agent/tasks/status') {
       const input=await body(req),id=requestId(input?.requestId),runtime=requestedRuntime(input?.runtime);
-      if (runtime===KIMI_RUNTIME) return respond(res,200,await kimiAgent.taskStatus(id));
-      return respond(res,200,await superAgentCall(`/along-source/api/tasks/${encodeURIComponent(id)}`,{method:'GET'}));
+      if (runtime===KIMI_RUNTIME) return respond(res,200,await upstream(()=>kimiAgent.taskStatus(id)));
+      return respond(res,200,await upstream(()=>superAgentCall(`/along-source/api/tasks/${encodeURIComponent(id)}`,{method:'GET'})));
     }
     if (req.method==='POST' && path==='/super-agent/goals') {
       const input=await body(req),runtime=requestedRuntime(input?.runtime);
@@ -155,14 +170,15 @@ const server=createServer({key:readFileSync(key),cert:readFileSync(cert)},async(
       const message=String(input.message??'').trim();
       if (!message||message.length>800) throw Error('消息长度需在 1 至 800 字之间');
       const history=Array.isArray(input.history)?input.history.slice(-12).map(item=>({role:item.role==='assistant'?'assistant':'user',text:String(item.text??'').slice(0,1200)})).filter(item=>item.text.trim()):[];
-      if (runtime===KIMI_RUNTIME) return respond(res,200,await kimiAgent.startGoal({requestId:requestId(input.requestId),goal,snapshot,message,history}));
-      const response=await superAgentCall('/along-source/api/goals',{value:{requestId:requestId(input.requestId),goal,snapshot,message,history}});
-      return respond(res,200,{...response,run:normalizeGoalRun(response.run)});
+      if (runtime===KIMI_RUNTIME) return respond(res,200,await upstream(()=>kimiAgent.startGoal({requestId:requestId(input.requestId),goal,snapshot,message,history})));
+      const response=await upstream(()=>superAgentCall('/along-source/api/goals',{value:{requestId:requestId(input.requestId),goal,snapshot,message,history}}));
+      return respond(res,200,{...response,run:await upstream(()=>normalizeGoalRun(response.run))});
     }
     if (req.method==='POST' && path==='/super-agent/goals/status') {
       const input=await body(req),id=requestId(input?.requestId),runtime=requestedRuntime(input?.runtime);
-      if (runtime===KIMI_RUNTIME) return respond(res,200,await kimiAgent.goalStatus(id));
-      return respond(res,200,normalizeGoalRun(await superAgentCall(`/along-source/api/goals/${encodeURIComponent(id)}`,{method:'GET'})));
+      if (runtime===KIMI_RUNTIME) return respond(res,200,await upstream(()=>kimiAgent.goalStatus(id)));
+      const raw=await upstream(()=>superAgentCall(`/along-source/api/goals/${encodeURIComponent(id)}`,{method:'GET'}));
+      return respond(res,200,await upstream(()=>normalizeGoalRun(raw)));
     }
     if (req.method==='POST' && path==='/goal/chat') {
       return respond(res,409,{error:'目标输入已升级，请更新 Along 后重试'});
@@ -175,11 +191,12 @@ const server=createServer({key:readFileSync(key),cert:readFileSync(cert)},async(
       if (route.decision==='quiet') return respond(res,200,{...route,source:'router'});
       const currentTask=String(input.currentTask??'').slice(0,120);
       const prompt=`你是 Along 的任务调整 Agent。确定性进度由 Along 算好，不要自行修改。不得调用工具，不要给医学建议。只输出 JSON：{"task":"具体可执行的下一步","reason":"解释为什么调整","remaining":${route.remaining}}。目标：${JSON.stringify(goal)}。原任务：${currentTask}。变化：${route.reason}。任务应与剩余 ${route.remaining} 分钟相符；若已完成则建议查看成果。`;
-      const suggestion=validateTaskReply(await runExclusive(()=>runTaskCodex(prompt)),route.remaining);
+      const raw=await runExclusive(()=>upstream(()=>runTaskCodex(prompt)));
+      const suggestion=await upstream(()=>validateTaskReply(raw,route.remaining));
       return respond(res,200,{...route,suggestion,source:'live-along'});
     }
     return respond(res,404,{error:'未找到接口'});
-  } catch(error) { respond(res,error.message.includes('正在处理')?429:400,{error:error.message}); }
+  } catch(error) { respond(res,statusForError(error),{error:error.message}); }
 });
 server.listen(port,lanHost,()=>{
   console.log(`Along 服务: https://${lanHost}:${port}`);
