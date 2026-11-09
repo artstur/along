@@ -15,7 +15,7 @@ export function agentRuntimeLabel(runtime) { return safeAgentRuntime(runtime)===
 // 这些 id 只用于本机把一次请求和一次结果对上，不需要密码学强度。
 export function newId(prefix='id') {
   const uuid=globalThis.crypto?.randomUUID?.();
-  return `${prefix}-${uuid??`${Date.now().toString(36)}-${Math.random().toString(36).slice(2,10)}`}`;
+  return `${prefix}-${uuid??`${Date.now().toString(36)}-${Math.random().toString(36).slice(2).padEnd(8,'0')}`}`;
 }
 function runtimeCopy(runtime) {
   return safeAgentRuntime(runtime)===KIMI_RUNTIME

@@ -270,7 +270,7 @@ struct AlongWebView: UIViewRepresentable {
     (() => {
       // along:// 是自定义 scheme，不是安全上下文，crypto.randomUUID 可能不存在。
       // 这些 id 只用于本机把一次请求和一次结果对上，不需要密码学强度。
-      const newId = () => (crypto?.randomUUID ? crypto.randomUUID() : `id-${Date.now().toString(36)}-${Math.random().toString(36).slice(2,10)}`);
+      const newId = () => (globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : `id-${Date.now().toString(36)}-${Math.random().toString(36).slice(2).padEnd(8,'0')}`);
       const pending = new Map();
       window.__alongHealthBridgeFinish = (id, result) => {
         const item = pending.get(id); if (!item) return;
