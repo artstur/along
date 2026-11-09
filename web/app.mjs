@@ -48,8 +48,15 @@ function saveTicket(ticket) { pendingTask=ticket; if (ticket) localStorage.setIt
 localStorage.setItem(KEY, JSON.stringify(state));
 
 const esc = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
-const formatDate = value => new Intl.DateTimeFormat('zh-CN', {month:'numeric', day:'numeric', hour:'2-digit', minute:'2-digit'}).format(new Date(value));
-const formatTime = value => new Intl.DateTimeFormat('zh-CN', {hour:'2-digit', minute:'2-digit'}).format(new Date(value));
+// 旧版本宿主写下的记录里可能没有时间戳：Intl 格式化无效日期会抛 RangeError，
+// 整个 render() 挂掉，界面停在旧页面上再也动不了。
+const formatStamp = (value,options) => {
+  if (value==null) return '—';
+  const date=new Date(value);
+  return Number.isFinite(date.getTime())?new Intl.DateTimeFormat('zh-CN',options).format(date):'—';
+};
+const formatDate = value => formatStamp(value,{month:'numeric', day:'numeric', hour:'2-digit', minute:'2-digit'});
+const formatTime = value => formatStamp(value,{hour:'2-digit', minute:'2-digit'});
 function notice(message) {
   toast.textContent = message;
   toast.classList.add('show');
@@ -142,12 +149,15 @@ function taskRequest(task) { return {...createSuperAgentRequest({task,domain:goa
 function currentSuperAgentRun(task) {
   const key=runKey(task.id);
   const stored=superAgentRuns[key];
-  const saved=safeSuperAgentRun(stored) || (agentRuntime===DSH_RUNTIME?safeSuperAgentRun(superAgentRuns[`${activeGoal}:${task.id}`]):null);
+  // 旧版本的记录存在不带运行时前缀的键里，两边都要一样处理。
+  const legacy=agentRuntime===DSH_RUNTIME?superAgentRuns[`${activeGoal}:${task.id}`]:null;
+  const saved=safeSuperAgentRun(stored)||safeSuperAgentRun(legacy);
   if (saved) return saved;
   // 存着的记录存在却过不了白名单：那是宿主返回了我们不认的形状。
   // 不能拿一个假的「正在连接」把它盖掉——那会让真实的状态和原因永远看不到，
   // 用户看到的是一个永远转圈的界面。
-  if (stored) return createFailedSuperAgentRun(taskRequest(task),typeof stored.error==='string'&&stored.error?stored.error:'宿主返回了无法识别的运行记录',Date.now(),agentRuntime);
+  const untrusted=stored??legacy;
+  if (untrusted) return createFailedSuperAgentRun(taskRequest(task),typeof untrusted.error==='string'&&untrusted.error?untrusted.error:'宿主返回了无法识别的运行记录',Date.now(),agentRuntime);
   const created=createPendingSuperAgentRun(taskRequest(task),Date.now(),agentRuntime);
   superAgentRuns={...superAgentRuns,[key]:created};
   saveSuperAgentRuns();
