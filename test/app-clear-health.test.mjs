@@ -25,15 +25,20 @@ test('the real HealthKit summary can be cleared from the app',async()=>{
   assert.equal(saved.source,null);
 });
 
-test('the clear entry shows even when a real summary only survives in the experiment backup',async()=>{
+// 实验开着的时候，真实摘要被挪进了实验备份里。
+// 实验不再跨重启存活：重启后备份里的真实摘要会回到顶层，
+// 清除入口必须还在，清除也必须真的把真实摘要清掉。
+test('a restart during the experiment brings the real summary back and keeps the clear entry',async()=>{
   const backupOnly={...healthkitState,source:null,snapshot:null,
     loop:{experiment:'weekly-workout-120-v1',previousState:healthkitState,currentTask:'本周安排一次 45 分钟健身',changes:[]}};
   const dom=installDomStub({storage:{[HEALTH_KEY]:JSON.stringify(backupOnly)}});
+  globalThis.window.AlongHealthBridge={clear:()=>Promise.resolve()};
   await import('../web/app.mjs?clear-health-backup-only');
-  assert.match(dom.app.innerHTML,/清除本机健康摘要/,'实验备份里还留着真实摘要时，清除入口必须在');
+  assert.match(dom.app.innerHTML,/清除本机健康摘要/,'真实摘要回到顶层后，清除入口必须在');
   await dom.click({action:'clear-health-data'});
   const saved=JSON.parse(dom.storage.get(HEALTH_KEY));
-  assert.equal(saved.loop.previousState.source,null);
+  assert.equal(saved.source,null);
+  assert.equal(saved.snapshot,null);
 });
 
 test('clearing also removes a real proposal even while the demo data is on screen',async()=>{
@@ -58,13 +63,16 @@ test('the demo data can still be left without touching the native bridge',async(
   assert.equal(JSON.parse(dom.storage.get(HEALTH_KEY)).source,null);
 });
 
-test('clearing also removes the real summary kept in the experiment backup',async()=>{
-  const demoState={...healthkitState,source:'demo',snapshot:{...healthkitState.snapshot,selectedTypes:null},
-    loop:{experiment:'weekly-workout-120-v1',previousState:healthkitState,currentTask:'本周安排一次 45 分钟健身',changes:[]}};
-  const dom=installDomStub({storage:{[HEALTH_KEY]:JSON.stringify(demoState)}});
+// 实验开着的时候（真实摘要在实验备份里），清除要连备份里的真实摘要一起清掉，
+// 也要让原生侧停读——否则下一轮刷新会把它读回来。
+test('clearing during an experiment also removes the real summary kept in the experiment backup',async()=>{
+  const dom=installDomStub({storage:{[HEALTH_KEY]:JSON.stringify(healthkitState)}});
   let cleared=0;
   globalThis.window.AlongHealthBridge={clear:()=>{cleared++;return Promise.resolve();}};
   await import('../web/app.mjs?clear-health-backup');
+  await dom.click({action:'open-lab'});
+  await dom.click({action:'experiment-start'});
+  assert.equal(JSON.parse(dom.storage.get(HEALTH_KEY)).loop.experiment,'weekly-workout-120-v1','实验要先开着，真实摘要才会进备份');
   await dom.click({action:'clear-health-data'});
   assert.equal(cleared,1,'实验里存着真实摘要时，必须让原生侧停读');
   const saved=JSON.parse(dom.storage.get(HEALTH_KEY));

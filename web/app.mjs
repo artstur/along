@@ -18,6 +18,15 @@ if ('serviceWorker' in navigator) {
   catch { /* 注册失败不影响正常使用。 */ }
 }
 let state = ensureHealthGoal(loadState(localStorage.getItem(KEY)));
+// 实验是个沙盒：App 重启后不该还停在演示数据上、把用户真实的健康摘要顶掉。
+// 实验室页的「返回目标」退出实验时也是这么做的，这里是重启时的同一件事。
+// 备份本身也可能被写坏：形状不对就用初始状态，别让整个 App 起不来。
+if (state.loop?.experiment === EXPERIMENT) {
+  const backup=state.loop.previousState;
+  const restored=backup && typeof backup==='object' && Array.isArray(backup.goals) ? backup : loadState(null);
+  state = ensureHealthGoal(restored);
+  localStorage.setItem(KEY, JSON.stringify(state));
+}
 let finance = loadFinance(localStorage.getItem(FINANCE_KEY));
 const storedActiveGoal=localStorage.getItem(ACTIVE_GOAL_KEY);
 let activeGoal = storedActiveGoal === 'finance' || isCustomGoalKey(storedActiveGoal) ? storedActiveGoal : 'health';
