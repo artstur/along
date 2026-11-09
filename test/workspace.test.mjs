@@ -44,6 +44,21 @@ test('finance connection stays explicitly simulated and changes the task', () =>
   assert.match(changed.primary.detail, /¥2,000/);
   assert.match(changed.note, /演示数据/);
 });
+test('recording a demo balance always adds 800 and never shrinks it', () => {
+  const connected = connectFinanceDemo();
+  const changed = addFinanceDemoRecord(connected);
+  assert.equal(changed.saved, 4000, '一笔结余就是 +800');
+  // 目标只是要跨过的门槛，不参与余额运算：目标被改小也不追溯改写已累计的余额。
+  const lowered = financeView(changed, {target: 2000});
+  assert.equal(lowered.measure, '¥4,000');
+  assert.equal(lowered.percent, 100);
+  // 余额已经超过目标时，进度封顶，余额继续累加。
+  const reached = addFinanceDemoRecord({...connected, saved: 10000});
+  assert.equal(reached.saved, 10800, '每点一次演示结余，余额就 +800');
+  const view = financeView(reached);
+  assert.equal(view.percent, 100);
+  assert.equal(view.progressText, '示例目标已达成');
+});
 test('connected health sources show only selected additional aggregates',()=>{
   const state=ensureHealthGoal(setSnapshot(initialState(),{
     selectedTypes:['workout','restingHeartRate','activeEnergy'],

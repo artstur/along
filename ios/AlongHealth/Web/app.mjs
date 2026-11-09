@@ -602,7 +602,7 @@ app.addEventListener('click', event => {
   if (action === 'dismiss-task') { saveTicket(null);render(); }
   if (action === 'connect-health') connectHealth();
   if (action === 'connect-finance') { saveFinance(connectFinanceDemo()); notice('已打开理财演示连接'); }
-  if (action === 'finance-event') { saveFinance(addFinanceDemoRecord(finance,goalCustom.finance?.target||10000)); notice('已记录一笔 +¥800 演示结余'); }
+  if (action === 'finance-event') { saveFinance(addFinanceDemoRecord(finance)); notice('已记录一笔 +¥800 演示结余'); }
   if (action === 'clear-health-demo') { saveHealth({...state, source:null, snapshot:null}); notice('已退出健康演示数据'); }
   if (action === 'open-lab') { screen = 'lab'; render(); }
   if (action === 'back-home') {
