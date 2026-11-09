@@ -18,6 +18,15 @@ if ('serviceWorker' in navigator) {
   catch { /* 注册失败不影响正常使用。 */ }
 }
 let state = ensureHealthGoal(loadState(localStorage.getItem(KEY)));
+// 实验是个沙盒：App 重启后不该还停在演示数据上、把用户真实的健康摘要顶掉。
+// 实验室页的「返回目标」退出实验时也是这么做的，这里是重启时的同一件事。
+// 备份本身也可能被写坏：形状不对就用初始状态，别让整个 App 起不来。
+if (state.loop?.experiment === EXPERIMENT) {
+  const backup=state.loop.previousState;
+  const restored=backup && typeof backup==='object' && Array.isArray(backup.goals) ? backup : loadState(null);
+  state = ensureHealthGoal(restored);
+  localStorage.setItem(KEY, JSON.stringify(state));
+}
 let finance = loadFinance(localStorage.getItem(FINANCE_KEY));
 const storedActiveGoal=localStorage.getItem(ACTIVE_GOAL_KEY);
 let activeGoal = storedActiveGoal === 'finance' || isCustomGoalKey(storedActiveGoal) ? storedActiveGoal : 'health';
@@ -37,6 +46,12 @@ goalLayouts={health:goalLayouts.health||null,finance:goalLayouts.finance||null,.
 let pendingTask = readStored(TICKET_KEY, null);
 let superAgentRuns = readStored(SUPER_AGENT_RUNS_KEY, {});
 let goalSuperAgentRuns = readStored(GOAL_SUPER_AGENT_RUNS_KEY, {});
+// 上次停在「还没确认的新目标」上：App 在 Agent 回话落地前被关掉时，
+// 用户写下的目标和那句话不能因为重启就再也看不见。回到那一页去。
+if (isCustomGoalKey(activeGoal) && !goalCustom[activeGoal] && !goalLayouts[activeGoal] &&
+    ((conversations[activeGoal]?.length||0)>0 || Object.keys(goalSuperAgentRuns).some(key=>key.startsWith(`${activeGoal}:`)))) {
+  screen='agent';
+}
 function syncAgentViewportHeight() {
   const height=window.visualViewport?.height || window.innerHeight;
   document.documentElement.style.setProperty('--agent-viewport-height',`${Math.round(height)}px`);
@@ -577,9 +592,25 @@ async function clearHealthData() {
   notice(real ? (stopped ? '已清除本机健康摘要，并停止读取 Apple Health' : '已清除本机健康摘要；请到系统设置里撤销 Apple Health 权限') : '已退出健康演示数据');
 }
 
+async function loadReplay() {
+  return fetch('./agent-replay.json').then(response => response.json());
+}
 async function injectEvent(event) {
   if (running) return;
-  const before = state;
+  const localAgent = ['localhost', '127.0.0.1'].includes(location.hostname);
+  let before = state;
+  // 公网版回放的是一段录好的 Along 运行，它固定从回放文件声明的起点开始。
+  // 用户先点过一次安静的变化，起点就偏了，主场景再也点不出来——README 承诺
+  // 两个按钮都是文档化的用法。先把实验拨回那个起点，主场景就始终可用
+  // （已经发生过的变化记录保留，安静处理的那几条还要看得见）。
+  if (!localAgent && event.type==='workout' && event.amount===35) {
+    const replay=await loadReplay();
+    if (replay?.beforeMinutes!=null && before.snapshot?.workoutMinutes!==replay.beforeMinutes) {
+      const restarted=startExperiment(before);
+      before={...restarted,loop:{...restarted.loop,changes:before.loop?.changes ?? []}};
+      saveHealth(before);
+    }
+  }
   let route;
   try { route = routeHealthEvent(before, event); } catch (error) { notice(error.message); return; }
   const id = newId('change');
@@ -589,9 +620,8 @@ async function injectEvent(event) {
   if (route.decision === 'quiet') return;
   try {
     let result;
-    const localAgent = ['localhost', '127.0.0.1'].includes(location.hostname);
-    if (!localAgent && before.snapshot.workoutMinutes === 75 && event.type === 'workout' && event.amount === 35) {
-      const replay = await fetch('./agent-replay.json').then(response => response.json());
+    if (!localAgent && event.type === 'workout' && event.amount === 35) {
+      const replay = await loadReplay();
       if (replay.experiment !== EXPERIMENT || replay.beforeMinutes !== 75 || replay.eventMinutes !== 35) throw Error('回放场景不匹配');
       result = {decision:'replan', source:'recorded-along', suggestion:replay.suggestion};
     } else if (localAgent) {
@@ -612,6 +642,10 @@ function beginNewGoal() {
   previousGoalBeforeDraft=activeGoal;
   activeGoal=`custom:${newId('goal')}`;
   conversations[activeGoal]=[];
+  // 新目标在 Agent 回话落地前也是用户写下的东西：先落盘。
+  // 否则 App 恰好在这段时间重启，用户写的目标和这句话会一起消失。
+  localStorage.setItem(ACTIVE_GOAL_KEY,activeGoal);
+  saveConversations();
   screen='agent';
   render();
   if (agentConfig.token) void refreshAgentConnection();
@@ -666,6 +700,8 @@ app.addEventListener('click', event => {
   if (action === 'agent-back') {
     if (isCustomGoalKey(activeGoal) && !goalCustom[activeGoal] && !goalLayouts[activeGoal]) {
       delete conversations[activeGoal];
+      // 放弃了这份草稿：存储里也要删掉，别把废弃的对话留在本机。
+      saveConversations();
       activeGoal=previousGoalBeforeDraft || 'health';
       previousGoalBeforeDraft=null;
     }

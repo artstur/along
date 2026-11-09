@@ -116,6 +116,20 @@ function readAgentJSON(value) {
   catch { throw Error('Agent 返回了无法解析的内容'); }
 }
 
+// 数字字符串就是那个数字：模型把 120 写成 "120"（或 "10,000"）时，要归一成
+// 数字再按同一套范围规则校验，而不是当类型不对把整份回复拒掉。
+// 目标空间里的指标目标也用这一条（web/adaptive-ui.mjs 从这里引用），
+// 同一概念不能有两个判断。
+const NUMBER_LIKE=/^-?(\d{1,3}(,\d{3})+|\d+)(\.\d+)?$/;
+export function numberLikeTarget(value) {
+  if (typeof value==='number') return value;
+  if (typeof value!=='string') return value;
+  const text=value.trim();
+  if (!NUMBER_LIKE.test(text)) return value;
+  const parsed=Number(text.replaceAll(',',''));
+  return Number.isFinite(parsed)?parsed:value;
+}
+
 // 回复与提案：只截断过长字符串；类型不对的值原样留着，交给共享校验层拒绝。
 // 两条运行时都要用这一份——否则同一份模型输出，一边被截断收下、一边整份作废
 // （和目标空间那一条是同一个坑）。
@@ -128,6 +142,7 @@ export function normalizeGoalReply(value) {
     reply:trim(answer.reply,1200),
     proposal:answer.proposal==null?null:{
       ...answer.proposal,
+      target:numberLikeTarget(answer.proposal.target),
       title:trim(answer.proposal.title,80),
       task:trim(answer.proposal.task,120),
       reason:trim(answer.proposal.reason,300),

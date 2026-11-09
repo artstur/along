@@ -1,4 +1,20 @@
+import {numberLikeTarget} from './goal-agent-core.mjs';
+
 export const ADAPTIVE_LAYOUTS_KEY = 'along.adaptive-layouts.v1';
+
+// 只有字符串和数字算文本；对象、数组、布尔都不是。
+function layoutText(value) {
+  if (typeof value==='string') return value;
+  if (typeof value==='number'&&Number.isFinite(value)) return String(value);
+  return value;
+}
+// 截断真的文本；类型不对的值原样留着，交给共享校验层拒收。
+function trim(raw,max,fallback) {
+  if (raw==null) return fallback;
+  const text=layoutText(raw);
+  if (typeof text!=='string') return text;
+  return text.trim().slice(0,max)||fallback;
+}
 
 export function isCustomGoalKey(value) {
   return value === 'custom' || (typeof value === 'string' && value.startsWith('custom:'));
@@ -49,17 +65,14 @@ function id(value, label) {
 
 // 指标目标写成数字字符串时（"120"、"10,000"）它就是那个数字：不能绕过范围
 // 校验，也不能因为类型不是 number 就丢掉进度条。不是数字的说明文字只用来显示。
-const NUMBER_LIKE=/^-?(\d{1,3}(,\d{3})+|\d+)(\.\d+)?$/;
+// 数字规则来自共享契约层（和目标提案用的是同一份），不能各写一套。
 function metricTargetValue(raw,limit) {
-  if (typeof raw==='number') {
-    if (!Number.isFinite(raw)||raw<=0||raw>limit) throw Error('指标目标格式不正确');
-    return raw;
+  const parsed=numberLikeTarget(raw);
+  if (typeof parsed==='number') {
+    if (!Number.isFinite(parsed)||parsed<=0||parsed>limit) throw Error('指标目标格式不正确');
+    return parsed;
   }
-  const label=text(raw, '指标目标', 60);
-  if (!NUMBER_LIKE.test(label)) return label;
-  const value=Number(label.replaceAll(',',''));
-  if (!Number.isFinite(value)||value<=0||value>limit) throw Error('指标目标格式不正确');
-  return value;
+  return text(raw, '指标目标', 60);
 }
 
 function cleanModule(value, domain) {
@@ -115,7 +128,13 @@ function inferredConnections(layout, domain, connections) {
 // 这里把两边的口径统一：不是列表就当没有，最多取 6 条，每条截到 240 字。
 export function normalizeQuestions(value) {
   const questions=Array.isArray(value)?value:[];
-  return questions.slice(0,6).map(question=>String(question??'待确认问题').trim().slice(0,240)||'待确认问题');
+  // 只有字符串和数字算文本：对象、数组、布尔都不算，不能兜底成 "[object Object]"
+  // 落到用户的首页上。算不出文本的那一条直接丢掉——待确认问题是可选列表，
+  // 不该因为其中一条是脏数据就把整份目标空间作废。
+  return questions.slice(0,6)
+    .map(question=>layoutText(question))
+    .filter(question=>typeof question==='string')
+    .map(question=>question.trim().slice(0,240)||'待确认问题');
 }
 
 // 模型给的布局常常有点毛刺：标题太长、模块 id 重复、给了第 7 个模块、
@@ -124,25 +143,27 @@ export function normalizeQuestions(value) {
 // 能修的修掉（截断、编号、去重、丢掉超量与未知类型）；修不了的（文本类型
 // 不对）原样留给共享校验层拒绝——不兜底成 "[object Object]"，那种脏文本会
 // 直接出现在用户的首页上。
-// 只有字符串和数字算文本；对象、数组、布尔都不是。
-function layoutText(value) {
-  if (typeof value==='string') return value;
-  if (typeof value==='number'&&Number.isFinite(value)) return String(value);
-  return value;
+// 推荐连接也是可选列表：一条脏连接不该把整份目标空间带崩（回复和任务都还在）。
+// 修得了的修好（编号、截断），修不了的（文本类型不对）丢掉这一条。
+function normalizeConnections(value,nextId) {
+  return (Array.isArray(value)?value:[]).slice(0,4)
+    .filter(item=>item&&typeof item==='object')
+    .map((item,index)=>({
+      id:nextId(item.id,'connection',index),
+      name:trim(item.name,60,`连接 ${index+1}`),
+      reason:trim(item.reason,240,'待补充'),
+      capability:trim(item.capability,160,'待补充'),
+      status:'recommended',
+    }))
+    .filter(item=>typeof item.name==='string'&&typeof item.reason==='string'&&typeof item.capability==='string');
 }
+
 export function normalizeAdaptiveLayout(value, domain='health') {
   if (!value||typeof value!=='object') return value;
   const used=new Set();
   const nextId=(raw,prefix,index)=>{
     const base=String(raw||`${prefix}-${index+1}`).toLowerCase().replace(/[^a-z0-9_-]+/g,'-').replace(/^-+|-+$/g,'').slice(0,52)||`${prefix}-${index+1}`;
     let id=base,n=2;while(used.has(id)) id=`${base.slice(0,48)}-${n++}`;used.add(id);return id;
-  };
-  // 截断真的文本；类型不对的值原样留着，交给共享校验层拒收。
-  const trim=(raw,max,fallback)=>{
-    if (raw==null) return fallback;
-    const text=layoutText(raw);
-    if (typeof text!=='string') return text;
-    return text.trim().slice(0,max)||fallback;
   };
   const modules=(Array.isArray(value.modules)?value.modules:[]).filter(module=>module&&['summary','fact_list','chips','metric'].includes(module.kind)&&!(domain==='custom'&&module.kind==='metric')).slice(0,6).map((module,index)=>{
     const base={kind:module.kind,id:nextId(module.id,'module',index),title:trim(module.title,60,`模块 ${index+1}`)};
@@ -170,7 +191,7 @@ export function normalizeAdaptiveLayout(value, domain='health') {
     summary:trim(value.summary,600,'目标计划已生成'),
     modules,tasks,
     questions:normalizeQuestions(value.questions),
-    connections:Array.isArray(value.connections)?value.connections.slice(0,4):[],
+    connections:normalizeConnections(value.connections,nextId),
   };
 }
 
