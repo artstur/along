@@ -2,7 +2,7 @@ import {homedir} from 'node:os';
 import {dirname, join} from 'node:path';
 import {existsSync, mkdirSync, readFileSync, renameSync, writeFileSync} from 'node:fs';
 import {validateGoalReply} from '../web/goal-agent-core.mjs';
-import {safeAdaptiveLayout, normalizeQuestions} from '../web/adaptive-ui.mjs';
+import {safeAdaptiveLayout, normalizeAdaptiveLayout} from '../web/adaptive-ui.mjs';
 import {KIMI_RUNTIME, AGENT_RUN_TIMEOUT_MS} from '../web/super-agent.mjs';
 
 const DEFAULT_URL='http://127.0.0.1:58627';
@@ -108,33 +108,6 @@ Required JSON shape:
 {"reply":"Chinese response","proposal":{"active":true,"title":"goal title","target":number_or_null,"task":"next step","reason":"reason"},"layout":{"version":1,"title":"space title","badge":"status","summary":"summary","modules":[...],"tasks":[...],"questions":["question"]}}
 Use at most 6 modules, 6 tasks and 6 questions. Each module has kind, id and title. A summary module has content; a fact_list module has items shaped as [{"label":"...","value":"..."}]; a chips module has string items. Do not use metric modules for a custom goal. Each task must include id, when, title, detail, state (temporary|planned|deferred). Questions must be strings. For a custom goal, proposal.target must be null. Preserve every explicit number, deadline, preference and constraint in the Along input. Keep all user-facing text in Chinese.`;
 }
-function layoutForAlong(value,domain) {
-  if (!value||typeof value!=='object') return value;
-  const used=new Set();
-  const nextId=(raw,prefix,index)=>{
-    const base=String(raw||`${prefix}-${index+1}`).toLowerCase().replace(/[^a-z0-9_-]+/g,'-').replace(/^-+|-+$/g,'').slice(0,52)||`${prefix}-${index+1}`;
-    let id=base,n=2;while(used.has(id)) id=`${base.slice(0,48)}-${n++}`;used.add(id);return id;
-  };
-  const modules=(Array.isArray(value.modules)?value.modules:[]).filter(module=>module&&['summary','fact_list','chips','metric'].includes(module.kind)&&!(domain==='custom'&&module.kind==='metric')).slice(0,6).map((module,index)=>{
-    const base={kind:module.kind,id:nextId(module.id,'module',index),title:clean(module.title,`模块 ${index+1}`,60)};
-    if (module.kind==='summary') return {...base,content:clean(module.content||module.note,'待补充',500)};
-    if (module.kind==='fact_list') {
-      const facts=Array.isArray(module.items)?module.items:Array.isArray(module.facts)?module.facts:[];
-      return {...base,items:facts.slice(0,6).map((fact,factIndex)=>typeof fact==='object'&&fact?{label:clean(fact.label,`要点 ${factIndex+1}`,40),value:clean(fact.value,'待补充',180)}:{label:`要点 ${factIndex+1}`,value:clean(fact,'待补充',180)})};
-    }
-    if (module.kind==='chips') {
-      const chips=Array.isArray(module.items)?module.items:Array.isArray(module.chips)?module.chips:[];
-      return {...base,items:chips.slice(0,8).map(chip=>clean(chip,'要点',32))};
-    }
-    return {...base,source:clean(module.source,'',30),target:module.target,unit:module.unit==null?null:clean(module.unit,'',20),note:module.note==null?null:clean(module.note,'',180)};
-  });
-  const tasks=(Array.isArray(value.tasks)?value.tasks:[]).slice(0,6).map((task,index)=>({
-    id:nextId(task?.id,'task',index),when:clean(task?.when,'待安排',80),title:clean(task?.title,`任务 ${index+1}`,100),detail:clean(task?.detail,'待补充',300),
-    state:['temporary','planned','deferred'].includes(task?.state)?task.state:'planned',
-  }));
-  return {version:1,title:clean(value.title,'我的目标',80),badge:value.badge==null?null:clean(value.badge,'',40),summary:clean(value.summary,'目标计划已生成',600),modules,tasks,
-    questions:normalizeQuestions(value.questions)};
-}
 function goalResultFromOutput(output,domain,message) {
   const normalized={...output,reply:strictText(output?.reply,1200),proposal:output?.proposal==null?null:{
     ...output.proposal,
@@ -143,7 +116,7 @@ function goalResultFromOutput(output,domain,message) {
     reason:strictText(output.proposal.reason,300),
   }};
   const validated=validateGoalReply(normalized,domain,message);
-  const layout=output?.layout==null?null:safeAdaptiveLayout(layoutForAlong(output.layout,domain),domain);
+  const layout=output?.layout==null?null:safeAdaptiveLayout(normalizeAdaptiveLayout(output.layout,domain),domain);
   if (output?.layout!=null&&!layout) throw Error('Kimi 返回的目标空间格式不正确');
   return {...validated,layout};
 }
