@@ -36,6 +36,17 @@ test('the clear entry shows even when a real summary only survives in the experi
   assert.equal(saved.loop.previousState.source,null);
 });
 
+test('clearing also removes a real proposal even while the demo data is on screen',async()=>{
+  const demoState={...healthkitState,source:'demo',snapshot:{...healthkitState.snapshot,selectedTypes:null}};
+  const ticket={id:'ticket-2',source:'healthkit',trigger:{from:75,to:110},eval:'replan',
+    mandate:'仅提出任务，用户确认后才采用',reason:'本周新增 35 分钟',status:'assigned'};
+  const dom=installDomStub({storage:{[HEALTH_KEY]:JSON.stringify(demoState),[TICKET_KEY]:JSON.stringify(ticket)}});
+  globalThis.window.AlongHealthBridge={clear:()=>Promise.resolve()};
+  await import('../web/app.mjs?clear-health-demo-ticket');
+  await dom.click({action:'clear-health-data'});
+  assert.equal(dom.storage.get(TICKET_KEY),null,'任务票里存着真实分钟数，任何一次清除健康数据都要一起清掉');
+});
+
 test('the demo data can still be left without touching the native bridge',async()=>{
   const demoState={...healthkitState,source:'demo',snapshot:{...healthkitState.snapshot,selectedTypes:null}};
   const dom=installDomStub({storage:{[HEALTH_KEY]:JSON.stringify(demoState)}});
