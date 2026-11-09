@@ -50,3 +50,20 @@ test('an untrusted legacy run record is not replaced by a fake connecting run',a
   assert.ok(!renders.some(html=>/连接 DSH Super Agent/.test(html)),'旧键里的记录也要落到明确的失败，不能造一个假的「正在连接」');
   assert.ok(renders.some(html=>/宿主说这条记录不可信/.test(html)),'宿主给的原因要能被看到');
 });
+
+test('an event with an unknown start time does not show a made-up date',async()=>{
+  const dom=installDomStub({storage:{
+    [ADAPTIVE_LAYOUTS_KEY]:JSON.stringify({health:layout,finance:null,custom:null}),
+    // 宿主用 0 表示「起始时间未知」（Number(entry.createdAt)||0）。
+    [RUNS_KEY]:JSON.stringify({'health:kimi-code-swarm:sleep-check':{...oldRun,events:[{text:'Along 已建立 Kimi Main Session',at:0}]}}),
+  }});
+  const renders=[];
+  Object.defineProperty(dom.app,'innerHTML',{get(){return renders[renders.length-1]??'';},set(value){renders.push(value);},configurable:true});
+  await import('../web/app.mjs?zero-event-time');
+  await dom.click({action:'open-task',taskId:'sleep-check'});
+  await new Promise(resolve=>setTimeout(resolve,0));
+  const epoch=new Intl.DateTimeFormat('zh-CN',{hour:'2-digit',minute:'2-digit'}).format(new Date(0));
+  assert.ok(renders.some(html=>/<span>—<\/span>/.test(html)),'起始时间未知时显示占位符');
+  // 显示一个看起来很正常的时间，比显示「未知」更糟：用户会以为那是真的。
+  assert.ok(!renders.some(html=>html.includes(epoch)),`不该显示一个看起来很正常的时间（${epoch}）`);
+});
