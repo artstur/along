@@ -10,6 +10,7 @@ import {runTaskCodex} from './codex-agent.mjs';
 import {KimiCodeAgent} from './kimi-code-agent.mjs';
 import {DSH_RUNTIME, KIMI_RUNTIME, safeAgentRuntime} from '../web/super-agent.mjs';
 import {readJsonBody} from './request-body.mjs';
+import {HostError, upstream, statusForError} from './host-error.mjs';
 
 const dir = join(homedir(), '.along', 'agent-host');
 mkdirSync(dir, {recursive:true, mode:0o700});
@@ -36,21 +37,6 @@ const superAgentURL = (process.env.ALONG_SUPERAGENT_URL || 'http://127.0.0.1:308
 const kimiAgent = new KimiCodeAgent({workspace:process.env.ALONG_KIMI_WORKSPACE||process.cwd()});
 
 function respond(res,status,data) { res.writeHead(status,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}).end(JSON.stringify(data)); }
-// 上游（DSH / Kimi / 模型）出的问题不是客户端请求不合法：要答复 5xx。
-// 400 会把「对方挂了」和「我发错了」在客户端混成同一件事。
-class HostError extends Error {
-  constructor(message,status=502) { super(message); this.status=status; }
-}
-// 上游调用统一包一层：失败按上游故障答复，不当成客户端请求不合法。
-async function upstream(operation) {
-  try { return await operation(); }
-  catch(error) { throw error instanceof HostError ? error : new HostError(error?.message??String(error),502); }
-}
-function statusForError(error) {
-  if (Number.isInteger(error?.status)) return error.status;
-  if (String(error?.message??'').includes('正在处理')) return 429;
-  return 400;
-}
 async function body(req) { return readJsonBody(req,32_000); }
 function authorized(req) {
   const token=req.headers.authorization?.match(/^Bearer ([a-f0-9]{64})$/)?.[1];
