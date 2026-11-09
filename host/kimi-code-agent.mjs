@@ -3,11 +3,13 @@ import {dirname, join} from 'node:path';
 import {existsSync, mkdirSync, readFileSync, writeFileSync} from 'node:fs';
 import {validateGoalReply} from '../web/goal-agent-core.mjs';
 import {safeAdaptiveLayout} from '../web/adaptive-ui.mjs';
-import {KIMI_RUNTIME} from '../web/super-agent.mjs';
+import {KIMI_RUNTIME, AGENT_RUN_TIMEOUT_MS} from '../web/super-agent.mjs';
 
 const DEFAULT_URL='http://127.0.0.1:58627';
 const DEFAULT_TOKEN_PATH=join(homedir(),'.kimi-code','server.token');
 const DEFAULT_STATE_PATH=join(homedir(),'.along','agent-host','kimi-runs.json');
+// 一次 Kimi 运行最多等这么久；超过还没拿到结果就明确停住，不让 iPhone 永远转圈。
+export const KIMI_RUN_TIMEOUT_MS=AGENT_RUN_TIMEOUT_MS;
 
 function clean(value,fallback='',max=500) { return String(value??fallback).trim().slice(0,max)||fallback; }
 function timestamp(value,fallback=Date.now()) {
@@ -212,7 +214,11 @@ export class KimiCodeAgent {
     const agents=transcriptAgents.length?transcriptAgents:children.map(childAgent);
     const swarmFinished=agents.length>0&&agents.every(agent=>['done','blocked'].includes(agent.status));
     const mainFinished=!session.busy&&session.last_turn_reason==='completed';
-    if (entry.kind==='goal'&&!parsedResult&&swarmFinished&&(mainFinished||!!output)&&!entry.synthesisSessionId) await this.ensureSynthesis(requestId,entry,transcript);
+    // 主会话要用户去 Mac 上处理时，等着就好，不要另开综合会话。
+    const needsMac=session.pending_interaction==='approval'||session.pending_interaction==='question';
+    // AgentSwarm 是阻塞调用：主回合结束就代表 Swarm 已经返回，子 Agent 是否回传不该再挡住终态。
+    const swarmOver=swarmFinished||mainFinished;
+    if (entry.kind==='goal'&&!parsedResult&&swarmOver&&!needsMac&&!entry.synthesisSessionId) await this.ensureSynthesis(requestId,entry,transcript);
     let activeSession=session;
     if (entry.synthesisSessionId&&!parsedResult) {
       const synthesisId=encodeURIComponent(entry.synthesisSessionId);
@@ -228,10 +234,24 @@ export class KimiCodeAgent {
       }
       activeSession=synthesisSession;
     }
-    const blocked=activeSession.pending_interaction==='approval'||activeSession.pending_interaction==='question'||activeSession.last_turn_reason==='failed'||agents.some(agent=>agent.status==='blocked');
-    const done=!blocked&&(entry.kind==='task'?swarmFinished:swarmFinished&&!!parsedResult);
+    const synthesisFinished=!!entry.synthesisSessionId&&!activeSession.busy&&activeSession.last_turn_reason==='completed';
+    // 会话结束了却一个字都没给：不是校验失败，是根本没有产出，同样要落到终态。
+    const noOutput=entry.kind==='goal'&&!parsedResult&&!output&&!outputError&&(entry.synthesisSessionId?synthesisFinished:mainFinished);
+    // 主会话要人处理或已经失败时，不能被综合会话遮住。
+    const sessionFailed=session.last_turn_reason==='failed'||activeSession.last_turn_reason==='failed';
+    const blocked=needsMac||sessionFailed||activeSession.pending_interaction==='approval'||activeSession.pending_interaction==='question'||agents.some(agent=>agent.status==='blocked');
+    // 综合会话已经交付了校验过的结果，就算主会话还在跑，这次运行也该结束。
+    const done=!blocked&&(entry.kind==='task'?swarmOver:(swarmOver||synthesisFinished)&&!!parsedResult);
+    // 兜底：Kimi 服务挂死时不能让 iPhone 永远转圈。
+    const timedOut=!done&&!blocked&&Date.now()-entry.createdAt>KIMI_RUN_TIMEOUT_MS;
+    const timeoutError=timedOut?'Kimi 长时间没有返回结果，已停止等待':null;
+    const halted=blocked||timedOut;
+    const failed=!done&&(outputError||noOutput)&&(synthesisFinished||(!entry.synthesisSessionId&&mainFinished));
+    const error=failed?(noOutput?'Kimi 已完成，但没有返回可用结果':`Kimi 已完成，但输出校验失败：${outputError.message}`):null;
+    // 给用户看的是人话，不把 last_turn_reason 这类机器值直接甩到界面上。
+    const blockedError=needsMac?'Kimi 会话在 Mac 上等着你处理':'Kimi 会话需要处理';
     const finished=agents.filter(agent=>agent.status==='done').length;
-    const progress=done?100:blocked?Math.max(12,agents.length?65:12):activeSession.busy?Math.min(96,25+agents.length*12+finished*10+(entry.synthesisSessionId?4:0)):8;
+    const progress=done?100:halted?Math.max(12,agents.length?65:12):activeSession.busy?Math.min(96,25+agents.length*12+finished*10+(entry.synthesisSessionId?4:0)):8;
     const events=[
       {at:entry.createdAt,text:'Along 已建立 Kimi Main Session'},
       {at:entry.createdAt+1,text:'Swarm Mode 已显式开启'},
@@ -239,12 +259,12 @@ export class KimiCodeAgent {
       ...(entry.synthesisSessionId?[{at:entry.createdAt+agents.length+2,text:'Kimi Main Session 正在综合子 Agent 结果'}]:[]),
       ...(done?[{at:timestamp(activeSession.updated_at),text:'Main Session 已完成汇总'}]:[]),
     ];
-    const common={actual:true,runtime:KIMI_RUNTIME,requestId,source:{kind:'along',label:entry.kind==='goal'?'Along 目标':'Along 动态任务'},trigger:{kind:entry.kind,label:'Kimi Code Web Server'},eval:{decision:blocked?'blocked':done?'accept':'evaluating'},ticket:{id:entry.sessionId},mandate:'只规划目标与动态任务；不执行外部写操作。',events,status:blocked?'blocked':done?'done':'working',statusLabel:blocked?'需要在 Mac 处理':done?'Kimi Swarm 已完成':entry.synthesisSessionId?'Kimi Main Session 正在综合':agents.length?`${agents.length} 个 Kimi Subagent 并行中`:'Kimi Main Session 正在拆解',progress,createdAt:entry.createdAt,updatedAt:timestamp(activeSession.updated_at)};
-    if (entry.kind==='task') return {version:2,...common,task:entry.input.task,assignments:agents,error:blocked?clean(session.last_turn_reason,'Kimi 会话需要处理'):undefined};
+    // 状态标签要说清卡在哪：等用户在 Mac 上动手 > 产出要重试 > 已经放弃 > 正常进行。
+    const statusLabel=needsMac?'需要在 Mac 处理':(error||timeoutError)?'输出需要重试':blocked?'需要在 Mac 处理':done?'Kimi Swarm 已完成':entry.synthesisSessionId?'Kimi Main Session 正在综合':agents.length?`${agents.length} 个 Kimi Subagent 并行中`:'Kimi Main Session 正在拆解';
+    const common={actual:true,runtime:KIMI_RUNTIME,requestId,source:{kind:'along',label:entry.kind==='goal'?'Along 目标':'Along 动态任务'},trigger:{kind:entry.kind,label:'Kimi Code Web Server'},eval:{decision:halted?'blocked':done?'accept':'evaluating'},ticket:{id:entry.sessionId},mandate:'只规划目标与动态任务；不执行外部写操作。',events,status:error||halted?'blocked':done?'done':'working',statusLabel,progress,createdAt:entry.createdAt,updatedAt:timestamp(activeSession.updated_at)};
+    if (entry.kind==='task') return {version:2,...common,task:entry.input.task,assignments:agents,error:timeoutError||(blocked?blockedError:undefined)};
     const result=done?parsedResult:null;
-    const synthesisFinished=entry.synthesisSessionId&&!activeSession.busy&&activeSession.last_turn_reason==='completed';
-    const error=!done&&outputError&&(synthesisFinished||(!entry.synthesisSessionId&&mainFinished))?`Kimi 已完成，但输出校验失败：${outputError.message}`:null;
-    return {version:1,kind:'goal',...common,input:{goal:entry.input.goal,message:entry.input.message},assignments:[],agents,result,status:error?'blocked':common.status,statusLabel:error?'输出需要重试':common.statusLabel,error:error||(blocked?clean(session.last_turn_reason,'Kimi 会话需要处理'):undefined)};
+    return {version:1,kind:'goal',...common,input:{goal:entry.input.goal,message:entry.input.message},assignments:[],agents,result,error:error||timeoutError||(blocked?blockedError:undefined)};
   }
   goalStatus(requestId) { return this.status(requestId,'goal'); }
   taskStatus(requestId) { return this.status(requestId,'task'); }
