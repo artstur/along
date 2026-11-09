@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {installDomStub} from './dom-stub.mjs';
 
 const HEALTH_KEY='along.health.v1';
+const TICKET_KEY='along.goal-ticket.v1';
 
 const healthkitState={
   version:1,source:'healthkit',
@@ -33,4 +34,30 @@ test('the demo data can still be left without touching the native bridge',async(
   await dom.click({action:'clear-health-data'});
   assert.equal(cleared,0,'演示数据不走原生侧');
   assert.equal(JSON.parse(dom.storage.get(HEALTH_KEY)).source,null);
+});
+
+test('clearing also removes the real summary kept in the experiment backup',async()=>{
+  const demoState={...healthkitState,source:'demo',snapshot:{...healthkitState.snapshot,selectedTypes:null},
+    loop:{experiment:'weekly-workout-120-v1',previousState:healthkitState,currentTask:'本周安排一次 45 分钟健身',changes:[]}};
+  const dom=installDomStub({storage:{[HEALTH_KEY]:JSON.stringify(demoState)}});
+  let cleared=0;
+  globalThis.window.AlongHealthBridge={clear:()=>{cleared++;return Promise.resolve();}};
+  await import('../web/app.mjs?clear-health-backup');
+  await dom.click({action:'clear-health-data'});
+  assert.equal(cleared,1,'实验里存着真实摘要时，必须让原生侧停读');
+  const saved=JSON.parse(dom.storage.get(HEALTH_KEY));
+  assert.equal(saved.source,null);
+  assert.equal(saved.snapshot,null);
+  assert.equal(saved.loop.previousState.source,null,'实验备份里的真实摘要也要清掉');
+  assert.equal(saved.loop.previousState.snapshot,null);
+});
+
+test('clearing removes the pending proposal that carries real minutes',async()=>{
+  const ticket={id:'ticket-1',source:'healthkit',trigger:{from:45,to:75},eval:'replan',
+    mandate:'仅提出任务，用户确认后才采用',reason:'本周新增 30 分钟，距目标从 75 分钟变为 45 分钟',status:'assigned'};
+  const dom=installDomStub({storage:{[HEALTH_KEY]:JSON.stringify(healthkitState),[TICKET_KEY]:JSON.stringify(ticket)}});
+  globalThis.window.AlongHealthBridge={clear:()=>Promise.resolve()};
+  await import('../web/app.mjs?clear-health-ticket');
+  await dom.click({action:'clear-health-data'});
+  assert.equal(dom.storage.get(TICKET_KEY),null,'待处理任务票里存着真实健身分钟数，要一起清掉');
 });

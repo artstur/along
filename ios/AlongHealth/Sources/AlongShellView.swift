@@ -49,6 +49,8 @@ final class AlongBridgeModel: ObservableObject {
     private weak var webView: WKWebView?
     private var refreshing = false
     private var lastRefresh = Date.distantPast
+    // 清除数据后，在途的读取不能再把旧摘要送回网页。
+    private var healthEpoch = 0
 
     func attach(_ webView: WKWebView) {
         self.webView = webView
@@ -70,6 +72,7 @@ final class AlongBridgeModel: ObservableObject {
 
     func refreshHealth() {
         let selected = savedSelection
+        let epoch = healthEpoch
         guard !selected.isEmpty, !refreshing, Date().timeIntervalSince(lastRefresh) > 8 else { return }
         refreshing = true
         lastRefresh = Date()
@@ -77,6 +80,7 @@ final class AlongBridgeModel: ObservableObject {
             defer { refreshing = false }
             do {
                 let summary = try await reader.read(selected, requestPermission: false)
+                guard epoch == healthEpoch else { return }
                 guard let data = try? JSONSerialization.data(withJSONObject: summary.browserSnapshot()),
                       let json = String(data: data, encoding: .utf8) else { return }
                 _ = try? await webView?.evaluateJavaScript("window.dispatchEvent(new CustomEvent('along-health-update', {detail: \(json)}))")
@@ -86,6 +90,7 @@ final class AlongBridgeModel: ObservableObject {
 
     func refreshSnapshot(id: String, webView: WKWebView) {
         let selected = savedSelection
+        let epoch = healthEpoch
         guard !selected.isEmpty else {
             deliver(id: id, result: ["ok": false, "error": "请先连接 Apple Health"], to: webView)
             return
@@ -93,6 +98,10 @@ final class AlongBridgeModel: ObservableObject {
         Task {
             do {
                 let summary = try await reader.read(selected, requestPermission: false)
+                guard epoch == healthEpoch else {
+                    deliver(id: id, result: ["ok": false, "error": "健康数据已被清除"], to: webView)
+                    return
+                }
                 deliver(id: id, result: ["ok": true, "snapshot": summary.browserSnapshot()], to: webView)
             } catch {
                 deliver(id: id, result: ["ok": false, "error": error.localizedDescription], to: webView)
@@ -107,6 +116,8 @@ final class AlongBridgeModel: ObservableObject {
         selection = []
         preview = nil
         errorMessage = nil
+        // 让在途的读取作废：它们返回时不能再把旧摘要送回网页。
+        healthEpoch += 1
         deliver(id: id, result: ["ok": true], to: webView)
     }
 
@@ -250,7 +261,7 @@ enum AlongConnectionStore {
 
 struct AlongWebView: UIViewRepresentable {
     @ObservedObject var bridge: AlongBridgeModel
-    private let site = URL(string: "along://app/index.html?build=35")!
+    private let site = URL(string: "along://app/index.html?build=36")!
 
     func makeCoordinator() -> Coordinator { Coordinator(bridge: bridge) }
 
