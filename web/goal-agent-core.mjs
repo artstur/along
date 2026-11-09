@@ -13,13 +13,22 @@ export function routeHealthChange(before, after, target) {
   return {decision: 'replan', reason: `本周新增 ${delta} 分钟，距目标从 ${oldRemaining} 分钟变为 ${remaining} 分钟`, oldRemaining, remaining, delta};
 }
 
-const CHANGE_PHRASE='改为|改成|设为|设成|设定成|定为|目标(?:改为|是|为)?|达到';
+const CHANGE_PHRASE='改为|改成|设为|设成|设定成|定为|达到';
+// 「目标/指标」直接限定的动词才算指派目标；「今天运动量提高到 150 分钟」这种事实陈述没有目标词，必须留在外面。
+const GOAL_PHRASE='目标(?:改为|是|为|调整为|提高到|减到|调到|调成|改到)?';
+const ANY_CHANGE=`${GOAL_PHRASE}|${CHANGE_PHRASE}`;
+const GOAL_WORD=/目标|指标/;
 const NOT_GOAL_TARGET=/每天|每日|每次|单次|上限|预算|封顶|最多|不超过|以内/;
+// 否定句与假设句里说的数字不是指派：「不要把目标改成 150 分钟」「如果改成 150 分钟就好了」。
+const NEGATED_TARGET=/不要|别|不用|不想|不必|勿|无需|没必要|不能|不是|如果|假如|要是|万一|假设/;
+// 触发词前面说的是另一件事时，那个数字不是目标：房租、学费、水电、评分。
+const OTHER_ITEM=/房租|房费|房贷|学费|水电|电费|水费|燃气|话费|网费|车费|油费|饭钱|菜钱|保险|保费|评分|得分|打分|分数/;
 const CAP_AFTER=/^\s*(以内|封顶)/;
-const HEALTH_TARGET=new RegExp(`(${CHANGE_PHRASE})\\s*(\\d+(?:\\.\\d+)?)\\s*(小时|分钟|分)(?:\\s*(\\d+(?:\\.\\d+)?)\\s*(分钟|分))?`,'g');
+// 金额必须带货币标记：没有货币标记的裸数字可能是公斤、步、岁，读成金额会让整单请求失败。
+const HEALTH_TARGET=new RegExp(`(${ANY_CHANGE})\\s*(\\d+(?:\\.\\d+)?)\\s*(小时|分钟|分(?![一-龥]))(?:\\s*(\\d+(?:\\.\\d+)?)\\s*(分钟|分(?![一-龥])))?`,'g');
 const FINANCE_TARGETS=[
-  new RegExp(`(${CHANGE_PHRASE})\\s*[¥￥]?\\s*(\\d+(?:,\\d{3})*)\\s*(?:元|块|人民币)`,'g'),
-  new RegExp(`(${CHANGE_PHRASE})\\s*[¥￥]\\s*(\\d+(?:,\\d{3})*)`,'g'),
+  new RegExp(`(${ANY_CHANGE})\\s*[¥￥]?\\s*(\\d+(?:,\\d{3})*(?:\\.\\d+)?)\\s*(万|萬)?\\s*(?:元|块|人民币)`,'g'),
+  new RegExp(`(${ANY_CHANGE})\\s*[¥￥]\\s*(\\d+(?:,\\d{3})*(?:\\.\\d+)?)\\s*(万|萬)?`,'g'),
 ];
 
 // 触发词所在的那一句：数字是否被「每天 30 分钟」这类限定词修饰，只看同一句。
@@ -31,37 +40,48 @@ function clauseBefore(message,index) {
 
 // 「达到」是达成类动词：只有明确指向目标时才算设定目标，否则只是陈述事实。
 function isGoalAssignment(trigger,clause) {
-  return trigger!=='达到'||/目标|指标/.test(clause);
+  return trigger!=='达到'||GOAL_WORD.test(clause);
+}
+
+// 扫出这条消息里所有「用户真的指派了目标」的候选。
+function targetCandidates(message,pattern,readValue) {
+  const found=[];
+  for (const match of message.matchAll(pattern)) {
+    const clause=clauseBefore(message,match.index);
+    if (NOT_GOAL_TARGET.test(clause)) continue;
+    if (NEGATED_TARGET.test(clause)) continue;
+    if (OTHER_ITEM.test(clause)) continue;
+    if (!isGoalAssignment(match[1],clause)) continue;
+    if (CAP_AFTER.test(message.slice(match.index+match[0].length))) continue;
+    const value=readValue(match);
+    if (value==null) continue;
+    found.push({at:match.index,value});
+  }
+  return found;
 }
 
 export function requestedTargetFromMessage(message, domain) {
   if (typeof message !== 'string') return null;
   if (domain === 'custom') return null;
   if (domain === 'health') {
-    for (const match of message.matchAll(HEALTH_TARGET)) {
-      const clause=clauseBefore(message,match.index);
-      if (NOT_GOAL_TARGET.test(clause)) continue;
-      if (!isGoalAssignment(match[1],clause)) continue;
-      if (CAP_AFTER.test(message.slice(match.index+match[0].length))) continue;
+    const found=targetCandidates(message,HEALTH_TARGET,match=>{
       const base=match[3]==='小时'?Number(match[2])*60:Number(match[2]);
       const minutes=base+(match[4]?Number(match[4]):0);
-      if (!Number.isInteger(minutes)||minutes<1||minutes>10080) continue;
-      return minutes;
-    }
-    return null;
+      return Number.isInteger(minutes)&&minutes>=1&&minutes<=10080?minutes:null;
+    });
+    return found.length?found[found.length-1].value:null;
   }
+  const found=[];
   for (const pattern of FINANCE_TARGETS) {
-    for (const match of message.matchAll(pattern)) {
-      const clause=clauseBefore(message,match.index);
-      if (NOT_GOAL_TARGET.test(clause)) continue;
-      if (!isGoalAssignment(match[1],clause)) continue;
-      if (CAP_AFTER.test(message.slice(match.index+match[0].length))) continue;
-      const amount=Number(match[2].replaceAll(',',''));
-      if (!Number.isInteger(amount)||amount<1||amount>10000000) continue;
-      return amount;
-    }
+    found.push(...targetCandidates(message,pattern,match=>{
+      const base=Number(match[2].replaceAll(',',''));
+      const amount=base*(match[3]==='万'||match[3]==='萬'?10000:1);
+      return Number.isInteger(amount)&&amount>=1&&amount<=10000000?amount:null;
+    }));
   }
-  return null;
+  // 用户改口时以最后一次为准：「目标改成 150 分钟，目标改成 180 分钟」取 180。
+  found.sort((a,b)=>a.at-b.at);
+  return found.length?found[found.length-1].value:null;
 }
 
 // 提案预览用的「目标变化」文案：没有提案就没有变化可言，理财金额要按千分位排。

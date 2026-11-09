@@ -254,9 +254,14 @@ function adaptiveGoalCard(layout) {
   const more=layout.modules.filter(module=>!visibleIds.has(module.id));
   return `<section class="goal-card adaptive-goal" aria-label="Along 生成的目标空间"><h1>${esc(layout.title)}</h1><p class="adaptive-summary">${esc(layout.summary)}</p>${visible.map(module=>adaptiveModule(module,true)).join('')}${more.length?`<details class="adaptive-more"><summary>查看目标详情 · ${more.length} 个模块</summary>${more.map(module=>adaptiveModule(module,false)).join('')}</details>`:''}<div class="card-actions"><button class="agent-action" data-action="edit-goal">编辑目标</button></div></section>`;
 }
+function taskProposalCard() {
+  if (!pendingTask || activeGoal !== 'health') return '';
+  const suggestion=pendingTask.suggestion;
+  return `<div class="task-proposal"><span>Apple Health 变化 → 路由判断 → ${suggestion?'Along 提案 → 等待你确认':'等待 Along'}</span><p>${esc(pendingTask.reason)}</p>${suggestion ? `<strong>${esc(suggestion.task)}</strong><p>${esc(suggestion.reason)}</p><button class="button" data-action="accept-task">采用这一步</button> <button class="button secondary" data-action="dismiss-task">保留原任务</button>` : `<p>${esc(pendingTask.error || 'Along 正在规划下一步…')}</p>`}</div>`;
+}
 function adaptiveTaskSection(layout) {
   const visible=layout.tasks.slice(0,2),hidden=Math.max(0,layout.tasks.length-visible.length);
-  return `<section class="task-section adaptive-tasks" aria-label="动态任务"><div class="section-heading"><h2>动态任务</h2><span>Along 根据目标与情境生成</span></div><div class="adaptive-task-card"><div class="generated-status">${layout.tasks.length} 项已生成 · 点击任务查看协作</div>${visible.map(task=>`<button class="generated-task generated-task-button" data-action="open-task" data-task-id="${esc(task.id)}"><div class="task-meta"><span>${esc(task.when)}</span><span class="state-pill">${esc(taskStateLabel[task.state])}</span></div><strong>${esc(task.title)}</strong><p>${esc(task.detail)}</p><span class="task-open-hint">查看任务协作</span></button>`).join('')}${hidden?`<p class="hidden-count">还有 ${hidden} 项未来触发任务，将在相关时间出现。</p>`:''}${layout.questions.length?`<div class="missing-strip">待确认 ${layout.questions.length} 项：${esc(layout.questions[0])}</div>`:''}<div class="card-actions"><button class="agent-action" data-action="edit-goal">补充信息</button></div></div></section>`;
+  return `<section class="task-section adaptive-tasks" aria-label="动态任务"><div class="section-heading"><h2>动态任务</h2><span>Along 根据目标与情境生成</span></div><div class="adaptive-task-card"><div class="generated-status">${layout.tasks.length} 项已生成 · 点击任务查看协作</div>${visible.map(task=>`<button class="generated-task generated-task-button" data-action="open-task" data-task-id="${esc(task.id)}"><div class="task-meta"><span>${esc(task.when)}</span><span class="state-pill">${esc(taskStateLabel[task.state])}</span></div><strong>${esc(task.title)}</strong><p>${esc(task.detail)}</p><span class="task-open-hint">查看任务协作</span></button>`).join('')}${hidden?`<p class="hidden-count">还有 ${hidden} 项未来触发任务，将在相关时间出现。</p>`:''}${layout.questions.length?`<div class="missing-strip">待确认 ${layout.questions.length} 项：${esc(layout.questions[0])}</div>`:''}<div class="card-actions"><button class="agent-action" data-action="edit-goal">补充信息</button></div></div>${taskProposalCard()}</section>`;
 }
 function adaptiveConnectionSection(layout) {
   if (!layout.connections?.length) return '';
@@ -286,7 +291,7 @@ function home() {
   const taskContent=layout?adaptiveTaskSection(layout):`<section class="task-section" aria-label="动态任务">
         <div class="section-heading"><h2>动态任务</h2><span>随目标与数据更新</span></div>
         <div class="focus-task"><div class="focus-top"><span>下一步</span><span class="task-chip">${esc(model.primary.status)}</span></div><h3>${esc(model.primary.title)}</h3><p>${esc(model.primary.detail)}</p><div class="card-actions"><button class="agent-action" data-action="edit-goal">补充信息</button></div></div>
-        ${pendingTask && activeGoal === 'health' ? `<div class="task-proposal"><span>Apple Health 变化 → 路由判断 → ${pendingTask.suggestion?'Along 提案 → 等待你确认':'等待 Along'}</span><p>${esc(pendingTask.reason)}</p>${pendingTask.suggestion ? `<strong>${esc(pendingTask.suggestion.task)}</strong><p>${esc(pendingTask.suggestion.reason)}</p><button class="button" data-action="accept-task">采用这一步</button> <button class="button secondary" data-action="dismiss-task">保留原任务</button>` : `<p>${esc(pendingTask.error || 'Along 正在规划下一步…')}</p>`}</div>` : ''}
+        ${taskProposalCard()}
         ${model.secondary.length ? `<div class="task-list">${model.secondary.map((task,index) => `<button class="task-row task-row-button" data-action="open-task" data-task-id="follow-up-${index}"><span class="task-row-mark" aria-hidden="true"></span><div><strong>${esc(task.title)}</strong><p>${esc(task.detail)}</p></div><span class="task-row-status">${esc(task.status)}</span></button>`).join('')}</div>` : ''}
       </section>`;
   const connectionContent=connection?`<section class="connection-section" aria-label="连接来源">
@@ -354,15 +359,16 @@ function goalOrchestrationPanel(run) {
   ${run.error?`<p class="goal-run-error">${esc(run.error)}</p>`:''}</section>`;
 }
 
-function agentPreview(item,index,goal,domain) {
+function agentPreview(item,goal,domain) {
   if (!item.proposal && !item.layout) return '';
   const change=goalChangeText(goal,item.proposal,domain);
   const goalChange=item.proposal?`<span>目标变化：${change}</span><strong>${esc(item.proposal.title)}</strong><p>下一步：${esc(item.proposal.task)}</p><p>${esc(item.proposal.reason)}</p>`:'';
   const layoutPreview=item.layout?`<span>Along 生成的目标空间</span><strong>${esc(item.layout.title)}</strong><p>${esc(item.layout.summary)}</p><p>${item.layout.modules.length} 个目标模块 · ${item.layout.tasks.length} 项动态任务 · ${item.layout.questions.length} 项待确认</p>`:'';
-  return `<div class="proposal-preview">${goalChange}${layoutPreview}<button class="button" data-action="accept-goal" data-index="${index}">${item.proposal?'确认采用目标与界面':'采用这个目标空间'}</button></div>`;
+  // 句柄用这一轮运行的 requestId，不用数组下标：对话超过 20 条会滚动丢旧记录，下标会错位。
+  return `<div class="proposal-preview">${goalChange}${layoutPreview}<button class="button" data-action="accept-goal" data-request-id="${esc(item.requestId||'')}">${item.proposal?'确认采用目标与界面':'采用这个目标空间'}</button></div>`;
 }
-function agentMessage(item,index,goal,domain) {
-  return `<div class="agent-message ${item.role}"><p>${esc(item.text)}</p>${agentPreview(item,index,goal,domain)}</div>`;
+function agentMessage(item,goal,domain) {
+  return `<div class="agent-message ${item.role}"><p>${esc(item.text)}</p>${agentPreview(item,goal,domain)}</div>`;
 }
 function agentPending(id) {
   return `<div class="agent-message assistant pending" data-agent-run="${esc(id)}" role="status"><div class="agent-thinking"><span aria-hidden="true"><i></i><i></i><i></i></span><p>正在连接 ${esc(runtimeMeta().full)}…</p></div></div>`;
@@ -394,7 +400,7 @@ function goalAgentPage() {
   return `<div class="app-shell agent-shell"><header class="topbar"><div class="topbar-inner">${brand()}</div></header><main class="content agent-page"><div class="agent-scroll">${backButton('agent-back','返回目标')}<div class="agent-title"><span class="eyebrow">${label} · ${esc(meta.full)}</span><h1>${esc(goal.title)}</h1><p>当前目标：${targetText}。${esc(meta.description)}确认后才会改变首页。</p></div>
   <div class="runtime-switch" role="group" aria-label="选择 Agent 运行时"><button type="button" data-action="select-runtime" data-runtime="${DSH_RUNTIME}" class="${agentRuntime===DSH_RUNTIME?'active':''}" aria-pressed="${agentRuntime===DSH_RUNTIME}">DSH Agents</button><button type="button" data-action="select-runtime" data-runtime="${KIMI_RUNTIME}" class="${agentRuntime===KIMI_RUNTIME?'active':''}" aria-pressed="${agentRuntime===KIMI_RUNTIME}">Kimi Swarm</button></div>
   ${agentConfig.token ? `<div class="agent-status ${agentConnection.status}"><strong>${esc(connectionText[0])}</strong><span>${esc(connectionText[1])}</span><em>${esc(connectionText[2])}</em></div>` : `<div class="agent-setup"><h2>首次连接 Along</h2><p>只需设置一次，之后会自动恢复。让 Mac 与 iPhone 保持在同一网络，启动 Along 服务后填入一次连接信息。</p><form id="pair-form"><input name="baseURL" placeholder="Along 服务地址" value="${esc(agentConfig.baseURL||'')}" required><input name="fingerprint" placeholder="连接指纹" value="${esc(agentConfig.fingerprint||'')}" required><input name="code" placeholder="一次性连接码" inputmode="numeric" required><button class="button" ${agentBusy?'disabled':''}>${agentBusy?'连接中…':'连接 Along'}</button></form></div>`}
-  <div class="agent-messages" role="log" aria-live="polite">${history.length?history.map((item,index)=>agentMessage(item,index,goal,domain)).join(''):'<p class="agent-empty">说说你希望达成什么、期限、约束和偏好；Along 会先整理并请你确认。</p>'}</div>
+  <div class="agent-messages" role="log" aria-live="polite">${history.length?history.map(item=>agentMessage(item,goal,domain)).join(''):'<p class="agent-empty">说说你希望达成什么、期限、约束和偏好；Along 会先整理并请你确认。</p>'}</div>
   ${goalOrchestrationPanel(goalRun)}
   </div><div class="agent-composer-dock"><form id="agent-form" class="agent-composer" aria-busy="${agentBusy||goalRunning}"><textarea name="message" rows="1" placeholder="描述你的目标" maxlength="800" required ${goalRunning?'disabled':''}></textarea><button class="agent-send" aria-label="交给 Super Agent" title="交给 Super Agent" ${agentBusy||goalRunning||!agentConfig.token?'disabled':''}><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 15V5m0 0L6.5 8.5M10 5l3.5 3.5"/></svg></button></form><p class="agent-disclaimer">${goalRunning?'Super Agent 编排中…':domain==='finance'?'理财连接和余额仍是演示；Super Agent 只规划，不交易。':domain==='health'?'仅发送当前目标与所选健康摘要，不发送原始记录。':'Along · 一起，慢慢向前'}</p></div></main></div>`;
 }
@@ -572,7 +578,10 @@ app.addEventListener('click', event => {
     render();
   }
   if (action === 'accept-goal') {
-    const index=Number(actionTarget.dataset.index),item=conversations[activeGoal]?.[index];
+    const requestId=actionTarget.dataset.requestId;
+    const list=conversations[activeGoal]||[];
+    const index=requestId?list.findIndex(entry=>entry.requestId===requestId):-1;
+    const item=index>=0?list[index]:null;
     if (!item?.proposal && !item?.layout) return;
     applyGeneratedGoal(activeGoal,item);
     consumeGoalProposal(activeGoal,index);
@@ -638,7 +647,7 @@ app.addEventListener('submit', async event => {
   saveConversations();
   const messages=app.querySelector('.agent-messages');
   messages?.querySelector('.agent-empty')?.remove();
-  messages?.insertAdjacentHTML('beforeend',agentMessage(userEntry,conversations[goalKey].length-1,goal,domain));
+  messages?.insertAdjacentHTML('beforeend',agentMessage(userEntry,goal,domain));
   messages?.insertAdjacentHTML('beforeend',agentPending(pendingId));
   formElement.querySelector('textarea')?.blur();
   formElement.reset();
