@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createFailedGoalSuperAgentRun, createFailedSuperAgentRun, createGoalSuperAgentRequest, createPendingGoalSuperAgentRun,
-  createPendingSuperAgentRun, createSuperAgentRequest, safeGoalSuperAgentRun, safeSuperAgentRun, KIMI_RUNTIME, safeAgentRuntime} from '../web/super-agent.mjs';
+  createPendingSuperAgentRun, createSuperAgentRequest, safeGoalSuperAgentRun, safeSuperAgentRun, withRunError, KIMI_RUNTIME, safeAgentRuntime} from '../web/super-agent.mjs';
 
 const task={id:'walk-20',when:'今晚',title:'完成 20 分钟快走',detail:'在晚饭后完成一次快走。',state:'planned'};
 
@@ -34,6 +34,15 @@ test('keeps Kimi runs separate while falling back unknown runtimes to DSH',()=>{
   assert.match(kimi.statusLabel,/Kimi/);
   assert.equal(safeSuperAgentRun(kimi),kimi);
   assert.equal(safeAgentRuntime('unknown'),'dsh-superagent');
+});
+
+test('a failed status read keeps the reason visible instead of swallowing it',()=>{
+  const request=createGoalSuperAgentRequest({domain:'custom',goal:{title:'定义目标',target:null},message:'半年完成一部长篇小说',requestId:'along-goal-custom-novel'});
+  const run=createPendingGoalSuperAgentRun(request,1000);
+  const failed=withRunError({...run,actual:true},'Along 目标数值与用户指定的 150 不一致');
+  assert.equal(failed.status,'working');
+  assert.equal(failed.error,'Along 目标数值与用户指定的 150 不一致');
+  assert.equal(withRunError(null,'x'),null);
 });
 
 test('creates and validates a real full-goal orchestration request',()=>{

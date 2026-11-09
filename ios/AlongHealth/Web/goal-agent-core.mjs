@@ -1,3 +1,6 @@
+// 显著变化的分钟门槛：真实变化路由与「目标变化实验」演示必须用同一个值。
+export const SIGNIFICANT_MINUTES=15;
+
 export function routeHealthChange(before, after, target) {
   const a = before?.workoutMinutes;
   const b = after?.workoutMinutes;
@@ -6,23 +9,69 @@ export function routeHealthChange(before, after, target) {
   const remaining = Math.max(0, target - b);
   const delta = b - a;
   if (delta <= 0) return {decision: 'quiet', reason: '健身时长没有增加'};
-  if (oldRemaining === 0 || (delta < 15 && remaining > 0)) return {decision: 'quiet', reason: '变化较小，保留当前任务'};
+  if (oldRemaining === 0 || (delta < SIGNIFICANT_MINUTES && remaining > 0)) return {decision: 'quiet', reason: '变化较小，保留当前任务'};
   return {decision: 'replan', reason: `本周新增 ${delta} 分钟，距目标从 ${oldRemaining} 分钟变为 ${remaining} 分钟`, oldRemaining, remaining, delta};
+}
+
+const CHANGE_PHRASE='改为|改成|设为|设成|设定成|定为|目标(?:改为|是|为)?|达到';
+const NOT_GOAL_TARGET=/每天|每日|每次|单次|上限|预算|封顶|最多|不超过|以内/;
+const CAP_AFTER=/^\s*(以内|封顶)/;
+const HEALTH_TARGET=new RegExp(`(${CHANGE_PHRASE})\\s*(\\d+(?:\\.\\d+)?)\\s*(小时|分钟|分)(?:\\s*(\\d+(?:\\.\\d+)?)\\s*(分钟|分))?`,'g');
+const FINANCE_TARGETS=[
+  new RegExp(`(${CHANGE_PHRASE})\\s*[¥￥]?\\s*(\\d+(?:,\\d{3})*)\\s*(?:元|块|人民币)`,'g'),
+  new RegExp(`(${CHANGE_PHRASE})\\s*[¥￥]\\s*(\\d+(?:,\\d{3})*)`,'g'),
+];
+
+// 触发词所在的那一句：数字是否被「每天 30 分钟」这类限定词修饰，只看同一句。
+function clauseBefore(message,index) {
+  const before=message.slice(0,index);
+  const cut=Math.max(before.lastIndexOf('，'),before.lastIndexOf(','),before.lastIndexOf('。'),before.lastIndexOf('；'),before.lastIndexOf(';'),before.lastIndexOf('\n'),before.lastIndexOf('、'));
+  return before.slice(cut+1);
+}
+
+// 「达到」是达成类动词：只有明确指向目标时才算设定目标，否则只是陈述事实。
+function isGoalAssignment(trigger,clause) {
+  return trigger!=='达到'||/目标|指标/.test(clause);
 }
 
 export function requestedTargetFromMessage(message, domain) {
   if (typeof message !== 'string') return null;
   if (domain === 'custom') return null;
   if (domain === 'health') {
-    const match = message.match(/(?:改为|改成|设为|设成|定为|目标(?:改为|是|为)?|达到)\s*(\d+(?:\.\d+)?)\s*(小时|分钟|分)/);
-    if (!match) return null;
-    const minutes = Number(match[1]) * (match[2] === '小时' ? 60 : 1);
-    return Number.isInteger(minutes) && minutes >= 1 && minutes <= 10080 ? minutes : null;
+    for (const match of message.matchAll(HEALTH_TARGET)) {
+      const clause=clauseBefore(message,match.index);
+      if (NOT_GOAL_TARGET.test(clause)) continue;
+      if (!isGoalAssignment(match[1],clause)) continue;
+      if (CAP_AFTER.test(message.slice(match.index+match[0].length))) continue;
+      const base=match[3]==='小时'?Number(match[2])*60:Number(match[2]);
+      const minutes=base+(match[4]?Number(match[4]):0);
+      if (!Number.isInteger(minutes)||minutes<1||minutes>10080) continue;
+      return minutes;
+    }
+    return null;
   }
-  const match = message.match(/(?:改为|改成|设为|设成|定为|目标(?:改为|是|为)?|达到)\s*[¥￥]?\s*(\d+(?:,\d{3})*)\s*(?:元|块|人民币)/);
-  if (!match) return null;
-  const amount = Number(match[1].replaceAll(',', ''));
-  return Number.isInteger(amount) && amount >= 1 && amount <= 10000000 ? amount : null;
+  for (const pattern of FINANCE_TARGETS) {
+    for (const match of message.matchAll(pattern)) {
+      const clause=clauseBefore(message,match.index);
+      if (NOT_GOAL_TARGET.test(clause)) continue;
+      if (!isGoalAssignment(match[1],clause)) continue;
+      if (CAP_AFTER.test(message.slice(match.index+match[0].length))) continue;
+      const amount=Number(match[2].replaceAll(',',''));
+      if (!Number.isInteger(amount)||amount<1||amount>10000000) continue;
+      return amount;
+    }
+  }
+  return null;
+}
+
+// 提案预览用的「目标变化」文案：没有提案就没有变化可言，理财金额要按千分位排。
+export function goalChangeText(goal, proposal, domain) {
+  if (!proposal) return '';
+  const plain=value=>Number.isFinite(value)?String(value):'—';
+  const money=value=>Number.isFinite(value)?`¥${value.toLocaleString('zh-CN')}`:'—';
+  if (domain==='health') return `${plain(goal?.target)} → ${plain(proposal.target)} 分钟 / 周`;
+  if (domain==='finance') return `${money(goal?.target)} → ${money(proposal.target)}`;
+  return '建立新的自定义目标';
 }
 
 function readAgentJSON(value) {
@@ -34,7 +83,7 @@ function readAgentJSON(value) {
   catch { throw Error('Agent 返回了无法解析的内容'); }
 }
 
-export function validateGoalReply(value, domain) {
+export function validateGoalReply(value, domain, message) {
   const answer = readAgentJSON(value);
   if (typeof answer.reply !== 'string' || !answer.reply.trim() || answer.reply.length > 1200) throw Error('Agent 回复格式不正确');
   let proposal = null;
@@ -48,6 +97,8 @@ export function validateGoalReply(value, domain) {
         typeof p.reason !== 'string' || !p.reason.trim() || p.reason.length > 300) throw Error('Agent 目标提案不完整');
     proposal = {title:p.title.trim(), target:domain==='custom'?null:p.target, task:p.task.trim(), reason:p.reason.trim()};
   }
+  const requested=requestedTargetFromMessage(message,domain);
+  if (requested!=null && proposal && proposal.target!==requested) throw Error(`Along 目标数值与用户指定的 ${requested} 不一致`);
   return {reply:answer.reply.trim(), proposal};
 }
 

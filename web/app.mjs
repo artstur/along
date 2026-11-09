@@ -1,12 +1,12 @@
 import {KEY, loadState, setSnapshot} from './health.mjs';
 import {ACTIVE_GOAL_KEY, FINANCE_KEY, ensureHealthGoal, loadFinance, connectFinanceDemo, addFinanceDemoRecord, healthView, financeView} from './workspace.mjs';
 import {EXPERIMENT, startExperiment, routeHealthEvent, acceptAgentSuggestion, agentRequestPayload} from './loop.mjs';
-import {routeHealthChange} from './goal-agent-core.mjs';
+import {goalChangeText, routeHealthChange} from './goal-agent-core.mjs';
 import {AGENT_KEY, GOALS_KEY, CONVERSATIONS_KEY, readStored, agentCall, loadNativeConnection, saveNativeConnection} from './agent-client.mjs';
 import {ADAPTIVE_LAYOUTS_KEY, customGoalEntries, findInitialCustomGoalCandidate, goalDomain, isCustomGoalKey, safeAdaptiveLayout, validateAdaptiveLayout} from './adaptive-ui.mjs';
 import {GOAL_SUPER_AGENT_RUNS_KEY, SUPER_AGENT_RUNS_KEY, createFailedGoalSuperAgentRun, createFailedSuperAgentRun,
   createGoalSuperAgentRequest, createPendingGoalSuperAgentRun, createPendingSuperAgentRun, createSuperAgentRequest,
-  safeGoalSuperAgentRun, safeSuperAgentRun, AGENT_RUNTIME_KEY, DSH_RUNTIME, KIMI_RUNTIME, agentRuntimeLabel, safeAgentRuntime} from './super-agent.mjs';
+  safeGoalSuperAgentRun, safeSuperAgentRun, withRunError, AGENT_RUNTIME_KEY, DSH_RUNTIME, KIMI_RUNTIME, agentRuntimeLabel, safeAgentRuntime} from './super-agent.mjs';
 const TICKET_KEY = 'along.goal-ticket.v1';
 
 const app = document.querySelector('#app');
@@ -159,7 +159,9 @@ async function refreshSuperAgentTask(task) {
     if (run?.actual) {superAgentRuns={...superAgentRuns,[key]:run};saveSuperAgentRuns();if (screen==='task'&&selectedTaskId===task.id) render();}
   } catch(error) {
     const current=safeSuperAgentRun(superAgentRuns[key]);
-    if (!current?.actual) {superAgentRuns={...superAgentRuns,[key]:createFailedSuperAgentRun(request,error.message,Date.now(),agentRuntime)};saveSuperAgentRuns();render();}
+    superAgentRuns={...superAgentRuns,[key]:current?.actual?withRunError(current,error.message):createFailedSuperAgentRun(request,error.message,Date.now(),agentRuntime)};
+    saveSuperAgentRuns();
+    if (screen==='task'&&selectedTaskId===task.id) render();
   } finally { superAgentRequests.delete(request.requestId); }
 }
 function saveGoalSuperAgentRuns() { localStorage.setItem(GOAL_SUPER_AGENT_RUNS_KEY,JSON.stringify(goalSuperAgentRuns)); }
@@ -222,7 +224,7 @@ async function refreshSuperAgentGoal(goalKey=activeGoal) {
     if (screen==='agent'&&activeGoal===goalKey) renderAgentUpdate();
     else if (screen==='home'&&activeGoal===goalKey) render();
   } catch(error) {
-    if (!current.actual) saveGoalRun(goalKey,{...current,status:'blocked',statusLabel:`${agentRuntimeLabel(current.runtime)} 状态读取失败`,error:error.message});
+    saveGoalRun(goalKey,withRunError(current,error.message));
   } finally { goalSuperAgentRequests.delete(current.requestId); }
 }
 function trustedMetric(source) {
@@ -354,7 +356,7 @@ function goalOrchestrationPanel(run) {
 
 function agentPreview(item,index,goal,domain) {
   if (!item.proposal && !item.layout) return '';
-  const change=domain==='health'?`${goal.target} → ${item.proposal?.target} 分钟 / 周`:domain==='finance'?`¥${goal.target.toLocaleString('zh-CN')} → ¥${item.proposal?.target.toLocaleString('zh-CN')}`:'建立新的自定义目标';
+  const change=goalChangeText(goal,item.proposal,domain);
   const goalChange=item.proposal?`<span>目标变化：${change}</span><strong>${esc(item.proposal.title)}</strong><p>下一步：${esc(item.proposal.task)}</p><p>${esc(item.proposal.reason)}</p>`:'';
   const layoutPreview=item.layout?`<span>Along 生成的目标空间</span><strong>${esc(item.layout.title)}</strong><p>${esc(item.layout.summary)}</p><p>${item.layout.modules.length} 个目标模块 · ${item.layout.tasks.length} 项动态任务 · ${item.layout.questions.length} 项待确认</p>`:'';
   return `<div class="proposal-preview">${goalChange}${layoutPreview}<button class="button" data-action="accept-goal" data-index="${index}">${item.proposal?'确认采用目标与界面':'采用这个目标空间'}</button></div>`;
