@@ -240,7 +240,7 @@ enum AlongConnectionStore {
 
 struct AlongWebView: UIViewRepresentable {
     @ObservedObject var bridge: AlongBridgeModel
-    private let site = URL(string: "along://app/index.html?build=27")!
+    private let site = URL(string: "along://app/index.html?build=28")!
 
     func makeCoordinator() -> Coordinator { Coordinator(bridge: bridge) }
 
