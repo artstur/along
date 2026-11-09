@@ -70,6 +70,11 @@ function cleanGoalTitle(value) {
   if (!title||title.length>80) throw Error('目标名称无效');
   return title;
 }
+// 客户端发来的自由文本也必须真的是字符串：String() 兜底会把对象变成
+// "[object Object]"，混过长度检查后送进模型。
+function clientText(value) {
+  return typeof value==='string'?value:'';
+}
 function cleanGoal(value) {
   const domain=value?.domain;
   if (!['health','finance','custom'].includes(domain)) throw Error('目标类型无效');
@@ -161,9 +166,11 @@ const server=createServer({key:readFileSync(key),cert:readFileSync(cert)},async(
     if (req.method==='POST' && path==='/super-agent/goals') {
       const input=await body(req),runtime=requestedRuntime(input?.runtime);
       const goal=cleanGoal(input.goal), snapshot=cleanSnapshot(input.snapshot,goal.domain);
-      const message=String(input.message??'').trim();
+      // 客户端发来的必须是真字符串：String() 兜底会把对象变成 "[object Object]"，
+      // 混过长度检查后送进模型（和目标标题那一条同一个坑）。
+      const message=clientText(input.message).trim();
       if (!message||message.length>800) throw Error('消息长度需在 1 至 800 字之间');
-      const history=Array.isArray(input.history)?input.history.slice(-12).map(item=>({role:item.role==='assistant'?'assistant':'user',text:String(item.text??'').slice(0,1200)})).filter(item=>item.text.trim()):[];
+      const history=Array.isArray(input.history)?input.history.slice(-12).map(item=>({role:item.role==='assistant'?'assistant':'user',text:clientText(item.text).slice(0,1200)})).filter(item=>item.text.trim()):[];
       // requestId 是客户端给的，要在包上游之前校验：发错了仍然是 400。
       const id=requestId(input.requestId);
       if (runtime===KIMI_RUNTIME) return respond(res,200,await upstream(()=>kimiAgent.startGoal({requestId:id,goal,snapshot,message,history})));
@@ -185,7 +192,7 @@ const server=createServer({key:readFileSync(key),cert:readFileSync(cert)},async(
       const before=cleanSnapshot(input.before,'health'),after=cleanSnapshot(input.after,'health');
       const route=routeHealthChange(before,after,goal.target);
       if (route.decision==='quiet') return respond(res,200,{...route,source:'router'});
-      const currentTask=String(input.currentTask??'').slice(0,120);
+      const currentTask=clientText(input.currentTask).slice(0,120);
       const prompt=`你是 Along 的任务调整 Agent。确定性进度由 Along 算好，不要自行修改。不得调用工具，不要给医学建议。只输出 JSON：{"task":"具体可执行的下一步","reason":"解释为什么调整","remaining":${route.remaining}}。目标：${JSON.stringify(goal)}。原任务：${currentTask}。变化：${route.reason}。任务应与剩余 ${route.remaining} 分钟相符；若已完成则建议查看成果。`;
       const raw=await runExclusive(()=>upstream(()=>runTaskCodex(prompt)));
       const suggestion=await upstream(()=>validateTaskReply(raw,route.remaining));
