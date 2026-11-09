@@ -58,10 +58,11 @@ export function installDomStub({storage={}}={}) {
     removeItem:key=>{ store.delete(key); },
     clear:()=>{ store.clear(); },
   };
+  const windowListeners=new Map();
   const window={
     innerHeight:800,
     visualViewport:{height:800,addEventListener(){}},
-    addEventListener(){},
+    addEventListener(type,handler){ const list=windowListeners.get(type)||[]; list.push(handler); windowListeners.set(type,list); },
     scrollTo(){},
   };
   globalThis.document=document;
@@ -85,6 +86,8 @@ export function installDomStub({storage={}}={}) {
     store,
     intervals,
     async tick(ms) { for (const entry of intervals) if (entry.ms===ms) await entry.fn(); },
+    // 触发 window 上的监听器：app.mjs 的健康更新、页面可见性等都挂在这里。
+    fireWindow(type,event={}) { const list=windowListeners.get(type)||[]; return Promise.all(list.map(handler=>handler(event))); },
     storage:{get:key=>store.get(key)??null,set:(key,value)=>store.set(key,String(value))},
     click(dataset,extra={}) {
       return app.dispatch('click',{target:{closest:()=>({dataset})},...extra});

@@ -722,9 +722,13 @@ window.addEventListener('along-health-update', async event => {
   saveTicket(ticket);if (screen==='home') render();
   try {
     const result=await agentCall(agentConfig,'/goal/event',{goal,before:{workoutMinutes:before.workoutMinutes,selectedTypes:['workout']},after:{workoutMinutes:next.snapshot.workoutMinutes,selectedTypes:['workout']},currentTask:goalCustom.health?.task||healthView(state).primary.title});
-    if (result.decision==='replan') saveTicket({...ticket,status:'proposed',reason:result.reason,suggestion:result.suggestion});
-    else saveTicket(null);
-  } catch(error) { saveTicket({...ticket,status:'waiting',error:error.message}); }
+    // 等回复期间可能又来了一次健康变化，也可能用户已经把这条提案处理掉了：
+    // 那一次的结果才是当前的，旧的结果盖上去会让提案对不上用户已经走到的进度。
+    if (pendingTask?.id===ticket.id) {
+      if (result.decision==='replan') saveTicket({...ticket,status:'proposed',reason:result.reason,suggestion:result.suggestion});
+      else saveTicket(null);
+    }
+  } catch(error) { if (pendingTask?.id===ticket.id) saveTicket({...ticket,status:'waiting',error:error.message}); }
   if (screen==='home') render();
 });
 sheet.addEventListener('click', event => {
