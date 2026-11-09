@@ -13,9 +13,9 @@ export function routeHealthChange(before, after, target) {
   return {decision: 'replan', reason: `本周新增 ${delta} 分钟，距目标从 ${oldRemaining} 分钟变为 ${remaining} 分钟`, oldRemaining, remaining, delta};
 }
 
-const CHANGE_PHRASE='改为|改成|设为|设成|设定成|定为|达到';
+const CHANGE_PHRASE='改为|改成|设为|设成|设定成|设定为|定为|达到';
 // 「目标/指标」直接限定的动词才算指派目标；「今天运动量提高到 150 分钟」这种事实陈述没有目标词，必须留在外面。
-const GOAL_PHRASE='(?:目标|指标)(?:改为|是|为|调整为|提高到|减到|调到|调成|改到)?';
+const GOAL_PHRASE='(?:目标|指标)(?:改为|是|为|调整为|提高到|减到|调到|调成|改到|改成|设为|设成|设定成|定为)?';
 const ANY_CHANGE=`${GOAL_PHRASE}|${CHANGE_PHRASE}`;
 const GOAL_WORD=/目标|指标/;
 const NOT_GOAL_TARGET=/每天|每日|每次|单次|上限|预算|封顶|最多|不超过|以内/;
@@ -28,7 +28,7 @@ const DEFERRED_TARGET=/下次|以后|之后|回头|再说|将来/;
 // 只看句尾，避免「交完房租把目标改成 12000 元」这种真指派被误杀。
 const OTHER_ITEM=/(房租|房费|房贷|学费|水电费|水电|电费|水费|燃气费|燃气|煤气费|餐费|伙食费|宽带费|物业费|话费|网费|车费|油费|饭钱|菜钱|保险费|保险|保费|评分|得分|打分|分数)$/;
 // 数字后面的补语：「改成 200 分钟更好」「改成 200 分钟如果天气好」都不是指派。
-const QUALIFIED_AFTER=/^\s*(以内|封顶|如果|要是|假如|万一|假设|更好|就行|好了|再说)/;
+const QUALIFIED_AFTER=/^\s*[，,。；;]?\s*(以内|封顶|如果|要是|假如|万一|假设|更好|就行|好了|再说)/;
 // 金额必须带货币标记：没有货币标记的裸数字可能是公斤、步、岁，读成金额会让整单请求失败。
 const HEALTH_TARGET=new RegExp(`(${ANY_CHANGE})\\s*(\\d+(?:\\.\\d+)?)\\s*(小时|分钟|分(?![一-龥]))(?:\\s*(\\d+(?:\\.\\d+)?)\\s*(分钟|分(?![一-龥])))?`,'g');
 const FINANCE_TARGETS=[
@@ -57,6 +57,9 @@ function targetCandidates(message,pattern,readValue) {
     if (NEGATED_TARGET.test(clause)) continue;
     if (DEFERRED_TARGET.test(clause)) continue;
     if (OTHER_ITEM.test(clause)) continue;
+    // 触发词没带目标词时，前面那句话就是在说别的事：「今天运动量改成 150 分钟」
+    // 「睡眠改成 8 小时」里的数字不是目标；只有空句或提到目标的句子才算指派。
+    if (!GOAL_WORD.test(match[1]) && clause.trim() && !GOAL_WORD.test(clause)) continue;
     if (!isGoalAssignment(match[1],clause)) continue;
     if (QUALIFIED_AFTER.test(message.slice(match.index+match[0].length))) continue;
     const value=readValue(match);
