@@ -216,8 +216,10 @@ enum AlongConnectionStore {
 
         guard let legacy = UserDefaults.standard.dictionary(forKey: legacyKey),
               let clean = clean(legacy) else { return nil }
-        _ = save(clean.mapValues { $0 as Any })
-        UserDefaults.standard.removeObject(forKey: legacyKey)
+        // 迁移到钥匙串成功之后才删旧键：写失败还照删，就只剩一份凭证，而且再也回不来。
+        if save(clean.mapValues { $0 as Any }) != nil {
+            UserDefaults.standard.removeObject(forKey: legacyKey)
+        }
         return clean
     }
 
