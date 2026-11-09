@@ -97,10 +97,10 @@ Along 是手机优先的目标工作台：把一个目标拆成「目标 / 来�
 - **补回归测试。** 放 `test/`，命名体现被钉住的不变量（例：`test('health router stays quiet when the target is already met')`），不要 `fix-bug-123`。
 - **共享文件双端可用。** 改 `web/goal-agent-core.mjs`、`web/adaptive-ui.mjs`、`web/super-agent.mjs`、`web/loop.mjs` 时，必须同时能在浏览器和 Node 里跑通，不得引入 Node 专用模块。
 - **同步产物与版本号**（用户可见的改动，漏一处手机上就还是旧页面）：
-  - `web/index.html` 的 `?v=`（当前 42）
-  - `web/sw.js` 的 `CACHE`（当前 `along-shell-v42`）
-  - `ios/AlongHealth/Sources/AlongShellView.swift` 的 `build=`（当前 42）
-  - 需要重新安装 App 时，再提 `ios/AlongHealth/Info.plist` 的 `CFBundleVersion`（当前 36）
+  - `web/index.html` 的 `?v=`（当前 43）
+  - `web/sw.js` 的 `CACHE`（当前 `along-shell-v43`）
+  - `ios/AlongHealth/Sources/AlongShellView.swift` 的 `build=`（当前 43）
+  - 需要重新安装 App 时，再提 `ios/AlongHealth/Info.plist` 的 `CFBundleVersion`（当前 37）
 - **新增前端文件**要同时登记到 `tools/build.mjs` 的 `files` 和 `web/sw.js` 的 `FILES`，并保持 `web/` 平铺。
 - **改源码，不手改产物。** `dist/` 和 `ios/AlongHealth/Web/` 由 `npm run build` 生成；`ios/AlongHealth/Web/` 被 git 跟踪，build 后要连同源码一起提交。
 
@@ -183,6 +183,12 @@ Along 是手机优先的目标工作台：把一个目标拆成「目标 / 来�
 - **仓库外的数据不保证类型**：工单号、标题这些字段来自 Agent 服务，不保证是字符串。不能直接对它调用 `.slice()` / `.toUpperCase()` 之类的方法——方法不存在就是 TypeError，而 TypeError 出现在 `render()` 里就会卡死整个界面。先过一道类型判断。
 - **同一件事的两条读取路径要给出同样的结论**：任务那条路径把「记录存在却不可信」落到了明确的失败，目标那条路径却当作「没有记录」——面板静默消失，宿主给的原因用户永远看不到。修好一条别忘了另一条。
 - **旧键和新键要一样处理**：运行时切过、缓存键改过之后，同一份记录可能存在两处。读的时候只检查新键，旧键里存着的坏数据就会漏过去，然后在别处被当成「没有记录」而造出一条假状态。查两处就要查两遍。
+- **逐块 toString 会把多字节字符切坏**：请求体按 TCP 分段到达时，`text+=chunk` 相当于每块单独解码，一个汉字被切开就变成 U+FFFD。中文是本产品的主要语言，正文极易跨段。要用 `StringDecoder` 跨块保留不完整的字节序列。
+- **一条坏记录不能让整台服务起不来**：状态文件解析失败时构造函数直接抛错，宿主在模块顶层就 new 这个类——于是服务启动即崩溃，用户完全用不了，而且看不到任何原因。这些记录只是「在跑的那次会话」的指针，解析失败就按空记录继续。落盘也要原子替换（先写临时文件再改名），否则进程被杀就留下半截 JSON。
+- **写失败时不能销毁数据**：原生侧把连接凭证从 UserDefaults 迁到钥匙串，save() 的返回值被丢掉、旧键却无条件删掉——钥匙串写失败时，唯一一份凭证就没了，而且再也回不来。
+- **确定性错误要落到终态**：输出校验失败是确定性的（这份结果不会再变好，重试也没用）。抛成 5xx 的话，前端会当成「暂时读不到状态」继续轮询，运行永远停在 working，输入框一直禁用，用户被锁 30 分钟。Kimi 那条路径一直把它落成 blocked + 明确原因，DSH 这条要一样。
+- **两条运行时对同一份模型输出必须给出同一个结论**：归一放在共享层，两条运行时都用它。归一只修能修的（截断、编号、去重、丢掉超量与未知类型），修不了的（文本类型不对）原样交给共享校验层拒绝。
+- **类型不对的文本不要兜底成 "[object Object]"**：那种脏文本会直接出现在用户的首页上。只有字符串和数字算文本；对象、数组、布尔都不是。
 
 === END GOAL PROMPT ===
 
