@@ -522,7 +522,9 @@ async function clearHealthData() {
   const real = hasRealHealthData();
   let stopped = true;
   if (real) { try { await window.AlongHealthBridge?.clear?.(); } catch { stopped = false; } }
-  if (real && pendingTask?.source === 'healthkit') saveTicket(null);
+  // 任务票里存着真实健身分钟数：只要它在，每次清除健康数据都要一起清掉，
+  // 不管当前界面显示的是真实来源还是演示数据。
+  if (pendingTask?.source === 'healthkit') saveTicket(null);
   const cleared = {...state, source:null, snapshot:null};
   if (state.loop) cleared.loop = {...state.loop, previousState: state.loop.previousState ? {...state.loop.previousState, source:null, snapshot:null} : undefined};
   saveHealth(cleared);
