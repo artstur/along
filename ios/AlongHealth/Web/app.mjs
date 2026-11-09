@@ -48,10 +48,15 @@ function saveTicket(ticket) { pendingTask=ticket; if (ticket) localStorage.setIt
 localStorage.setItem(KEY, JSON.stringify(state));
 
 const esc = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+// 工单号由仓库外的 Agent 服务给出，不保证是字符串：不能直接对它调用 .slice()，
+// 那会在 render() 里抛 TypeError，整个界面停在旧页面上再也动不了。
+const ticketTag = value => typeof value==='string'&&value?value.slice(0,8):'—';
 // 旧版本宿主写下的记录里可能没有时间戳：Intl 格式化无效日期会抛 RangeError，
 // 整个 render() 挂掉，界面停在旧页面上再也动不了。
 const formatStamp = (value,options) => {
-  if (value==null) return '—';
+  // 宿主用 0 表示「起始时间未知」（Number(entry.createdAt)||0），
+  // 那不是 1970 年：显示一个看起来很正常的时间，比显示「未知」更糟。
+  if (value==null || value===0) return '—';
   const date=new Date(value);
   return Number.isFinite(date.getTime())?new Intl.DateTimeFormat('zh-CN',options).format(date):'—';
 };
@@ -73,8 +78,13 @@ async function refreshAgentConnection() {
     const failedRun=currentGoalSuperAgentRun(activeGoal);
     if (failedRun?.status==='blocked' && failedRun.actual!==true) {
       const key=goalRunKey(activeGoal);
+      const legacyKey=activeGoal;
+      const legacyRun=goalSuperAgentRuns[legacyKey];
       const {[key]:_discarded,...remainingRuns}=goalSuperAgentRuns;
-      goalSuperAgentRuns=remainingRuns;
+      const {[legacyKey]:_legacyDiscarded,...cleanRuns}=remainingRuns;
+      // 旧键里存着的也是一条过不了白名单的坏记录时一起清掉：
+      // 只清新键的话，那条坏记录会一直挂在存储里，用户每次打开都撞上它。
+      goalSuperAgentRuns=legacyRun&&!safeGoalSuperAgentRun(legacyRun)?cleanRuns:remainingRuns;
       saveGoalSuperAgentRuns();
     }
     const history=conversations[activeGoal]||[];
@@ -192,8 +202,31 @@ async function refreshSuperAgentTask(task) {
 function saveGoalSuperAgentRuns() { localStorage.setItem(GOAL_SUPER_AGENT_RUNS_KEY,JSON.stringify(goalSuperAgentRuns)); }
 function goalRunKey(goalKey=activeGoal,runtime=agentRuntime) { return `${goalKey}:${runtime}`; }
 function currentGoalSuperAgentRun(goalKey=activeGoal) {
-  return safeGoalSuperAgentRun(goalSuperAgentRuns[goalRunKey(goalKey)]) || (agentRuntime===DSH_RUNTIME?safeGoalSuperAgentRun(goalSuperAgentRuns[goalKey]):null);
+  const key=goalRunKey(goalKey);
+  const stored=goalSuperAgentRuns[key];
+  // 旧版本的记录存在不带运行时前缀的键里，两边都要一样处理。
+  const legacy=agentRuntime===DSH_RUNTIME?goalSuperAgentRuns[goalKey]:null;
+  const saved=safeGoalSuperAgentRun(stored)||safeGoalSuperAgentRun(legacy);
+  if (saved) return saved;
+  // 存着的记录过不了白名单：那是宿主返回了我们不认的形状。
+  // 不能静默地当成「没有记录」——那样整个编排面板会消失，
+  // 宿主给的原因用户永远看不到。
+  const untrusted=stored??legacy;
+  if (untrusted) return createFailedGoalSuperAgentRun(untrustedGoalRequest(goalKey,untrusted),untrustedGoalReason(untrusted),Date.now(),agentRuntime);
+  return null;
 }
+// 存着的记录不可信时，要给它一个能落到失败状态的形状：还能用的部分捡回来，
+// 剩下的用当前目标补齐——失败卡片要能说清「是谁、为什么」。
+function untrustedGoalRequest(goalKey,value) {
+  const input=value&&typeof value==='object'&&value.input&&typeof value.input==='object'?value.input:null;
+  const goal=currentGoal();
+  return {
+    requestId:typeof value?.requestId==='string'&&value.requestId?value.requestId:newId('req'),
+    goal:input?.goal&&typeof input.goal==='object'?input.goal:{domain:goalDomain(goalKey),title:goal.title,target:goal.target},
+    message:typeof input?.message==='string'?input.message:'',
+  };
+}
+const untrustedGoalReason = value => typeof value?.error==='string'&&value.error?value.error:'宿主返回了无法识别的目标编排记录';
 const goalSuperAgentRequests=new Set();
 function saveGoalRun(goalKey,run) {
   goalSuperAgentRuns={...goalSuperAgentRuns,[goalRunKey(goalKey,run?.runtime||agentRuntime)]:run};
@@ -394,7 +427,7 @@ function goalOrchestrationPanel(run) {
   const events=(run.events||[]).slice(-5);
   const mandateText=typeof run.mandate==='string'?run.mandate:run.mandate?.scope||'仅围绕本次目标进行拆解、规划与可交付执行。';
   return `<section class="goal-orchestration ${runStatus(run.status)}" aria-live="polite"><div class="goal-run-head"><div><span class="eyebrow">真实 ${esc(meta.full)}</span><h2>${esc(run.statusLabel)}</h2></div><strong>${runProgress(run.progress)}%</strong></div><div class="run-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${runProgress(run.progress)}"><span style="width:${runProgress(run.progress)}%"></span></div>
-  <div class="orchestration-flow compact"><div><span>Source</span><strong>目标输入</strong></div><b aria-hidden="true">→</b><div><span>${run.runtime===KIMI_RUNTIME?'Session':'Main Session'}</span><strong>${run.eval?.decision==='accept'?'已接单':run.eval?.decision==='evaluating'?'评估中':'等待'}</strong></div><b aria-hidden="true">→</b><div><span>${run.runtime===KIMI_RUNTIME?'Swarm':'Ticket'}</span><strong>${run.runtime===KIMI_RUNTIME?'已开启':run.ticket?esc(run.ticket.id.slice(0,8)):'创建中'}</strong></div><b aria-hidden="true">→</b><div><span>${esc(meta.worker)}</span><strong>${run.agents?.length||0} 个 Agent</strong></div></div>
+  <div class="orchestration-flow compact"><div><span>Source</span><strong>目标输入</strong></div><b aria-hidden="true">→</b><div><span>${run.runtime===KIMI_RUNTIME?'Session':'Main Session'}</span><strong>${run.eval?.decision==='accept'?'已接单':run.eval?.decision==='evaluating'?'评估中':'等待'}</strong></div><b aria-hidden="true">→</b><div><span>${run.runtime===KIMI_RUNTIME?'Swarm':'Ticket'}</span><strong>${run.runtime===KIMI_RUNTIME?'已开启':run.ticket?esc(ticketTag(run.ticket?.id)):'创建中'}</strong></div><b aria-hidden="true">→</b><div><span>${esc(meta.worker)}</span><strong>${run.agents?.length||0} 个 Agent</strong></div></div>
   ${run.mandate?`<div class="mandate-card"><span>Mandate · 本次授权边界</span><p>${esc(mandateText)}</p></div>`:''}
   ${run.agents?.length?`<div class="worker-grid">${run.agents.map(taskAgentCard).join('')}</div>`:''}
   ${events.length?`<div class="goal-run-events">${events.map(event=>`<p><span>${formatTime(event.at)}</span>${esc(event.text)}</p>`).join('')}</div>`:''}

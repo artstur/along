@@ -68,7 +68,11 @@ export function createFailedSuperAgentRun(request, error, updatedAt=Date.now(), 
 
 export function safeSuperAgentRun(value) {
   if (!value || !RUNTIMES.has(value.runtime) || typeof value.requestId!=='string') return null;
-  if (value.actual===true && (!value.source || !value.trigger || !Array.isArray(value.assignments) || !Array.isArray(value.events))) return null;
+  // 白名单与渲染层对「一条记录有哪些字段」的假设必须一致：渲染层直接用
+  // run.source / run.trigger / run.assignments / run.events，白名单就不能
+  // 放行缺这些字段的记录——哪怕它不是 actual 的那一条，否则渲染时会抛错，
+  // 整个界面停在旧页面上。
+  if (!value.source || !value.trigger || !Array.isArray(value.assignments) || !Array.isArray(value.events)) return null;
   if (value.version===2 || value.actual===true) return value;
   return null;
 }
@@ -107,7 +111,8 @@ export function createFailedGoalSuperAgentRun(request, error, updatedAt=Date.now
 
 export function safeGoalSuperAgentRun(value) {
   if (!value || value.kind!=='goal' || !RUNTIMES.has(value.runtime) || typeof value.requestId!=='string') return null;
-  if (value.actual===true && (!value.source || !value.trigger || !Array.isArray(value.agents) || !Array.isArray(value.events))) return null;
+  // 同上：渲染层会直接读 run.source / run.trigger / run.agents / run.events。
+  if (!value.source || !value.trigger || !Array.isArray(value.agents) || !Array.isArray(value.events)) return null;
   return value.version===1 || value.actual===true ? value : null;
 }
 
