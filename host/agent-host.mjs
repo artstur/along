@@ -170,8 +170,10 @@ const server=createServer({key:readFileSync(key),cert:readFileSync(cert)},async(
       const message=String(input.message??'').trim();
       if (!message||message.length>800) throw Error('消息长度需在 1 至 800 字之间');
       const history=Array.isArray(input.history)?input.history.slice(-12).map(item=>({role:item.role==='assistant'?'assistant':'user',text:String(item.text??'').slice(0,1200)})).filter(item=>item.text.trim()):[];
-      if (runtime===KIMI_RUNTIME) return respond(res,200,await upstream(()=>kimiAgent.startGoal({requestId:requestId(input.requestId),goal,snapshot,message,history})));
-      const response=await upstream(()=>superAgentCall('/along-source/api/goals',{value:{requestId:requestId(input.requestId),goal,snapshot,message,history}}));
+      // requestId 是客户端给的，要在包上游之前校验：发错了仍然是 400。
+      const id=requestId(input.requestId);
+      if (runtime===KIMI_RUNTIME) return respond(res,200,await upstream(()=>kimiAgent.startGoal({requestId:id,goal,snapshot,message,history})));
+      const response=await upstream(()=>superAgentCall('/along-source/api/goals',{value:{requestId:id,goal,snapshot,message,history}}));
       return respond(res,200,{...response,run:await upstream(()=>normalizeGoalRun(response.run))});
     }
     if (req.method==='POST' && path==='/super-agent/goals/status') {

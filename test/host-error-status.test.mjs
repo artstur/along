@@ -32,17 +32,39 @@ test('a bad request and a busy host keep their own status',()=>{
   assert.equal(statusForError(new Error('Along 正在处理上一条请求，请稍后再试')),429,'宿主忙着仍然是 429');
 });
 
+// 判断某个调用点是不是落在 upstream(...) 包装里：向外逐层找出包裹它的调用。
+function insideUpstream(text,index) {
+  let depth=0; const heads=[];
+  for (let i=index-1;i>=0;i-=1) {
+    const ch=text[i];
+    if (ch===')') depth++;
+    else if (ch==='(') {
+      if (depth>0) { depth-=1; continue; }
+      heads.push(text.slice(Math.max(0,i-32),i));
+    }
+  }
+  return heads.some(head=>/upstream\s*$/.test(head));
+}
+
+function callsIn(routes,pattern) {
+  const found=[];
+  for (const match of routes.matchAll(pattern)) {
+    found.push({index:match.index,text:routes.slice(Math.max(0,match.index-40),match.index+match[0].length).replace(/\s+/g,' '),inside:insideUpstream(routes,match.index)});
+  }
+  return found;
+}
+
 test('no upstream call in the routes escapes the upstream wrapper',()=>{
   const start=hostSource.indexOf('const server=createServer');
   const end=hostSource.indexOf('server.listen(');
   assert.ok(start>0&&end>start,'找不到宿主的路由处理');
   const routes=hostSource.slice(start,end);
-  const primitives=/(kimiAgent\.\w+\(|superAgentCall\(|superAgentReady\(|runTaskCodex\(|validateTaskReply\(|normalizeGoalRun\()/g;
-  const missed=[];
-  for (const match of routes.matchAll(primitives)) {
-    const before=routes.slice(Math.max(0,match.index-24),match.index);
-    if (!before.endsWith('upstream(()=>')) missed.push(routes.slice(match.index-30,match.index+match[0].length).replace(/\s+/g,' '));
-  }
-  assert.deepEqual(missed,[],'上游调用必须包在 upstream() 里，否则故障会被当成客户端请求不合法');
+  const missed=callsIn(routes,/(kimiAgent\.\w+\(|superAgentCall\(|superAgentReady\(|runTaskCodex\(|validateTaskReply\(|normalizeGoalRun\()/g)
+    .filter(call=>!call.inside);
+  assert.deepEqual(missed.map(call=>call.text),[],'上游调用必须包在 upstream() 里，否则故障会被当成客户端请求不合法');
   assert.match(routes,/statusForError\(error\)/,'答复状态码要走同一套判断');
+  // 反过来：客户端自己的校验不能被包进上游，否则「我发错了」也会被答成 5xx。
+  const misfiled=callsIn(routes,/(requestId\(|cleanGoal\(|cleanSnapshot\()/g)
+    .filter(call=>call.inside);
+  assert.deepEqual(misfiled.map(call=>call.text),[],'客户端入参校验必须在包上游之前，否则非法请求会被答成 5xx');
 });
