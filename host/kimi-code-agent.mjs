@@ -1,6 +1,6 @@
 import {homedir} from 'node:os';
 import {dirname, join} from 'node:path';
-import {existsSync, mkdirSync, readFileSync, writeFileSync} from 'node:fs';
+import {existsSync, mkdirSync, readFileSync, renameSync, writeFileSync} from 'node:fs';
 import {validateGoalReply} from '../web/goal-agent-core.mjs';
 import {safeAdaptiveLayout, normalizeQuestions} from '../web/adaptive-ui.mjs';
 import {KIMI_RUNTIME, AGENT_RUN_TIMEOUT_MS} from '../web/super-agent.mjs';
@@ -152,7 +152,15 @@ export class KimiCodeAgent {
   constructor({baseURL=process.env.ALONG_KIMI_CODE_URL||DEFAULT_URL,token=process.env.ALONG_KIMI_CODE_TOKEN,tokenPath=DEFAULT_TOKEN_PATH,statePath=DEFAULT_STATE_PATH,workspace=process.cwd(),model=process.env.ALONG_KIMI_CODE_MODEL||'kimi-code/kimi-for-coding',fetchImpl=fetch}={}) {
     this.baseURL=baseURL.replace(/\/$/,'');this.token=token;this.tokenPath=tokenPath;this.statePath=statePath;this.workspace=workspace;this.model=model;this.fetch=fetchImpl;
     this.runs={};this.synthesisRequests=new Set();
-    try { this.runs=JSON.parse(readFileSync(this.statePath,'utf8')); } catch(error) { if (error.code!=='ENOENT') throw error; }
+    // 状态文件坏了不能让整台服务起不来：解析失败就当成没有记录继续。
+    // 这些记录只是「在跑的那次会话」的指针，Kimi 侧的会话本身还在。
+    try {
+      const parsed=JSON.parse(readFileSync(this.statePath,'utf8'));
+      this.runs=parsed&&typeof parsed==='object'&&!Array.isArray(parsed)?parsed:{};
+    } catch(error) {
+      if (error.code!=='ENOENT') console.warn(`Along：运行记录无法读取，已按空记录继续（${error.message}）`);
+      this.runs={};
+    }
   }
   authToken() {
     if (this.token) return this.token;
@@ -171,7 +179,11 @@ export class KimiCodeAgent {
   }
   save() {
     mkdirSync(dirname(this.statePath),{recursive:true,mode:0o700});
-    writeFileSync(this.statePath,JSON.stringify(this.runs,null,2),{mode:0o600});
+    // 先写临时文件再改名：直接覆盖时进程被杀会留下半截 JSON，
+    // 下一次启动就再也起不来。
+    const temp=`${this.statePath}.tmp`;
+    writeFileSync(temp,JSON.stringify(this.runs,null,2),{mode:0o600});
+    renameSync(temp,this.statePath);
   }
   async ready() {
     const [meta,auth,user]=await Promise.all([this.call('/api/v1/meta'),this.call('/api/v1/auth'),this.call('/api/v1/oauth/userinfo')]);
