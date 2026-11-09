@@ -4,7 +4,7 @@ import {execFileSync} from 'node:child_process';
 import {homedir, networkInterfaces} from 'node:os';
 import {join} from 'node:path';
 import {mkdirSync, readFileSync, writeFileSync, existsSync, chmodSync} from 'node:fs';
-import {routeHealthChange, validateGoalReply, validateTaskReply} from '../web/goal-agent-core.mjs';
+import {routeHealthChange, validateGoalReply, normalizeGoalReply, validateTaskReply} from '../web/goal-agent-core.mjs';
 import {safeAdaptiveLayout, normalizeAdaptiveLayout} from '../web/adaptive-ui.mjs';
 import {runTaskCodex} from './codex-agent.mjs';
 import {KimiCodeAgent} from './kimi-code-agent.mjs';
@@ -112,7 +112,7 @@ function normalizeGoalRun(run) {
   try {
     const domain=run.input?.goal?.domain;
     if (!['health','finance','custom'].includes(domain)) throw Error('Along 返回的目标类型无效');
-    const output=validateGoalReply(run.result,domain,String(run.input?.message??''));
+    const output=validateGoalReply(normalizeGoalReply(run.result),domain,String(run.input?.message??''));
     // 待确认问题这一项要和 Kimi 运行时用同一套口径：否则同一份模型输出，
     // 一边被作废整份目标空间、一边照单全收。
     // 归一放在共享层：两条运行时对同一份模型输出必须给出同一个结论。

@@ -5,7 +5,7 @@ import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import vm from 'node:vm';
 import {KimiCodeAgent} from '../host/kimi-code-agent.mjs';
-import {validateGoalReply} from '../web/goal-agent-core.mjs';
+import {validateGoalReply, normalizeGoalReply} from '../web/goal-agent-core.mjs';
 import {safeAdaptiveLayout, normalizeQuestions, normalizeAdaptiveLayout} from '../web/adaptive-ui.mjs';
 
 // 两条运行时对同一份模型输出必须给出同一个结论：要么都收下同样的目标空间，
@@ -52,13 +52,13 @@ function loadDshNormalizer() {
   const start=source.indexOf('function normalizeGoalRun');
   const end=source.indexOf('const server=createServer');
   assert.ok(start>0&&end>start,'找不到宿主的运行归一');
-  const context=vm.createContext({validateGoalReply,safeAdaptiveLayout,normalizeQuestions,normalizeAdaptiveLayout});
+  const context=vm.createContext({validateGoalReply,normalizeGoalReply,safeAdaptiveLayout,normalizeQuestions,normalizeAdaptiveLayout});
   vm.runInContext(`${source.slice(start,end)}\nglobalThis.normalizeGoalRun=normalizeGoalRun;`,context);
   return context.normalizeGoalRun;
 }
 
-async function kimiVerdict(layout) {
-  const output={reply:'好',proposal:null,layout};
+async function kimiVerdict(layout,extra={}) {
+  const output={reply:'好',proposal:null,layout,...extra};
   const {statePath,fetchImpl}=kimiServer(output);
   try {
     const agent=new KimiCodeAgent({token:'secret-token',statePath,workspace:'/along',fetchImpl});
@@ -67,14 +67,14 @@ async function kimiVerdict(layout) {
   } finally { rmSync(statePath,{force:true}); }
 }
 
-function dshVerdict(layout) {
+function dshVerdict(layout,extra={}) {
   const normalizeGoalRun=loadDshNormalizer();
   return normalizeGoalRun({
     kind:'goal',runtime:'dsh-superagent',requestId:'along-goal-layout',actual:true,
     source:{kind:'along',label:'Along 目标'},trigger:{kind:'goal',label:'正在提交给 DSH'},
     agents:[],events:[],assignments:[],status:'working',statusLabel:'DSH 正在处理',progress:40,
     input:{goal:{domain:'health',title:'运动',target:120},message:'做一个计划'},
-    result:{reply:'好',proposal:null,layout},
+    result:{reply:'好',proposal:null,layout,...extra},
   });
 }
 
@@ -111,6 +111,28 @@ test('no runtime delivers a made-up object as user facing text',async()=>{
   for (const item of malformedLayouts) {
     const dsh=dshVerdict(item.layout);
     const kimi=await kimiVerdict(item.layout);
+    const text=JSON.stringify([dsh.result,kimi.result]);
+    assert.ok(!text.includes('[object Object]'),`「${item.name}」把对象兜底成了 [object Object]`);
+  }
+});
+
+// 回复与提案也要一致：模型给了过长的回复或提案标题时，一条运行时截断收下、
+// 另一条整份作废，用户看到的还是「两条运行时结论相反」。
+const malformedReplies=[
+  {name:'回复超长',extra:{reply:'好'.repeat(1500)}},
+  {name:'提案标题超长',extra:{proposal:{active:true,title:'标'.repeat(100),target:120,task:'今天动一动',reason:'按 120 分钟分配'}}},
+  {name:'提案任务是对象',extra:{proposal:{active:true,title:'本周运动',target:120,task:{text:'今天动一动'},reason:'按 120 分钟分配'}}},
+  {name:'回复是对象',extra:{reply:{text:'好'}}},
+];
+
+test('both runtimes reach the same verdict on the same reply and proposal',async()=>{
+  for (const item of malformedReplies) {
+    const dsh=dshVerdict(baseLayout,item.extra);
+    const kimi=await kimiVerdict(baseLayout,item.extra);
+    const dshOk=dsh.status!=='blocked'&&!!dsh.result?.reply;
+    const kimiOk=kimi.status!=='blocked'&&!!kimi.result?.reply;
+    assert.equal(dshOk,kimiOk,`「${item.name}」在两条运行时上的结论相反`);
+    if (dshOk) assert.equal(dsh.result.reply,kimi.result.reply,`「${item.name}」交付的回复不一样`);
     const text=JSON.stringify([dsh.result,kimi.result]);
     assert.ok(!text.includes('[object Object]'),`「${item.name}」把对象兜底成了 [object Object]`);
   }

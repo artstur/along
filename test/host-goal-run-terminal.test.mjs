@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import vm from 'node:vm';
-import {validateGoalReply} from '../web/goal-agent-core.mjs';
+import {validateGoalReply, normalizeGoalReply} from '../web/goal-agent-core.mjs';
 import {safeAdaptiveLayout, normalizeQuestions, normalizeAdaptiveLayout} from '../web/adaptive-ui.mjs';
 
 const hostSource=readFileSync(new URL('../host/agent-host.mjs',import.meta.url),'utf8');
@@ -13,7 +13,7 @@ function loadNormalizeGoalRun() {
   const start=hostSource.indexOf('function normalizeGoalRun');
   const end=hostSource.indexOf('const server=createServer');
   assert.ok(start>0&&end>start,'找不到宿主的归一函数');
-  const context=vm.createContext({validateGoalReply,safeAdaptiveLayout,normalizeQuestions,normalizeAdaptiveLayout});
+  const context=vm.createContext({validateGoalReply,normalizeGoalReply,safeAdaptiveLayout,normalizeQuestions,normalizeAdaptiveLayout});
   vm.runInContext(`${hostSource.slice(start,end)}\nglobalThis.api={normalizeGoalRun};`,context);
   return context.api;
 }
