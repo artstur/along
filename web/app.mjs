@@ -577,9 +577,25 @@ async function clearHealthData() {
   notice(real ? (stopped ? '已清除本机健康摘要，并停止读取 Apple Health' : '已清除本机健康摘要；请到系统设置里撤销 Apple Health 权限') : '已退出健康演示数据');
 }
 
+async function loadReplay() {
+  return fetch('./agent-replay.json').then(response => response.json());
+}
 async function injectEvent(event) {
   if (running) return;
-  const before = state;
+  const localAgent = ['localhost', '127.0.0.1'].includes(location.hostname);
+  let before = state;
+  // 公网版回放的是一段录好的 Along 运行，它固定从回放文件声明的起点开始。
+  // 用户先点过一次安静的变化，起点就偏了，主场景再也点不出来——README 承诺
+  // 两个按钮都是文档化的用法。先把实验拨回那个起点，主场景就始终可用
+  // （已经发生过的变化记录保留，安静处理的那几条还要看得见）。
+  if (!localAgent && event.type==='workout' && event.amount===35) {
+    const replay=await loadReplay();
+    if (replay?.beforeMinutes!=null && before.snapshot?.workoutMinutes!==replay.beforeMinutes) {
+      const restarted=startExperiment(before);
+      before={...restarted,loop:{...restarted.loop,changes:before.loop?.changes ?? []}};
+      saveHealth(before);
+    }
+  }
   let route;
   try { route = routeHealthEvent(before, event); } catch (error) { notice(error.message); return; }
   const id = newId('change');
@@ -589,9 +605,8 @@ async function injectEvent(event) {
   if (route.decision === 'quiet') return;
   try {
     let result;
-    const localAgent = ['localhost', '127.0.0.1'].includes(location.hostname);
-    if (!localAgent && before.snapshot.workoutMinutes === 75 && event.type === 'workout' && event.amount === 35) {
-      const replay = await fetch('./agent-replay.json').then(response => response.json());
+    if (!localAgent && event.type === 'workout' && event.amount === 35) {
+      const replay = await loadReplay();
       if (replay.experiment !== EXPERIMENT || replay.beforeMinutes !== 75 || replay.eventMinutes !== 35) throw Error('回放场景不匹配');
       result = {decision:'replan', source:'recorded-along', suggestion:replay.suggestion};
     } else if (localAgent) {
