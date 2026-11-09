@@ -94,6 +94,20 @@ test('a swarm that reports nothing at all converges to blocked instead of workin
   } finally { cleanup(); }
 });
 
+test('a failed subagent does not throw away a validated result',async()=>{
+  const {agent,cleanup}=withAgent({
+    mainMessages:[assistant(JSON.stringify(goalResult))],
+    transcript:[swarmFrame(['目标策略师','风险评审'],
+      '<subagent agent_id="agent-0" item="目标策略师" outcome="completed">ok</subagent><subagent agent_id="agent-1" item="风险评审" outcome="failed">boom</subagent>')],
+  });
+  try {
+    const response=await agent.startGoal({requestId:'req-subagent-failed',...goalInput});
+    assert.equal(response.run.status,'done','一个子 Agent 失败不该连坐掉已经校验过的结果');
+    assert.ok(response.run.result);
+    assert.ok(response.run.agents.some(item=>item.status==='blocked'),'失败的子 Agent 要在卡片上标出来');
+  } finally { cleanup(); }
+});
+
 test('a task run converges once the main session finishes',async()=>{
   const {agent,cleanup}=withAgent({});
   try {

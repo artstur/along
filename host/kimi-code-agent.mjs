@@ -239,7 +239,8 @@ export class KimiCodeAgent {
     const noOutput=entry.kind==='goal'&&!parsedResult&&!output&&!outputError&&(entry.synthesisSessionId?synthesisFinished:mainFinished);
     // 主会话要人处理或已经失败时，不能被综合会话遮住。
     const sessionFailed=session.last_turn_reason==='failed'||activeSession.last_turn_reason==='failed';
-    const blocked=needsMac||sessionFailed||activeSession.pending_interaction==='approval'||activeSession.pending_interaction==='question'||agents.some(agent=>agent.status==='blocked');
+    // 一个子 Agent 失败不再连坐整单：已经有校验过的结果就交付，失败的子 Agent 自己在卡片上标注。
+    const blocked=needsMac||sessionFailed||activeSession.pending_interaction==='approval'||activeSession.pending_interaction==='question'||(!parsedResult&&agents.some(agent=>agent.status==='blocked'));
     // 综合会话已经交付了校验过的结果，就算主会话还在跑，这次运行也该结束。
     const done=!blocked&&(entry.kind==='task'?swarmOver:(swarmOver||synthesisFinished)&&!!parsedResult);
     // 兜底：Kimi 服务挂死时不能让 iPhone 永远转圈。
