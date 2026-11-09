@@ -5,7 +5,7 @@ import {homedir, networkInterfaces} from 'node:os';
 import {join} from 'node:path';
 import {mkdirSync, readFileSync, writeFileSync, existsSync, chmodSync} from 'node:fs';
 import {routeHealthChange, validateGoalReply, validateTaskReply} from '../web/goal-agent-core.mjs';
-import {safeAdaptiveLayout, normalizeQuestions} from '../web/adaptive-ui.mjs';
+import {safeAdaptiveLayout, normalizeAdaptiveLayout} from '../web/adaptive-ui.mjs';
 import {runTaskCodex} from './codex-agent.mjs';
 import {KimiCodeAgent} from './kimi-code-agent.mjs';
 import {DSH_RUNTIME, KIMI_RUNTIME, safeAgentRuntime} from '../web/super-agent.mjs';
@@ -115,7 +115,8 @@ function normalizeGoalRun(run) {
     const output=validateGoalReply(run.result,domain,String(run.input?.message??''));
     // 待确认问题这一项要和 Kimi 运行时用同一套口径：否则同一份模型输出，
     // 一边被作废整份目标空间、一边照单全收。
-    const rawLayout=run.result.layout==null?null:{...run.result.layout,questions:normalizeQuestions(run.result.layout.questions)};
+    // 归一放在共享层：两条运行时对同一份模型输出必须给出同一个结论。
+    const rawLayout=run.result.layout==null?null:normalizeAdaptiveLayout(run.result.layout,domain);
     const layout=rawLayout==null?null:safeAdaptiveLayout(rawLayout,domain);
     if (run.result.layout!=null && !layout) throw Error('Along 返回的目标空间格式不正确');
     return {...run,result:{...output,layout}};

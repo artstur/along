@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import vm from 'node:vm';
 import {validateGoalReply} from '../web/goal-agent-core.mjs';
-import {safeAdaptiveLayout, normalizeQuestions} from '../web/adaptive-ui.mjs';
+import {safeAdaptiveLayout, normalizeQuestions, normalizeAdaptiveLayout} from '../web/adaptive-ui.mjs';
 
 const hostSource=readFileSync(new URL('../host/agent-host.mjs',import.meta.url),'utf8');
 
@@ -13,7 +13,7 @@ function loadNormalizeGoalRun() {
   const start=hostSource.indexOf('function normalizeGoalRun');
   const end=hostSource.indexOf('const server=createServer');
   assert.ok(start>0&&end>start,'找不到宿主的归一函数');
-  const context=vm.createContext({validateGoalReply,safeAdaptiveLayout,normalizeQuestions});
+  const context=vm.createContext({validateGoalReply,safeAdaptiveLayout,normalizeQuestions,normalizeAdaptiveLayout});
   vm.runInContext(`${hostSource.slice(start,end)}\nglobalThis.api={normalizeGoalRun};`,context);
   return context.api;
 }
@@ -36,7 +36,8 @@ test('a goal layout the shared validator rejects ends the run instead of failing
   const {normalizeGoalRun}=loadNormalizeGoalRun();
   const run=normalizeGoalRun({
     ...baseRun,
-    result:{reply:'好的，先从记录开始。',proposal:null,layout:{...validLayout,modules:[{kind:'timeline',id:'x',title:'时间线',content:'x'}]}},
+    // 归一之后仍然不合格的布局：模块标题是对象，类型不对，原样交给共享校验层拒收。
+    result:{reply:'好的，先从记录开始。',proposal:null,layout:{...validLayout,modules:[{kind:'summary',id:'x',title:{text:'标题'},content:'内容'}]}},
   });
   // 校验失败是确定性的错误：这一次运行不会再变好。
   // 落成终态，前端才不会继续轮询、把用户锁在转圈里最长 30 分钟。
