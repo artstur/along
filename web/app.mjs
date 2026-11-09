@@ -278,7 +278,10 @@ function adaptiveGoalCard(layout) {
 function taskProposalCard() {
   if (!pendingTask || activeGoal !== 'health') return '';
   const suggestion=pendingTask.suggestion;
-  return `<div class="task-proposal"><span>Apple Health 变化 → 路由判断 → ${suggestion?'Along 提案 → 等待你确认':'等待 Along'}</span><p>${esc(pendingTask.reason)}</p>${suggestion ? `<strong>${esc(suggestion.task)}</strong><p>${esc(suggestion.reason)}</p><button class="button" data-action="accept-task">采用这一步</button> <button class="button secondary" data-action="dismiss-task">保留原任务</button>` : `<p>${esc(pendingTask.error || 'Along 正在规划下一步…')}</p>`}</div>`;
+  // 没有建议时也要给「保留原任务」：否则这条提示会一直留在首页，
+  // 用户唯一的出路是「清除本机健康摘要」，那会连他的数据一起删掉。
+  const dismiss='<button class="button secondary" data-action="dismiss-task">保留原任务</button>';
+  return `<div class="task-proposal"><span>Apple Health 变化 → 路由判断 → ${suggestion?'Along 提案 → 等待你确认':'等待 Along'}</span><p>${esc(pendingTask.reason)}</p>${suggestion ? `<strong>${esc(suggestion.task)}</strong><p>${esc(suggestion.reason)}</p><button class="button" data-action="accept-task">采用这一步</button> ${dismiss}` : `<p>${esc(pendingTask.error || 'Along 正在规划下一步…')}</p>${dismiss}`}</div>`;
 }
 function adaptiveTaskSection(layout) {
   const visible=layout.tasks.slice(0,2),hidden=Math.max(0,layout.tasks.length-visible.length);
