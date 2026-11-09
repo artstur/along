@@ -38,9 +38,9 @@ test('keeps Kimi runs separate while falling back unknown runtimes to DSH',()=>{
 
 test('a failed status read keeps the reason visible instead of swallowing it',()=>{
   const request=createGoalSuperAgentRequest({domain:'custom',goal:{title:'定义目标',target:null},message:'半年完成一部长篇小说',requestId:'along-goal-custom-novel'});
-  const run=createPendingGoalSuperAgentRun(request,1000);
+  const run=createPendingGoalSuperAgentRun(request,Date.now());
   const failed=withRunError({...run,actual:true},'Along 目标数值与用户指定的 150 不一致');
-  assert.equal(failed.status,'working');
+  assert.equal(failed.status,'working','刚读失败一次还要继续轮询，等真的读不到了才停');
   assert.equal(failed.error,'Along 目标数值与用户指定的 150 不一致');
   assert.equal(withRunError(null,'x'),null);
 });

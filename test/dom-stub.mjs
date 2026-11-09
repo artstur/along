@@ -75,12 +75,16 @@ export function installDomStub({storage={}}={}) {
   // app.mjs 里最长的定时器是 toast 自动消失（3.2 秒），会让测试进程白等；长延时统一压到 1 毫秒。
   const nativeSetTimeout=globalThis.setTimeout;
   globalThis.setTimeout=(fn,delay,...args)=>nativeSetTimeout(fn,delay>=1000?1:delay,...args);
-  // app.mjs 有几个 60 秒/4 秒/3 秒的轮询定时器，测试里不需要，也不能让进程无法退出。
-  globalThis.setInterval=()=>0;
+  // app.mjs 有几个 60 秒/4 秒/3 秒的轮询定时器，测试里默认不跑，也不能让进程无法退出；
+  // 需要验证轮询行为时用 tick(毫秒) 手动触发对应的那一个。
+  const intervals=[];
+  globalThis.setInterval=(fn,ms)=>{intervals.push({fn,ms});return intervals.length;};
   const app=document.querySelector('#app');
   return {
     app,
     store,
+    intervals,
+    async tick(ms) { for (const entry of intervals) if (entry.ms===ms) await entry.fn(); },
     storage:{get:key=>store.get(key)??null,set:(key,value)=>store.set(key,String(value))},
     click(dataset,extra={}) {
       return app.dispatch('click',{target:{closest:()=>({dataset})},...extra});

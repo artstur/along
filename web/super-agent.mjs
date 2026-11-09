@@ -3,6 +3,8 @@ export const GOAL_SUPER_AGENT_RUNS_KEY = 'along.goal-super-agent-runs.v1';
 export const AGENT_RUNTIME_KEY = 'along.agent-runtime.v1';
 export const DSH_RUNTIME = 'dsh-superagent';
 export const KIMI_RUNTIME = 'kimi-code-swarm';
+// 一次运行最多等这么久：读得到就读，读不到也到这个期限就明确停住，不让界面永远转圈。
+export const AGENT_RUN_TIMEOUT_MS = 30*60_000;
 
 const TASK_STATES = new Set(['temporary', 'planned', 'deferred']);
 const DOMAINS = new Set(['health', 'finance', 'custom']);
@@ -110,6 +112,10 @@ export function safeGoalSuperAgentRun(value) {
 }
 
 // 状态读取失败时保留原因，run 继续轮询；下一次成功会覆盖掉这条错误。
-export function withRunError(run, error) {
-  return run ? {...run, error:cleanText(error,'状态读取失败',500)} : null;
+// 但如果一直读不到状态（Mac 上的服务挂了），不能永远停在 working：等到期限就明确停住。
+export function withRunError(run, error, now=Date.now()) {
+  if (!run) return null;
+  const createdAt=Number.isFinite(run.createdAt)?run.createdAt:now;
+  const stalled=now-createdAt>AGENT_RUN_TIMEOUT_MS;
+  return {...run,error:cleanText(error,'状态读取失败',500),...(stalled?{status:'blocked',statusLabel:'状态读取失败'}:{})};
 }

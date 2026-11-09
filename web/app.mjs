@@ -225,6 +225,9 @@ async function refreshSuperAgentGoal(goalKey=activeGoal) {
     else if (screen==='home'&&activeGoal===goalKey) render();
   } catch(error) {
     saveGoalRun(goalKey,withRunError(current,error.message));
+    // 读不到状态也要让用户看见：否则错误只存在存储里，界面一直转圈。
+    if (screen==='agent'&&activeGoal===goalKey) renderAgentUpdate();
+    else if (screen==='home'&&activeGoal===goalKey) render();
   } finally { goalSuperAgentRequests.delete(current.requestId); }
 }
 function trustedMetric(source) {
