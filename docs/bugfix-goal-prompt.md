@@ -184,8 +184,8 @@ Along 是手机优先的目标工作台：把一个目标拆成「目标 / 来�
 ## 6. 命令与工作区
 
 - 仓库根 `~/workspace/along`，远端 `git@github.com:artstur/along.git`
-- **分支与 PR**：修复走功能分支 `fix/agent-contract-consistency`，改动推到 PR #5（https://github.com/artstur/along/pull/5）；直推 `main` 会被拒。下一轮接着这个分支与这个 PR，不要新开分支，也不要重开 PR。
-- **PR 描述就是交接文档**：每轮把修了什么、验证证据、遗留写进去；下一轮开工先读它（见第 2 节）。
+- **分支与 PR**：修复走功能分支 `fix/agent-contract-consistency`；直推 `main` 会被拒。PR #5（这一轮的大批修复）合入 main 之后，GitHub 不允许重开已合并的 PR——下一轮**继续用这个分支，但要开新的 PR**。
+- **PR 描述就是交接文档**：每轮把修了什么、验证证据、遗留写进去；下一轮开工先读上一轮那份（见第 2 节）。
 - **工具链**：本机 PATH 上默认没有 `node`，也没有 `npm`（先 `command -v npm` 确认）。`npm install` 本身需要 npm，没有就先装一个 Node ≥ 22.19（例如 `brew install node`）。
 - 只需要 `npm install` 一次：它会把项目自带的 Node 22.23.4 装到 `node_modules/node/bin/node`，并通过 `node_modules/.bin/node` 暴露给脚本。npm 运行脚本时会把 `node_modules/.bin` 加进 PATH，所以 `npm run check` 里的 `node` 用的就是这份 22.23.4，不需要系统 Node（`npm run dev` 直接写死 `./node_modules/node/bin/node`，同一个道理）。
 - `npm run check`（CI 同款：语法检查 + 全部测试）、`npm test`（只跑测试）、`npm run build`（生成 `dist/` 与 `ios/AlongHealth/Web/`）
