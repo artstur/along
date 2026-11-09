@@ -28,3 +28,42 @@ test('a goal run with a non-string ticket id does not freeze the agent page',asy
   assert.match(dom.app.innerHTML,/编排完成/,'目标编排面板要画得出来，不能让 render() 抛错');
   assert.doesNotMatch(dom.app.innerHTML,/12345/,'脏的 ticket.id 不该被当成可显示的工单号');
 });
+
+// 宿主返回了过不了本地白名单的目标编排记录：缺 kind / agents / events。
+const untrustedGoalRun={
+  actual:true,runtime:'dsh-superagent',requestId:'req-goal-2',status:'done',statusLabel:'编排完成',
+  error:'宿主说这条记录不可信',
+};
+
+test('an untrusted goal run record shows the host reason instead of vanishing',async()=>{
+  const dom=installDomStub({storage:{
+    [GOAL_RUNS_KEY]:JSON.stringify({'health:dsh-superagent':untrustedGoalRun}),
+    [AGENT_KEY]:JSON.stringify(agentConfig),
+    [RUNTIME_KEY]:JSON.stringify('dsh-superagent'),
+  }});
+  await import('../web/app.mjs?untrusted-goal-run');
+  // 记录存在却过不了白名单时，不能当作「没有记录」：那会让整个编排面板
+  // 静默消失，宿主给的原因用户永远看不到。
+  await dom.click({action:'edit-goal'});
+  assert.match(dom.app.innerHTML,/goal-orchestration/,'不可信的目标编排记录也要有明确的落点，不能静默消失');
+  assert.match(dom.app.innerHTML,/宿主说这条记录不可信/,'宿主给的原因要能被看到');
+});
+
+test('an untrusted goal run in the legacy key is cleared once the connection is ready',async()=>{
+  const dom=installDomStub({storage:{
+    [GOAL_RUNS_KEY]:JSON.stringify({health:untrustedGoalRun}),
+    [AGENT_KEY]:JSON.stringify(agentConfig),
+    [RUNTIME_KEY]:JSON.stringify('dsh-superagent'),
+  }});
+  globalThis.window.AlongAgentBridge={
+    request:({path})=>Promise.resolve(path==='/connection/status'?{along:true,ready:true,runtime:'dsh-superagent'}:{}),
+  };
+  await import('../web/app.mjs?legacy-untrusted-goal-run');
+  await dom.click({action:'edit-goal'});
+  await new Promise(resolve=>setTimeout(resolve,0));
+  await new Promise(resolve=>setTimeout(resolve,0));
+  const stored=JSON.parse(dom.storage.get(GOAL_RUNS_KEY));
+  // 旧键里存着的坏记录要能被清掉：否则那条失败状态会一直挂在存储里，
+  // 用户每次打开都看到同一个坏状态，却没有任何出路。
+  assert.equal(stored.health,undefined,'旧键里过不了白名单的记录要一起清掉');
+});
