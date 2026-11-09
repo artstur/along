@@ -97,10 +97,10 @@ Along 是手机优先的目标工作台：把一个目标拆成「目标 / 来�
 - **补回归测试。** 放 `test/`，命名体现被钉住的不变量（例：`test('health router stays quiet when the target is already met')`），不要 `fix-bug-123`。
 - **共享文件双端可用。** 改 `web/goal-agent-core.mjs`、`web/adaptive-ui.mjs`、`web/super-agent.mjs`、`web/loop.mjs` 时，必须同时能在浏览器和 Node 里跑通，不得引入 Node 专用模块。
 - **同步产物与版本号**（用户可见的改动，漏一处手机上就还是旧页面）：
-  - `web/index.html` 的 `?v=`（当前 39）
-  - `web/sw.js` 的 `CACHE`（当前 `along-shell-v39`）
-  - `ios/AlongHealth/Sources/AlongShellView.swift` 的 `build=`（当前 39）
-  - 需要重新安装 App 时，再提 `ios/AlongHealth/Info.plist` 的 `CFBundleVersion`（当前 33）
+  - `web/index.html` 的 `?v=`（当前 40）
+  - `web/sw.js` 的 `CACHE`（当前 `along-shell-v40`）
+  - `ios/AlongHealth/Sources/AlongShellView.swift` 的 `build=`（当前 40）
+  - 需要重新安装 App 时，再提 `ios/AlongHealth/Info.plist` 的 `CFBundleVersion`（当前 34）
 - **新增前端文件**要同时登记到 `tools/build.mjs` 的 `files` 和 `web/sw.js` 的 `FILES`，并保持 `web/` 平铺。
 - **改源码，不手改产物。** `dist/` 和 `ios/AlongHealth/Web/` 由 `npm run build` 生成；`ios/AlongHealth/Web/` 被 git 跟踪，build 后要连同源码一起提交。
 
