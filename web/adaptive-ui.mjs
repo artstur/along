@@ -30,7 +30,8 @@ function object(value, label) {
 }
 
 function text(value, label, max, {optional = false} = {}) {
-  if (optional && value == null) return '';
+  // 可选字段「缺失」与「为空」是同一件事：不该因为一个空标签把整份内容作废。
+  if (optional&&(value==null||(typeof value==='string'&&!value.trim()))) return '';
   if (typeof value !== 'string' || !value.trim() || value.trim().length > max) throw Error(`${label}格式不正确`);
   return value.trim();
 }

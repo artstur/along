@@ -20,6 +20,20 @@ test('adaptive layout keeps only the whitelisted declarative UI schema',()=>{
   assert.equal(value.modules[2].source,'workoutMinutes');
 });
 
+test('an empty optional field does not throw away the whole layout',()=>{
+  const empty=structuredClone(valid);
+  empty.badge='';
+  empty.modules[2].unit='';
+  empty.modules[2].note='';
+  const value=safeAdaptiveLayout(empty,'health');
+  assert.ok(value,'可选字段为空不该让整份布局作废');
+  assert.equal(value.badge,'');
+  assert.equal(value.modules[2].unit,'');
+  assert.equal(value.modules[2].note,'');
+  // 必填字段为空仍然要拒绝。
+  assert.equal(safeAdaptiveLayout({...valid,summary:''},'health'),null);
+});
+
 test('adaptive layout rejects invented metric sources and executable module kinds',()=>{
   const badMetric=structuredClone(valid);badMetric.modules[2].source='agentEstimatedMinutes';
   assert.throws(()=>validateAdaptiveLayout(badMetric,'health'),/指标来源不受信任/);
