@@ -34,6 +34,16 @@ test('an empty optional field does not throw away the whole layout',()=>{
   assert.equal(safeAdaptiveLayout({...valid,summary:''},'health'),null);
 });
 
+test('a layout without pending questions is still a usable goal space',()=>{
+  const noQuestions=structuredClone(valid);
+  delete noQuestions.questions;
+  const value=safeAdaptiveLayout(noQuestions,'health');
+  assert.ok(value,'少一个可选列表不该让整份目标空间作废');
+  assert.deepEqual(value.questions,[]);
+  // 真的不是列表仍然要拒绝：缺失可以，畸形不行。
+  assert.equal(safeAdaptiveLayout({...noQuestions,questions:'还有问题吗？'},'health'),null);
+});
+
 test('adaptive layout rejects invented metric sources and executable module kinds',()=>{
   const badMetric=structuredClone(valid);badMetric.modules[2].source='agentEstimatedMinutes';
   assert.throws(()=>validateAdaptiveLayout(badMetric,'health'),/指标来源不受信任/);

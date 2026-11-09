@@ -103,7 +103,8 @@ export function validateAdaptiveLayout(value, domain='health') {
   if (layout.version !== 1) throw Error('个性化页面版本不受支持');
   const modules=list(layout.modules, '页面模块', 6).map(item=>cleanModule(item,domain));
   const tasks=list(layout.tasks, '动态任务', 6).map(cleanTask);
-  const questions=list(layout.questions, '待确认问题', 6).map(item=>text(item, '待确认问题', 240));
+  // 待确认问题是可选列表：没给就当没有，不能因此把整份目标空间作废（和推荐连接一致）。
+  const questions=list(layout.questions ?? [], '待确认问题', 6).map(item=>text(item, '待确认问题', 240));
   const connections=inferredConnections(layout,domain,list(layout.connections??[], '推荐连接', 4).map(cleanConnection));
   const ids=[...modules.map(item=>item.id),...tasks.map(item=>item.id),...connections.map(item=>item.id)];
   if (new Set(ids).size !== ids.length) throw Error('页面模块 ID 重复');
