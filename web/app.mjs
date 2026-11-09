@@ -46,6 +46,12 @@ goalLayouts={health:goalLayouts.health||null,finance:goalLayouts.finance||null,.
 let pendingTask = readStored(TICKET_KEY, null);
 let superAgentRuns = readStored(SUPER_AGENT_RUNS_KEY, {});
 let goalSuperAgentRuns = readStored(GOAL_SUPER_AGENT_RUNS_KEY, {});
+// 上次停在「还没确认的新目标」上：App 在 Agent 回话落地前被关掉时，
+// 用户写下的目标和那句话不能因为重启就再也看不见。回到那一页去。
+if (isCustomGoalKey(activeGoal) && !goalCustom[activeGoal] && !goalLayouts[activeGoal] &&
+    ((conversations[activeGoal]?.length||0)>0 || Object.keys(goalSuperAgentRuns).some(key=>key.startsWith(`${activeGoal}:`)))) {
+  screen='agent';
+}
 function syncAgentViewportHeight() {
   const height=window.visualViewport?.height || window.innerHeight;
   document.documentElement.style.setProperty('--agent-viewport-height',`${Math.round(height)}px`);
@@ -636,6 +642,10 @@ function beginNewGoal() {
   previousGoalBeforeDraft=activeGoal;
   activeGoal=`custom:${newId('goal')}`;
   conversations[activeGoal]=[];
+  // 新目标在 Agent 回话落地前也是用户写下的东西：先落盘。
+  // 否则 App 恰好在这段时间重启，用户写的目标和这句话会一起消失。
+  localStorage.setItem(ACTIVE_GOAL_KEY,activeGoal);
+  saveConversations();
   screen='agent';
   render();
   if (agentConfig.token) void refreshAgentConnection();
@@ -690,6 +700,8 @@ app.addEventListener('click', event => {
   if (action === 'agent-back') {
     if (isCustomGoalKey(activeGoal) && !goalCustom[activeGoal] && !goalLayouts[activeGoal]) {
       delete conversations[activeGoal];
+      // 放弃了这份草稿：存储里也要删掉，别把废弃的对话留在本机。
+      saveConversations();
       activeGoal=previousGoalBeforeDraft || 'health';
       previousGoalBeforeDraft=null;
     }
