@@ -118,15 +118,23 @@ function requestedRuntime(value) {
 }
 function normalizeGoalRun(run) {
   if (!run?.result) return run;
-  const domain=run.input?.goal?.domain;
-  if (!['health','finance','custom'].includes(domain)) throw Error('Along 返回的目标类型无效');
-  const output=validateGoalReply(run.result,domain,String(run.input?.message??''));
-  // 待确认问题这一项要和 Kimi 运行时用同一套口径：否则同一份模型输出，
-  // 一边被作废整份目标空间、一边照单全收。
-  const rawLayout=run.result.layout==null?null:{...run.result.layout,questions:normalizeQuestions(run.result.layout.questions)};
-  const layout=rawLayout==null?null:safeAdaptiveLayout(rawLayout,domain);
-  if (run.result.layout!=null && !layout) throw Error('Along 返回的目标空间格式不正确');
-  return {...run,result:{...output,layout}};
+  try {
+    const domain=run.input?.goal?.domain;
+    if (!['health','finance','custom'].includes(domain)) throw Error('Along 返回的目标类型无效');
+    const output=validateGoalReply(run.result,domain,String(run.input?.message??''));
+    // 待确认问题这一项要和 Kimi 运行时用同一套口径：否则同一份模型输出，
+    // 一边被作废整份目标空间、一边照单全收。
+    const rawLayout=run.result.layout==null?null:{...run.result.layout,questions:normalizeQuestions(run.result.layout.questions)};
+    const layout=rawLayout==null?null:safeAdaptiveLayout(rawLayout,domain);
+    if (run.result.layout!=null && !layout) throw Error('Along 返回的目标空间格式不正确');
+    return {...run,result:{...output,layout}};
+  } catch(error) {
+    // 输出校验失败是确定性的错误：这一次运行不会再变好，必须落到终态。
+    // 抛成 5xx 的话，前端会把它当成「暂时读不到状态」继续轮询，
+    // 运行永远停在 working，用户被锁在转圈里最长 30 分钟。
+    // Kimi 那条路径就是把校验失败落成终态的，两边要一样。
+    return {...run,status:'blocked',statusLabel:'输出需要重试',result:null,error:`DSH 已完成，但输出校验失败：${error.message}`};
+  }
 }
 const server=createServer({key:readFileSync(key),cert:readFileSync(cert)},async(req,res)=>{
   try {
