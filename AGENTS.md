@@ -22,6 +22,7 @@
 
 ## 3. 怎样算改完
 
+- 修 bug 走 `docs/bugfix-goal-prompt.md` 里的流程（复现 → 独立核实 → 修复 → 回归验证 → 交付）。那份文档同时是跨轮次的记忆：第 7 节记着这个仓库已经踩过的坑，PR 描述的遗留清单记着还没修的——**开工前先读这两处，别重犯、别重修**。
 - 跑 `npm run check`，这是 CI 用的检查（语法检查加全部测试）。`npm test` 只跑全部测试，不能替代它。
 - `check` 按目录匹配：`web/`、`host/` 下的 `.mjs` 自动做语法检查，`test/*.test.mjs` 自动运行。新文件放对目录即可，不用改 `package.json`。
 - 推送 `main` 不会自动部署：GitHub Pages 只能手动触发；iPhone 要先 build，再在 Xcode 里重新安装。
