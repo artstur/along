@@ -35,6 +35,15 @@ test('an oversized body is still refused',async()=>{
   await assert.rejects(()=>readJsonBody(stream([payload]),16),/请求过大/,'超大的请求体要被拒绝');
 });
 
+test('a long chinese conversation is not refused as too large',async()=>{
+  // 上限按字符算：中文一个字是三个字节，按字节算会让一次正常的中文长对话
+  // （12 条历史 + 正文，最多几万字）被判「请求过大」。
+  const message='本'.repeat(15_000);
+  const payload=Buffer.from(JSON.stringify({message}),'utf8');
+  const parsed=await readJsonBody(stream([payload]),32_000);
+  assert.equal(parsed.message.length,15_000,'中文长对话不该被判「请求过大」');
+});
+
 test('both host entry points read the body with the shared reader',()=>{
   assert.match(agentHostSource,/readJsonBody\(req,32_000\)/,'Agent 宿主要用共享的读体实现');
   assert.match(serverSource,/readJsonBody\(req,8192\)/,'本地服务要用共享的读体实现');
