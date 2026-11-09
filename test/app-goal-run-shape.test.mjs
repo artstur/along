@@ -67,3 +67,19 @@ test('an untrusted goal run in the legacy key is cleared once the connection is 
   // 用户每次打开都看到同一个坏状态，却没有任何出路。
   assert.equal(stored.health,undefined,'旧键里过不了白名单的记录要一起清掉');
 });
+
+test('a goal run event with an invalid time does not freeze the agent page',async()=>{
+  const dom=installDomStub({storage:{
+    [GOAL_RUNS_KEY]:JSON.stringify({'health:dsh-superagent':{
+      ...goalRunWithNumericTicket,ticket:{id:'ticket-abc12345'},
+      events:[{text:'Main Session 已建立',at:'not-a-date'}],
+    }}),
+    [AGENT_KEY]:JSON.stringify(agentConfig),
+    [RUNTIME_KEY]:JSON.stringify('dsh-superagent'),
+  }});
+  await import('../web/app.mjs?goal-invalid-event-time');
+  // 目标编排面板也会格式化事件时间：那一处同样不能抛 RangeError。
+  await dom.click({action:'edit-goal'});
+  assert.match(dom.app.innerHTML,/goal-run-events/,'目标编排面板要画得出来，不能让 render() 抛错');
+  assert.match(dom.app.innerHTML,/—/,'非法时间显示占位符');
+});

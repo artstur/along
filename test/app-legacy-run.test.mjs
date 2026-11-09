@@ -67,3 +67,19 @@ test('an event with an unknown start time does not show a made-up date',async()=
   // 显示一个看起来很正常的时间，比显示「未知」更糟：用户会以为那是真的。
   assert.ok(!renders.some(html=>html.includes(epoch)),`不该显示一个看起来很正常的时间（${epoch}）`);
 });
+
+test('an event with an empty time shows the placeholder, not the epoch',async()=>{
+  const dom=installDomStub({storage:{
+    [ADAPTIVE_LAYOUTS_KEY]:JSON.stringify({health:layout,finance:null,custom:null}),
+    [RUNS_KEY]:JSON.stringify({'health:kimi-code-swarm:sleep-check':{...oldRun,events:[{text:'Swarm Mode 已显式开启',at:null}]}}),
+  }});
+  const renders=[];
+  Object.defineProperty(dom.app,'innerHTML',{get(){return renders[renders.length-1]??'';},set(value){renders.push(value);},configurable:true});
+  await import('../web/app.mjs?null-event-time');
+  await dom.click({action:'open-task',taskId:'sleep-check'});
+  await new Promise(resolve=>setTimeout(resolve,0));
+  const epoch=new Intl.DateTimeFormat('zh-CN',{hour:'2-digit',minute:'2-digit'}).format(new Date(0));
+  // new Date(null) 是 1970 年，不是「没有时间」——空值要显示占位符。
+  assert.ok(renders.some(html=>/<span>—<\/span>/.test(html)),'空时间显示占位符');
+  assert.ok(!renders.some(html=>html.includes(epoch)),`空时间不该显示 1970 年（${epoch}）`);
+});
