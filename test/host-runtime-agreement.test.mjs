@@ -5,7 +5,7 @@ import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import vm from 'node:vm';
 import {KimiCodeAgent} from '../host/kimi-code-agent.mjs';
-import {validateGoalReply} from '../web/goal-agent-core.mjs';
+import {validateGoalReply, normalizeGoalReply} from '../web/goal-agent-core.mjs';
 import {safeAdaptiveLayout, normalizeQuestions, normalizeAdaptiveLayout} from '../web/adaptive-ui.mjs';
 
 const layout={
@@ -48,7 +48,7 @@ function loadHostNormalizer() {
   const start=source.indexOf('function normalizeGoalRun');
   const end=source.indexOf('const server=createServer');
   assert.ok(start>0&&end>start,'找不到宿主的运行归一');
-  const context=vm.createContext({validateGoalReply,safeAdaptiveLayout,normalizeQuestions,normalizeAdaptiveLayout});
+  const context=vm.createContext({validateGoalReply,normalizeGoalReply,safeAdaptiveLayout,normalizeQuestions,normalizeAdaptiveLayout});
   vm.runInContext(`${source.slice(start,end)}\nglobalThis.normalizeGoalRun=normalizeGoalRun;`,context);
   return context.normalizeGoalRun;
 }

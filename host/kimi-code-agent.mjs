@@ -1,7 +1,7 @@
 import {homedir} from 'node:os';
 import {dirname, join} from 'node:path';
 import {existsSync, mkdirSync, readFileSync, renameSync, writeFileSync} from 'node:fs';
-import {validateGoalReply} from '../web/goal-agent-core.mjs';
+import {validateGoalReply, normalizeGoalReply} from '../web/goal-agent-core.mjs';
 import {safeAdaptiveLayout, normalizeAdaptiveLayout} from '../web/adaptive-ui.mjs';
 import {KIMI_RUNTIME, AGENT_RUN_TIMEOUT_MS} from '../web/super-agent.mjs';
 
@@ -15,10 +15,6 @@ function clean(value,fallback='',max=500) { return String(value??fallback).trim(
 // 回复与提案的字段由共享校验层 validateGoalReply 判断：这里只截断过长的字符串，
 // 非字符串原样传过去让它拒绝。String() 兜底会把对象变成 "[object Object]"，
 // 混过类型检查后当成 Along 的回复或用户的目标标题。
-function strictText(value,max) {
-  if (typeof value!=='string') return value==null?'':value;
-  return value.trim().slice(0,max);
-}
 function timestamp(value,fallback=Date.now()) {
   const parsed=typeof value==='number'?value:Date.parse(value);
   return Number.isFinite(parsed)?parsed:fallback;
@@ -109,13 +105,8 @@ Required JSON shape:
 Use at most 6 modules, 6 tasks and 6 questions. Each module has kind, id and title. A summary module has content; a fact_list module has items shaped as [{"label":"...","value":"..."}]; a chips module has string items. Do not use metric modules for a custom goal. Each task must include id, when, title, detail, state (temporary|planned|deferred). Questions must be strings. For a custom goal, proposal.target must be null. Preserve every explicit number, deadline, preference and constraint in the Along input. Keep all user-facing text in Chinese.`;
 }
 function goalResultFromOutput(output,domain,message) {
-  const normalized={...output,reply:strictText(output?.reply,1200),proposal:output?.proposal==null?null:{
-    ...output.proposal,
-    title:strictText(output.proposal.title,80),
-    task:strictText(output.proposal.task,120),
-    reason:strictText(output.proposal.reason,300),
-  }};
-  const validated=validateGoalReply(normalized,domain,message);
+  // 归一放在共享层：两条运行时对同一份模型输出必须给出同一个结论。
+  const validated=validateGoalReply(normalizeGoalReply(output),domain,message);
   const layout=output?.layout==null?null:safeAdaptiveLayout(normalizeAdaptiveLayout(output.layout,domain),domain);
   if (output?.layout!=null&&!layout) throw Error('Kimi 返回的目标空间格式不正确');
   return {...validated,layout};
