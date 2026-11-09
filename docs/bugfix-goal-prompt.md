@@ -97,10 +97,10 @@ Along 是手机优先的目标工作台：把一个目标拆成「目标 / 来�
 - **补回归测试。** 放 `test/`，命名体现被钉住的不变量（例：`test('health router stays quiet when the target is already met')`），不要 `fix-bug-123`。
 - **共享文件双端可用。** 改 `web/goal-agent-core.mjs`、`web/adaptive-ui.mjs`、`web/super-agent.mjs`、`web/loop.mjs` 时，必须同时能在浏览器和 Node 里跑通，不得引入 Node 专用模块。
 - **同步产物与版本号**（用户可见的改动，漏一处手机上就还是旧页面）：
-  - `web/index.html` 的 `?v=`（当前 32）
-  - `web/sw.js` 的 `CACHE`（当前 `along-shell-v32`）
-  - `ios/AlongHealth/Sources/AlongShellView.swift` 的 `build=`（当前 32）
-  - 需要重新安装 App 时，再提 `ios/AlongHealth/Info.plist` 的 `CFBundleVersion`（当前 26）
+  - `web/index.html` 的 `?v=`（当前 37）
+  - `web/sw.js` 的 `CACHE`（当前 `along-shell-v37`）
+  - `ios/AlongHealth/Sources/AlongShellView.swift` 的 `build=`（当前 37）
+  - 需要重新安装 App 时，再提 `ios/AlongHealth/Info.plist` 的 `CFBundleVersion`（当前 31）
 - **新增前端文件**要同时登记到 `tools/build.mjs` 的 `files` 和 `web/sw.js` 的 `FILES`，并保持 `web/` 平铺。
 - **改源码，不手改产物。** `dist/` 和 `ios/AlongHealth/Web/` 由 `npm run build` 生成；`ios/AlongHealth/Web/` 被 git 跟踪，build 后要连同源码一起提交。
 
@@ -164,6 +164,14 @@ Along 是手机优先的目标工作台：把一个目标拆成「目标 / 来�
 - **理财演示的「目标」不是余额天花板**：目标是要跨过的门槛，不参与余额运算；一旦拿它去封顶，目标被改小之后点「+¥800」余额反而会倒退。另外，写入时用的上限和 `loadFinance` 读取校验用的上界必须是同一个数，否则会出现「写得进去、读不出来」→ 余额被整条判非法而清零。
 - **清数据要连原生侧一起清**：只清网页里的 localStorage 缓存是不够的——原生侧还在读 HealthKit，下一轮前台刷新会把摘要原样写回来。清真实健康数据要走 `alongHealthClear` 这类桥接消息：清掉读取选择并停掉观察。
 - **写好的 Service Worker 需要真的注册**：`AGENTS.md` 把 `web/sw.js` 的 `FILES` 登记当成硬约定，但曾经没有任何地方注册过它，离线缓存实际没启用。注册要带支持性判断（`along://` 不是安全上下文，会自动跳过）与失败兜底。
+- **原生侧与宿主侧的行为也要能自动测**：`ios/AlongHealth/Sources/*.swift` 和 `host/agent-host.mjs` 都不是可 import 的模块，但「照抄一份逻辑来测」等于没测。仓库里已经用了两种取法：Swift 用 `swift <file>` 跑从真实源码里切出来的那段判断（CI 上没有 Swift 工具链时要优雅跳过），宿主用 `node:vm` 在独立上下文里跑切出来的函数——断言的都是真正发布的那份代码。
+- **同一份契约，运行时之间也会分叉**：Kimi 运行时先把模型给的布局归一（`layoutForAlong`）再校验，DSH 运行时直接校验。模型少给一个 `questions`，DSH 路径就把整份目标空间判成「格式不正确」，用户什么都拿不到。两条运行时对同一个字段的判断必须一致。
+- **可选列表和可选字符串要一视同仁**：缺一个 `questions` 数组，和给一个空的 `badge`、`unit`、`note` 一样，都不该让整份布局作废——「缺失」与「为空」等价，列表本身也是可选的。畸形内容（不是数组）仍然要拒绝。
+- **数字字符串就是那个数字**：校验只在 `typeof === 'number'` 时做范围检查，字符串会绕过上限，还会因为不再是数字而丢掉进度条。目标写成 `"120"`、`"10,000"` 时要归一成数字再按同一套范围规则校验；不是数字的说明文字才只用来显示。
+- **桥接的契约是一次请求一次答复**：原生侧任何「忙，正在处理」的分支都必须回一个失败答复，不能 `return` 掉——否则网页那边的 Promise 永远悬着，用户只看到「点了没反应」。
+- **别给「等用户操作」的桥接调用加超时**：健康导入要等用户在原生弹层里选完，可能合法地等很久，一刀切超时会误伤。要保证的是「每个请求都有答复」，不是「每个请求都在 N 秒内答复」。
+- **宿主答复的状态码要分清「我发错了」和「对方挂了」**：上游（DSH / Kimi / 模型）故障答复 5xx，客户端请求不合法才是 400。全答成 400 时客户端既不会重试，也分不清该找谁。
+- **入参清洗不要用 `String()` 兜底**：`String({})` 得到 `"[object Object]"`，混过长度检查后会被当成用户的目标送进模型。共享契约层要求真字符串的地方，宿主也必须要求。
 
 === END GOAL PROMPT ===
 
