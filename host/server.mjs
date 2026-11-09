@@ -2,17 +2,17 @@ import {createServer} from 'node:http';
 import {readFile,stat} from 'node:fs/promises';
 import {resolve,extname,sep} from 'node:path';
 import {routeHealthEvent} from '../web/loop.mjs';
+import {readJsonBody} from './request-body.mjs';
 const root=resolve('web');
 const types={'.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.mjs':'text/javascript; charset=utf-8','.js':'text/javascript; charset=utf-8','.svg':'image/svg+xml','.png':'image/png','.webmanifest':'application/manifest+json'};
 function json(res,status,value){res.writeHead(status,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'}).end(JSON.stringify(value));}
-async function parseBody(req){let raw='';for await(const part of req){raw+=part;if(raw.length>8192)throw Error('请求过大');}return JSON.parse(raw);}
 createServer(async(req,res)=>{
   try{
     const url=new URL(req.url,'http://localhost');
     if(url.pathname==='/api/health-event'){
       if(req.method!=='POST'||!req.headers['content-type']?.startsWith('application/json'))return json(res,405,{error:'仅接受 JSON POST'});
       if(req.headers.origin&&new URL(req.headers.origin).host!==req.headers.host)return json(res,403,{error:'来源不匹配'});
-      const {before,event}=await parseBody(req);
+      const {before,event}=await readJsonBody(req,8192);
       const route=routeHealthEvent(before,event);
       if(route.decision==='quiet')return json(res,200,{decision:'quiet',reason:route.reason,remaining:route.remainingAfter});
       if(typeof before.loop.currentTask!=='string'||before.loop.currentTask.length>100)throw Error('原任务格式不正确');
