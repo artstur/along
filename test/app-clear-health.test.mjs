@@ -32,10 +32,16 @@ test('a restart during the experiment brings the real summary back and keeps the
   const backupOnly={...healthkitState,source:null,snapshot:null,
     loop:{experiment:'weekly-workout-120-v1',previousState:healthkitState,currentTask:'本周安排一次 45 分钟健身',changes:[]}};
   const dom=installDomStub({storage:{[HEALTH_KEY]:JSON.stringify(backupOnly)}});
-  globalThis.window.AlongHealthBridge={clear:()=>Promise.resolve()};
+  let cleared=0;
+  globalThis.window.AlongHealthBridge={clear:()=>{cleared++;return Promise.resolve();}};
   await import('../web/app.mjs?clear-health-backup-only');
+  // 先确认真实摘要真的回到了顶层：否则后面的清除断言是恒真的，抓不到任何东西。
+  const restored=JSON.parse(dom.storage.get(HEALTH_KEY));
+  assert.equal(restored.source,'healthkit','重启后真实摘要要回到顶层');
+  assert.equal(restored.snapshot.workoutMinutes,75,'真实摘要不能丢');
   assert.match(dom.app.innerHTML,/清除本机健康摘要/,'真实摘要回到顶层后，清除入口必须在');
   await dom.click({action:'clear-health-data'});
+  assert.equal(cleared,1,'清掉真实摘要要同时让原生侧停掉读取');
   const saved=JSON.parse(dom.storage.get(HEALTH_KEY));
   assert.equal(saved.source,null);
   assert.equal(saved.snapshot,null);
