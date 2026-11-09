@@ -97,10 +97,10 @@ Along 是手机优先的目标工作台：把一个目标拆成「目标 / 来�
 - **补回归测试。** 放 `test/`，命名体现被钉住的不变量（例：`test('health router stays quiet when the target is already met')`），不要 `fix-bug-123`。
 - **共享文件双端可用。** 改 `web/goal-agent-core.mjs`、`web/adaptive-ui.mjs`、`web/super-agent.mjs`、`web/loop.mjs` 时，必须同时能在浏览器和 Node 里跑通，不得引入 Node 专用模块。
 - **同步产物与版本号**（用户可见的改动，漏一处手机上就还是旧页面）：
-  - `web/index.html` 的 `?v=`（当前 43）
-  - `web/sw.js` 的 `CACHE`（当前 `along-shell-v43`）
-  - `ios/AlongHealth/Sources/AlongShellView.swift` 的 `build=`（当前 43）
-  - 需要重新安装 App 时，再提 `ios/AlongHealth/Info.plist` 的 `CFBundleVersion`（当前 37）
+  - `web/index.html` 的 `?v=`（当前 44）
+  - `web/sw.js` 的 `CACHE`（当前 `along-shell-v44`）
+  - `ios/AlongHealth/Sources/AlongShellView.swift` 的 `build=`（当前 44）
+  - 需要重新安装 App 时，再提 `ios/AlongHealth/Info.plist` 的 `CFBundleVersion`（当前 38）
 - **新增前端文件**要同时登记到 `tools/build.mjs` 的 `files` 和 `web/sw.js` 的 `FILES`，并保持 `web/` 平铺。
 - **改源码，不手改产物。** `dist/` 和 `ios/AlongHealth/Web/` 由 `npm run build` 生成；`ios/AlongHealth/Web/` 被 git 跟踪，build 后要连同源码一起提交。
 
@@ -189,6 +189,8 @@ Along 是手机优先的目标工作台：把一个目标拆成「目标 / 来�
 - **确定性错误要落到终态**：输出校验失败是确定性的（这份结果不会再变好，重试也没用）。抛成 5xx 的话，前端会当成「暂时读不到状态」继续轮询，运行永远停在 working，输入框一直禁用，用户被锁 30 分钟。Kimi 那条路径一直把它落成 blocked + 明确原因，DSH 这条要一样。
 - **两条运行时对同一份模型输出必须给出同一个结论**：归一放在共享层，两条运行时都用它。归一只修能修的（截断、编号、去重、丢掉超量与未知类型），修不了的（文本类型不对）原样交给共享校验层拒绝。
 - **类型不对的文本不要兜底成 "[object Object]"**：那种脏文本会直接出现在用户的首页上。只有字符串和数字算文本；对象、数组、布尔都不是。
+- **共享归一要覆盖回复与提案，不只是目标空间**：目标空间统一了口径，回复与提案却还分叉（一边截断收下、一边整份作废），同一份模型输出在两条运行时上结论依旧相反。两边都要用的归一就都搬进共享层，不要只搬一半。
+- **改读体实现时别顺手改上限的量纲**：中文一个字是三个字节，上限从「字符」改成「字节」等于把可用长度缩到三分之一，一次正常的中文长对话会被判「请求过大」。
 
 === END GOAL PROMPT ===
 
