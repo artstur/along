@@ -141,8 +141,13 @@ const superAgentRequests=new Set();
 function taskRequest(task) { return {...createSuperAgentRequest({task,domain:goalDomain(activeGoal),goal:currentGoal(),context:currentSummary()}),runtime:agentRuntime}; }
 function currentSuperAgentRun(task) {
   const key=runKey(task.id);
-  const saved=safeSuperAgentRun(superAgentRuns[key]) || (agentRuntime===DSH_RUNTIME?safeSuperAgentRun(superAgentRuns[`${activeGoal}:${task.id}`]):null);
+  const stored=superAgentRuns[key];
+  const saved=safeSuperAgentRun(stored) || (agentRuntime===DSH_RUNTIME?safeSuperAgentRun(superAgentRuns[`${activeGoal}:${task.id}`]):null);
   if (saved) return saved;
+  // 存着的记录存在却过不了白名单：那是宿主返回了我们不认的形状。
+  // 不能拿一个假的「正在连接」把它盖掉——那会让真实的状态和原因永远看不到，
+  // 用户看到的是一个永远转圈的界面。
+  if (stored) return createFailedSuperAgentRun(taskRequest(task),typeof stored.error==='string'&&stored.error?stored.error:'宿主返回了无法识别的运行记录',Date.now(),agentRuntime);
   const created=createPendingSuperAgentRun(taskRequest(task),Date.now(),agentRuntime);
   superAgentRuns={...superAgentRuns,[key]:created};
   saveSuperAgentRuns();
