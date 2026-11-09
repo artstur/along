@@ -44,11 +44,29 @@ function cleanAgent(agent) {
   let changed=false;
   if (next.objective!=null && !isText(next.objective)) { next.objective='未提供说明'; changed=true; }
   if (next.work!=null && !isText(next.work)) { next.work=''; changed=true; }
+  // 状态标签直接渲染 agent.status：类型不对就不能当成状态显示出去。
+  if (next.status!=null && !isText(next.status)) { next.status=''; changed=true; }
   if (next.report && typeof next.report==='object' && next.report.summary!=null && !isText(next.report.summary)) {
     next.report={...next.report,summary:''};
     changed=true;
   }
   return changed ? next : agent;
+}
+// 授权边界：两种运行时给回来的形状不一样（字符串或对象），渲染层两种都读。
+// 类型不对的子字段直接删掉，让渲染层自己的兜底接手。
+function cleanMandate(mandate) {
+  if (mandate==null) return mandate;
+  if (typeof mandate==='string') return mandate;
+  if (typeof mandate!=='object') return null;
+  const next={...mandate};
+  let changed=false;
+  if (next.scope!=null && !isText(next.scope)) { delete next.scope; changed=true; }
+  if (next.actor && typeof next.actor==='object' && next.actor.id!=null && !isText(next.actor.id)) {
+    next.actor={...next.actor};
+    delete next.actor.id;
+    changed=true;
+  }
+  return changed ? next : mandate;
 }
 function sameList(left,right) { return left.length===right.length && left.every((item,index)=>item===right[index]); }
 // 运行记录里会显示给人看的文本字段：类型不对的不能当成文本显示出去。
@@ -63,6 +81,8 @@ function normalizeRunText(value, agentField) {
     if (part && typeof part==='object' && part.label!=null && !isText(part.label)) { next[key]={...part,label:'未提供说明'}; changed=true; }
   }
   if (next.ticket && typeof next.ticket==='object' && next.ticket.id!=null && !isText(next.ticket.id)) { delete next.ticket; changed=true; }
+  const mandate=cleanMandate(next.mandate);
+  if (mandate!==next.mandate) { next.mandate=mandate; changed=true; }
   const events=next.events.map(cleanEvent).filter(Boolean);
   if (!sameList(events,next.events)) { next.events=events; changed=true; }
   const agents=next[agentField].map(cleanAgent).filter(Boolean);
