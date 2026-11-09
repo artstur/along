@@ -2,6 +2,8 @@ export const ACTIVE_GOAL_KEY = 'along.active-goal.v1';
 export const FINANCE_KEY = 'along.finance-demo.v1';
 const HEALTH_GOAL_ID = 'along-health-weekly-workout';
 const FINANCE_TARGET = 10000;
+// 演示余额的上下界：写进去的和读出来的必须是同一个数，否则余额会被判非法而清零。
+const FINANCE_SAVED_MAX = 10000000;
 
 export function ensureHealthGoal(state) {
   if (state.goals.some(goal => goal.type === 'workout')) return state;
@@ -15,7 +17,7 @@ export function loadFinance(raw) {
   try {
     const value = JSON.parse(raw);
     if (value?.version === 1 && typeof value.connected === 'boolean' &&
-        Number.isInteger(value.saved) && value.saved >= 0 && value.saved <= 10000000 &&
+        Number.isInteger(value.saved) && value.saved >= 0 && value.saved <= FINANCE_SAVED_MAX &&
         Number.isInteger(value.recordCount) && value.recordCount >= 0) return value;
   } catch {}
   return {version: 1, connected: false, saved: 0, recordCount: 0};
@@ -25,9 +27,10 @@ export function connectFinanceDemo() {
   return {version: 1, connected: true, saved: 3200, recordCount: 0};
 }
 
-export function addFinanceDemoRecord(finance, target = FINANCE_TARGET) {
+export function addFinanceDemoRecord(finance) {
   if (!finance.connected) throw Error('请先打开理财演示连接');
-  return {...finance, saved: Math.min(target, finance.saved + 800), recordCount: finance.recordCount + 1};
+  // 目标只是要跨过的门槛，不参与余额运算：目标变小或已经达成，余额都不会倒退。
+  return {...finance, saved: Math.min(FINANCE_SAVED_MAX, finance.saved + 800), recordCount: finance.recordCount + 1};
 }
 
 export function healthView(state, customization = null) {
