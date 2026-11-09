@@ -97,10 +97,10 @@ Along 是手机优先的目标工作台：把一个目标拆成「目标 / 来�
 - **补回归测试。** 放 `test/`，命名体现被钉住的不变量（例：`test('health router stays quiet when the target is already met')`），不要 `fix-bug-123`。
 - **共享文件双端可用。** 改 `web/goal-agent-core.mjs`、`web/adaptive-ui.mjs`、`web/super-agent.mjs`、`web/loop.mjs` 时，必须同时能在浏览器和 Node 里跑通，不得引入 Node 专用模块。
 - **同步产物与版本号**（用户可见的改动，漏一处手机上就还是旧页面）：
-  - `web/index.html` 的 `?v=`（当前 37）
-  - `web/sw.js` 的 `CACHE`（当前 `along-shell-v37`）
-  - `ios/AlongHealth/Sources/AlongShellView.swift` 的 `build=`（当前 37）
-  - 需要重新安装 App 时，再提 `ios/AlongHealth/Info.plist` 的 `CFBundleVersion`（当前 31）
+  - `web/index.html` 的 `?v=`（当前 38）
+  - `web/sw.js` 的 `CACHE`（当前 `along-shell-v38`）
+  - `ios/AlongHealth/Sources/AlongShellView.swift` 的 `build=`（当前 38）
+  - 需要重新安装 App 时，再提 `ios/AlongHealth/Info.plist` 的 `CFBundleVersion`（当前 32）
 - **新增前端文件**要同时登记到 `tools/build.mjs` 的 `files` 和 `web/sw.js` 的 `FILES`，并保持 `web/` 平铺。
 - **改源码，不手改产物。** `dist/` 和 `ios/AlongHealth/Web/` 由 `npm run build` 生成；`ios/AlongHealth/Web/` 被 git 跟踪，build 后要连同源码一起提交。
 
@@ -172,6 +172,10 @@ Along 是手机优先的目标工作台：把一个目标拆成「目标 / 来�
 - **别给「等用户操作」的桥接调用加超时**：健康导入要等用户在原生弹层里选完，可能合法地等很久，一刀切超时会误伤。要保证的是「每个请求都有答复」，不是「每个请求都在 N 秒内答复」。
 - **宿主答复的状态码要分清「我发错了」和「对方挂了」**：上游（DSH / Kimi / 模型）故障答复 5xx，客户端请求不合法才是 400。全答成 400 时客户端既不会重试，也分不清该找谁。
 - **入参清洗不要用 `String()` 兜底**：`String({})` 得到 `"[object Object]"`，混过长度检查后会被当成用户的目标送进模型。共享契约层要求真字符串的地方，宿主也必须要求。
+- **异步回写前要确认「我这条还是当前的那一条」**：同一条路径上的兄弟代码常常已经有这个守卫（实验路径用 `changes[0].id` 判断），那就是这个仓库的既有约定。await 回来之后必须重新确认，否则先发后到的旧结果会盖掉新结果——用户看到的是一条对不上他当前进度的提案。
+- **读函数不能有破坏性副作用**：读运行记录的地方一旦发现记录不可信，不能造一条假的「正在连接」把它写回存储——那会让真实状态和失败原因永远看不到，用户只剩一个永久转圈的界面。
+- **等用户操作的状态也要留出口**：还没等到 Agent 建议时，提示卡片上也要有「保留原任务」。否则用户唯一的出路是删掉自己的数据才能脱身。
+- **期限比较要先归一时间基准**：`Date.now()-undefined` 是 `NaN`，和任何数比较都为假——期限永远不到。缺时间的记录要按已过期处理。
 
 === END GOAL PROMPT ===
 

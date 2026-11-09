@@ -141,8 +141,13 @@ const superAgentRequests=new Set();
 function taskRequest(task) { return {...createSuperAgentRequest({task,domain:goalDomain(activeGoal),goal:currentGoal(),context:currentSummary()}),runtime:agentRuntime}; }
 function currentSuperAgentRun(task) {
   const key=runKey(task.id);
-  const saved=safeSuperAgentRun(superAgentRuns[key]) || (agentRuntime===DSH_RUNTIME?safeSuperAgentRun(superAgentRuns[`${activeGoal}:${task.id}`]):null);
+  const stored=superAgentRuns[key];
+  const saved=safeSuperAgentRun(stored) || (agentRuntime===DSH_RUNTIME?safeSuperAgentRun(superAgentRuns[`${activeGoal}:${task.id}`]):null);
   if (saved) return saved;
+  // 存着的记录存在却过不了白名单：那是宿主返回了我们不认的形状。
+  // 不能拿一个假的「正在连接」把它盖掉——那会让真实的状态和原因永远看不到，
+  // 用户看到的是一个永远转圈的界面。
+  if (stored) return createFailedSuperAgentRun(taskRequest(task),typeof stored.error==='string'&&stored.error?stored.error:'宿主返回了无法识别的运行记录',Date.now(),agentRuntime);
   const created=createPendingSuperAgentRun(taskRequest(task),Date.now(),agentRuntime);
   superAgentRuns={...superAgentRuns,[key]:created};
   saveSuperAgentRuns();
@@ -278,7 +283,10 @@ function adaptiveGoalCard(layout) {
 function taskProposalCard() {
   if (!pendingTask || activeGoal !== 'health') return '';
   const suggestion=pendingTask.suggestion;
-  return `<div class="task-proposal"><span>Apple Health 变化 → 路由判断 → ${suggestion?'Along 提案 → 等待你确认':'等待 Along'}</span><p>${esc(pendingTask.reason)}</p>${suggestion ? `<strong>${esc(suggestion.task)}</strong><p>${esc(suggestion.reason)}</p><button class="button" data-action="accept-task">采用这一步</button> <button class="button secondary" data-action="dismiss-task">保留原任务</button>` : `<p>${esc(pendingTask.error || 'Along 正在规划下一步…')}</p>`}</div>`;
+  // 没有建议时也要给「保留原任务」：否则这条提示会一直留在首页，
+  // 用户唯一的出路是「清除本机健康摘要」，那会连他的数据一起删掉。
+  const dismiss='<button class="button secondary" data-action="dismiss-task">保留原任务</button>';
+  return `<div class="task-proposal"><span>Apple Health 变化 → 路由判断 → ${suggestion?'Along 提案 → 等待你确认':'等待 Along'}</span><p>${esc(pendingTask.reason)}</p>${suggestion ? `<strong>${esc(suggestion.task)}</strong><p>${esc(suggestion.reason)}</p><button class="button" data-action="accept-task">采用这一步</button> ${dismiss}` : `<p>${esc(pendingTask.error || 'Along 正在规划下一步…')}</p>${dismiss}`}</div>`;
 }
 function adaptiveTaskSection(layout) {
   const visible=layout.tasks.slice(0,2),hidden=Math.max(0,layout.tasks.length-visible.length);
@@ -319,7 +327,7 @@ function home() {
         <div class="section-heading"><h2>连接</h2><span>连接和任务相关的数据源</span></div>
         <div class="connection-card"><div class="connection-symbol" aria-hidden="true">${activeGoal === 'health' ? '♥' : '¥'}</div><div class="connection-copy"><div class="connection-name"><strong>${esc(connection.name)}</strong><span class="source-tag ${connection.kind}">${esc(connection.label)}</span></div><p>${esc(connection.detail)}${esc(sourceTime)}</p></div><button class="agent-action connection-agent-action" data-action="${activeGoal === 'health' ? 'connect-health' : connection.kind === 'demo' ? 'finance-event' : 'connect-finance'}">${esc(connection.action)}</button></div>
         ${connection.metrics?.length ? `<div class="connection-metrics">${connection.metrics.map(item=>`<div><span>${esc(item.label)}</span><strong>${esc(item.value)}</strong></div>`).join('')}</div>` : ''}
-        ${activeGoal === 'health' && (state.source === 'demo' || state.source === 'healthkit') ? `<button class="minor-action" data-action="clear-health-data">${hasRealHealthData() ? '清除本机健康摘要' : '退出健康演示数据'}</button>` : ''}
+        ${activeGoal === 'health' && (state.source === 'demo' || hasRealHealthData()) ? `<button class="minor-action" data-action="clear-health-data">${hasRealHealthData() ? '清除本机健康摘要' : '退出健康演示数据'}</button>` : ''}
         ${activeGoal === 'finance' && finance.connected ? '<p class="connection-footnote">点“模拟 +¥800”只会更新这份本机演示数据，不会访问账户或发起交易。</p>' : ''}
       </section>`:'';
   const recommendedConnectionContent=layout?adaptiveConnectionSection(layout):'';
@@ -722,9 +730,13 @@ window.addEventListener('along-health-update', async event => {
   saveTicket(ticket);if (screen==='home') render();
   try {
     const result=await agentCall(agentConfig,'/goal/event',{goal,before:{workoutMinutes:before.workoutMinutes,selectedTypes:['workout']},after:{workoutMinutes:next.snapshot.workoutMinutes,selectedTypes:['workout']},currentTask:goalCustom.health?.task||healthView(state).primary.title});
-    if (result.decision==='replan') saveTicket({...ticket,status:'proposed',reason:result.reason,suggestion:result.suggestion});
-    else saveTicket(null);
-  } catch(error) { saveTicket({...ticket,status:'waiting',error:error.message}); }
+    // 等回复期间可能又来了一次健康变化，也可能用户已经把这条提案处理掉了：
+    // 那一次的结果才是当前的，旧的结果盖上去会让提案对不上用户已经走到的进度。
+    if (pendingTask?.id===ticket.id) {
+      if (result.decision==='replan') saveTicket({...ticket,status:'proposed',reason:result.reason,suggestion:result.suggestion});
+      else saveTicket(null);
+    }
+  } catch(error) { if (pendingTask?.id===ticket.id) saveTicket({...ticket,status:'waiting',error:error.message}); }
   if (screen==='home') render();
 });
 sheet.addEventListener('click', event => {
