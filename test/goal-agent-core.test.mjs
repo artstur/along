@@ -56,6 +56,117 @@ test('a reply without a proposal is kept even when the user named a number',()=>
   assert.equal(value.proposal,null);
 });
 
+test('a change verb counts as an assignment only when a goal word qualifies it',()=>{
+  assert.equal(requestedTargetFromMessage('目标调整为 200 分钟','health'),200);
+  assert.equal(requestedTargetFromMessage('目标提高到 200 分钟','health'),200);
+  assert.equal(requestedTargetFromMessage('把目标减到 100 分钟','health'),100);
+  assert.equal(requestedTargetFromMessage('把目标调到 120 分钟','health'),120);
+  assert.equal(requestedTargetFromMessage('把目标调成 130 分钟','health'),130);
+  assert.equal(requestedTargetFromMessage('把目标改到 140 分钟','health'),140);
+  assert.equal(requestedTargetFromMessage('今天运动量提高到 150 分钟','health'),null);
+  assert.equal(requestedTargetFromMessage('今天运动量调整为 150 分钟','health'),null);
+});
+
+test('a money amount is only read when the text carries a currency marker',()=>{
+  assert.equal(requestedTargetFromMessage('目标改为 3 万元','finance'),30000);
+  assert.equal(requestedTargetFromMessage('目标改为 1.5 万元','finance'),15000);
+  assert.equal(requestedTargetFromMessage('目标改为 ¥3万','finance'),30000);
+  assert.equal(requestedTargetFromMessage('存钱目标改成 30000','finance'),null);
+  assert.equal(requestedTargetFromMessage('目标改成 3 万','finance'),null);
+  assert.equal(requestedTargetFromMessage('目标改成 3 万 5','finance'),null);
+  assert.equal(requestedTargetFromMessage('还款目标改成 3 期','finance'),null);
+});
+
+test('a bare 分 is only read as minutes when it does not start another word',()=>{
+  assert.equal(requestedTargetFromMessage('目标改为 3 分期','health'),null);
+  assert.equal(requestedTargetFromMessage('目标改为 150 分','health'),150);
+  assert.equal(requestedTargetFromMessage('目标改为 2 小时 30 分','health'),150);
+});
+
+// 语料基线：每一条都是「用户是否真的指派了目标数值」的判断，任何一条变化都要有意识地改。
+const PHRASE_CORPUS=[
+  ['目标改为 150 分钟','health',150],
+  ['把每周运动目标改成 150 分钟','health',150],
+  ['这周运动目标改为 150 分钟，但每天只有 20 分钟','health',150],
+  ['目标设为 2 小时','health',120],
+  ['目标改成 90 分钟','health',90],
+  ['运动目标定为 180 分钟','health',180],
+  ['运动目标 150 分钟','health',150],
+  ['每周目标改成 150 分钟','health',150],
+  ['目标改为 1.5 小时','health',90],
+  ['目标改成 150分钟','health',150],
+  ['目标改为 150 分','health',150],
+  ['目标改为 2 小时 30 分钟','health',150],
+  ['目标改为 1 小时 45 分钟','health',105],
+  ['目标改为 2 小时，每天 30 分钟','health',120],
+  ['设定成 150 分钟','health',150],
+  ['目标调整为 200 分钟','health',200],
+  ['目标提高到 200 分钟','health',200],
+  ['把目标减到 100 分钟','health',100],
+  ['把目标调到 120 分钟','health',120],
+  ['把每天上限改成 30 分钟','health',null],
+  ['每天运动改成 20 分钟','health',null],
+  ['把单次上限设为 45 分钟','health',null],
+  ['上限改成 40 分钟','health',null],
+  ['每次 30 分钟','health',null],
+  ['我每天最多运动 30 分钟','health',null],
+  ['每周不超过 200 分钟','health',null],
+  ['每天最多 30 分钟','health',null],
+  ['目标改为 30 分钟以内','health',null],
+  ['目标改成 30 分钟封顶','health',null],
+  ['目标改为 30 分钟，每天 3 次','health',30],
+  ['目标改为 30 分钟每天 3 次','health',30],
+  ['目标改成 150 分钟（每天 3 次）','health',150],
+  ['目标改成 150 分钟，每天最多 45 分钟','health',150],
+  ['每周运动 120 分钟','health',null],
+  ['我上周运动了 120 分钟','health',null],
+  ['今天运动量达到 150 分钟','health',null],
+  ['先达到 150 分钟','health',null],
+  ['目标达到 150 分钟','health',150],
+  ['目标改为 150 分钟，第一阶段先做 50 分钟','health',150],
+  ['第一阶段先做 50 分钟，目标改为 150 分钟','health',150],
+  ['目标改成 150 分钟，这周已经做了 60 分钟','health',150],
+  ['预算改为 500 元','finance',null],
+  ['每月预算改成 3000 元','finance',null],
+  ['把预算设为 20000 元','finance',null],
+  ['预算改成 ¥500','finance',null],
+  ['每天最多花 100 元','finance',null],
+  ['餐饮预算 800 元','finance',null],
+  ['允许额度 500 元','finance',null],
+  ['每月可支配 5000 元','finance',null],
+  ['预算改为 500 元，目标改为 12000 元','finance',12000],
+  ['目标改为 ¥12,000','finance',12000],
+  ['目标改为 12000 元','finance',12000],
+  ['目标改为 12,000 元','finance',12000],
+  ['目标改为 ¥12,000 元','finance',12000],
+  ['目标改成 30000 人民币','finance',30000],
+  ['每月目标改为 ¥12,000 元','finance',12000],
+  ['目标改成 5000 块','finance',5000],
+  ['设定为 ¥500','finance',500],
+  ['存钱目标改成 30000','finance',null],
+  ['目标改为 3 万元','finance',30000],
+  ['目标改为 1.5 万元','finance',15000],
+  ['目标改为 0 分钟','health',null],
+  ['目标改为 10081 分钟','health',null],
+  ['目标改为 0 元','finance',null],
+  ['不要把目标改成 150 分钟','health',null],
+  ['先别把目标改成 150 分钟','health',null],
+  ['如果目标改成 150 分钟就好了','health',null],
+  ['不要把目标改成 30000 元','finance',null],
+  ['如果目标改成 30000 元就好了','finance',null],
+  ['每月房租设为 2500 元','finance',null],
+  ['评分目标改为 3 分','health',null],
+  ['目标改成 150 分钟，目标改成 180 分钟','health',180],
+  ['目标改成 30000 元，目标改成 12000 元','finance',12000],
+  ['未来半年完成一部长篇小说','custom',null],
+];
+
+test('the phrase corpus keeps every expected target',()=>{
+  for (const [message,domain,expected] of PHRASE_CORPUS) {
+    assert.equal(requestedTargetFromMessage(message,domain),expected,message);
+  }
+});
+
 test('the proposal preview states no change when there is no proposal',()=>{
   assert.equal(goalChangeText({target:120},null,'health'),'');
   assert.equal(goalChangeText({target:10000},null,'finance'),'');
