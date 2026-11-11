@@ -11,8 +11,9 @@ import {KimiCodeAgent} from './kimi-code-agent.mjs';
 import {DSH_RUNTIME, KIMI_RUNTIME, safeAgentRuntime} from '../web/super-agent.mjs';
 import {readJsonBody} from './request-body.mjs';
 import {HostError, upstream, statusForError} from './host-error.mjs';
+import {agentHealthSnapshot,cleanHealthContext,cleanPlanningContext,validateReassessment} from '../web/contextual-planning.mjs';
 
-const dir = join(homedir(), '.along', 'agent-host');
+const dir = process.env.ALONG_AGENT_STATE_DIR||join(homedir(), '.along', 'agent-host');
 mkdirSync(dir, {recursive:true, mode:0o700});
 const key = join(dir, 'key.pem'), cert = join(dir, 'cert.pem');
 if (!existsSync(key) || !existsSync(cert)) {
@@ -34,6 +35,9 @@ let busy = false;
 const port = Number(process.env.ALONG_AGENT_PORT) || 4176;
 const lanHost = process.env.ALONG_AGENT_HOST || networkInterfaces().en0?.find(item=>item.family==='IPv4'&&!item.internal)?.address || '127.0.0.1';
 const superAgentURL = (process.env.ALONG_SUPERAGENT_URL || 'http://127.0.0.1:3082').replace(/\/$/,'');
+const contextReviewURL=(process.env.ALONG_CONTEXT_REVIEW_URL||superAgentURL).replace(/\/$/,'');
+if (process.env.ALONG_CONTEXT_REVIEW_TOKEN_FILE&&!['localhost','127.0.0.1','[::1]'].includes(new URL(contextReviewURL).hostname)) throw Error('专用情境评估凭据只能发送到本机 DSH');
+const contextToken=process.env.ALONG_CONTEXT_REVIEW_TOKEN_FILE?readFileSync(process.env.ALONG_CONTEXT_REVIEW_TOKEN_FILE,'utf8').trim():null;
 const kimiAgent = new KimiCodeAgent({workspace:process.env.ALONG_KIMI_WORKSPACE||process.cwd()});
 
 function respond(res,status,data) { res.writeHead(status,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}).end(JSON.stringify(data)); }
@@ -42,10 +46,10 @@ function authorized(req) {
   const token=req.headers.authorization?.match(/^Bearer ([a-f0-9]{64})$/)?.[1];
   return !!(token && tokenHash && timingSafeEqual(createHash('sha256').update(token).digest(),tokenHash));
 }
-async function superAgentCall(path,{method='POST',value}={}) {
+async function superAgentCall(path,{method='POST',value,contextReview=false}={}) {
   let response;
   try {
-    response=await fetch(`${superAgentURL}${path}`,{method,headers:{'x-along-bridge':'1',...(value===undefined?{}:{'content-type':'application/json'})},
+    response=await fetch(`${contextReview?contextReviewURL:superAgentURL}${path}`,{method,headers:{'x-along-bridge':'1',...(contextReview&&contextToken?{'x-along-context-token':contextToken}:{}),...(value===undefined?{}:{'content-type':'application/json'})},
       ...(value===undefined?{}:{body:JSON.stringify(value)}),signal:AbortSignal.timeout(15_000)});
   } catch(error) { throw new HostError(`Along 服务暂不可用：${error.message}`,502); }
   let result;
@@ -87,10 +91,17 @@ function cleanGoal(value) {
   return {domain,target,title:cleanGoalTitle(value?.title)};
 }
 function cleanSnapshot(value,domain) {
-  if (domain==='custom') return {source:'暂无连接'};
+  if (domain==='custom' && !value?.planning) return {source:'暂无连接'};
   if (domain==='finance') return {saved:Number.isInteger(value?.saved) && value.saved>=0 ? Math.min(value.saved,10000000) : null, source:'演示数据'};
-  const selected=Array.isArray(value?.selectedTypes)?value.selectedTypes.filter(type=>['workout','steps','weight','sleep'].includes(type)):[];
-  return {workoutMinutes:selected.includes('workout') && Number.isInteger(value?.workoutMinutes) ? Math.min(Math.max(value.workoutMinutes,0),10080):null, selectedTypes:selected, source:'Apple Health 最小摘要'};
+  const snapshot=agentHealthSnapshot(value);
+  if (value?.planning && !snapshot.contextReviewAllowed) throw Error('请先在 iPhone 的 Apple Health 管理页确认用于情境评估的摘要');
+  const planning=cleanPlanningContext(value?.planning);
+  if (value?.planning && !planning) throw Error('情境评估的版本无效');
+  if (planning) {
+    planning.previous=cleanHealthContext({...planning.previous,selectedTypes:planning.previous.selectedTypes.filter(type=>snapshot.selectedTypes.includes(type))});
+    if (!planning.now||!planning.revisionId) throw Error('情境评估的版本或时间无效');
+  }
+  return {...snapshot,...(planning?{planning}:{})};
 }
 async function runExclusive(operation) {
   if (busy) throw Error('Along 正在处理上一条请求，请稍后再试');
@@ -119,7 +130,10 @@ function normalizeGoalRun(run) {
     const rawLayout=run.result.layout==null?null:normalizeAdaptiveLayout(run.result.layout,domain);
     const layout=rawLayout==null?null:safeAdaptiveLayout(rawLayout,domain);
     if (run.result.layout!=null && !layout) throw Error('Along 返回的目标空间格式不正确');
-    return {...run,result:{...output,layout}};
+    const planning=run.input?.snapshot?.planning;
+    const reassessment=planning?validateReassessment(run.result.reassessment,layout,planning):null;
+    if (planning&&output.proposal) throw Error('情境重排不能修改目标');
+    return {...run,result:{...output,layout,...(planning?{reassessment}:{})}};
   } catch(error) {
     // 输出校验失败是确定性的错误：这一次运行不会再变好，必须落到终态。
     // 抛成 5xx 的话，前端会把它当成「暂时读不到状态」继续轮询，
@@ -131,7 +145,7 @@ function normalizeGoalRun(run) {
 const server=createServer({key:readFileSync(key),cert:readFileSync(cert)},async(req,res)=>{
   try {
     const path=new URL(req.url,'https://along.local').pathname;
-    if (req.method==='GET' && path==='/health') return respond(res,200,{service:'along-agent-host',ready:true});
+    if (req.method==='GET' && path==='/health') return respond(res,200,{service:'along-agent-host',ready:true,contextReviewVersion:1});
     if (req.method==='POST' && path==='/pair') {
       const input=await body(req);
       if (Date.now()>codeExpiry || pairFailures>=5 || input?.code!==code) {pairFailures++; return respond(res,403,{error:'配对码无效或已过期'});}
@@ -142,6 +156,10 @@ const server=createServer({key:readFileSync(key),cert:readFileSync(cert)},async(
       return respond(res,200,{token});
     }
     if (!authorized(req)) return respond(res,401,{error:'请先配对这台 Mac'});
+    if (req.method==='POST'&&path==='/connection/verify') {
+      console.log(`已验证原配对连接 (${new Date().toISOString()})`);
+      return respond(res,200,{paired:true});
+    }
     if (req.method==='POST' && path==='/connection/status') {
       const input=await body(req),runtime=requestedRuntime(input?.runtime);
       if (runtime===KIMI_RUNTIME) {
@@ -156,6 +174,7 @@ const server=createServer({key:readFileSync(key),cert:readFileSync(cert)},async(
     if (req.method==='POST' && path==='/super-agent/tasks') {
       const input=await body(req),runtime=requestedRuntime(input?.runtime);
       const {runtime:_runtime,...dshInput}=input;
+      if (dshInput.goal?.domain==='health') dshInput.context=agentHealthSnapshot(dshInput.context);
       if (runtime===KIMI_RUNTIME) return respond(res,200,await upstream(()=>kimiAgent.startTask(dshInput)));
       return respond(res,200,await upstream(()=>superAgentCall('/along-source/api/tasks',{value:dshInput})));
     }
@@ -174,14 +193,15 @@ const server=createServer({key:readFileSync(key),cert:readFileSync(cert)},async(
       const history=Array.isArray(input.history)?input.history.slice(-12).map(item=>({role:item.role==='assistant'?'assistant':'user',text:clientText(item.text).slice(0,1200)})).filter(item=>item.text.trim()):[];
       // requestId 是客户端给的，要在包上游之前校验：发错了仍然是 400。
       const id=requestId(input.requestId);
+      if (snapshot.planning&&snapshot.planning.revisionId!==id) throw Error('情境版本与请求编号不符');
       if (runtime===KIMI_RUNTIME) return respond(res,200,await upstream(()=>kimiAgent.startGoal({requestId:id,goal,snapshot,message,history})));
-      const response=await upstream(()=>superAgentCall('/along-source/api/goals',{value:{requestId:id,goal,snapshot,message,history}}));
+      const response=await upstream(()=>superAgentCall('/along-source/api/goals',{value:{requestId:id,goal,snapshot,message,history},contextReview:!!snapshot.planning}));
       return respond(res,200,{...response,run:await upstream(()=>normalizeGoalRun(response.run))});
     }
     if (req.method==='POST' && path==='/super-agent/goals/status') {
       const input=await body(req),id=requestId(input?.requestId),runtime=requestedRuntime(input?.runtime);
       if (runtime===KIMI_RUNTIME) return respond(res,200,await upstream(()=>kimiAgent.goalStatus(id)));
-      const raw=await upstream(()=>superAgentCall(`/along-source/api/goals/${encodeURIComponent(id)}`,{method:'GET'}));
+      const raw=await upstream(()=>superAgentCall(`/along-source/api/goals/${encodeURIComponent(id)}`,{method:'GET',contextReview:input.contextReview===true||id.startsWith('along-review-')}));
       return respond(res,200,await upstream(()=>normalizeGoalRun(raw)));
     }
     if (req.method==='POST' && path==='/goal/chat') {

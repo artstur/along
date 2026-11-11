@@ -99,9 +99,12 @@ function cleanTask(value) {
   const task=object(value, '动态任务');
   const state=text(task.state, '任务状态', 20);
   if (!TASK_STATES.has(state)) throw Error('任务状态不受支持');
+  if (task.kind!=null&&!['agent_action','reminder','recommendation'].includes(task.kind)) throw Error('未知的任务类型');
+  if (task.kind==='reminder' && (typeof task.scheduledFor!=='string'||!/(Z|[+-]\d\d:\d\d)$/i.test(task.scheduledFor)||!Number.isFinite(Date.parse(task.scheduledFor)))) throw Error('提醒需要带时区的日期和时间');
   return {
     id:id(task.id, '任务 ID'), when:text(task.when, '任务时间', 80), title:text(task.title, '任务标题', 100),
-    detail:text(task.detail, '任务说明', 300), state,
+    detail:text(task.detail, '任务说明', 300), state,...(task.kind?{kind:task.kind}:{}),
+    ...(task.kind==='reminder'?{scheduledFor:new Date(task.scheduledFor).toISOString()}:{}),
   };
 }
 
@@ -183,6 +186,7 @@ export function normalizeAdaptiveLayout(value, domain='health') {
   const tasks=(Array.isArray(value.tasks)?value.tasks:[]).slice(0,6).map((task,index)=>({
     id:nextId(task?.id,'task',index),when:trim(task?.when,80,'待安排'),title:trim(task?.title,100,`任务 ${index+1}`),detail:trim(task?.detail,300,'待补充'),
     state:['temporary','planned','deferred'].includes(task?.state)?task.state:'planned',
+    kind:task?.kind,scheduledFor:task?.scheduledFor,
   }));
   return {
     version:1,

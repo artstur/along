@@ -1,3 +1,4 @@
+import {cleanHealthContext} from './contextual-planning.mjs';
 export const KEY = 'along.health.v1';
 export const initialState = () => ({version: 1, source: null, snapshot: null, goals: []});
 export function loadState(raw) {
@@ -15,8 +16,11 @@ export function setSnapshot(state, input, source) {
   if (Object.values(data).some(value => value !== null && (!Number.isFinite(value) || value < 0))) throw Error('健康数据格式不正确');
   if ((data.restingHeartRate != null && data.restingHeartRate > 250) || (data.wristTemperatureC != null && data.wristTemperatureC > 45) || (data.activeEnergyKcal != null && data.activeEnergyKcal > 20000)) throw Error('健康数据超出合理范围');
   const selectedTypes=source==='healthkit' && Array.isArray(input?.selectedTypes) ? input.selectedTypes.filter(type=>['steps','workout','activeEnergy','weight','restingHeartRate','wristTemperature','sleep'].includes(type)) : null;
-  const snapshot={...data, selectedTypes, updatedAt: new Date().toISOString()};
+  const context=cleanHealthContext({...input,selectedTypes});
+  const snapshot={...data, selectedTypes, contextReviewAllowed:source==='healthkit'&&input?.contextReviewAllowed===true,capturedAt:context.capturedAt,
+    sleepSummary:context.sleepSummary,workoutSummary:context.workoutSummary,updatedAt:new Date().toISOString()};
   // 空读数（撤销授权、读取失败）不等于「用户没有数据」，不能拿它覆盖已经有的摘要。
-  if (!summaryHasData(snapshot) && summaryHasData(state.snapshot)) return state;
+  if (!summaryHasData(snapshot) && summaryHasData(state.snapshot) &&
+    state.snapshot.contextReviewAllowed!==true && !snapshot.contextReviewAllowed) return state;
   return {...state, source, snapshot};
 }
