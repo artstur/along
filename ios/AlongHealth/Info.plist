@@ -20,6 +20,10 @@
 	<string>1.0</string>
 	<key>CFBundleVersion</key>
 	<string>49</string>
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array><string>com.artstur.AlongHealth.daily-review</string></array>
+	<key>UIBackgroundModes</key>
+	<array><string>fetch</string></array>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>连接同一 Wi-Fi 的 Mac 上的 Along Agent，用于目标问答和任务调整。</string>
 	<key>NSHealthShareUsageDescription</key>

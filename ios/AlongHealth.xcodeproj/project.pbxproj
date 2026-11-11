@@ -12,11 +12,13 @@
 		595B5882C1544700B64936EB /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 6821CB996D4B3D95F42D8C7C /* Assets.xcassets */; };
 		83E233CBAFF6B1DD99ED4ADD /* AlongShellView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 558B32A1B3669EFDE3602320 /* AlongShellView.swift */; };
 		9BB4B7FC6CF6944AFB13B0C5 /* HealthModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 142972353AE352839663BD5F /* HealthModels.swift */; };
+		DE66DFD80001000000000001 /* DailyHealthReminders.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE66DFD80001000000000002 /* DailyHealthReminders.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		E69ECBE9A8C141B9A3C75457 /* Web */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Web; sourceTree = "<group>"; };
 		142972353AE352839663BD5F /* HealthModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthModels.swift; sourceTree = "<group>"; };
+		DE66DFD80001000000000002 /* DailyHealthReminders.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DailyHealthReminders.swift; sourceTree = "<group>"; };
 		50B67BD0E2D1DE69F5A8B26B /* AlongHealth.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = AlongHealth.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		558B32A1B3669EFDE3602320 /* AlongShellView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AlongShellView.swift; sourceTree = "<group>"; };
 		6821CB996D4B3D95F42D8C7C /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -30,6 +32,7 @@
 				558B32A1B3669EFDE3602320 /* AlongShellView.swift */,
 				9BBFF439D907DDD983B94E22 /* HealthKitReader.swift */,
 				142972353AE352839663BD5F /* HealthModels.swift */,
+				DE66DFD80001000000000002 /* DailyHealthReminders.swift */,
 			);
 			name = Sources;
 			path = AlongHealth/Sources;
@@ -140,6 +143,7 @@
 				83E233CBAFF6B1DD99ED4ADD /* AlongShellView.swift in Sources */,
 				361D36E0A388C9F3D0C516A3 /* HealthKitReader.swift in Sources */,
 				9BB4B7FC6CF6944AFB13B0C5 /* HealthModels.swift in Sources */,
+				DE66DFD80001000000000001 /* DailyHealthReminders.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

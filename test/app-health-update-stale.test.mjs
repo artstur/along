@@ -28,7 +28,7 @@ const settle=()=>new Promise(resolve=>setImmediate(resolve));
 let browserInstance=0;
 // Health observations and all host responses here are synthetic. The actual Web entry points
 // compose the request, poll it, validate the result, render the proposal, notify and adopt it.
-async function browser({initial=baseline,storage={},nativeHealth,restoreConnection,pendingGoalReminder}={}) {
+async function browser({initial=baseline,storage={},nativeHealth,restoreConnection,pendingGoalReminder,dailyHandoff}={}) {
   const dom=installDomStub({storage:{
     [HEALTH_KEY]:JSON.stringify({version:1,source:'healthkit',snapshot:initial,
       goals:[{id:'weekly',type:'workout',target:180}]}),
@@ -42,8 +42,11 @@ async function browser({initial=baseline,storage={},nativeHealth,restoreConnecti
   const submits=[],polls=[],notifications=[],reminderSets=[];
   window.AlongAgentBridge={
     ...(pendingGoalReminder?{pendingGoalReminder}:{}),
+    ...(dailyHandoff?{dailyReminderStatus:async data=>({...data,items:{}})}:{}),
     ...(restoreConnection?{connection:restoreConnection}:{}),
     request({path,body}) {
+      if (dailyHandoff&&path==='/super-agent/daily-delegation') return Promise.resolve({grant:dailyHandoff.grant});
+      if (dailyHandoff&&path==='/super-agent/goals/status'&&body.requestId===dailyHandoff.run.requestId) return Promise.resolve(dailyHandoff.run);
       if (path==='/connection/status') return Promise.resolve({along:true,runtime:DSH_RUNTIME,ready:true});
       const calls=path==='/super-agent/goals'?submits:path==='/super-agent/goals/status'?polls:null;
       if (!calls) throw Error('unexpected Agent route '+path);
@@ -124,6 +127,19 @@ test('home shows the next alert confirmed by iOS even if its task was arranged o
   assert.deepEqual(app.read(ADAPTIVE_LAYOUTS_KEY).health.tasks,confirmedLayout.tasks);
   await app.app.dispatch('change',{target:{id:'goal-select',value:'finance'}});
   assert.doesNotMatch(app.app.innerHTML,/今天收工提醒/);
+});
+
+test('a legacy iPhone sleep alert appears in the original sleep task and never claims a DSH bedtime or a workout amount',async()=>{
+  const now=new Date(),next=new Date(now);
+  next.setHours(23,59,59,999);
+  if (next<=now) return;
+  const app=await browser({pendingGoalReminder:async goalKey=>({goalKey,taskId:'old-unique-task',title:'睡前准备提醒',scheduledFor:next.toISOString()})});
+  await settle();
+  const row=app.app.innerHTML.match(/data-task-id="wind-down"[^>]*>[\s\S]*?<\/button>/)?.[0]||'';
+  assert.match(row,/23:59 提醒准备睡觉/);assert.match(row,/iPhone 已安排/);
+  assert.doesNotMatch(row,/建议就寝|DSH 已规划/);
+  assert.doesNotMatch(app.app.innerHTML,/class="next-reminder"|今天建议运动 [0-9]+ 分钟/);
+  assert.deepEqual(app.read(ADAPTIVE_LAYOUTS_KEY).health.tasks,confirmedLayout.tasks);
 });
 
 test('a scheduling instruction during a review reaches the Agent with consented context and waits for adoption',async()=>{
@@ -755,4 +771,106 @@ test('weekly exercise minutes use only selected, unambiguous goal or task eviden
     answer(review,resultFor(review.body));
     await settle();
   }
+});
+
+async function sendDailyInstruction(app,instruction) {
+  await app.click({action:'task-instruction'});
+  await document.querySelector('#sheet').dispatch('submit',{target:{id:'task-instruction-form',dataset:{goal:'health'},fields:{instruction}},preventDefault(){}});
+  await settle();
+}
+function normalizedDailyAnswer(call,workoutMinutes) {
+  const request=call.body,planning=request.snapshot.planning;
+  const result=resultFor(request);
+  result.reassessment.dailyActions={localDate:planning.localDate,workoutMinutes,workoutReminderAt:null,sleepReminderAt:null,bedtimeAt:null,reason:'已结合近期有记录的运动与作息。'};
+  call.resolve({run:{...hostRun(request,result),input:{goal:request.goal,snapshot:request.snapshot}}});
+}
+test('a clear standing instruction uses a real daily ticket, updates once per new evidence and day, and can be withdrawn',async t=>{
+  const now=Date.parse('2026-11-11T04:00:00Z');
+  t.mock.timers.enable({apis:['Date'],now});
+  const app=await browser({storage:restrictedStorage});
+  await sendDailyInstruction(app,'请每天提醒我运动和睡觉');
+  const first=app.submits[0];
+  const daily=first.body.snapshot.planning.dailyDelegation;
+  assert.deepEqual(daily.topics,['sleep','workout']);
+  assert.equal(daily.goalKey,'health');
+  assert.ok(!daily.weeklyWorkoutMinutes,'private weekly target stays local');
+  assert.doesNotMatch(JSON.stringify(first.body),/十二周健康计划|午间有空|旧睡眠任务|旧训练任务/);
+  normalizedDailyAnswer(first,24);
+  await settle();
+  assert.equal(app.read(PLANNING_STATE_KEY).dailyRecord.action.workoutMinutes,24);
+  assert.equal(app.read(PLANNING_STATE_KEY).dailyRecord.action.ticketId,'test-ticket');
+  assert.deepEqual(app.read(ADAPTIVE_LAYOUTS_KEY).health.tasks,protectedPlan.tasks);
+  assert.deepEqual(app.reminderSets,[]);
+  await app.observe({...baseline,capturedAt:new Date(now+60000).toISOString()});
+  assert.equal(app.submits.length,1,'sampling alone does not repeat today’s instructions');
+  const changed=app.observe({...baseline,sleepMinutes:420});
+  const second=app.submits[1];assert.equal(second.body.snapshot.planning.dailyDelegation.id,daily.id);
+  normalizedDailyAnswer(second,12);await changed;
+  assert.equal(app.read(PLANNING_STATE_KEY).dailyRecord.action.workoutMinutes,12);
+  t.mock.timers.setTime(now+86400_000);
+  const tomorrow=app.observe({...baseline,sleepMinutes:420});
+  const third=app.submits[2];assert.notEqual(third.body.snapshot.planning.localDate,first.body.snapshot.planning.localDate);
+  normalizedDailyAnswer(third,19);await tomorrow;
+  await app.observe({...baseline,sleepMinutes:420});
+  assert.equal(app.submits.length,3);
+  await sendDailyInstruction(app,'取消每日提醒');
+  assert.ok(!app.submits[3].body.snapshot.planning.dailyDelegation);
+  assert.ok(!app.read(PLANNING_STATE_KEY).dailyRecord);
+  answer(app.submits[3],resultFor(app.submits[3].body));await settle();
+  const restarted=await browser({storage:Object.fromEntries(app.store)});
+  const next=restarted.observe({...baseline,sleepMinutes:430});
+  const after=restarted.submits[0];assert.ok(!after.body.snapshot.planning.dailyDelegation);
+  answer(after,resultFor(after.body));await next;
+});
+
+test('a question or a one-off request gives no standing permission and a late reply cannot restore withdrawn scope',async()=>{
+  const app=await browser();
+  for (const instruction of ['请每天提醒我运动和睡觉吗？','今晚请提醒我睡觉','不要每天提醒我运动']) {
+    await sendDailyInstruction(app,instruction);
+    const call=app.submits.at(-1);
+    assert.equal(call.body.snapshot.planning.dailyDelegation,undefined);
+    answer(call,resultFor(call.body));await settle();
+  }
+  await sendDailyInstruction(app,'每天提醒我运动');
+  const late=app.submits.at(-1);
+  assert.deepEqual(late.body.snapshot.planning.dailyDelegation.topics,['workout']);
+  const changed=app.observe({...baseline,selectedTypes:['sleep']});
+  normalizedDailyAnswer(late,17);await changed;await settle();
+  assert.ok(!app.read(PLANNING_STATE_KEY)?.dailyRecord);
+  assert.ok(!app.read('along.health-sharing.v1').dailyDelegation);
+  assert.ok(app.submits.at(-1).body.snapshot.planning.dailyDelegation==null);
+});
+
+test('paired Mac handoff needs the exact goal, DSH ticket, authorization and applied revision and coexists with an existing proposal',async t=>{
+  const now=Date.parse('2026-11-11T04:00:00Z'),timezone=Intl.DateTimeFormat().resolvedOptions().timeZone;
+  t.mock.timers.enable({apis:['Date'],now});
+  const grant={id:'delegated-grant',goalKey:'health',topics:['sleep','workout'],requestId:'along-review-mac',ticketId:'ticket-mac',weeklyWorkoutMinutes:160};
+  const p={version:1,kind:'context-review',revisionId:grant.requestId,now:new Date(now-30000).toISOString(),timezone,
+    localDate:new Intl.DateTimeFormat('en-CA',{timeZone:timezone}).format(new Date(now)),dailyDelegation:{id:grant.id,goalKey:'health',topics:grant.topics,weeklyWorkoutMinutes:160},
+    goalIntent:intent,currentPlan:confirmedLayout};
+  const request={requestId:grant.requestId,goal:{domain:'health',title:'我的健康目标',target:160},snapshot:{...baseline,planning:p}};
+  const result=resultFor(request);result.reassessment.dailyActions={localDate:p.localDate,workoutMinutes:23,workoutReminderAt:null,sleepReminderAt:null,bedtimeAt:null,reason:'已预留晚间收尾时间。'};
+  const run={...hostRun(request,result),input:{goal:request.goal,snapshot:request.snapshot},ticket:{id:grant.ticketId}};
+  const prior={id:'prior',goalKey:'health',requestId:'prior',source:'healthkit',status:'proposed',
+    assessment:{decision:'need_data',changes:[]},error:'之前待确认的安排',reason:'先确认下周安排'};
+  const start=async (g,r,extra={})=>{
+    const app=await browser({storage:{[TICKET_KEY]:JSON.stringify(prior),[PLANNING_STATE_KEY]:JSON.stringify({evaluated:baseline,
+        localDate:p.localDate,goalIntent:'我的健康目标\n'+intent,lastDecision:{requestId:'prior'}}),...extra},
+      nativeHealth:{refresh:async()=>baseline},pendingGoalReminder:async goalKey=>({goalKey,requestId:'prior',taskId:'earlier',title:'原提醒',scheduledFor:new Date(now+3600000).toISOString()}),
+      dailyHandoff:{grant:g,run:r}});
+    await settle();await settle();await settle();
+    return app;
+  };
+  for (const [g,r] of [[{...grant,ticketId:'other'},run],[grant,{...run,actual:false}],[{...grant,topics:['sleep']},run],
+    [grant,{...run,input:{...run.input,snapshot:{...run.input.snapshot,selectedTypes:['workout','sleep','weight']}}}]]) {
+    const invalid=await start(g,r);
+    assert.ok(!invalid.read(PLANNING_STATE_KEY)?.dailyRecord);
+  }
+  const valid=await start(grant,run);
+  assert.equal(valid.read(PLANNING_STATE_KEY)?.dailyRecord?.action.requestId,request.requestId);
+  assert.equal(valid.read(TICKET_KEY).requestId,'prior');
+  assert.deepEqual(valid.read(ADAPTIVE_LAYOUTS_KEY).health.tasks,confirmedLayout.tasks);
+  await sendDailyInstruction(valid,'停止每日提醒');
+  const restarted=await start(grant,run,Object.fromEntries(valid.store));
+  assert.ok(!restarted.read(PLANNING_STATE_KEY)?.dailyRecord,'a Mac grant still discoverable for this pairing cannot resurrect a withdrawn permission');
 });

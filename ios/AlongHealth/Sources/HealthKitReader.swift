@@ -1,4 +1,5 @@
 import Foundation
+import BackgroundTasks
 import HealthKit
 import JavaScriptCore
 import CryptoKit
@@ -298,6 +299,18 @@ enum BackgroundReviewAdmission {
         return true
     }
 
+    static func priorBlocked(_ run: [String: Any], id: String, day: String, grant: [String: Any]) -> [String: Any]? {
+        guard run["actual"] as? Bool == true, run["runtime"] as? String == "dsh-superagent", run["kind"] as? String == "goal",
+              run["status"] as? String == "blocked", run["requestId"] as? String == id,
+              let ticket = run["ticket"] as? [String: Any], let ticketID = ticket["id"] as? String, !ticketID.isEmpty,
+              let input = run["input"] as? [String: Any], let snapshot = input["snapshot"] as? [String: Any],
+              snapshot["contextReviewAllowed"] as? Bool == true, let planning = snapshot["planning"] as? [String: Any],
+              planning["revisionId"] as? String == id, planning["localDate"] as? String == day,
+              let original = planning["dailyDelegation"] as? [String: Any], NSDictionary(dictionary: grant).isEqual(to: original)
+        else { return nil }
+        return ["requestId": id, "ticketId": ticketID, "localDate": day]
+    }
+
     static func covered(_ state: [String: Any], date: String, now: Date, nextReviewAt: String?) -> Bool {
         guard state["lastLocalDate"] as? String == date else { return false }
         guard let nextReviewAt else { return true }
@@ -323,6 +336,10 @@ enum BackgroundReviewAdmission {
     private let defaults = UserDefaults.standard, reader = HealthKitReader()
     private let armedKey = "along.health.backgroundReviewArmed.v1", dirtyKey = "along.health.backgroundReviewDirty.v1"
     private let observedTypesKey = "along.health.backgroundTargetTypes.v1"
+    private let dailyWakeGoal = "along.health.dailyWakeGoal.v1"
+    var scheduleCalendarRefresh: (Date?) -> Void = { _ in }
+    var permitsDailyReview: ([String: Any], String, [String]) -> Bool = { _, _, _ in false }
+    var deliverDailyResult: ([String: Any], String, [String]) async -> Bool = { _, _, _ in false }
     private var observations: Set<HealthMetric>?
     private var completions: [() -> Void] = []
     private var worker: Task<Void, Never>?
@@ -372,7 +389,90 @@ enum BackgroundReviewAdmission {
         return value
     }
 
+    private func dailyScope(_ template: [String: Any], key: String) -> Bool {
+        guard template["goalKey"] as? String == key, template["paused"] as? Bool != true,
+              let planning = template["planning"] as? [String: Any], let grant = planning["dailyDelegation"] as? [String: Any],
+              let types = template["selectedTypes"] as? [String], !types.isEmpty,
+              Set(types).isSubset(of: Set(nativeSelection.map(\.rawValue))) else { return false }
+        return permitsDailyReview(grant, key, types)
+    }
+
+    private func nextCalendarRefresh() {
+        guard let key = authorizedGoal, defaults.bool(forKey: armedKey), defaults.string(forKey: dailyWakeGoal) == key else {
+            scheduleCalendarRefresh(nil); return
+        }
+        let now = Date(), retry = Date(timeIntervalSinceNow: 15 * 60)
+        // Protected data and the paired keychain can be unavailable on an overnight wake.
+        guard UIApplication.shared.isProtectedDataAvailable, let state = try? read(), let pair = try? pairedMac().1 else {
+            scheduleCalendarRefresh(retry); return
+        }
+        guard let template = state["template"] as? [String: Any],
+              BackgroundReviewAdmission.matches(state, template: template, pair: pair), dailyScope(template, key: key) else {
+            scheduleCalendarRefresh(nil); return
+        }
+        let pending = state["pending"] as? [String: Any], completed = state["completed"] as? [String: Any]
+        let pendingPlan = ((pending?["request"] as? [String: Any])?["snapshot"] as? [String: Any])?["planning"] as? [String: Any]
+        let evaluated = pendingPlan?["localDate"] as? String ?? state["lastLocalDate"] as? String ?? template["evaluatedLocalDate"] as? String
+        let today = Self.localDay(now)
+        let retryNeeded = defaults.bool(forKey: dirtyKey) || evaluated != today ||
+            (pending != nil && (completed?["requestId"] as? String != pending?["requestId"] as? String))
+        if retryNeeded { scheduleCalendarRefresh(retry); return }
+        let tomorrow = Calendar.current.date(byAdding: .day, value: 1, to: Calendar.current.startOfDay(for: now)) ?? now.addingTimeInterval(24 * 3600)
+        let next = completed?["nextReviewAt"] as? String ?? template["nextReviewAt"] as? String
+        let iso = ISO8601DateFormatter(), fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let due = next.flatMap { fractional.date(from: $0) ?? iso.date(from: $0) }
+        let lastStamp = pendingPlan?["now"] as? String ?? state["lastNow"] as? String
+        let last = lastStamp.flatMap { fractional.date(from: $0) ?? iso.date(from: $0) }
+        if let due, due <= now, last.map({ $0 < due }) ?? true {
+            scheduleCalendarRefresh(retry)
+        } else {
+            scheduleCalendarRefresh(due.map { $0 > now ? min($0, tomorrow) : tomorrow } ?? tomorrow)
+        }
+    }
+
+    private static func localDay(_ now: Date) -> String {
+        let date = DateFormatter()
+        date.locale = Locale(identifier: "en_US_POSIX"); date.calendar = Calendar(identifier: .gregorian)
+        date.timeZone = .current; date.dateFormat = "yyyy-MM-dd"
+        return date.string(from: now)
+    }
+
+    func dailyGrantChanged() {
+        if defaults.bool(forKey: armedKey), let key = authorizedGoal, let state = try? read(),
+           let t = state["template"] as? [String: Any], let pair = try? pairedMac().1,
+           BackgroundReviewAdmission.matches(state, template: t, pair: pair), dailyScope(t, key: key) {
+            defaults.set(key, forKey: dailyWakeGoal)
+            nextCalendarRefresh()
+        } else {
+            if defaults.string(forKey: dailyWakeGoal) != nil { calendarRefreshExpired() }
+            defaults.removeObject(forKey: dailyWakeGoal)
+            scheduleCalendarRefresh(nil)
+        }
+    }
+
+    func calendarRefresh(_ completion: @escaping (Bool) -> Void) {
+        guard UIApplication.shared.applicationState == .background, let key = authorizedGoal,
+              defaults.string(forKey: dailyWakeGoal) == key, defaults.bool(forKey: armedKey) else { completion(false); return }
+        // Resubmit first so suspension, lock, network failure or an unfinished DSH ticket can recover.
+        scheduleCalendarRefresh(Date(timeIntervalSinceNow: 15 * 60))
+        guard UIApplication.shared.isProtectedDataAvailable, let state = try? read(), let pair = try? pairedMac().1 else { completion(false); return }
+        guard let template = state["template"] as? [String: Any], BackgroundReviewAdmission.matches(state, template: template, pair: pair),
+              dailyScope(template, key: key) else { scheduleCalendarRefresh(nil); completion(false); return }
+        observed { [weak self] in
+            guard let self else { completion(false); return }
+            completion(!self.defaults.bool(forKey: self.dirtyKey))
+        }
+    }
+
+    func calendarRefreshExpired() {
+        drainGeneration += 1
+        worker?.cancel()
+    }
+
     func disarm() {
+        scheduleCalendarRefresh(nil)
+        defaults.removeObject(forKey: dailyWakeGoal)
         defaults.set(false, forKey: armedKey)
         drainGeneration += 1
         worker?.cancel()
@@ -420,6 +520,7 @@ enum BackgroundReviewAdmission {
                 if generation == drainGeneration && !Task.isCancelled {
                     do { try await deliver(generation) } catch { /* A fresh foreground read and the stored request recover failures. */ }
                 }
+                if generation == drainGeneration, defaults.string(forKey: dailyWakeGoal) != nil { nextCalendarRefresh() }
                 batch.forEach { $0() }
                 if Task.isCancelled { break }
             }
@@ -439,14 +540,15 @@ enum BackgroundReviewAdmission {
               template["paused"] as? Bool != true, mayDeliver(generation, goalKey: key) else { return }
         let selected = Set((template["selectedTypes"] as? [String] ?? []).compactMap(HealthMetric.init(rawValue:))).intersection(nativeSelection)
         guard !selected.isEmpty else { return }
+        if let planning = template["planning"] as? [String: Any], planning["dailyDelegation"] != nil,
+           !dailyScope(template, key: key) { return }
         let comparison = defaults.bool(forKey: "along.health.comparisonHistory.v1") && template["comparisonHistoryAllowed"] as? Bool == true
         let summary = try await reader.read(selected, requestPermission: false, includeContext: true, includeComparisonHistory: comparison)
         guard summary.hasReadableValue, mayDeliver(generation, goalKey: key), try pairedMac().1 == pair else { return }
         var snapshot = summary.browserSnapshot(contextReviewAllowed: true, comparisonHistoryAllowed: comparison)
         snapshot["backgroundReviewAllowed"] = true; snapshot["backgroundReviewGoalKey"] = key
-        let now = Date(), zone = TimeZone.current, date = DateFormatter()
-        date.locale = Locale(identifier: "en_US_POSIX"); date.calendar = Calendar(identifier: .gregorian); date.timeZone = zone; date.dateFormat = "yyyy-MM-dd"
-        let localDate = date.string(from: now)
+        let now = Date(), zone = TimeZone.current
+        let localDate = Self.localDay(now)
         let clock = ["now": ISO8601DateFormatter().string(from: now), "timezone": zone.identifier, "localDate": localDate]
         var pending = state["pending"] as? [String: Any]
         var lineage: [String: Any] = [:]
@@ -457,19 +559,26 @@ enum BackgroundReviewAdmission {
             var completed = state["completed"] as? [String: Any]
             if completed?["requestId"] as? String != oldID {
                 let run = try await callHost(connection, path: "/super-agent/goals/status", body: ["runtime": "dsh-superagent", "requestId": oldID, "contextReview": true])
-                guard mayDeliver(generation, goalKey: key), try pairedMac().1 == pair,
-                      run["actual"] as? Bool == true, run["runtime"] as? String == "dsh-superagent", run["requestId"] as? String == oldID,
-                      run["status"] as? String == "done", let ticket = run["ticket"] as? [String: Any], let ticketID = ticket["id"] as? String, !ticketID.isEmpty,
-                      let result = run["result"] as? [String: Any], let assessment = result["reassessment"] as? [String: Any],
-                      assessment["basedOnRevision"] as? String == oldID else { return }
-                completed = ["requestId": oldID, "nextReviewAt": assessment["nextReviewAt"] as? String as Any? ?? NSNull()]
-                state["completed"] = completed; try write(state)
+                guard mayDeliver(generation, goalKey: key), try pairedMac().1 == pair else { return }
+                if oldDay < localDate, dailyScope(template, key: key),
+                   let grant = currentPlan["dailyDelegation"] as? [String: Any],
+                   let blocked = BackgroundReviewAdmission.priorBlocked(run, id: oldID, day: oldDay, grant: grant) {
+                    // Keep the DSH record and its ID, but never use its rejected output as the baseline.
+                    state["lastBlocked"] = blocked
+                } else {
+                    guard let receipt = try await completionReceipt(run, id: oldID, day: oldDay, template: template, key: key,
+                        generation: generation, pair: pair, types: selected) else { return }
+                    completed = receipt
+                    state["completed"] = receipt; try write(state)
+                }
             }
-            let due: Any = completed?["nextReviewAt"] as? String as Any? ?? NSNull()
-            currentPlan["previous"] = facts
-            template["planning"] = currentPlan
-            template["evaluatedLocalDate"] = oldDay; template["nextReviewAt"] = due
-            lineage = ["baseline": facts, "previousRequestId": oldID, "evaluatedLocalDate": oldDay, "nextReviewAt": due]
+            if completed?["requestId"] as? String == oldID {
+                let due: Any = completed?["nextReviewAt"] as? String as Any? ?? NSNull()
+                currentPlan["previous"] = facts
+                template["planning"] = currentPlan
+                template["evaluatedLocalDate"] = oldDay; template["nextReviewAt"] = due
+                lineage = ["baseline": facts, "previousRequestId": oldID, "evaluatedLocalDate": oldDay, "nextReviewAt": due]
+            }
             // Keep the old accepted receipt until its replacement can be durably recorded.
             pending = nil
         }
@@ -493,7 +602,29 @@ enum BackgroundReviewAdmission {
         guard let run = response["run"] as? [String: Any], run["actual"] as? Bool == true, run["requestId"] as? String == id,
               run["runtime"] as? String == "dsh-superagent", mayDeliver(generation, goalKey: key), try pairedMac().1 == pair else { return }
         pending?["state"] = "accepted"; state["pending"] = pending; try write(state)
+        if let receipt = try await completionReceipt(run, id: id, day: localDate, template: template, key: key,
+            generation: generation, pair: pair, types: selected) {
+            state["completed"] = receipt; try write(state)
+        }
         defaults.set(false, forKey: dirtyKey)
+    }
+
+    private func completionReceipt(_ run: [String: Any], id: String, day: String, template: [String: Any],
+                                   key: String, generation: Int, pair: String, types: Set<HealthMetric>) async throws -> [String: Any]? {
+        guard mayDeliver(generation, goalKey: key), try pairedMac().1 == pair,
+              run["actual"] as? Bool == true, run["runtime"] as? String == "dsh-superagent", run["requestId"] as? String == id,
+              run["status"] as? String == "done", let ticket = run["ticket"] as? [String: Any], let ticketID = ticket["id"] as? String, !ticketID.isEmpty,
+              let result = run["result"] as? [String: Any], let assessment = result["reassessment"] as? [String: Any],
+              assessment["basedOnRevision"] as? String == id else { return nil }
+        if day == Self.localDay(Date()), let plan = template["planning"] as? [String: Any], let grant = plan["dailyDelegation"] as? [String: Any] {
+            guard dailyScope(template, key: key), let input = run["input"] as? [String: Any], let snapshot = input["snapshot"] as? [String: Any],
+                  let runPlan = snapshot["planning"] as? [String: Any], let issued = runPlan["dailyDelegation"] as? [String: Any],
+                  NSDictionary(dictionary: grant).isEqual(to: issued), runPlan["revisionId"] as? String == id,
+                  runPlan["localDate"] as? String == day, runPlan["timezone"] as? String == TimeZone.current.identifier,
+                  await deliverDailyResult(run, key, types.map(\.rawValue)), mayDeliver(generation, goalKey: key), try pairedMac().1 == pair
+            else { return nil }
+        }
+        return ["requestId": id, "nextReviewAt": assessment["nextReviewAt"] as? String as Any? ?? NSNull()]
     }
 
     private func callHost(_ connection: [String: String], path: String, body: [String: Any]) async throws -> [String: Any] {
@@ -541,6 +672,7 @@ enum BackgroundReviewAdmission {
             try write(state)
             defaults.set(types, forKey: observedTypesKey)
             defaults.set(true, forKey: armedKey)
+            dailyGrantChanged()
             committed = true
             configureObservers()
             return ["enabled": true]
@@ -571,14 +703,51 @@ enum BackgroundReviewAdmission {
 }
 
 @MainActor final class HealthDeliveryAppDelegate: NSObject, UIApplicationDelegate {
+    private var awaitingInitialForeground = true
+    private let dailyRefreshID = "com.artstur.AlongHealth.daily-review"
+    private func schedule(_ date: Date?) {
+        guard let date else { BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: dailyRefreshID); return }
+        let request = BGAppRefreshTaskRequest(identifier: dailyRefreshID)
+        request.earliestBeginDate = date
+        do { try BGTaskScheduler.shared.submit(request) } catch { /* User or system can disable Background App Refresh; foreground still recovers. */ }
+    }
+
+    private func handle(_ task: BGTask) {
+        let reviews = BackgroundHealthReviews.shared
+        var completed = false
+        func finish(_ success: Bool) {
+            guard !completed else { return }
+            completed = true; task.setTaskCompleted(success: success)
+        }
+        task.expirationHandler = { Task { @MainActor in
+            guard !completed else { return }
+            reviews.calendarRefreshExpired(); finish(false)
+        } }
+        reviews.calendarRefresh { success in finish(success) }
+    }
+
     func application(_ application: UIApplication, didFinishLaunchingWithOptions options: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         let reviews = BackgroundHealthReviews.shared
-        if application.applicationState != .background { reviews.foregroundStarted() }
+        BGTaskScheduler.shared.register(forTaskWithIdentifier: dailyRefreshID, using: .main) { [weak self] task in
+            Task { @MainActor in
+                guard let self else { task.setTaskCompleted(success: false); return }
+                self.handle(task)
+            }
+        }
+        reviews.scheduleCalendarRefresh = { [weak self] date in self?.schedule(date) }
+        reviews.permitsDailyReview = { grant, key, types in DailyHealthReminders.permitsBackground(grant, goalKey: key, selectedTypes: types) }
+        reviews.deliverDailyResult = { run, key, types in await DailyHealthReminders.receivedInBackground(run, goalKey: key, selectedTypes: types) }
+        if application.applicationState == .active { enterForeground() }
         reviews.configureObservers()
         NotificationCenter.default.addObserver(self, selector: #selector(enterForeground), name: UIApplication.willEnterForegroundNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(becameActive), name: UIApplication.didBecomeActiveNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(unlocked), name: UIApplication.protectedDataDidBecomeAvailableNotification, object: nil)
         return true
     }
-    @objc private func enterForeground() { BackgroundHealthReviews.shared.foregroundStarted() }
+    @objc private func enterForeground() {
+        awaitingInitialForeground = false
+        BackgroundHealthReviews.shared.foregroundStarted()
+    }
+    @objc private func becameActive() { if awaitingInitialForeground { enterForeground() } }
     @objc private func unlocked() { BackgroundHealthReviews.shared.protectedDataAvailable() }
 }
