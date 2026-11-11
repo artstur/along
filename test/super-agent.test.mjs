@@ -18,7 +18,7 @@ test('pending state does not claim that DSH accepted or executed the task',()=>{
   assert.equal(run.actual,false);
   assert.equal(run.eval,null);
   assert.equal(run.ticket,null);
-  assert.equal(run.progress,2);
+  assert.equal(run.progress,null);
 });
 
 test('records connection failures and rejects legacy simulated runs',()=>{

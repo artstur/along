@@ -33,8 +33,16 @@ test('an untrusted run record is not replaced by a fake connecting run',async()=
     [ADAPTIVE_LAYOUTS_KEY]:JSON.stringify({health:layout,finance:null,custom:null}),
     [AGENT_KEY]:JSON.stringify(agentConfig),
   }});
+  let submittedId;
   globalThis.window.AlongAgentBridge={
-    request:({path})=>Promise.resolve(path==='/super-agent/tasks/status'?untrustedRun:{}),
+    request:async({path,body})=>{
+      if (path==='/super-agent/tasks') {
+        submittedId=body.requestId;
+        return {run:{...compliantRun,requestId:submittedId}};
+      }
+      if (path==='/super-agent/tasks/status') return {...untrustedRun,requestId:submittedId};
+      return {};
+    },
   };
   await import('../web/app.mjs?untrusted-run');
   await dom.click({action:'open-task',taskId:'sleep-check'});
@@ -45,7 +53,7 @@ test('an untrusted run record is not replaced by a fake connecting run',async()=
   assert.doesNotMatch(dom.app.innerHTML,/连接 Kimi Code Swarm/,'不能拿一个假的「正在连接」盖住真实记录');
   const stored=JSON.parse(dom.storage.get(RUNS_KEY));
   assert.equal(stored[runKey]?.actual,true,'渲染不能把真实记录换成假记录');
-  assert.equal(stored[runKey]?.requestId,'req-1','真实记录的标识不能被换掉');
+  assert.equal(stored[runKey]?.requestId,submittedId,'真实记录的标识不能被换掉');
 });
 
 test('a valid run record is shown as it is',async()=>{
@@ -53,13 +61,18 @@ test('a valid run record is shown as it is',async()=>{
     [ADAPTIVE_LAYOUTS_KEY]:JSON.stringify({health:layout,finance:null,custom:null}),
     [AGENT_KEY]:JSON.stringify(agentConfig),
   }});
+  let submittedId;
   globalThis.window.AlongAgentBridge={
-    request:({path})=>Promise.resolve(path==='/super-agent/tasks'?{run:compliantRun}:{}),
+    request:async({path,body})=>{
+      if (path!=='/super-agent/tasks') return {};
+      submittedId=body.requestId;
+      return {run:{...compliantRun,requestId:submittedId}};
+    },
   };
   await import('../web/app.mjs?trusted-run');
   await dom.click({action:'open-task',taskId:'sleep-check'});
   await new Promise(resolve=>setTimeout(resolve,0));
   assert.match(dom.app.innerHTML,/Kimi Main Session 正在拆解/,'宿主给的真实运行状态要照原样显示');
   const stored=JSON.parse(dom.storage.get(RUNS_KEY));
-  assert.equal(stored[runKey]?.requestId,'req-2');
+  assert.equal(stored[runKey]?.requestId,submittedId);
 });

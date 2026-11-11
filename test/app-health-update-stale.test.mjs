@@ -363,7 +363,8 @@ test('an approved existing goal receives a first assessment on the first unchang
   const app=await browser();
   const observation=app.observe(baseline);
   assert.equal(app.submits.length,1);
-  assert.match(app.app.innerHTML,/正在评估/,'the card appears before the host answers');
+  assert.match(app.app.innerHTML,/<div class="review-in-progress"><span role="status">正在评估当前任务<\/span><button[^>]+data-action="dismiss-task"/,'a pending review appears once with the option to retain the plan');
+  assert.doesNotMatch(app.app.innerHTML,/正在规划下一步/);
   const review=app.submits[0];
   assert.match(review.body.snapshot.planning.goalIntent,/11 点起床/);
   answer(review,resultFor(review.body));
@@ -586,7 +587,7 @@ test('a user can preview exactly which existing goal fields and tasks to use for
   answer(review,resultFor(review.body));
   await settle();
   assert.match(app.app.innerHTML,/最近评估/);
-  assert.ok(app.app.innerHTML.indexOf('根据最新观测重新核对已确认安排。')<app.app.innerHTML.indexOf('查看任务协作'));
+  assert.match(app.app.innerHTML,/查看任务[\s\S]+最近评估[\s\S]+已检查最新记录。/);
   await app.observe(baseline);
   assert.equal(app.submits.length,1);
   await app.click({action:'edit-goal'});
