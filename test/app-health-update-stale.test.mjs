@@ -494,7 +494,7 @@ test('a detached goal retains its privacy restrictions when opening a task and s
   const submission=app.submit();
   await settle();
   const request=app.submits[0];
-  assert.doesNotMatch(JSON.stringify(request.body),/317/);
+  assert.doesNotMatch(JSON.stringify({goal:request.body.goal,snapshot:request.body.snapshot,message:request.body.message,history:request.body.history}),/旧睡眠记录|317/);
   answer(request,{reply:'已收到。',proposal:null,layout:null});
   await submission;
 });
@@ -544,5 +544,170 @@ test('a verified reconnection recovers an explicit transport failure without rev
       await settle();
       assert.equal(app.read(TICKET_KEY),null);
     }
+  }
+});
+
+const protectedGoalKey='along.health-sharing.v1';
+const protectedPlan={...confirmedLayout,title:'十二周健康计划',summary:'仅本地的旧计划说明',
+  modules:[{kind:'chips',id:'constraints',title:'条件',items:['晚班后吃饭']}],
+  tasks:[{...confirmedLayout.tasks[0],title:'旧睡眠任务',id:'private-sleep-317'},
+         {...confirmedLayout.tasks[1],title:'旧训练任务',id:'private-yoga-48'}]};
+const restrictedStorage={
+  [GOALS_KEY]:JSON.stringify({health:{title:'十二周健康计划',intent:'每周运动 180 分钟；午间有空'}}),
+  [ADAPTIVE_LAYOUTS_KEY]:JSON.stringify({health:protectedPlan}),
+  [CONVERSATIONS_KEY]:JSON.stringify({health:[{role:'user',text:'之前的私人聊天内容',localOnly:true}]}),
+  [protectedGoalKey]:JSON.stringify({localGoalTitle:true,localPlanText:true,tasks:protectedPlan.tasks.map((t,i)=>({id:t.id,alias:'private-task-'+i,localText:true}))}),
+};
+async function chooseReviewContent(app,keys) {
+  await app.click({action:'review-access'});
+  const panel=document.querySelector('#sheet');
+  const fields=Object.fromEntries(keys.map(key=>['allow-'+key,'on']));
+  await panel.dispatch('submit',{target:{id:'review-access-form',fields},preventDefault(){}});
+  await settle();
+  return panel.innerHTML;
+}
+
+test('a user can preview exactly which existing goal fields and tasks to use for this goal’s reviews',async()=>{
+  const app=await browser({storage:restrictedStorage});
+  assert.match(app.app.innerHTML,/data-action="review-access"/);
+  const panel=await chooseReviewContent(app,['title','intent','module-constraints','task-private-task-0']);
+  assert.match(panel,/晚班后吃饭/);
+  assert.match(panel,/旧训练任务/);
+  assert.doesNotMatch(panel,/之前的私人聊天内容/);
+  const review=app.submits[0];
+  assert.equal(review.body.goal.title,'十二周健康计划');
+  assert.match(review.body.snapshot.planning.goalIntent,/每周运动 180 分钟/);
+  assert.match(review.body.snapshot.planning.goalIntent,/晚班后吃饭/);
+  assert.equal(review.body.snapshot.planning.weeklyWorkoutMinutes,180);
+  assert.equal(review.body.goal.target,180);
+  assert.deepEqual(review.body.snapshot.planning.protectedTaskIds,['private-task-1']);
+  assert.match(JSON.stringify(review.body),/旧睡眠任务/);
+  assert.doesNotMatch(JSON.stringify(review.body),/private-sleep-317|private-yoga-48|旧训练任务|之前的私人聊天内容|仅本地的旧计划说明/);
+  answer(review,resultFor(review.body));
+  await settle();
+  assert.match(app.app.innerHTML,/最近评估/);
+  assert.ok(app.app.innerHTML.indexOf('根据最新观测重新核对已确认安排。')<app.app.innerHTML.indexOf('查看任务协作'));
+  await app.observe(baseline);
+  assert.equal(app.submits.length,1);
+  await app.click({action:'edit-goal'});
+  const explicit=app.submit();
+  await settle();
+  assert.doesNotMatch(JSON.stringify(app.submits[1].body),/十二周健康计划|午间有空|晚班后吃饭|旧睡眠任务|之前的私人聊天内容/);
+  answer(app.submits[1],{reply:'收到',proposal:null,layout:null});
+  await explicit;
+});
+
+test('revoking review fields invalidates an in-flight result and forgets derived review text before retry and restart',async()=>{
+  const app=await browser({storage:restrictedStorage});
+  await chooseReviewContent(app,['title','intent','task-private-task-0']);
+  const previous=app.submits[0];
+  assert.ok(previous);
+  await chooseReviewContent(app,[]);
+  answer(previous,resultFor(previous.body,'need_data'));
+  await settle();
+  assert.equal(app.submits.length,2);
+  const current=app.submits[1];
+  assert.notEqual(current.body.requestId,previous.body.requestId);
+  assert.equal(current.body.goal.target,null);
+  assert.equal(current.body.snapshot.planning.weeklyWorkoutMinutes,null);
+  assert.deepEqual(current.body.snapshot.planning.protectedTaskIds,['private-task-0','private-task-1']);
+  assert.doesNotMatch(JSON.stringify(current.body),/十二周健康计划|午间有空|旧睡眠任务|旧训练任务/);
+  current.reject(Error('The network connection was lost.'));
+  await settle();
+  const restarted=await browser({storage:Object.fromEntries(app.store),nativeHealth:{async refresh(){return baseline;}}});
+  await settle();
+  assert.doesNotMatch(JSON.stringify(restarted.submits[0].body),/十二周健康计划|午间有空|旧睡眠任务|旧训练任务/);
+  answer(restarted.submits[0],resultFor(restarted.submits[0].body));
+  await settle();
+  assert.deepEqual(restarted.read(ADAPTIVE_LAYOUTS_KEY).health.tasks,protectedPlan.tasks);
+});
+
+test('a protected plan duration does not become a weekly exercise target in a health assessment',async()=>{
+  const app=await browser({storage:{...restrictedStorage,
+    [HEALTH_KEY]:JSON.stringify({version:1,source:'healthkit',snapshot:baseline,goals:[{id:'weekly',type:'workout',target:12}]}),
+    [GOALS_KEY]:JSON.stringify({health:{title:'未来 12 周健康计划',intent:'先试 12 周'}}),
+  }});
+  const first=app.observe(baseline);
+  const review=app.submits[0];
+  assert.equal(review.body.goal.target,null);
+  assert.equal(review.body.snapshot.planning.weeklyWorkoutMinutes,null);
+  answer(review,resultFor(review.body));
+  await first;
+});
+
+test('a proposal derived from review-only content cannot leak through opening its changed or added tasks',async()=>{
+  const app=await browser({storage:restrictedStorage});
+  await chooseReviewContent(app,['intent','task-private-task-0']);
+  const first=app.submits[0], request=first.body;
+  const [allowed,withheld]=request.snapshot.planning.currentPlan.tasks;
+  const replacement={...allowed,title:'按私人目标提前结束'};
+  const added={...confirmedLayout.tasks[1],id:'new-private',title:'午间按私人与会约束安排'};
+  const reason='根据只授权给评估的目标调整。';
+  const result={reply:reason,proposal:null,layout:{...confirmedLayout,tasks:[replacement,withheld,added]},reassessment:{
+    decision:'revise',basedOnRevision:request.requestId,reason,changes:[
+      {taskId:allowed.id,operation:'update',reason},{taskId:added.id,operation:'add',reason}],nextReviewAt:null,watchFor:[]}};
+  answer(first,result);await settle();
+  await app.click({action:'accept-task'});
+  const [changed,kept,newTask]=app.read(ADAPTIVE_LAYOUTS_KEY).health.tasks;
+  assert.equal(changed.title,replacement.title);
+  assert.deepEqual(kept,protectedPlan.tasks[1]);
+  for (const task of [changed,newTask]) {
+    await app.click({action:'open-task',taskId:task.id});
+    assert.match(app.app.innerHTML,/仅保存在本机|限此目标评估/);
+    await app.click({action:'task-back'});
+  }
+  const observation=app.observe({...baseline,workoutMinutes:210});
+  const next=app.submits.at(-1);
+  assert.notEqual(next.body.requestId,request.requestId);
+  assert.doesNotMatch(JSON.stringify(next.body.snapshot.planning.recentDecisions),/根据只授权给评估的目标调整/);
+  answer(next,resultFor(next.body));
+  await observation;
+});
+
+test('adopting after a newly proposed reminder has expired keeps the old plan and requests a fresh review',async()=>{
+  const app=await browser();
+  const scheduledFor=new Date(Date.now()+3_600_000).toISOString();
+  const reminder={...confirmedLayout.tasks[0],kind:'reminder',scheduledFor,title:'按新作息收尾'};
+  const observation=app.observe({...baseline,sleepMinutes:380});
+  const review=app.submits[0];
+  answer(review,resultFor(review.body,'revise',{tasks:[reminder,confirmedLayout.tasks[1]]}));
+  await observation;
+  assert.match(app.app.innerHTML,/data-action="accept-task"/);
+  const realNow=Date.now;
+  try {
+    Date.now=()=>Date.parse(scheduledFor)+60_000;
+    await app.click({action:'accept-task'});
+    await settle();
+    assert.deepEqual(app.read(ADAPTIVE_LAYOUTS_KEY).health.tasks,confirmedLayout.tasks);
+    assert.deepEqual(app.reminderSets,[]);
+    assert.equal(app.submits.length,2);
+    const next=app.submits[1];
+    assert.notEqual(next.body.requestId,review.body.requestId);
+    answer(next,resultFor(next.body));
+    await settle();
+    assert.equal(app.read(TICKET_KEY),null);
+  } finally {Date.now=realNow;}
+});
+
+test('weekly exercise minutes use only selected, unambiguous goal or task evidence including legacy plan summaries',async()=>{
+  const cases=[
+    {selected:['summary'],summary:'未来12周，以睡眠为主。每周运动至少160分钟。',expected:160},
+    {selected:['task-private-task-0'],title:'累计运动至少160分钟',detail:'这是本周的运动目标。',expected:160},
+    {selected:['summary','task-private-task-0'],summary:'每周运动至少160分钟。',title:'本周运动目标是180分钟',expected:null},
+    {selected:['summary'],summary:'每周睡眠回顾120分钟。本周运动已经完成90分钟。',expected:null},
+    {selected:['summary'],summary:'每周运动120到160分钟。',expected:null},
+  ];
+  for (const {selected,summary='仅留本机的摘要',title='旧睡眠任务',detail='按原时间执行。',expected} of cases) {
+    const plan={...protectedPlan,summary,tasks:[{...protectedPlan.tasks[0],title,detail},protectedPlan.tasks[1]]};
+    const app=await browser({storage:{...restrictedStorage,
+      [GOALS_KEY]:JSON.stringify({health:{title:'未来12周健康计划',intent:''}}),
+      [ADAPTIVE_LAYOUTS_KEY]:JSON.stringify({health:plan}),
+    }});
+    await chooseReviewContent(app,selected);
+    const review=app.submits[0];
+    assert.equal(review.body.snapshot.planning.weeklyWorkoutMinutes,expected,summary+' '+title);
+    assert.equal(review.body.goal.target,expected);
+    answer(review,resultFor(review.body));
+    await settle();
   }
 });

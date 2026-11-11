@@ -10,6 +10,33 @@ const text=(v,max=300)=>typeof v==='string'?v.trim().slice(0,max):'';
 const stamp=v=>typeof v==='string'&&/^\d{4}-\d{2}-\d{2}T/.test(v)&&Number.isFinite(Date.parse(v))?v:null;
 const list=(v,max)=>Array.isArray(v)?v.slice(0,max):[];
 
+// Local calendar weeks can cross a daylight-saving transition.
+function historyWindow(value,type) {
+  const startAt=stamp(value?.startAt),endAt=stamp(value?.endAt);
+  if (!startAt||!endAt||![startAt,endAt].every(time=>/(Z|[+-]\d\d:\d\d)$/.test(time))) return null;
+  const hours=(Date.parse(endAt)-Date.parse(startAt))/3_600_000;
+  const daysWithData=value.daysWithData;
+  if (Math.abs(hours-7*24)>2||!Number.isInteger(daysWithData)||daysWithData<0||daysWithData>7) return null;
+  const max={sleep:1440,workout:10080,weight:1000}[type];
+  const measured=daysWithData>0?number(value.value,max):null;
+  const window={startAt,endAt,daysWithData,value:measured};
+  if (type==='workout') window.count=daysWithData&&Number.isInteger(value.count)&&value.count>=daysWithData?number(value.count,1000):null;
+  return window;
+}
+
+function recentHistory(raw,selectedTypes,capturedAt,comparisonHistoryAllowed) {
+  const history={};
+  for (const type of ['sleep','workout','weight']) {
+    if (!selectedTypes.includes(type)||!raw?.[type]||(type!=='workout'&&!comparisonHistoryAllowed)) continue;
+    const recent=historyWindow(raw[type].recent,type),previous=historyWindow(raw[type].previous,type);
+    if (!recent||!previous||Date.parse(previous.endAt)!==Date.parse(recent.startAt)) continue;
+    const age=Date.parse(capturedAt)-Date.parse(recent.endAt);
+    if (!Number.isFinite(age)||age<0||age>26*3_600_000) continue;
+    history[type]={recent,previous};
+  }
+  return Object.keys(history).length?history:null;
+}
+
 export function cleanHealthContext(value={}) {
   const selectedTypes=TYPES.filter(type=>Array.isArray(value?.selectedTypes)&&value.selectedTypes.includes(type));
   const next={source:'Apple Health 汇总',selectedTypes,capturedAt:stamp(value?.capturedAt||value?.updatedAt)};
@@ -33,6 +60,8 @@ export function cleanHealthContext(value={}) {
         count:number(p?.count,100),recentCount:number(p?.recentCount,100),averageMinutes:number(p?.averageMinutes,1440),lastObservedAt:stamp(p?.lastObservedAt),
       })).filter(p=>p.activity&&p.count!==null)};
   }
+  next.comparisonHistoryAllowed=value?.comparisonHistoryAllowed===true;
+  next.recentHistory=recentHistory(value?.recentHistory,selectedTypes,next.capturedAt,next.comparisonHistoryAllowed);
   return next;
 }
 
@@ -58,27 +87,39 @@ function cleanTasks(tasks) {
     ...(t?.kind==='reminder'?{scheduledFor:stamp(t.scheduledFor)?new Date(t.scheduledFor).toISOString():null}:{})}));
 }
 
+function privateTaskIds(value) {
+  const declared=list(value?.protectedTaskIds,6);
+  return list(value?.currentPlan?.tasks,6).filter(t=>t?.id&&(declared.includes(t.id)||
+    (t.title==='本机保留的任务'&&t.detail==='任务内容来自旧授权范围，请保留。'))).map(t=>t.id);
+}
+
 export function cleanPlanningContext(value) {
   if (!value||value.version!==1) return null;
   const plan=value.currentPlan;
+  const previous=cleanHealthContext(value.previous);
+  const hasBaseline=previous.selectedTypes.length>0;
+  const weekly=value.weeklyWorkoutMinutes;
   return {version:1,kind:'context-review',revisionId:text(value.revisionId,96),
     cause:['observation','review','feedback'].includes(value.cause)?value.cause:'observation',
     now:stamp(value.now),timezone:text(value.timezone,80),localDate:text(value.localDate,10),
     goalIntent:text(value.goalIntent,1600),
-    previous:cleanHealthContext(value.previous),
-    changes:list(value.changes,16).map(c=>text(c?.field||c,80)).filter(Boolean),
+    previous,baselineKind:hasBaseline?'previous_observation':'initial',
+    changes:hasBaseline?list(value.changes,16).map(c=>text(c?.field||c,80)).filter(Boolean):[],
+    weeklyWorkoutMinutes:Number.isInteger(weekly)&&weekly>0&&weekly<=10080?weekly:null,
+    protectedTaskIds:privateTaskIds(value),
     currentPlan:{title:text(plan?.title,80),summary:text(plan?.summary,600),tasks:cleanTasks(plan?.tasks)},
     recentDecisions:list(value.recentDecisions,6).map(d=>({at:stamp(d?.at),decision:text(d?.decision,20),
       reason:text(d?.reason,500),feedback:text(d?.feedback,300),watchFor:list(d?.watchFor,8).map(v=>text(v,180)).filter(Boolean)})),
   };
 }
 
-export function createPlanningContext({before,after,goalIntent,currentPlan,recentDecisions=[],cause='observation',now=new Date(),revisionId}) {
+export function createPlanningContext({before,after,goalIntent,currentPlan,weeklyWorkoutMinutes=null,protectedTaskIds=[],recentDecisions=[],cause='observation',now=new Date(),revisionId}) {
   const timezone=Intl.DateTimeFormat().resolvedOptions().timeZone;
-  const previous=cleanHealthContext({...before,selectedTypes:(before?.selectedTypes||[]).filter(type=>after.selectedTypes.includes(type))});
+  const previous=cleanHealthContext({...before,selectedTypes:(before?.selectedTypes||[]).filter(type=>after.selectedTypes.includes(type)),
+    comparisonHistoryAllowed:before?.comparisonHistoryAllowed===true&&after.comparisonHistoryAllowed===true});
   return cleanPlanningContext({version:1,revisionId,cause,now:now.toISOString(),timezone,
     localDate:new Intl.DateTimeFormat('en-CA',{timeZone:timezone}).format(now),goalIntent,
-    previous,changes:healthContextChanges(before,after),currentPlan,recentDecisions});
+    previous,changes:healthContextChanges(previous,after),currentPlan,weeklyWorkoutMinutes,protectedTaskIds,recentDecisions});
 }
 
 export function validateReassessment(value,layout,planning) {
@@ -103,8 +144,10 @@ export function validateReassessment(value,layout,planning) {
     if (['keep','update'].includes(change.operation)&&(!old.has(change.taskId)||!next.has(change.taskId))) throw Error('变更任务与任务空间不一致');
   }
   if (value.decision==='revise') {
+    const protectedIds=new Set(privateTaskIds(planning));
     for (const id of new Set([...old.keys(),...next.keys()])) {
       const operation=!old.has(id)?'add':!next.has(id)?'cancel':JSON.stringify(old.get(id))===JSON.stringify(next.get(id))?'keep':'update';
+      if (protectedIds.has(id)&&operation!=='keep') throw Error('本机保留的旧任务必须原样保留');
       const task=next.get(id);
       if (operation!=='keep'&&task?.kind==='reminder'&&!(Date.parse(task.scheduledFor)>Date.parse(planning.now))) throw Error('新增或更新的提醒需要未来时间');
       const claimed=changes.find(c=>c.taskId===id)?.operation;

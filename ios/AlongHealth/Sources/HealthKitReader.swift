@@ -5,7 +5,7 @@ final class HealthKitReader {
     private let store = HKHealthStore()
     private var observers: [HKObserverQuery] = []
 
-    func read(_ selection: Set<HealthMetric>, requestPermission: Bool = true, includeContext: Bool = true) async throws -> HealthSummary {
+    func read(_ selection: Set<HealthMetric>, requestPermission: Bool = true, includeContext: Bool = true, includeComparisonHistory: Bool = false) async throws -> HealthSummary {
         guard HKHealthStore.isHealthDataAvailable() else {
             throw ReaderError.unavailable
         }
@@ -32,15 +32,20 @@ final class HealthKitReader {
         if selection.contains(.steps) { result.steps = try await todaySteps(now: now) }
         if selection.contains(.workout) {
             let workout = try await recentWorkouts(now: now, includeContext: includeContext)
-            result.workoutMinutes = workout?.minutes
-            result.workoutCount = workout?.count
-            result.workoutSummary = workout?.summary
+            result.workoutMinutes = workout.minutes
+            result.workoutCount = workout.count
+            result.workoutSummary = workout.summary
+            result.recentHistory["workout"] = workout.history
         }
-        if selection.contains(.weight) { result.weightKg = try await latestWeight() }
+        if selection.contains(.weight) {
+            result.weightKg = try await latestWeight()
+            if includeContext && includeComparisonHistory { result.recentHistory["weight"] = try await weightHistory(now: now) }
+        }
         if selection.contains(.sleep) {
-            let sleep = try await recentSleep(now: now, includeContext: includeContext)
-            result.sleepMinutes = sleep?.latestMinutes
-            result.sleepSummary = sleep?.summary
+            let sleep = try await recentSleep(now: now, includeContext: includeContext, includeHistory: includeContext && includeComparisonHistory)
+            result.sleepMinutes = sleep.latestMinutes
+            result.sleepSummary = sleep.summary
+            result.recentHistory["sleep"] = sleep.history
         }
         if selection.contains(.activeEnergy) { result.activeEnergyKcal = try await todayActiveEnergy(now: now) }
         if selection.contains(.restingHeartRate) { result.restingHeartRate = try await latestRestingHeartRate(now: now) }
@@ -127,7 +132,7 @@ final class HealthKitReader {
         return try await samples(of: type, predicate: predicate, limit: 1, sort: sorted).first as? HKQuantitySample
     }
 
-    private func recentWorkouts(now: Date, includeContext: Bool) async throws -> (minutes: Int, count: Int, summary: [String: Any])? {
+    private func recentWorkouts(now: Date, includeContext: Bool) async throws -> (minutes: Int?, count: Int?, summary: [String: Any]?, history: [String: Any]?) {
         var calendar = Calendar(identifier: .iso8601)
         calendar.timeZone = .current
         let weekStart = calendar.dateInterval(of: .weekOfYear, for: now)!.start
@@ -137,10 +142,12 @@ final class HealthKitReader {
         let start = includeContext ? calendar.date(byAdding: .day, value: -27, to: todayStart)! : weekStart
         let predicate = HKQuery.predicateForSamples(withStart: start, end: now, options: .strictStartDate)
         let workouts = try await samples(of: .workoutType(), predicate: predicate).compactMap { $0 as? HKWorkout }
-        guard !workouts.isEmpty else { return nil }
+        let history = includeContext ? HealthHistoryWindows(endingAt: todayStart, calendar: calendar)
+            .workout(workouts.map { ($0.startDate, $0.duration) }) : nil
+        guard !workouts.isEmpty else { return (nil, nil, nil, history) }
         let week = workouts.filter { $0.startDate >= weekStart }
         let weekMinutes = Int(week.reduce(0.0) { $0 + $1.duration } / 60)
-        guard includeContext else { return (weekMinutes, week.count, [:]) }
+        guard includeContext else { return (weekMinutes, week.count, nil, nil) }
         let today = workouts.filter { $0.startDate >= todayStart }
         let yesterday = workouts.filter { $0.startDate >= yesterdayStart && $0.startDate < todayStart }
         // Only grouped counts/timing/durations cross the bridge, never HKWorkout samples.
@@ -166,7 +173,7 @@ final class HealthKitReader {
             "todayMinutes": Int(today.reduce(0.0) { $0 + $1.duration } / 60), "todayCount": today.count,
             "yesterdayMinutes": Int(yesterday.reduce(0.0) { $0 + $1.duration } / 60),
             "latestWorkoutAt": formatter.string(from: workouts.map(\.startDate).max()!), "patterns": patterns]
-        return (weekMinutes, week.count, summary)
+        return (weekMinutes, week.count, summary, history)
     }
 
     private static func activityName(_ type: HKWorkoutActivityType) -> String {
@@ -193,9 +200,28 @@ final class HealthKitReader {
         return (latest.quantity.doubleValue(for: .gramUnit(with: .kilo)) * 10).rounded() / 10
     }
 
-    private func recentSleep(now: Date, includeContext: Bool) async throws -> (latestMinutes: Int?, summary: [String: Any])? {
+    private func weightHistory(now: Date) async throws -> [String: Any] {
+        let calendar = Calendar.current
+        let windows = HealthHistoryWindows(endingAt: calendar.startOfDay(for: now), calendar: calendar)
+        let type = HKQuantityType.quantityType(forIdentifier: .bodyMass)!
+        let predicate = HKQuery.predicateForSamples(withStart: windows.start, end: windows.end, options: [])
+        let values = try await samples(of: type, predicate: predicate)
+        return windows.weight(values.compactMap { sample in
+            guard let weight = sample as? HKQuantitySample else { return nil }
+            return (weight.endDate, weight.quantity.doubleValue(for: .gramUnit(with: .kilo)))
+        })
+    }
+
+    private func recentSleep(now: Date, includeContext: Bool, includeHistory: Bool) async throws -> (latestMinutes: Int?, summary: [String: Any]?, history: [String: Any]?) {
         let window = SleepObservationWindow(now: now, calendar: .current)
-        let start = includeContext ? window.start : Calendar.current.date(byAdding: .day, value: -1, to: window.latestBoundary)!
+        let start: Date
+        if includeHistory {
+            start = HealthHistoryWindows(endingAt: window.averageThrough, calendar: window.calendar).start
+        } else if includeContext {
+            start = window.start
+        } else {
+            start = window.calendar.date(byAdding: .day, value: -1, to: window.latestBoundary)!
+        }
         let predicate = HKQuery.predicateForSamples(withStart: start, end: window.latestEnd, options: [])
         let values = try await samples(of: HKCategoryType.categoryType(forIdentifier: .sleepAnalysis)!, predicate: predicate)
         let ranges = values.compactMap { sample -> DateInterval? in
@@ -204,7 +230,7 @@ final class HealthKitReader {
                   HKCategoryValueSleepAnalysis.allAsleepValues.contains(stage) else { return nil }
             return sleep.startDate < sleep.endDate ? DateInterval(start: sleep.startDate, end: sleep.endDate) : nil
         }
-        return window.summarize(ranges)
+        return window.summarize(ranges, includeHistory: includeHistory)
     }
 
     private func samples(of type: HKSampleType, predicate: NSPredicate?, limit: Int = HKObjectQueryNoLimit, sort: [NSSortDescriptor]? = nil) async throws -> [HKSample] {

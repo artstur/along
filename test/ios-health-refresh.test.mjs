@@ -34,10 +34,12 @@ final class WKWebView {
     static var pending: [CheckedContinuation<HealthSummary, Never>] = []
     static var reads = 0
     static var peak = 0
+    static var historyReads: [Bool] = []
     func observe(_ selected: Set<HealthMetric>, onChange: @escaping () -> Void) {}
     func stopObserving() {}
-    func read(_ selected: Set<HealthMetric>, requestPermission: Bool = true, includeContext: Bool = true) async throws -> HealthSummary {
+    func read(_ selected: Set<HealthMetric>, requestPermission: Bool = true, includeContext: Bool = true, includeComparisonHistory: Bool = false) async throws -> HealthSummary {
         Self.reads += 1
+        Self.historyReads.append(includeComparisonHistory)
         return await withCheckedContinuation {
             Self.pending.append($0)
             Self.peak = max(Self.peak, Self.pending.count)
@@ -57,6 +59,7 @@ ${bridge.replaceAll('UserDefaults.standard','TestDefaults.standard')}
         let model = AlongBridgeModel()
         let view = WKWebView()
         TestDefaults.standard.set(["steps"], forKey: "along.health.selectedTypes")
+        TestDefaults.standard.set(true, forKey: "along.health.contextReview.v1")
         model.attach(view)
         await settle()
         model.refreshHealth()
@@ -64,6 +67,8 @@ ${bridge.replaceAll('UserDefaults.standard','TestDefaults.standard')}
         HealthKitReader.finish(1)
         await settle()
         print("reads after observer burst", HealthKitReader.reads)
+        print("legacy has history permission", HealthKitReader.historyReads.contains(true))
+        TestDefaults.standard.set(true, forKey: "along.health.comparisonHistory.v1")
         model.refreshSnapshot(id: "web-poll", webView: view)
         model.refreshSnapshot(id: "second-poll", webView: view)
         await settle()
@@ -73,6 +78,7 @@ ${bridge.replaceAll('UserDefaults.standard','TestDefaults.standard')}
         HealthKitReader.finish(3)
         await settle()
         print("answered poll", view.messages.contains { $0.contains("web-poll") })
+        print("new history permission honored", HealthKitReader.historyReads.last == true)
         print("answered second poll", view.messages.contains { $0.contains("second-poll") })
         model.refreshHealth()
         await settle()
@@ -80,6 +86,7 @@ ${bridge.replaceAll('UserDefaults.standard','TestDefaults.standard')}
         model.clearHealth(id: "clear", webView: view)
         HealthKitReader.finish(999)
         await settle()
+        print("cleared history permission", !TestDefaults.standard.bool(forKey: "along.health.comparisonHistory.v1"))
         print("revoked sample published", view.messages.contains { $0.contains(#""steps":999"#) })
         model.refreshSnapshot(id: "missing", webView: view)
         print("missing selection code", view.messages.last?.contains("health_not_connected") ?? false)
@@ -89,6 +96,9 @@ ${bridge.replaceAll('UserDefaults.standard','TestDefaults.standard')}
     execFileSync('swiftc',['-parse-as-library','-module-cache-path',join(dir,'cache'),fileURLToPath(models),file,'-o',exe],{stdio:'pipe'});
     const output=execFileSync(exe,{encoding:'utf8'});
     assert.match(output,/reads after observer burst 2/);
+    assert.match(output,/legacy has history permission false/);
+    assert.match(output,/new history permission honored true/);
+    assert.match(output,/cleared history permission true/);
     assert.match(output,/overlapping reads 1/);
     assert.match(output,/answered poll true/);
     assert.match(output,/answered second poll true/);
