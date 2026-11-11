@@ -269,10 +269,10 @@ function runtimeMeta(runtime=agentRuntime) {
     ? {short:'Kimi Swarm',full:'Kimi Code Agent Swarm',main:'Kimi Main Session',worker:'Subagents',description:'Main Session 启动真实 Swarm，并行子 Agent 拆解、复核并生成动态任务。'}
     : {short:'DSH Agents',full:'DSH Super Agent',main:'DSH Main Session',worker:'Worker',description:'Main Session 接单，Worker 与真实子 Agent 拆解、分工并生成动态任务。'};
 }
-function currentTaskRecords() {
-  const layout=goalLayouts[activeGoal];
+function currentTaskRecords(goalKey=activeGoal) {
+  const layout=goalLayouts[goalKey];
   if (layout) return layout.tasks;
-  const model=activeGoal==='finance'?financeView(finance,goalCustom.finance):isCustomGoalKey(activeGoal)?customView(activeGoal):healthView(localHealthViewState(),goalCustom.health);
+  const model=goalKey==='finance'?financeView(finance,goalCustom.finance):isCustomGoalKey(goalKey)?customView(goalKey):healthView(localHealthViewState(),goalCustom.health);
   const normalize=(task,id,index)=>({
     id,
     when:index===0?(task.status || '现在'):(task.status || '之后'),
@@ -287,53 +287,89 @@ function runKey(taskId,runtime=agentRuntime) { return `${activeGoal}:${runtime}:
 function selectedTask() { return currentTaskRecords().find(task=>task.id===selectedTaskId) || null; }
 const superAgentRequests=new Set();
 function taskRequest(task) { return {...createSuperAgentRequest({task:activeGoal==='finance'?task:reviewFor(activeGoal).shareableHealthTask(task),domain:goalDomain(activeGoal),goal:agentGoal(activeGoal),context:currentSummary()}),runtime:agentRuntime}; }
+function localOnlyTask(task,goalKey=activeGoal) {
+  return goalKey!=='finance' && reviewFor(goalKey).sharing.tasks?.some(saved=>saved.id===task.id && saved.localText);
+}
+function taskScope(goalKey) { return goalKey==='finance'?0:reviewFor(goalKey).sharing.scope||0; }
+function taskCallKey(task,goalKey=activeGoal,runtime=agentRuntime) {
+  return JSON.stringify([goalKey,runtime,taskScope(goalKey),task.id,task.title,task.detail,task.when,task.state]);
+}
+function taskCallIsCurrent(taskId,goalKey,runtime,callKey) {
+  const task=currentTaskRecords(goalKey).find(item=>item.id===taskId);
+  return task && !localOnlyTask(task,goalKey) && taskCallKey(task,goalKey,runtime)===callKey;
+}
 function currentSuperAgentRun(task) {
-  const key=runKey(task.id);
-  const stored=superAgentRuns[key];
-  // 旧版本的记录存在不带运行时前缀的键里，两边都要一样处理。
+  if (localOnlyTask(task)) return null;
+  const stored=superAgentRuns[runKey(task.id)];
   const legacy=agentRuntime===DSH_RUNTIME?superAgentRuns[`${activeGoal}:${task.id}`]:null;
-  const saved=safeSuperAgentRun(stored)||safeSuperAgentRun(legacy);
+  // The same task card can survive a rewritten task or an authorization alias change.
+  const request=taskRequest(task);
+  const records=[stored,legacy].filter(value=>{
+    if (!value || (value.runtime && value.runtime!==agentRuntime)) return false;
+    if (value.taskScope!=null && value.taskScope!==taskScope(activeGoal)) return false;
+    if (typeof value.requestId==='string' && value.requestId.startsWith('along-') && value.requestId!==request.requestId) return false;
+    if (request.task.id!==task.id && value.requestId!==request.requestId && value.task?.id!==request.task.id) return false;
+    return ['id','title','detail','when','state'].every(field=>value.task?.[field]==null || value.task[field]===request.task[field]);
+  });
+  const saved=records.map(safeSuperAgentRun).find(Boolean);
   if (saved) return saved;
-  // 存着的记录存在却过不了白名单：那是宿主返回了我们不认的形状。
-  // 不能拿一个假的「正在连接」把它盖掉——那会让真实的状态和原因永远看不到，
-  // 用户看到的是一个永远转圈的界面。
-  const untrusted=stored??legacy;
-  if (untrusted) return createFailedSuperAgentRun(taskRequest(task),typeof untrusted.error==='string'&&untrusted.error?untrusted.error:'宿主返回了无法识别的运行记录',Date.now(),agentRuntime);
-  const created=createPendingSuperAgentRun(taskRequest(task),Date.now(),agentRuntime);
-  superAgentRuns={...superAgentRuns,[key]:created};
+  const untrusted=records[0];
+  return untrusted?createFailedSuperAgentRun(taskRequest(task),typeof untrusted.error==='string'&&untrusted.error?untrusted.error:'宿主返回了无法识别的运行记录',Date.now(),agentRuntime):null;
+}
+function stoppedTaskDecision(run) {
+  return !run.ticket && ['ignore','unavailable','stop'].includes(run.eval?.decision);
+}
+function storeTaskReply(key,goalKey,task,run,startedAt,scope) {
+  superAgentRuns={...superAgentRuns,[key]:{...run,taskScope:scope,createdAt:Number.isFinite(run.createdAt)?run.createdAt:startedAt}};
+  const saved=safeSuperAgentRun(run);
+  if (saved?.actual===true) void deliverAgentNotification(taskRunNotification(goalKey,task,saved));
+}
+async function submitSuperAgentTask(task,{retry=false}={}) {
+  const goalKey=activeGoal,key=runKey(task.id),callKey=taskCallKey(task);
+  if (localOnlyTask(task,goalKey)||!agentConfig.token||superAgentRequests.has(callKey)) return;
+  const current=currentSuperAgentRun(task);
+  if (current?.actual===true || (current?.error&&!retry)) return;
+  const request=taskRequest(task),startedAt=Date.now();
+  superAgentRequests.add(callKey);
+  superAgentRuns={...superAgentRuns,[key]:{...createPendingSuperAgentRun(request,startedAt,request.runtime),taskScope:taskScope(goalKey)}};
   saveSuperAgentRuns();
-  return created;
-}
-async function submitSuperAgentTask(task) {
-  const goalKey=activeGoal;
-  const request=taskRequest(task),key=runKey(task.id);
-  if (superAgentRequests.has(request.requestId)) return;
-  superAgentRequests.add(request.requestId);
+  render();
+  void enableAgentNotifications();
   try {
-    if (!agentConfig.token) throw Error('请先在“编辑目标”中连接这台 Mac');
-    if (goalKey!=='finance'&&reviewFor(goalKey).sharing.tasks?.some(saved=>saved.id===task.id&&saved.localText))
-      throw Error('此任务来自之前的健康授权范围，仅保存在本机。请用当前授权重新编排任务。');
     const response=await agentCall(agentConfig,'/super-agent/tasks',request);
-    if (!response?.run?.actual) throw Error(`${agentRuntimeLabel(agentRuntime)} 没有返回真实运行记录`);
-    superAgentRuns={...superAgentRuns,[key]:response.run};
-    void deliverAgentNotification(taskRunNotification(goalKey,task,response.run));
-  } catch(error) { superAgentRuns={...superAgentRuns,[key]:createFailedSuperAgentRun(request,error.message,Date.now(),agentRuntime)}; }
-  finally { superAgentRequests.delete(request.requestId);saveSuperAgentRuns();if (screen==='task'&&selectedTaskId===task.id) render(); }
-}
-async function refreshSuperAgentTask(task) {
-  const goalKey=activeGoal;
-  const request=taskRequest(task),key=runKey(task.id);
-  if (!agentConfig.token || superAgentRequests.has(request.requestId)) return;
-  superAgentRequests.add(request.requestId);
-  try {
-    const run=await agentCall(agentConfig,'/super-agent/tasks/status',{requestId:request.requestId,runtime:agentRuntime});
-    if (run?.actual) {superAgentRuns={...superAgentRuns,[key]:run};saveSuperAgentRuns();void deliverAgentNotification(taskRunNotification(goalKey,task,run));if (screen==='task'&&selectedTaskId===task.id) render();}
+    if (!taskCallIsCurrent(task.id,goalKey,request.runtime,callKey)) return;
+    const run=response?.run;
+    if (run?.actual!==true || run.runtime!==request.runtime || run.requestId!==request.requestId)
+      throw Error(typeof run?.error==='string'&&run.error||'Mac 没有返回与本次任务匹配的运行记录');
+    storeTaskReply(key,goalKey,task,{...run,task:request.task},startedAt,taskScope(goalKey));
   } catch(error) {
-    const current=safeSuperAgentRun(superAgentRuns[key]);
-    superAgentRuns={...superAgentRuns,[key]:current?.actual?withRunError(current,error.message):createFailedSuperAgentRun(request,error.message,Date.now(),agentRuntime)};
-    saveSuperAgentRuns();
-    if (screen==='task'&&selectedTaskId===task.id) render();
-  } finally { superAgentRequests.delete(request.requestId); }
+    if (taskCallIsCurrent(task.id,goalKey,request.runtime,callKey))
+      superAgentRuns={...superAgentRuns,[key]:{...createFailedSuperAgentRun(request,error.message,Date.now(),request.runtime),taskScope:taskScope(goalKey)}};
+  } finally {
+    superAgentRequests.delete(callKey);saveSuperAgentRuns();
+    if (screen==='task'&&activeGoal===goalKey&&agentRuntime===request.runtime&&selectedTaskId===task.id) render();
+  }
+}
+async function refreshSuperAgentTask(task,{retry=false}={}) {
+  const goalKey=activeGoal,key=runKey(task.id),callKey=taskCallKey(task);
+  if (localOnlyTask(task,goalKey)||!agentConfig.token||superAgentRequests.has(callKey)) return;
+  const current=currentSuperAgentRun(task);
+  if (!current?.actual || stoppedTaskDecision(current) || (current.status!=='working' && !(retry&&current.refreshFailed))) return;
+  superAgentRequests.add(callKey);
+  try {
+    const run=await agentCall(agentConfig,'/super-agent/tasks/status',{requestId:current.requestId,runtime:current.runtime});
+    if (!taskCallIsCurrent(task.id,goalKey,current.runtime,callKey)) return;
+    if (run?.actual!==true || run.runtime!==current.runtime || run.requestId!==current.requestId)
+      throw Error(typeof run?.error==='string'&&run.error||'Mac 没有返回与本次任务匹配的运行记录');
+    if (!safeSuperAgentRun(run)) throw Error(typeof run.error==='string'&&run.error||'Mac 返回了无法识别的任务状态');
+    storeTaskReply(key,goalKey,task,{...run,task:current.task??run.task},Number.isFinite(current.createdAt)?current.createdAt:Date.now(),taskScope(goalKey));
+  } catch(error) {
+    if (taskCallIsCurrent(task.id,goalKey,current.runtime,callKey))
+      superAgentRuns={...superAgentRuns,[key]:{...withRunError({...current,createdAt:Number.isFinite(current.createdAt)?current.createdAt:Date.now()},error.message),refreshFailed:true}};
+  } finally {
+    superAgentRequests.delete(callKey);saveSuperAgentRuns();
+    if (screen==='task'&&activeGoal===goalKey&&agentRuntime===current.runtime&&selectedTaskId===task.id) render();
+  }
 }
 function saveGoalSuperAgentRuns() { localStorage.setItem(GOAL_SUPER_AGENT_RUNS_KEY,JSON.stringify(goalSuperAgentRuns)); }
 function goalRunKey(goalKey=activeGoal,runtime=agentRuntime) { return `${goalKey}:${runtime}`; }
@@ -463,21 +499,21 @@ function adaptiveGoalCard(layout) {
   const more=layout.modules.filter(module=>!visibleIds.has(module.id));
   return `<section class="goal-card adaptive-goal" aria-label="Along 生成的目标空间"><h1>${esc(layout.title)}</h1><p class="adaptive-summary">${esc(layout.summary)}</p>${visible.map(module=>adaptiveModule(module,true)).join('')}${more.length?`<details class="adaptive-more"><summary>查看目标详情 · ${more.length} 个模块</summary>${more.map(module=>adaptiveModule(module,false)).join('')}</details>`:''}<div class="card-actions"><button class="agent-action" data-action="edit-goal">编辑目标</button></div></section>`;
 }
+// Native updates re-render the home screen while a disclosure may be in use.
+function homeDisclosure(name) {
+  const key=activeGoal+'/'+name;
+  const open=Array.from(app.querySelectorAll('details[data-home-detail][open]')).some(item=>item.dataset.homeDetail===key);
+  return `data-home-detail="${esc(key)}"${open?' open':''}`;
+}
 function healthReviewDetails() {
   if (!hasHealthSource(activeGoal)) return '';
   const review=reviewFor(activeGoal);
-  const last=review.latestDecision();
-  const access=review.accessOptions().length>0;
-  const comparison=state.source==='healthkit'&&state.snapshot?.contextReviewAllowed===true&&
-    scopedSnapshot(activeGoal).comparisonHistoryAllowed!==true&&scopedSnapshot(activeGoal).selectedTypes.some(t=>t==='sleep'||t==='weight');
-  if (!last&&!access&&!comparison) return '';
+  const last=review.latestDecision(),access=review.accessOptions().length>0;
+  if (!last&&!access) return '';
   const label={keep:'保留当前安排',revise:'建议调整任务',need_data:'需要补充信息'}[last?.decision];
-  const message=last?.reply||last?.reason||'';
-  const preview=Array.from(message).slice(0,88).join('');
-  const explanation=message.length>preview.length?`<details><summary>${esc(preview)}… 查看完整判断</summary><p>${esc(message)}</p></details>`:`<p>${esc(message)}</p>`;
-  return `<div class="adaptive-more">${last?`<strong>最近评估 · ${esc(label)}</strong>${explanation}<small>${esc(formatDate(last.at))} · ${esc(agentRuntimeLabel(last.runtime))}</small>`:''}
-    ${access?`<p>可选择这项目标的原文和任务，供 Along 复查已有安排。</p><button class="minor-action" data-action="review-access">选择评估内容</button>`:''}
-    ${comparison?`<p>要比较近两周的睡眠或体重，可在 Apple Health 中重新预览并允许评估。</p><button class="minor-action" data-action="connect-health">管理 Apple Health</button>`:''}</div>`;
+  return `<details class="health-review" ${homeDisclosure('review')}><summary><span>${last?`最近评估 · ${esc(label)}`:'评估设置'}</span>${last?`<time datetime="${esc(last.at)}">${esc(formatDate(last.at))}</time>`:''}</summary>
+    ${last?`<p>${esc(last.reply||last.reason)}</p><small>${esc(agentRuntimeLabel(last.runtime))}</small>`:''}
+    ${access?'<button class="minor-action" data-action="review-access">选择评估内容</button>':''}</details>`;
 }
 function taskProposalCard() {
   if (!hasHealthSource(activeGoal)) return '';
@@ -506,6 +542,10 @@ function taskProposalCard() {
   const dismiss='<button class="button secondary" data-action="dismiss-task">保留原任务</button>';
   const retry=pendingTask.requestId===planningState.request?.requestId&&planningState.run?.status==='blocked';
   const needData=pendingTask.assessment?.decision==='need_data';
+  if (pendingTask.status==='assigned'&&planningState.run?.status==='working'&&
+      pendingTask.requestId===planningState.request?.requestId&&!suggestion&&!pendingTask.assessment&&!pendingTask.error&&!planningState.run.error) {
+    return '<div class="review-in-progress"><span role="status">正在评估当前任务</span><button class="minor-action" data-action="dismiss-task">保留原任务</button></div>';
+  }
   const label=suggestion?'计划调整建议':retry?'评估未完成':needData?'需要补充信息':'正在评估';
   const changes=pendingTask.assessment?.changes?.filter(c=>c.operation!=='keep')||[];
   const diff=changes.map(change=>{
@@ -544,7 +584,7 @@ function localWeeklyWorkoutProgress(layout) {
   });
   if (matches.length!==1) return null;
   const remaining=minutes<target?`还差 ${target-minutes} 分钟`:'本周已达目标';
-  const lines=[`本周运动 ${minutes} / ${target} 分钟 · ${remaining}`];
+  const lines=[];
   const pair=snapshot.recentHistory?.workout;
   if (pair&&Date.now()-Date.parse(pair.recent.endAt)<26*3_600_000) {
     const date=stamp=>formatStamp(stamp,{month:'numeric',day:'numeric'});
@@ -558,7 +598,7 @@ function localWeeklyWorkoutProgress(layout) {
       lines.push(delta===0?'两期记录的运动时长相同':`最近一期记录的运动时长${delta>0?'多':'少'} ${Math.abs(delta)} 分钟`);
     }
   }
-  return {id:matches[0].id,html:`<div data-weekly-workout-progress>${lines.map(line=>`<p>${esc(line)}</p>`).join('')}</div>`};
+  return {id:matches[0].id,minutes,target,remaining,history:lines};
 }
 function adaptiveTaskSection(layout) {
   const kinds={reminder:'定时提醒',agent_action:'Agent 处理',recommendation:'推荐'};
@@ -566,11 +606,17 @@ function adaptiveTaskSection(layout) {
   const taskButton=task=>{
     const timing=task.kind==='reminder'&&task.scheduledFor?formatDate(task.scheduledFor):task.when;
     const meta=[kinds[task.kind],timing].filter(Boolean).join(' · ');
-    return `<button class="generated-task generated-task-button" data-action="open-task" data-task-id="${esc(task.id)}"><div class="task-meta"><span>${esc(meta)}</span><span class="state-pill">${esc(taskStateLabel[task.state])}</span></div><strong>${esc(task.title)}</strong><p>${esc(task.detail)}</p>${task.id===workout?.id?workout.html:''}<span class="task-open-hint">查看任务协作</span></button>`;
+    const weekly=task.id===workout?.id;
+    const body=weekly?`<div data-weekly-workout-progress><p>本周运动 <strong>${workout.minutes} / ${workout.target}</strong> 分钟</p><span>${esc(workout.remaining)}</span></div>`:`<p>${esc(task.detail)}</p>`;
+    const hint=localOnlyTask(task)?'查看任务':'查看任务协作';
+    const button=`<button class="generated-task generated-task-button" data-action="open-task" data-task-id="${esc(task.id)}"><div class="task-meta"><span>${esc(meta)}</span><span class="state-pill">${esc(taskStateLabel[task.state])}</span></div><strong>${esc(task.title)}</strong>${body}<span class="task-open-hint">${hint}</span></button>`;
+    if (!weekly||!workout.history.length) return button;
+    const history=workout.history.map(line=>`<p>${esc(line)}</p>`).join('');
+    return `<article data-weekly-task="${esc(task.id)}">${button}<details class="workout-history" ${homeDisclosure('workout/'+task.id)}><summary>近两期运动记录</summary>${history}</details></article>`;
   };
   const visible=layout.tasks.slice(0,2).map(taskButton).join('');
   const later=layout.tasks.slice(2);
-  return `<section class="task-section adaptive-tasks" aria-label="动态任务"><div class="section-heading"><h2>动态任务</h2><span>Along 根据目标与情境生成</span></div>${taskProposalCard()}${healthReviewDetails()}<div class="adaptive-task-card">${visible}${later.length?`<details class="adaptive-more"><summary>查看其余 ${later.length} 项任务</summary>${later.map(taskButton).join('')}</details>`:''}${layout.questions.length?`<div class="missing-strip">待确认 ${layout.questions.length} 项：${esc(layout.questions[0])}</div>`:''}<div class="card-actions"><button class="agent-action" data-action="edit-goal">补充信息</button></div></div></section>`;
+  return `<section class="task-section adaptive-tasks" aria-label="动态任务"><div class="section-heading"><h2>动态任务</h2>${hasHealthSource(activeGoal)?'':'<span>Along 根据目标与情境生成</span>'}</div>${taskProposalCard()}<div class="adaptive-task-card">${visible}${later.length?`<details class="adaptive-more"><summary>查看其余 ${later.length} 项任务</summary>${later.map(taskButton).join('')}</details>`:''}${layout.questions.length?`<div class="missing-strip">待确认 ${layout.questions.length} 项：${esc(layout.questions[0])}</div>`:''}<div class="card-actions"><button class="agent-action" data-action="edit-goal">补充信息</button></div></div>${healthReviewDetails()}</section>`;
 }
 function adaptiveConnectionSection(layout) {
   if (!layout.connections?.length) return '';
@@ -601,10 +647,11 @@ function home() {
         <div class="card-actions"><button class="agent-action" data-action="edit-goal">编辑目标</button></div>
       </section>`;
   const taskContent=layout?adaptiveTaskSection(layout):`<section class="task-section" aria-label="动态任务">
-        <div class="section-heading"><h2>动态任务</h2><span>随目标与数据更新</span></div>
-        ${taskProposalCard()}${healthReviewDetails()}
+        <div class="section-heading"><h2>动态任务</h2>${linked?'':'<span>随目标与数据更新</span>'}</div>
+        ${taskProposalCard()}
         <div class="focus-task"><div class="focus-top"><span>下一步</span><span class="task-chip">${esc(model.primary.status)}</span></div><h3>${esc(model.primary.title)}</h3><p>${esc(model.primary.detail)}</p><div class="card-actions"><button class="agent-action" data-action="edit-goal">补充信息</button></div></div>
         ${model.secondary.length ? `<div class="task-list">${model.secondary.map((task,index) => `<button class="task-row task-row-button" data-action="open-task" data-task-id="follow-up-${index}"><span class="task-row-mark" aria-hidden="true"></span><div><strong>${esc(task.title)}</strong><p>${esc(task.detail)}</p></div><span class="task-row-status">${esc(task.status)}</span></button>`).join('')}</div>` : ''}
+        ${healthReviewDetails()}
       </section>`;
   const connectionContent=connection?`<section class="connection-section" aria-label="连接来源">
         <div class="section-heading"><h2>连接</h2><span>连接和任务相关的数据源</span></div>
@@ -628,42 +675,67 @@ function home() {
     </main><footer>Along · 一起，慢慢向前</footer></div>`;
 }
 
-function taskAgentCard(agent) {
+function taskAgentCard(agent,taskDetail=false) {
   const status=AGENT_STATUSES.has(agent.status)?agent.status:'';
-  const raw=Number.isFinite(agent.progress)?agent.progress:agent.status==='done'?100:agent.status==='working'?55:agent.status==='blocked'?85:0;
+  const recorded=Number.isFinite(agent.progress);
+  const raw=recorded?agent.progress:agent.status==='done'?100:agent.status==='working'?55:agent.status==='blocked'?85:0;
   const progress=Math.max(0,Math.min(100,raw));
-  return `<article class="worker-card ${status}"><div class="worker-card-head"><span class="worker-mark" aria-hidden="true">A</span><div><strong>Along</strong><span>协作单元</span></div><span class="worker-state">${esc(agentStateLabel[agent.status]||agent.status)}</span></div><p class="worker-objective">${esc(agent.objective)}</p><div class="worker-progress"><span style="width:${progress}%"></span></div><p class="worker-now"><span>当前</span>${esc(agent.work)}</p>${agent.report?`<p class="worker-output"><span>报告</span>${esc(agent.report.summary)}</p>`:''}</article>`;
+  return `<article class="worker-card ${status}"><div class="worker-card-head"><span class="worker-mark" aria-hidden="true">A</span><div><strong>Along</strong><span>协作单元</span></div><span class="worker-state">${esc(agentStateLabel[agent.status]||agent.status)}</span></div>${agent.objective?`<p class="worker-objective">${esc(agent.objective)}</p>`:''}${taskDetail!==true||recorded?`<div class="worker-progress"><span style="width:${progress}%"></span></div>`:''}${agent.work?`<p class="worker-now"><span>当前</span>${esc(agent.work)}</p>`:''}${agent.report?.summary?`<p class="worker-output"><span>报告</span>${esc(agent.report.summary)}</p>`:''}</article>`;
+}
+function taskReasonText(reason) {
+  if (typeof reason==='string') return reason;
+  if (typeof reason?.values?.text==='string') return reason.values.text;
+  if (typeof reason?.code!=='string') return '';
+  return ({noRuleMatched:'没有匹配的接单规则',senderNotMember:'请求者未列入当前来源的授权名单',directionUnsettled:'执行意图或方向还需确认',
+    noAdmissible:'此请求未通过接单评估',timeout:'接单评估超时',policyChanged:'评估期间接单规则发生变化',humanStop:'用户已要求停止'})[reason.code]||reason.code;
+}
+function taskExecutionRecord(run) {
+  const workers=run.assignments.filter(agent=>agent.objective||agent.work||agent.report?.summary||agent.status);
+  const events=run.events.filter(event=>event.text);
+  const ticket=run.ticket?.id;
+  const mandate=run.mandate;
+  const mandateText=typeof mandate==='string'?mandate:[mandate?.scope,mandate?.strength==='explicit'?'明确授权':'',
+    mandate?.actor?.id?`请求者 ${mandate.actor.id}`:'',typeof mandate?.policyVersion==='string'?`Policy ${shortText(mandate.policyVersion)}`:''].filter(value=>typeof value==='string'&&value).join(' · ');
+  return `${ticket?`<section class="task-record"><h2>${run.runtime===KIMI_RUNTIME?'Kimi 会话':'DSH 工单'}</h2>${typeof run.ticket.title==='string'?`<p>${esc(run.ticket.title)}</p>`:''}<p>${esc(ticket)}</p></section>`:''}
+    ${mandateText?`<div class="mandate-card"><span>本次授权边界</span><p>${esc(mandateText)}</p></div>`:''}
+    ${workers.length?`<section class="workers-section"><div class="section-heading"><h2>任务分工</h2><span>${workers.filter(agent=>agent.status==='done').length} / ${workers.length} 已完成</span></div><div class="worker-grid">${workers.map(agent=>taskAgentCard(agent,true)).join('')}</div></section>`:''}
+    ${events.length?`<section class="activity-section"><div class="section-heading"><h2>工作记录</h2></div><div class="activity-list">${events.map(event=>`<div class="activity-row"><span class="activity-dot"></span><div><strong>${esc(event.text)}</strong><span>${formatTime(event.at)}</span></div></div>`).join('')}</div></section>`:''}`;
 }
 function taskDetailPage() {
   const task=selectedTask();
   if (!task) {
     return `<div class="app-shell"><header class="topbar"><div class="topbar-inner">${brand()}<span class="topbar-caption">Along</span></div></header><main class="content task-detail">${backButton('task-back','返回动态任务')}<div class="empty-task"><h1>任务已更新</h1><p>这项动态任务已不在当前计划中，请返回查看最新安排。</p></div></main></div>`;
   }
-  const run=currentSuperAgentRun(task);
-  const meta=runtimeMeta(run.runtime);
-  const evalText=run.eval?.decision==='accept'?'接受执行':run.eval?.decision==='evaluating'?'正在评估':run.eval?.decision==='ignore'?'未接受':run.eval?.decision||'等待评估';
-  // 数组里可能有 null 元素（宿主给的数据不保证形状）：渲染不能因此抛错。
-  // 数组里可能有 null 元素（宿主给的数据不保证形状）：渲染不能因此抛错。
-  const events=run.events.filter(event=>event&&typeof event==='object');
-  const workers=[{name:meta.main,role:'Orchestrator',status:run.eval?.decision==='evaluating'?'working':run.eval?'done':'queued',objective:'评估任务、建立授权边界并编排并行工作。',work:run.eval?`Eval：${evalText}`:'等待接收 Trigger',report:null},...run.assignments.filter(agent=>agent&&typeof agent==='object')];
-  const mandateText=run.mandate?`${run.mandate.strength==='explicit'?'明确授权':'推断授权'} · 请求者 ${run.mandate.actor?.id||'—'} · Policy ${shortText(run.mandate.policyVersion)}`:'尚未生成 Mandate';
-  return `<div class="app-shell super-agent-shell"><header class="topbar"><div class="topbar-inner">${brand()}<span class="topbar-caption">Along · 任务协作</span></div></header><main class="content task-detail">
+  const local=localOnlyTask(task),run=currentSuperAgentRun(task),actual=run?.actual===true;
+  const stopped=actual&&stoppedTaskDecision(run);
+  const submitting=!actual&&superAgentRequests.has(taskCallKey(task));
+  const meta=runtimeMeta();
+  let status,reason='',action='',button='';
+  if (local) {
+    status='仅在本机';
+    reason=`按你之前的健康授权范围，任务原文仅保存在本机，本次未提交给 ${meta.short}。`;
+  } else if (actual) {
+    status=stopped?({ignore:'未接受任务',unavailable:'接单评估未完成',stop:'执行已停止'})[run.eval.decision]:run.statusLabel||'已接收';
+    const reasons=stopped&&Array.isArray(run.eval.reasons)?run.eval.reasons.map(taskReasonText).filter(Boolean):[];
+    reason=[run.error,...reasons,(!run.error&&run.status==='blocked')?run.report?.summary:''].filter(item=>typeof item==='string'&&item).join(' ');
+    if (stopped&&!reason) reason=`${meta.short} 已返回这项决定。`;
+    if (run.refreshFailed) {action=agentConfig.token?'refresh-task':'edit-goal';button=agentConfig.token?'重新读取状态':'连接 Mac';}
+    else if (stopped&&run.eval.decision==='unavailable') reason+=' 请在 Mac 查看接单评估。';
+  } else if (!agentConfig.token && !run?.error) {
+    status='待连接 Mac';reason='请先在“编辑目标”中连接这台 Mac，然后再打开任务。';action='edit-goal';button='连接 Mac';
+  } else if (run?.error) {
+    status='提交未获确认';reason=run.error;
+    action=agentConfig.token?'retry-task':'edit-goal';button=agentConfig.token?'重试提交':'连接 Mac';
+  } else {
+    status=submitting?`正在提交给 ${meta.short}`:'待提交';
+  }
+  const showProgress=actual&&!stopped&&Number.isFinite(run.progress),percent=showProgress?runProgress(run.progress):0;
+  return `<div class="app-shell super-agent-shell"><header class="topbar"><div class="topbar-inner">${brand()}<span class="topbar-caption">Along · ${local?'任务详情':'任务协作'}</span></div></header><main class="content task-detail">
     ${backButton('task-back','返回动态任务')}
-    <section class="task-hero"><div class="task-hero-top"><span class="eyebrow">${esc(task.when)} · ${esc(taskStateLabel[task.state])}</span><span class="run-status ${runStatus(run.status)}"><i></i>${esc(run.statusLabel)}</span></div><h1>${esc(task.title)}</h1><p>${esc(task.detail)}</p><div class="run-progress-head"><span>总体进展</span><strong>${runProgress(run.progress)}%</strong></div><div class="run-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${runProgress(run.progress)}"><span style="width:${runProgress(run.progress)}%"></span></div></section>
-
-    <section class="orchestration-section"><div class="section-heading"><h2>编排链路</h2><span>${run.runtime===KIMI_RUNTIME?'Kimi Session 到并行 Subagents':'从触发到可交付 Ticket'}</span></div><div class="orchestration-flow">
-      <div><span>Source</span><strong>${esc(run.source.label)}</strong></div><b aria-hidden="true">→</b>
-      <div><span>Trigger</span><strong>${esc(run.trigger.label)}</strong></div><b aria-hidden="true">→</b>
-      <div><span>Eval</span><strong>${esc(evalText)}</strong></div><b aria-hidden="true">→</b>
-      <div><span>Ticket</span><strong>${esc(run.ticket?.id||'尚未创建')}</strong></div>
-    </div><div class="mandate-card"><span>Mandate · 本次授权边界</span><p>${esc(mandateText)}</p></div></section>
-
-    <section class="workers-section"><div class="section-heading"><h2>真实分工</h2><span>${workers.filter(agent=>agent.status==='done').length} / ${workers.length} 已完成</span></div><div class="worker-grid">${workers.map(taskAgentCard).join('')}</div></section>
-
-    <section class="activity-section"><div class="section-heading"><h2>工作记录</h2><span>只记录有意义的状态变化</span></div><div class="activity-list">${events.map((event,index)=>`<div class="activity-row"><span class="activity-dot ${index===events.length-1&&run.status!=='done'?'active':''}"></span><div><strong>${esc(event.text)}</strong><span>${formatTime(event.at)}</span></div></div>`).join('')}</div></section>
-
-    <aside class="architecture-note"><strong>${run.actual?`真实 ${meta.full} 运行`:'等待真实运行'}</strong><p>${esc(run.error||`以上状态来自本机 ${meta.full} 的真实会话与子 Agent；没有用定时动画模拟。`)}</p></aside>
-  </main></div>`;
+    <section class="task-hero"><div class="task-hero-top"><span class="eyebrow">${esc(task.when)} · ${esc(taskStateLabel[task.state])}</span><span class="run-status ${actual?runStatus(stopped?'blocked':run.status):''}">${local?'':'<i></i>'}${esc(status)}</span></div><h1>${esc(task.title)}</h1><p>${esc(task.detail)}</p>
+    ${showProgress?`<div class="run-progress-head"><span>总体进展</span><strong>${percent}%</strong></div><div class="run-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}"><span style="width:${percent}%"></span></div>`:''}</section>
+    ${reason?`<section class="task-record" aria-live="polite"><h2>${local?'为什么没有提交':actual&&!stopped&&run.refreshFailed?'状态读取失败':'原因'}</h2><p>${esc(reason)}</p>${action?`<button class="minor-action" data-action="${action}">${button}</button>`:''}</section>`:''}
+    ${actual?taskExecutionRecord(run):''}</main></div>`;
 }
 
 function goalOrchestrationPanel(run) {
@@ -951,7 +1023,14 @@ app.addEventListener('click', event => {
     screen='task';
     render();
     const task=selectedTask();
-    if (task) { void enableAgentNotifications();void submitSuperAgentTask(task); }
+    if (task) void submitSuperAgentTask(task);
+  }
+  if (screen==='task' && (action==='retry-task'||action==='refresh-task')) {
+    const task=selectedTask();
+    if (task) {
+      if (action==='refresh-task') void refreshSuperAgentTask(task,{retry:true});
+      else void submitSuperAgentTask(task,{retry:true});
+    }
   }
   if (action === 'task-back') { selectedTaskId=null;screen='home';render(); }
   if (action === 'edit-goal') { screen='agent'; render();if (agentConfig.token) void refreshAgentConnection(); }
