@@ -26,6 +26,7 @@ final class WKWebView {
     static let standard = TestDefaults()
     var values: [String: Any] = [:]
     func set(_ value: Any, forKey key: String) { values[key] = value }
+    func string(forKey key: String) -> String? { values[key] as? String }
     func bool(forKey key: String) -> Bool { values[key] as? Bool ?? false }
     func stringArray(forKey key: String) -> [String]? { values[key] as? [String] }
     func removeObject(forKey key: String) { values.removeValue(forKey: key) }
@@ -90,6 +91,15 @@ ${bridge.replaceAll('UserDefaults.standard','TestDefaults.standard')}
         print("revoked sample published", view.messages.contains { $0.contains(#""steps":999"#) })
         model.refreshSnapshot(id: "missing", webView: view)
         print("missing selection code", view.messages.last?.contains("health_not_connected") ?? false)
+        TestDefaults.standard.set(["steps"], forKey: "along.health.selectedTypes")
+        TestDefaults.standard.set(true, forKey: "along.health.contextReview.v1")
+        model.begin(id: "manage", webView: view, goalKey: "health")
+        model.chooseBackground(true)
+        precondition(TestDefaults.standard.string(forKey: "along.health.backgroundReviewGoal.v1") == "health")
+        precondition(TestDefaults.standard.stringArray(forKey: "along.health.selectedTypes") == ["steps"])
+        precondition(!TestDefaults.standard.bool(forKey: "along.health.comparisonHistory.v1"))
+        model.chooseBackground(false)
+        print("standalone background permission revoked", TestDefaults.standard.string(forKey: "along.health.backgroundReviewGoal.v1") == nil)
     }
 }`);
     const exe=join(dir,'check');
@@ -105,5 +115,6 @@ ${bridge.replaceAll('UserDefaults.standard','TestDefaults.standard')}
     assert.match(output,/read in flight when cleared true/);
     assert.match(output,/revoked sample published false/);
     assert.match(output,/missing selection code true/);
+    assert.match(output,/standalone background permission revoked true/);
   } finally {rmSync(dir,{recursive:true,force:true});}
 });

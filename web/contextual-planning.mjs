@@ -84,7 +84,7 @@ function cleanTasks(tasks) {
   return list(tasks,6).map(t=>({id:text(t?.id,64),when:text(t?.when,80),title:text(t?.title,100),
     detail:text(t?.detail,300),state:['temporary','planned','deferred'].includes(t?.state)?t.state:'planned',
     ...(['reminder','agent_action','recommendation'].includes(t?.kind)?{kind:t.kind}:{}),
-    ...(t?.kind==='reminder'?{scheduledFor:stamp(t.scheduledFor)?new Date(t.scheduledFor).toISOString():null}:{})}));
+    ...(t?.kind==='reminder'?{scheduledFor:stamp(t.scheduledFor)&&/(Z|[+-]\d\d:\d\d)$/i.test(t.scheduledFor)?new Date(t.scheduledFor).toISOString():null}:{})}));
 }
 
 function privateTaskIds(value) {
@@ -120,6 +120,38 @@ export function createPlanningContext({before,after,goalIntent,currentPlan,weekl
   return cleanPlanningContext({version:1,revisionId,cause,now:now.toISOString(),timezone,
     localDate:new Intl.DateTimeFormat('en-CA',{timeZone:timezone}).format(now),goalIntent,
     previous,changes:healthContextChanges(previous,after),currentPlan,weeklyWorkoutMinutes,protectedTaskIds,recentDecisions});
+}
+
+// Also evaluated in JavaScriptCore by the native HealthKit observer.
+export function buildBackgroundReviewRequest(template,snapshot,requestId,clock) {
+  const key=template?.goalKey,domain=key==='health'?'health':'custom';
+  if (!(key==='health'||typeof key==='string'&&/^custom:[A-Za-z0-9_:-]{1,90}$/.test(key))||
+      template.runtime!=='dsh-superagent'||template.paused||template.goal?.domain!==domain||
+      snapshot?.contextReviewAllowed!==true||snapshot.backgroundReviewAllowed!==true||snapshot.backgroundReviewGoalKey!==key||
+      typeof requestId!=='string'||!/^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$/.test(requestId)||!stamp(clock?.now)||!text(clock.timezone,80)||!/^\d{4}-\d{2}-\d{2}$/.test(clock.localDate)) return null;
+  const scope=template.selectedTypes;
+  if (!Array.isArray(scope)||!scope.length||!Array.isArray(snapshot.selectedTypes)||!scope.every(type=>TYPES.includes(type)&&snapshot.selectedTypes.includes(type))||
+      template.comparisonHistoryAllowed===true&&snapshot.comparisonHistoryAllowed!==true) return null;
+  const selectedTypes=TYPES.filter(type=>scope.includes(type));
+  const history=template.comparisonHistoryAllowed===true&&snapshot.comparisonHistoryAllowed===true;
+  const after=agentHealthSnapshot({...snapshot,selectedTypes,comparisonHistoryAllowed:history});
+  const source=cleanPlanningContext(template.planning);
+  if (!source||!source.previous.selectedTypes.length) return null;
+  const previous=cleanHealthContext({...source.previous,selectedTypes:source.previous.selectedTypes.filter(t=>selectedTypes.includes(t)),
+    comparisonHistoryAllowed:history&&source.previous.comparisonHistoryAllowed});
+  const observed=Object.keys(METRICS).some(field=>after[field]!=null)||
+    Object.values(after.recentHistory||{}).some(pair=>pair.recent.value!=null||pair.previous.value!=null);
+  const changes=healthContextChanges(previous,after);
+  const nextReview=stamp(template.nextReviewAt);
+  const due=!!nextReview&&Date.parse(nextReview)<=Date.parse(clock.now);
+  const nextDay=/^\d{4}-\d{2}-\d{2}$/.test(template.evaluatedLocalDate)&&template.evaluatedLocalDate!==clock.localDate;
+  if (!observed||!changes.length&&!due&&!nextDay) return null;
+  const planning=cleanPlanningContext({...source,previous,changes,cause:due||nextDay?'review':'observation',revisionId:requestId,
+    now:clock.now,timezone:clock.timezone,localDate:clock.localDate});
+  const goal={domain,title:text(template.goal.title,120),target:domain==='health'?planning.weeklyWorkoutMinutes:null};
+  if (!goal.title) return null;
+  return {requestId,runtime:template.runtime,goal,snapshot:{...after,planning},
+    message:'请结合目标、已有安排和最新情境，评估是否需要调整；给出判断与任务变更依据。',history:[]};
 }
 
 export function validateReassessment(value,layout,planning) {
@@ -158,9 +190,18 @@ export function validateReassessment(value,layout,planning) {
     watchFor:list(value.watchFor,8).map(v=>text(v,180)).filter(Boolean)};
 }
 
+// The Host attaches this same policy to both runtime inputs, including reviews
+// from older clients. No private goal text or additional HealthKit field is needed.
+export const SLEEP_REMINDER_CRITERIA=[
+  '若本次可见的目标、任务或用户新要求明确涉及就寝作息，主动检查下一次睡前提醒。仅选择了睡眠读数不足以判断用户有此目标。protectedTaskIds 原样保留，不从占位任务猜测内容，也不把它当成已有等价提醒的证据。',
+  '以当前 message 和 recentDecisions 中用户最新反馈为准。在 planning.timezone 下解释“今天、今晚”：message 重放反馈时沿用该条反馈的 at，只有新输入没有反馈时间戳才用 planning.now。晚睡可能跨午夜。一次性请求过了对应夜晚或已满足，不顺延或变成每日提醒。尊重拒绝、暂停和已采用的同一晚等价提醒，不重复提案。',
+  '本次就寝目标确实需要提醒，且有足够依据时，即使健康读数没变也选择 revise，提出下一次有具体本地时刻的 kind=reminder，填写晚于 planning.now、带时区的 scheduledFor。优先使用本人指定时刻或明确的起床与睡眠时长目标。本人请你代选时，可依据授权睡眠摘要提出一个合理的收尾时点，在理由中说明依据和不确定性。单次入睡、睡眠结束或运动记录不能证明通常的起床、下班或日程。若明确要求今天收到，提醒本身要落在用户本地今天余下的时间内。',
+  '有尚未满足的睡前提醒请求，只有缺少关键时间依据、时间已过或有具体冲突时才用 need_data，在 reply 中只问一个能确定下一步的问题。文字建议、watchFor、nextReviewAt 或 keep 都不能代替一次可采用的提醒。没有未满足的需要时可以 keep。提案由本人采用后才进入系统提醒队列。',
+].join('\n');
+
 export const REASSESSMENT_INSTRUCTIONS=`This is a contextual review of an existing goal, not a new goal assignment.
 Compare the current observation with snapshot.planning.previous, the user's full goalIntent, existing tasks, recent decisions and feedback. The fact collector does NOT decide whether a change matters. You make that judgment, even when a weekly target is already met or a change is small.
 Think across time: consider yesterday's load, today's sleep and wake timing, shifts in workout type/time/frequency, time remaining, commitments and available environmental evidence together. An unusual day is not automatically a lasting habit; separate an observation from an inferred pattern and from an explicit preference change. An observed earlier wake time does not silently rewrite a fixed wake-time constraint. State uncertainty and request useful missing sources. Do not invent calendar slots, bookings, weather, POIs, visits or medical diagnoses.
-Choose keep, revise or need_data. Keep is a valid intelligent outcome and must stay quiet. For revise, return the complete updated layout (same schema), reuse task IDs for retained/updated tasks, and explain every add/update/cancel. Preserve unaffected commitments and completed work. Use Chinese user-facing text. Optimize the next one or two useful actions over the user's goal horizon; do not divide the remaining minutes mechanically or turn example weekdays into rules. Do not change the goal itself during this review: proposal=null. A review is planning authorization only; no booking, payment, publishing or other external write.
+Apply snapshot.planning.reviewCriteria when choosing keep, revise or need_data. A keep decision stays quiet. For revise, return the complete updated layout (same schema), reuse task IDs for retained/updated tasks, and explain every add/update/cancel. Preserve unaffected commitments and completed work. Use Chinese user-facing text. Optimize the next one or two useful actions over the user's goal horizon; do not divide the remaining minutes mechanically or turn example weekdays into rules. Do not change the goal itself during this review: proposal=null. A review is planning authorization only; no booking, payment, publishing or other external write.
 For revise use layout={"version":1,"title":"...","summary":"...","modules":[],"tasks":[...],"questions":[]}. Include at most six tasks. In layout.tasks list each retained task as {"id":"original-id"}. To update one, include only its id and the fields that need to change, e.g. {"id":"walk","state":"deferred"}. Along fills all other fields from the accepted plan. Omit cancelled IDs and explain the cancellation. For an added task supply id, when, title, detail, state (temporary|planned|deferred) and kind (reminder|recommendation|agent_action). Classify every real difference in reassessment.changes. Each new or updated reminder needs a scheduledFor strictly after planning.now, with timezone. Previously elapsed reminders can stay as history; never reschedule them merely to make a future timestamp. For need_data ask one actionable question in reply. Treat a user answer in recentDecisions as input to that question.
 Return reassessment={"decision":"keep|revise|need_data","basedOnRevision":"snapshot.planning.revisionId","reason":"reason grounded in observed changes and goal tradeoffs","changes":[{"taskId":"stable id","operation":"add|update|cancel|keep","reason":"why"}],"nextReviewAt":"ISO time with UTC offset or null","watchFor":["conditions worth reconsidering"]} alongside reply, proposal and layout. For keep/need_data, layout=null and changes=[]. Choose the next useful review time yourself, or null. Do not claim a notification or other action was delivered.`;

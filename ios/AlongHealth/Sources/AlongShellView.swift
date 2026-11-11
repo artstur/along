@@ -9,6 +9,7 @@ import UserNotifications
 
 @main
 struct AlongHealthApp: App {
+    @UIApplicationDelegateAdaptor(HealthDeliveryAppDelegate.self) private var healthDelegate
     @StateObject private var bridge = AlongBridgeModel()
     @Environment(\.scenePhase) private var scenePhase
 
@@ -30,7 +31,8 @@ struct AlongHealthApp: App {
                         .interactiveDismissDisabled(bridge.busy)
                 }
                 .onChange(of: scenePhase) { _, phase in
-                    if phase == .active { bridge.refreshHealth() }
+                    if phase == .active { bridge.resumeForeground() }
+                    if phase == .background { bridge.pauseForeground() }
                 }
         }
     }
@@ -55,6 +57,12 @@ final class AlongBridgeModel: ObservableObject {
     @Published var webLoading = true
     @Published var webError: String?
 
+    @Published private(set) var backgroundSelected = false
+    private(set) var managedGoal: String?
+    var foregroundReadsAllowed: () -> Bool = { true }
+    var backgroundConsentChanged: () -> Void = {}
+    private let backgroundPreference = "along.health.backgroundReviewGoal.v1"
+
     private let reader = HealthKitReader()
     private var requestID: String?
     private weak var webView: WKWebView?
@@ -66,9 +74,11 @@ final class AlongBridgeModel: ObservableObject {
 
     func attach(_ webView: WKWebView) {
         self.webView = webView
-        startObservers()
-        refreshHealth()
+        if foregroundReadsAllowed() { resumeForeground() }
     }
+
+    func resumeForeground() { startObservers(); refreshHealth() }
+    func pauseForeground() { reader.stopObserving() }
 
     private var savedSelection: Set<HealthMetric> {
         Set((UserDefaults.standard.stringArray(forKey: "along.health.selectedTypes") ?? []).compactMap(HealthMetric.init(rawValue:)))
@@ -86,17 +96,21 @@ final class AlongBridgeModel: ObservableObject {
         let selected = savedSelection
         guard !selected.isEmpty else { return }
         reader.observe(selected) { [weak self] in
-            Task { @MainActor in self?.refreshHealth() }
+            Task { @MainActor in if self?.foregroundReadsAllowed() == true { self?.refreshHealth() } }
         }
     }
 
     func refreshHealth() {
-        guard !savedSelection.isEmpty else { return }
+        guard foregroundReadsAllowed(), !savedSelection.isEmpty else { return }
         healthUpdateRequested = true
         startHealthRefresh()
     }
 
     func refreshSnapshot(id: String, webView: WKWebView) {
+        guard foregroundReadsAllowed() else {
+            deliver(id: id, result: ["ok": false, "error": "回到前台后重新读取健康摘要"], to: webView)
+            return
+        }
         guard !savedSelection.isEmpty else {
             deliver(id: id, result: ["ok": false, "code": "health_not_connected", "error": "请先连接 Apple Health"], to: webView)
             return
@@ -122,16 +136,43 @@ final class AlongBridgeModel: ObservableObject {
                 do {
                     let summary = try await reader.read(savedSelection, requestPermission: false, includeContext: contextReviewAllowed,
                                                         includeComparisonHistory: comparisonHistoryAllowed)
-                    let snapshot = summary.browserSnapshot(contextReviewAllowed: contextReviewAllowed, comparisonHistoryAllowed: comparisonHistoryAllowed)
-                    if publish && epoch == healthEpoch { publishHealthSnapshot(snapshot) }
+                    let snapshot = scopedSnapshot(summary)
+                    if publish && epoch == healthEpoch && foregroundReadsAllowed() { publishHealthSnapshot(snapshot) }
                     result = ["ok": true, "snapshot": snapshot]
                 } catch {
                     if publish && epoch == healthEpoch { errorMessage = error.localizedDescription }
                     result = ["ok": false, "error": error.localizedDescription]
                 }
+                if !foregroundReadsAllowed() { result = ["ok": false, "error": "回到前台后重新读取健康摘要"] }
                 if epoch != healthEpoch { result = ["ok": false, "error": "健康数据选择已更新"] }
                 for request in requests { deliver(id: request.id, result: result, to: request.view) }
             }
+        }
+    }
+
+    private func scopedSnapshot(_ summary: HealthSummary) -> [String: Any] {
+        var snapshot = summary.browserSnapshot(contextReviewAllowed: contextReviewAllowed, comparisonHistoryAllowed: comparisonHistoryAllowed)
+        let goal = contextReviewAllowed ? UserDefaults.standard.string(forKey: backgroundPreference) : nil
+        snapshot["backgroundReviewAllowed"] = goal != nil
+        snapshot["backgroundReviewGoalKey"] = goal as Any? ?? NSNull()
+        return snapshot
+    }
+
+    func chooseBackground(_ enabled: Bool) {
+        guard let managedGoal else { return }
+        backgroundSelected = enabled
+        // Existing imports can change just background delivery without reading more types or enabling longer history.
+        if contextReviewAllowed && !savedSelection.isEmpty {
+            persistBackgroundChoice(goal: managedGoal)
+            backgroundConsentChanged()
+            refreshHealth()
+        }
+    }
+
+    private func persistBackgroundChoice(goal: String) {
+        if backgroundSelected { UserDefaults.standard.set(goal, forKey: backgroundPreference) }
+        else if UserDefaults.standard.string(forKey: backgroundPreference) == goal {
+            UserDefaults.standard.removeObject(forKey: backgroundPreference)
         }
     }
 
@@ -155,6 +196,9 @@ final class AlongBridgeModel: ObservableObject {
         UserDefaults.standard.removeObject(forKey: "along.health.selectedTypes")
         UserDefaults.standard.removeObject(forKey: "along.health.contextReview.v1")
         UserDefaults.standard.removeObject(forKey: "along.health.comparisonHistory.v1")
+        UserDefaults.standard.removeObject(forKey: backgroundPreference)
+        backgroundSelected = false
+        backgroundConsentChanged()
         reader.stopObserving()
         selection = []
         preview = nil
@@ -170,12 +214,16 @@ final class AlongBridgeModel: ObservableObject {
         view.evaluateJavaScript("window.__alongHealthBridgeFinish(...\(json))")
     }
 
-    func begin(id: String, webView: WKWebView) {
+    func begin(id: String, webView: WKWebView, goalKey: String? = nil) {
         // 在途导入已经有一个请求时，这次要明确答复，不能直接丢掉。
         if let refusal = HealthImportAdmission.refusal(pending: requestID) {
             deliver(id: id, result: refusal, to: webView)
             return
         }
+        managedGoal = goalKey.flatMap { key in
+            key == "health" || (key.hasPrefix("custom:") && (8...100).contains(key.count)) ? key : nil
+        }
+        backgroundSelected = managedGoal != nil && UserDefaults.standard.string(forKey: backgroundPreference) == managedGoal
         requestID = id
         self.webView = webView
         selection = savedSelection
@@ -213,8 +261,10 @@ final class AlongBridgeModel: ObservableObject {
         UserDefaults.standard.set(preview.selected.map(\.rawValue), forKey: "along.health.selectedTypes")
         UserDefaults.standard.set(true, forKey: "along.health.contextReview.v1")
         UserDefaults.standard.set(true, forKey: "along.health.comparisonHistory.v1")
+        if let managedGoal { persistBackgroundChoice(goal: managedGoal) }
+        backgroundConsentChanged()
         startObservers()
-        finish(snapshot: preview.browserSnapshot(contextReviewAllowed: true, comparisonHistoryAllowed: true))
+        finish(snapshot: scopedSnapshot(preview))
     }
 
     func cancel() { finish(error: "已取消健康数据导入") }
@@ -396,6 +446,8 @@ struct AlongWebView: UIViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(bridge: bridge) }
 
     func makeUIView(context: Context) -> WKWebView {
+        bridge.foregroundReadsAllowed = { UIApplication.shared.applicationState != .background }
+        bridge.backgroundConsentChanged = { BackgroundHealthReviews.shared.consentChanged() }
         let controller = WKUserContentController()
         controller.add(context.coordinator, name: "alongHealth")
         controller.add(context.coordinator, name: "alongHealthRefresh")
@@ -436,10 +488,15 @@ struct AlongWebView: UIViewRepresentable {
         else item.reject(Object.assign(new Error(result.error || '导入已取消'), {code: result.code}));
       };
       window.AlongHealthBridge = {
-        connect: ({types} = {}) => new Promise((resolve, reject) => {
+        connect: ({types, goalKey} = {}) => new Promise((resolve, reject) => {
           const id = newId();
           pending.set(id, {resolve, reject});
-          window.webkit.messageHandlers.alongHealth.postMessage({id, types});
+          window.webkit.messageHandlers.alongHealth.postMessage({id, types, goalKey});
+        }),
+        backgroundReview: (action, value = {}) => new Promise((resolve, reject) => {
+          const id = newId();
+          agentPending.set(id, {resolve, reject});
+          window.webkit.messageHandlers.alongAgent.postMessage({id, operation: 'backgroundReview', action, value});
         }),
         refresh: () => new Promise((resolve, reject) => {
           const id = newId();
@@ -470,6 +527,7 @@ struct AlongWebView: UIViewRepresentable {
           agentPending.set(id, {resolve, reject});
           window.webkit.messageHandlers.alongAgent.postMessage({id, operation: 'connection', action, value});
         }),
+        pendingGoalReminder: goalKey => window.AlongAgentBridge.notification('upcomingGoalReminder', {goalKey}),
         notification: (action, value = null) => new Promise((resolve, reject) => {
           const id = newId();
           agentPending.set(id, {resolve, reject});
@@ -532,19 +590,34 @@ struct AlongWebView: UIViewRepresentable {
                   let body = message.body as? [String: Any], let id = body["id"] as? String,
                   let webView = message.webView else { return }
             if message.name == "alongHealth" {
-                Task { @MainActor in bridge.begin(id: id, webView: webView) }
+                Task { @MainActor in bridge.begin(id: id, webView: webView, goalKey: origin.protocol == "along" ? body["goalKey"] as? String : nil) }
             } else if message.name == "alongHealthRefresh" {
                 Task { @MainActor in bridge.refreshSnapshot(id: id, webView: webView) }
             } else if message.name == "alongHealthClear" {
                 Task { @MainActor in bridge.clearHealth(id: id, webView: webView) }
             } else {
                 if body["operation"] as? String == "notification" {
+                    if body["action"] as? String == "upcomingGoalReminder", origin.protocol != "along" || origin.host != "app" {
+                        Self.deliverAlongResult(id: id, result: ["ok":false,"error":"请在 Along 中查看提醒"], webView: webView)
+                        return
+                    }
                     Task {
                         let result: [String: Any]
                         do { result = ["ok": true, "value": try await Self.notificationOperation(body)] }
                         catch { result = ["ok": false, "error": error.localizedDescription] }
                         await MainActor.run { Self.deliverAlongResult(id: id, result: result, webView: webView) }
                     }
+                    return
+                }
+                if body["operation"] as? String == "backgroundReview" {
+                    let result: [String: Any]
+                    do {
+                        guard origin.protocol == "along", origin.host == "app",
+                              let action = body["action"] as? String else { throw AgentBridgeError.invalidConfiguration }
+                        let response = try BackgroundHealthReviews.shared.bridgeAction(action, value: body["value"] as? [String: Any] ?? [:])
+                        result = ["ok": true, "value": response]
+                    } catch { result = ["ok": false, "error": error.localizedDescription] }
+                    Self.deliverAlongResult(id: id, result: result, webView: webView)
                     return
                 }
                 if body["operation"] as? String == "connection" {
@@ -586,6 +659,23 @@ struct AlongWebView: UIViewRepresentable {
             case "status":
                 let settings = await center.notificationSettings()
                 return ["status": notificationStatus(settings.authorizationStatus)]
+            case "upcomingGoalReminder":
+                guard let value = input["value"] as? [String: Any], let goalKey = value["goalKey"] as? String,
+                      goalKey == "health" || (goalKey.hasPrefix("custom:") && (8...100).contains(goalKey.count))
+                else { throw AgentBridgeError.invalidConfiguration }
+                let pending = await center.pendingNotificationRequests()
+                let prefix = healthReminderPrefix(goalKey)
+                let candidates = pending.compactMap { request -> (Date, UNNotificationRequest, String)? in
+                    guard let id = request.content.userInfo["taskId"] as? String,
+                          request.content.userInfo["goalKey"] as? String == goalKey,
+                          request.identifier == prefix + notificationIdentifier(id),
+                          let trigger = request.trigger as? UNCalendarNotificationTrigger,
+                          !trigger.repeats, let date = trigger.nextTriggerDate(), date > Date() else { return nil }
+                    return (date, request, id)
+                }
+                guard let (date, request, taskID) = candidates.min(by: { $0.0 < $1.0 }) else { return [:] }
+                return ["goalKey": goalKey, "taskId": taskID, "title": request.content.title,
+                        "scheduledFor": ISO8601DateFormatter().string(from: date)]
             case "replaceHealthReminders":
                 guard let value = input["value"] as? [String: Any],
                       let items = value["items"] as? [[String: Any]], items.count <= 6
@@ -741,6 +831,11 @@ struct AlongWebView: UIViewRepresentable {
             for key in ["kind", "goalKey", "taskId", "requestId"] {
                 if let value = info[key] as? String { payload[key] = value }
             }
+            if let goalKey = payload["goalKey"], let id = payload["taskId"],
+               response.notification.request.identifier == Self.healthReminderPrefix(goalKey) + Self.notificationIdentifier(id),
+               response.notification.request.trigger is UNCalendarNotificationTrigger {
+                payload["reminderTitle"] = response.notification.request.content.title
+            }
             DispatchQueue.main.async {
                 self.openNotification(payload)
                 completionHandler()
@@ -765,7 +860,7 @@ struct AlongWebView: UIViewRepresentable {
             webView.evaluateJavaScript("window.__alongAgentBridgeFinish(...\(json))")
         }
 
-        static func agentRequest(_ input: [String: Any]) async throws -> [String: Any] {
+        static func agentRequest(_ input: [String: Any], background: Bool = false) async throws -> [String: Any] {
             guard let base = input["baseURL"] as? String, let components = URLComponents(string: base),
                   components.scheme == "https", let host = components.host,
                   host.split(separator: ".").count == 4,
@@ -784,7 +879,7 @@ struct AlongWebView: UIViewRepresentable {
                   let url = URL(string: base + path) else { throw AgentBridgeError.invalidConfiguration }
             var request = URLRequest(url: url)
             request.httpMethod = "POST"
-            request.timeoutInterval = path == "/connection/verify" ? 12 : 120
+            request.timeoutInterval = background ? 8 : (path == "/connection/verify" ? 12 : 120)
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             if let token = input["token"] as? String, !token.isEmpty {
                 request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
@@ -792,8 +887,8 @@ struct AlongWebView: UIViewRepresentable {
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
             let delegate = PinnedAgentDelegate(fingerprint: fingerprint.uppercased())
             let configuration = URLSessionConfiguration.ephemeral
-            configuration.waitsForConnectivity = true
-            configuration.timeoutIntervalForResource = path == "/connection/verify" ? 15 : 120
+            configuration.waitsForConnectivity = !background
+            configuration.timeoutIntervalForResource = background ? 10 : (path == "/connection/verify" ? 15 : 120)
             // Every session is tied to one private address, pinned certificate and non-redirecting request.
             configuration.connectionProxyDictionary = [
                 kCFNetworkProxiesProxyAutoConfigEnable as String: true,
@@ -835,6 +930,7 @@ struct AlongWebView: UIViewRepresentable {
         }
 
         func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+            if UIApplication.shared.applicationState != .background { BackgroundHealthReviews.shared.foregroundStarted() }
             webReady = false
         }
 
@@ -1045,6 +1141,13 @@ struct HealthSyncSheet: View {
                     Text("选择要读取的数据 · 已选 \(bridge.selection.count)/\(HealthMetric.allCases.count)")
                 } footer: {
                     Text("已选项目会在 App 前台自动检查。开关表示 Along 的选择；HealthKit 不会向 App 告知某项读取权限是否已被拒绝。")
+                }
+                if bridge.managedGoal != nil {
+                    Section {
+                        Toggle("允许 DSH 在后台评估当前目标", isOn: Binding(get: { bridge.backgroundSelected }, set: { bridge.chooseBackground($0) }))
+                    } footer: {
+                        Text("已有授权可单独切换，立即生效。DSH 只使用已选摘要，需要能连接已配对的 Mac。锁屏或离线时，打开 Along 后补读。")
+                    }
                 }
                 Section("睡眠评分") {
                     Text("Apple 睡眠评分目前没有可供第三方 App 直接读取的 HealthKit 类型。Along 可读取昨晚睡眠时长，但不会把它伪装成苹果评分。")

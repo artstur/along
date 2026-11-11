@@ -18,7 +18,9 @@ export function setSnapshot(state, input, source) {
   if ((data.restingHeartRate != null && data.restingHeartRate > 250) || (data.wristTemperatureC != null && data.wristTemperatureC > 45) || (data.activeEnergyKcal != null && data.activeEnergyKcal > 20000)) throw Error('健康数据超出合理范围');
   const selectedTypes=source==='healthkit' && Array.isArray(input?.selectedTypes) ? input.selectedTypes.filter(type=>['steps','workout','activeEnergy','weight','restingHeartRate','wristTemperature','sleep'].includes(type)) : null;
   const context=cleanHealthContext({...input,selectedTypes});
-  const snapshot={...data, selectedTypes, contextReviewAllowed:source==='healthkit'&&input?.contextReviewAllowed===true,capturedAt:context.capturedAt,
+  const background=source==='healthkit'&&input?.contextReviewAllowed===true&&input?.backgroundReviewAllowed===true&&
+    (input.backgroundReviewGoalKey==='health'||/^custom:[A-Za-z0-9_:-]{1,90}$/.test(input.backgroundReviewGoalKey||''));
+  const snapshot={backgroundReviewAllowed:background,backgroundReviewGoalKey:background?input.backgroundReviewGoalKey:null,...data, selectedTypes, contextReviewAllowed:source==='healthkit'&&input?.contextReviewAllowed===true,capturedAt:context.capturedAt,
     sleepSummary:context.sleepSummary,workoutSummary:context.workoutSummary,
     comparisonHistoryAllowed:source==='healthkit'&&input?.contextReviewAllowed===true&&context.comparisonHistoryAllowed,
     ...(source==='healthkit'&&input?.contextReviewAllowed===true&&context.recentHistory?{recentHistory:context.recentHistory}:{}),updatedAt:new Date().toISOString()};

@@ -11,7 +11,7 @@ import {KimiCodeAgent} from './kimi-code-agent.mjs';
 import {DSH_RUNTIME, KIMI_RUNTIME, safeAgentRuntime} from '../web/super-agent.mjs';
 import {readJsonBody} from './request-body.mjs';
 import {HostError, upstream, statusForError} from './host-error.mjs';
-import {agentHealthSnapshot,cleanHealthContext,cleanPlanningContext,validateReassessment} from '../web/contextual-planning.mjs';
+import {agentHealthSnapshot,cleanHealthContext,cleanPlanningContext,validateReassessment,SLEEP_REMINDER_CRITERIA} from '../web/contextual-planning.mjs';
 
 const dir = process.env.ALONG_AGENT_STATE_DIR||join(homedir(), '.along', 'agent-host');
 mkdirSync(dir, {recursive:true, mode:0o700});
@@ -110,6 +110,7 @@ function cleanSnapshot(value,domain,goalTarget=null) {
       '缺少某项双周窗口时，仍可基于已经提供的上一晚、前一晚、七天睡眠平均或已记录的运动时段作有限判断；单次体重无法说明变化方向。',
       '当前自然周的 workoutMinutes 应与明确的 weeklyWorkoutMinutes（分钟/周）比较。滚动七天与自然周分开计算。其他目标按 goalIntent 判断，不把目标期限或体重当运动分钟。',
       '结合目标、剩余日期与已有安排，给出支持你判断的时间、数值和任务。若长期任务仍正确但下一步太笼统，考虑一个有依据、可执行的阶段任务。区别补量候选与用户约好的固定活动，已有安排适合时可以保留。',
+      SLEEP_REMINDER_CRITERIA,
       'protectedTaskIds 的正文不可见，原样保留。不得猜测其作用或重复补排。可以提出确有依据、与原安排无冲突的行动；若缺失的信息实质影响下一步，只问一个具体问题。',
     ].join('\n');
     if (!planning.now||!planning.revisionId) throw Error('情境评估的版本或时间无效');

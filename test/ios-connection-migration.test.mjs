@@ -91,6 +91,7 @@ for error in cases { print(AgentBridgeError.transportMessage(error) ?? "unchange
   } finally {rmSync(dir,{recursive:true,force:true});}
 });
 
-test('every iPhone request has a resource deadline including time spent waiting for connectivity',()=>{
-  assert.match(swiftSource,/configuration\.timeoutIntervalForResource = path == "\/connection\/verify" \? 15 : 120/);
+test('iPhone foreground requests retain their deadlines and background work stops promptly offline',()=>{
+  assert.match(swiftSource,/configuration\.waitsForConnectivity = !background/);
+  assert.match(swiftSource,/configuration\.timeoutIntervalForResource = background \? 10 : \(path == "\/connection\/verify" \? 15 : 120\)/);
 });
