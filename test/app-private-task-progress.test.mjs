@@ -42,16 +42,25 @@ async function open({plan=layout,source='healthkit',active='health',initial=snap
 }
 const card=(dom,id)=>dom.app.innerHTML.match(new RegExp('data-task-id="'+id+'"[^>]*>([\\s\\S]*?)</button>'))?.[1]||'';
 
+const taskText=html=>html.replace(/<[^>]+>/g,' ').replace(/\s+/g,' ').trim();
+const historyFor=(dom,id)=>dom.app.innerHTML.match(new RegExp('data-weekly-task="'+id+'"[^>]*>[\\s\\S]*?</button>(<details[^>]*class="workout-history"[^>]*>[\\s\\S]*?</details>)'))?.[1]||'';
+
 test('the original weekly task shows local Health progress and complete-day comparisons without changing the accepted plan or agent request',async()=>{
   const dom=await open({connect:true});
   const html=card(dom,task.id);
-  assert.match(html,/本周运动 51 \/ 120 分钟[^<]*还差 69 分钟/);
-  assert.match(html,/最近完整 7 天[^<]*86 分钟[^<]*2 天有记录/);
-  assert.match(html,/此前 7 天[^<]*104 分钟[^<]*3 天有记录/);
-  assert.match(html,/少 18 分钟/);
+  assert.match(html,/>查看任务<\/span>/);
+  assert.doesNotMatch(html,/查看任务协作/);
+  assert.match(taskText(html),/本周运动 51 \/ 120 分钟.*还差 69 分钟/);
+  assert.doesNotMatch(html,/最近完整 7 天|此前 7 天/);
+  const history=historyFor(dom,task.id);
+  assert.match(history,/^<details [^>]*><summary>近两期运动记录<\/summary>/);
+  assert.doesNotMatch(history.split('>')[0],/ open/);
+  assert.match(history,/最近完整 7 天[^<]*86 分钟[^<]*2 天有记录/);
+  assert.match(history,/此前 7 天[^<]*104 分钟[^<]*3 天有记录/);
+  assert.match(history,/少 18 分钟/);
   assert.doesNotMatch(card(dom,other.id),/data-weekly-workout-progress/);
   const update=dom.observe({...snapshot,workoutMinutes:124});
-  assert.match(card(dom,task.id),/本周运动 124 \/ 120 分钟[^<]*本周已达目标/);
+  assert.match(taskText(card(dom,task.id)),/本周运动 124 \/ 120 分钟[^<]*本周已达目标/);
   assert.deepEqual(JSON.parse(dom.storage.get(ADAPTIVE_LAYOUTS_KEY)).health.tasks,layout.tasks);
   assert.equal(dom.calls.length,1);
   const {body,resolve}=dom.calls[0];
@@ -84,10 +93,10 @@ test('weekly evidence disappears immediately on workout revocation, and never at
 test('missing comparison coverage remains unknown and a recorded zero stays numeric',async()=>{
   const recent={...snapshot.recentHistory.workout.recent,value:null,count:null,daysWithData:0};
   const dom=await open({initial:{...snapshot,workoutMinutes:0,recentHistory:{workout:{...snapshot.recentHistory.workout,recent}}}});
-  assert.match(card(dom,task.id),/本周运动 0 \/ 120 分钟[^<]*还差 120 分钟/);
-  assert.match(card(dom,task.id),/最近完整 7 天[^<]*无运动记录/);
-  assert.match(card(dom,task.id),/此前 7 天[^<]*104 分钟/);
-  assert.doesNotMatch(card(dom,task.id),/少 104 分钟/);
+  assert.match(taskText(card(dom,task.id)),/本周运动 0 \/ 120 分钟[^<]*还差 120 分钟/);
+  assert.match(historyFor(dom,task.id),/最近完整 7 天[^<]*无运动记录/);
+  assert.match(historyFor(dom,task.id),/此前 7 天[^<]*104 分钟/);
+  assert.doesNotMatch(historyFor(dom,task.id),/少 104 分钟/);
 });
 
 test('an already validated previous-build keep prefers its user-facing reply and folds long explanations, while an unverified run cannot supply the text',async()=>{
@@ -96,11 +105,16 @@ test('an already validated previous-build keep prefers its user-facing reply and
   const planning={lastDecision:decision,recentDecisions:[decision],evaluated:snapshot,request:{requestId:'completed'},
     run:{actual:true,status:'done',runtime:DSH_RUNTIME,requestId:'completed',result:{reply,reassessment:{...decision,basedOnRevision:'completed'}}}};
   const dom=await open({planning});
-  const summary=dom.app.innerHTML.match(/<strong>最近评估 · 保留当前安排<\/strong><details><summary>([^<]+)<\/summary><p>([^<]+)<\/p><\/details>/);
-  assert.ok(summary,'only the preview is visible until the user expands it');
-  assert.match(summary[1],/查看完整判断/);
-  assert.ok(summary[1].length<reply.length);
-  assert.equal(summary[2],reply);
+  const review=dom.app.innerHTML.match(/<details class="health-review"[^>]*>([\s\S]*?)<\/details>/);
+  assert.ok(review);
+  assert.doesNotMatch(review[0].split('>')[0],/ open/);
+  const summary=review[1].match(/<summary>([\s\S]*?)<\/summary>/)[1];
+  assert.match(summary,/最近评估 · 保留当前安排/);
+  assert.match(summary,/<time [^>]+>[^<]+<\/time>/);
+  assert.doesNotMatch(summary,/保持当前安排|选择评估内容/);
+  assert.ok(review[1].includes(reply));
+  assert.match(review[1],/data-action="review-access"/);
+  assert.ok(dom.app.innerHTML.indexOf('data-task-id="local-workout"')<review.index,'current tasks precede review history');
   assert.doesNotMatch(dom.app.innerHTML,/Internal decision log/);
   for(const override of [{recentDecisions:[]},{evaluated:null},{run:{...planning.run,actual:false}},
     {request:{requestId:'different'}}]) {

@@ -115,15 +115,15 @@ export function createPendingSuperAgentRun(request, createdAt=Date.now(), runtim
   const copy=runtimeCopy(runtime);
   return {
     version:2,actual:false,runtime,requestId:request.requestId,task:request.task,
-    source:{kind:'along',label:'Along 动态任务'},trigger:{kind:'dynamic-task',label:copy.submit},
-    eval:null,ticket:null,mandate:null,assignments:[],events:[],status:'working',statusLabel:copy.connecting,progress:2,
+    source:{kind:'along',label:'Along 动态任务'},trigger:{kind:'dynamic-task',label:'动态任务'},
+    eval:null,ticket:null,mandate:null,assignments:[],events:[],status:'working',statusLabel:copy.submit,progress:null,
     createdAt,updatedAt:createdAt,
   };
 }
 
 export function createFailedSuperAgentRun(request, error, updatedAt=Date.now(), runtime=DSH_RUNTIME) {
   const copy=runtimeCopy(runtime);
-  return {...createPendingSuperAgentRun(request,updatedAt,runtime),status:'blocked',statusLabel:copy.unavailable,error:cleanText(error,copy.failed,500),updatedAt};
+  return {...createPendingSuperAgentRun(request,updatedAt,runtime),status:'blocked',statusLabel:'提交未获确认',error:cleanText(error,copy.failed,500),updatedAt};
 }
 
 export function safeSuperAgentRun(value) {
