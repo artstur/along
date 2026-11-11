@@ -472,7 +472,10 @@ function healthReviewDetails() {
     scopedSnapshot(activeGoal).comparisonHistoryAllowed!==true&&scopedSnapshot(activeGoal).selectedTypes.some(t=>t==='sleep'||t==='weight');
   if (!last&&!access&&!comparison) return '';
   const label={keep:'保留当前安排',revise:'建议调整任务',need_data:'需要补充信息'}[last?.decision];
-  return `<div class="adaptive-more">${last?`<strong>最近评估 · ${esc(label)}</strong><p>${esc(last.reason)}</p><small>${esc(formatDate(last.at))} · ${esc(agentRuntimeLabel(last.runtime))}</small>`:''}
+  const message=last?.reply||last?.reason||'';
+  const preview=Array.from(message).slice(0,88).join('');
+  const explanation=message.length>preview.length?`<details><summary>${esc(preview)}… 查看完整判断</summary><p>${esc(message)}</p></details>`:`<p>${esc(message)}</p>`;
+  return `<div class="adaptive-more">${last?`<strong>最近评估 · ${esc(label)}</strong>${explanation}<small>${esc(formatDate(last.at))} · ${esc(agentRuntimeLabel(last.runtime))}</small>`:''}
     ${access?`<p>可选择这项目标的原文和任务，供 Along 复查已有安排。</p><button class="minor-action" data-action="review-access">选择评估内容</button>`:''}
     ${comparison?`<p>要比较近两周的睡眠或体重，可在 Apple Health 中重新预览并允许评估。</p><button class="minor-action" data-action="connect-health">管理 Apple Health</button>`:''}</div>`;
 }
@@ -516,12 +519,54 @@ function taskProposalCard() {
     `<p>${esc(pendingTask.error||planningState.run?.error||'Along 正在规划下一步…')}</p>${retry?'<button class="button" data-action="retry-health-review">重试评估</button>':needData?'<form id="health-review-answer" class="agent-composer"><textarea name="answer" rows="2" maxlength="300" required aria-label="补充信息" placeholder="回复 Agent 的问题"></textarea><button class="button">提交回复</button></form>':''}`;
   return `<div class="task-proposal"><span>情境变化 · ${label}</span><p>${esc(pendingTask.reason)}</p>${actions} ${dismiss}</div>`;
 }
+// This joins private task text to Apple Health for display only. The accepted
+// layout and the separately scoped plan sent to the Agent stay independent.
+function localWeeklyWorkoutProgress(layout) {
+  if (activeGoal!=='health'||state.source!=='healthkit') return null;
+  const snapshot=scopedSnapshot(activeGoal);
+  if (!snapshot.contextReviewAllowed||!snapshot.selectedTypes.includes('workout')) return null;
+  const minutes=snapshot.workoutMinutes;
+  const target=reviewFor(activeGoal).workoutTarget(true,{});
+  if (minutes==null||target==null) return null;
+  const start=new Date();
+  start.setHours(0,0,0,0);
+  start.setDate(start.getDate()-(start.getDay()+6)%7);
+  const captured=Date.parse(snapshot.capturedAt);
+  if (!Number.isFinite(captured)||captured<start.getTime()) return null;
+  const matches=layout.tasks.filter(task=>{
+    if (/单次|每次|每天|每日|查看|回顾|复盘|评估|统计|记录|整理|检查/.test(task.title)) return false;
+    const cadence=/本周|每周|每星期|每礼拜|这周/;
+    const weekly=cadence.test(task.title)||cadence.test(task.when)||cadence.test(task.detail);
+    if (!weekly||!/累计|总计|目标|至少|每周(?:运动|锻炼|训练)/.test(task.title)) return false;
+    const text=cadence.test(task.title)?task.title:'每周'+task.title;
+    const evidence=weeklyExerciseEvidence(text);
+    return !evidence.ambiguous&&evidence.values.length===1&&evidence.values[0]===target;
+  });
+  if (matches.length!==1) return null;
+  const remaining=minutes<target?`还差 ${target-minutes} 分钟`:'本周已达目标';
+  const lines=[`本周运动 ${minutes} / ${target} 分钟 · ${remaining}`];
+  const pair=snapshot.recentHistory?.workout;
+  if (pair&&Date.now()-Date.parse(pair.recent.endAt)<26*3_600_000) {
+    const date=stamp=>formatStamp(stamp,{month:'numeric',day:'numeric'});
+    for (const [label,period] of [['最近完整 7 天',pair.recent],['此前 7 天',pair.previous]]) {
+      const range=`${date(period.startAt)} 至 ${date(Date.parse(period.endAt)-1)}`;
+      const observed=period.value==null?'无运动记录':`${period.value} 分钟 · ${period.daysWithData} 天有记录`;
+      lines.push(`${label}（${range}）${observed}`);
+    }
+    if (pair.recent.value!=null&&pair.previous.value!=null) {
+      const delta=pair.recent.value-pair.previous.value;
+      lines.push(delta===0?'两期记录的运动时长相同':`最近一期记录的运动时长${delta>0?'多':'少'} ${Math.abs(delta)} 分钟`);
+    }
+  }
+  return {id:matches[0].id,html:`<div data-weekly-workout-progress>${lines.map(line=>`<p>${esc(line)}</p>`).join('')}</div>`};
+}
 function adaptiveTaskSection(layout) {
   const kinds={reminder:'定时提醒',agent_action:'Agent 处理',recommendation:'推荐'};
+  const workout=localWeeklyWorkoutProgress(layout);
   const taskButton=task=>{
     const timing=task.kind==='reminder'&&task.scheduledFor?formatDate(task.scheduledFor):task.when;
     const meta=[kinds[task.kind],timing].filter(Boolean).join(' · ');
-    return `<button class="generated-task generated-task-button" data-action="open-task" data-task-id="${esc(task.id)}"><div class="task-meta"><span>${esc(meta)}</span><span class="state-pill">${esc(taskStateLabel[task.state])}</span></div><strong>${esc(task.title)}</strong><p>${esc(task.detail)}</p><span class="task-open-hint">查看任务协作</span></button>`;
+    return `<button class="generated-task generated-task-button" data-action="open-task" data-task-id="${esc(task.id)}"><div class="task-meta"><span>${esc(meta)}</span><span class="state-pill">${esc(taskStateLabel[task.state])}</span></div><strong>${esc(task.title)}</strong><p>${esc(task.detail)}</p>${task.id===workout?.id?workout.html:''}<span class="task-open-hint">查看任务协作</span></button>`;
   };
   const visible=layout.tasks.slice(0,2).map(taskButton).join('');
   const later=layout.tasks.slice(2);
@@ -1269,15 +1314,17 @@ function createHealthReview(goalKey) {
     return !goalCustom[goalKey]?.title&&!plan&&(local||!healthSharing.localGoalTitle)?goal.target:null;
   }
   function latestDecision() {
-    if (planningState.lastDecision) return planningState.lastDecision;
+    const saved=planningState.lastDecision;
+    if (saved?.reply) return saved;
     // Upgrade an already validated result from Build 45. A host run by itself
     // is insufficient: it must also have been accepted into the local decision log.
     const run=planningState.run,a=run?.result?.reassessment;
-    if (!a) return null;
+    if (!a) return saved||null;
     const logged=(planningState.recentDecisions||[]).slice().reverse().find(d=>d.decision===a.decision&&d.reason===a.reason);
     if (!run?.actual||run.status!=='done'||!logged||!planningState.evaluated||a.basedOnRevision!==run.requestId||
-      planningState.request?.requestId!==run.requestId) return null;
-    return {decision:a.decision,reason:a.reason,at:logged.at,runtime:run.runtime,requestId:run.requestId};
+      planningState.request?.requestId!==run.requestId||saved&&saved.requestId!==run.requestId) return saved||null;
+    return {decision:a.decision,reason:a.reason,at:logged.at,runtime:run.runtime,requestId:run.requestId,
+      reply:typeof run.result.reply==='string'?run.result.reply.trim().slice(0,1200):''};
   }
   function setAccess(selected) {
     const grants=Object.fromEntries(selected.map(o=>[o.key,o.value]));
@@ -1353,7 +1400,8 @@ function createHealthReview(goalKey) {
     }
     if (layout&&goalLayouts[goalKey]) layout={...goalLayouts[goalKey],tasks:layout.tasks};
     const at=new Date().toISOString();
-    savePlanning({...planningState,lastDecision:{requestId:run.requestId,at,runtime:run.runtime,decision:assessment.decision,reason:assessment.reason},
+    savePlanning({...planningState,lastDecision:{requestId:run.requestId,at,runtime:run.runtime,decision:assessment.decision,reason:assessment.reason,
+      reply:typeof result.reply==='string'?result.reply.trim().slice(0,1200):''},
       evaluated:agentHealthSnapshot(request.snapshot),localDate:request.snapshot.planning.localDate,
       goalIntent:request.snapshot.planning.goalIntent,nextReviewAt:assessment.nextReviewAt,
       recentDecisions:[...(planningState.recentDecisions||[]),{at:new Date().toISOString(),decision:assessment.decision,reason:assessment.reason,watchFor:assessment.watchFor}].slice(-6)});
