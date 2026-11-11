@@ -79,7 +79,7 @@ function cleanGoalTitle(value) {
 function clientText(value) {
   return typeof value==='string'?value:'';
 }
-function cleanGoal(value) {
+function cleanGoal(value,contextReview=false) {
   const domain=value?.domain;
   if (!['health','finance','custom'].includes(domain)) throw Error('目标类型无效');
   if (domain==='custom') {
@@ -87,10 +87,11 @@ function cleanGoal(value) {
   }
   const limit=domain==='health'?10080:10000000;
   const target=value?.target;
+  if (contextReview&&domain==='health'&&target===null) return {domain,target:null,title:cleanGoalTitle(value?.title)};
   if (!Number.isInteger(target)||target<1||target>limit) throw Error('目标数值无效');
   return {domain,target,title:cleanGoalTitle(value?.title)};
 }
-function cleanSnapshot(value,domain) {
+function cleanSnapshot(value,domain,goalTarget=null) {
   if (domain==='custom' && !value?.planning) return {source:'暂无连接'};
   if (domain==='finance') return {saved:Number.isInteger(value?.saved) && value.saved>=0 ? Math.min(value.saved,10000000) : null, source:'演示数据'};
   const snapshot=agentHealthSnapshot(value);
@@ -98,7 +99,19 @@ function cleanSnapshot(value,domain) {
   const planning=cleanPlanningContext(value?.planning);
   if (value?.planning && !planning) throw Error('情境评估的版本无效');
   if (planning) {
-    planning.previous=cleanHealthContext({...planning.previous,selectedTypes:planning.previous.selectedTypes.filter(type=>snapshot.selectedTypes.includes(type))});
+    planning.previous=cleanHealthContext({...planning.previous,
+      comparisonHistoryAllowed:snapshot.comparisonHistoryAllowed&&planning.previous.comparisonHistoryAllowed,
+      selectedTypes:planning.previous.selectedTypes.filter(type=>snapshot.selectedTypes.includes(type))});
+    if (domain!=='health'||planning.weeklyWorkoutMinutes!==goalTarget) planning.weeklyWorkoutMinutes=null;
+    // Both runtimes receive these criteria with the consent-scoped observations.
+    planning.reviewCriteria=[
+      'baselineKind=initial 表示首次评估。相邻读数相同或 changes 为空时，也要依据当前 recentHistory 的两个七天窗口、当周进度及用户反馈复核任务。',
+      '窗口左闭右开。workout.value 是窗口内记录的运动总分钟数，count 是记录次数。sleep.value 是有记录日的平均睡眠分钟，weight.value 是有记录日每日末次体重的平均公斤数。daysWithData 是实际有记录的天数。空值是未知，单日或覆盖稀疏时说明限制，不据此断言长期趋势。',
+      '缺少某项双周窗口时，仍可基于已经提供的上一晚、前一晚、七天睡眠平均或已记录的运动时段作有限判断；单次体重无法说明变化方向。',
+      '当前自然周的 workoutMinutes 应与明确的 weeklyWorkoutMinutes（分钟/周）比较。滚动七天与自然周分开计算。其他目标按 goalIntent 判断，不把目标期限或体重当运动分钟。',
+      '结合目标、剩余日期与已有安排，给出支持你判断的时间、数值和任务。若长期任务仍正确但下一步太笼统，考虑一个有依据、可执行的阶段任务。区别补量候选与用户约好的固定活动，已有安排适合时可以保留。',
+      'protectedTaskIds 的正文不可见，原样保留。不得猜测其作用或重复补排。可以提出确有依据、与原安排无冲突的行动；若缺失的信息实质影响下一步，只问一个具体问题。',
+    ].join('\n');
     if (!planning.now||!planning.revisionId) throw Error('情境评估的版本或时间无效');
   }
   return {...snapshot,...(planning?{planning}:{})};
@@ -185,7 +198,8 @@ const server=createServer({key:readFileSync(key),cert:readFileSync(cert)},async(
     }
     if (req.method==='POST' && path==='/super-agent/goals') {
       const input=await body(req),runtime=requestedRuntime(input?.runtime);
-      const goal=cleanGoal(input.goal), snapshot=cleanSnapshot(input.snapshot,goal.domain);
+      const goal=cleanGoal(input.goal,!!input.snapshot?.planning), snapshot=cleanSnapshot(input.snapshot,goal.domain,goal.target);
+      if (snapshot.planning&&goal.domain==='health') goal.target=snapshot.planning.weeklyWorkoutMinutes;
       // 客户端发来的必须是真字符串：String() 兜底会把对象变成 "[object Object]"，
       // 混过长度检查后送进模型（和目标标题那一条同一个坑）。
       const message=clientText(input.message).trim();
@@ -194,8 +208,9 @@ const server=createServer({key:readFileSync(key),cert:readFileSync(cert)},async(
       // requestId 是客户端给的，要在包上游之前校验：发错了仍然是 400。
       const id=requestId(input.requestId);
       if (snapshot.planning&&snapshot.planning.revisionId!==id) throw Error('情境版本与请求编号不符');
-      if (runtime===KIMI_RUNTIME) return respond(res,200,await upstream(()=>kimiAgent.startGoal({requestId:id,goal,snapshot,message,history})));
-      const response=await upstream(()=>superAgentCall('/along-source/api/goals',{value:{requestId:id,goal,snapshot,message,history},contextReview:!!snapshot.planning}));
+      const goalInput={requestId:id,goal,snapshot,message,history};
+      if (runtime===KIMI_RUNTIME) return respond(res,200,await upstream(()=>kimiAgent.startGoal(goalInput)));
+      const response=await upstream(()=>superAgentCall('/along-source/api/goals',{value:goalInput,contextReview:!!snapshot.planning}));
       return respond(res,200,{...response,run:await upstream(()=>normalizeGoalRun(response.run))});
     }
     if (req.method==='POST' && path==='/super-agent/goals/status') {

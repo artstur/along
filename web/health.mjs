@@ -7,7 +7,8 @@ export function loadState(raw) {
 }
 const SUMMARY_KEYS=['steps','workoutMinutes','workoutCount','weightKg','sleepMinutes','activeEnergyKcal','restingHeartRate','wristTemperatureC'];
 export function summaryHasData(snapshot) {
-  return !!snapshot && SUMMARY_KEYS.some(key=>snapshot[key]!=null);
+  return !!snapshot && (SUMMARY_KEYS.some(key=>snapshot[key]!=null)||
+    Object.values(snapshot.recentHistory||{}).some(pair=>pair?.recent?.value!=null||pair?.previous?.value!=null));
 }
 export function setSnapshot(state, input, source) {
   if (!['demo', 'healthkit'].includes(source)) throw Error('未知数据来源');
@@ -18,7 +19,9 @@ export function setSnapshot(state, input, source) {
   const selectedTypes=source==='healthkit' && Array.isArray(input?.selectedTypes) ? input.selectedTypes.filter(type=>['steps','workout','activeEnergy','weight','restingHeartRate','wristTemperature','sleep'].includes(type)) : null;
   const context=cleanHealthContext({...input,selectedTypes});
   const snapshot={...data, selectedTypes, contextReviewAllowed:source==='healthkit'&&input?.contextReviewAllowed===true,capturedAt:context.capturedAt,
-    sleepSummary:context.sleepSummary,workoutSummary:context.workoutSummary,updatedAt:new Date().toISOString()};
+    sleepSummary:context.sleepSummary,workoutSummary:context.workoutSummary,
+    comparisonHistoryAllowed:source==='healthkit'&&input?.contextReviewAllowed===true&&context.comparisonHistoryAllowed,
+    ...(source==='healthkit'&&input?.contextReviewAllowed===true&&context.recentHistory?{recentHistory:context.recentHistory}:{}),updatedAt:new Date().toISOString()};
   // 空读数（撤销授权、读取失败）不等于「用户没有数据」，不能拿它覆盖已经有的摘要。
   if (!summaryHasData(snapshot) && summaryHasData(state.snapshot) &&
     state.snapshot.contextReviewAllowed!==true && !snapshot.contextReviewAllowed) return state;

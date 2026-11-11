@@ -78,6 +78,10 @@ final class AlongBridgeModel: ObservableObject {
         UserDefaults.standard.bool(forKey: "along.health.contextReview.v1")
     }
 
+    private var comparisonHistoryAllowed: Bool {
+        UserDefaults.standard.bool(forKey: "along.health.comparisonHistory.v1")
+    }
+
     private func startObservers() {
         let selected = savedSelection
         guard !selected.isEmpty else { return }
@@ -116,8 +120,9 @@ final class AlongBridgeModel: ObservableObject {
                 healthRefreshRequests.removeAll()
                 var result: [String: Any]
                 do {
-                    let summary = try await reader.read(savedSelection, requestPermission: false, includeContext: contextReviewAllowed)
-                    let snapshot = summary.browserSnapshot(contextReviewAllowed: contextReviewAllowed)
+                    let summary = try await reader.read(savedSelection, requestPermission: false, includeContext: contextReviewAllowed,
+                                                        includeComparisonHistory: comparisonHistoryAllowed)
+                    let snapshot = summary.browserSnapshot(contextReviewAllowed: contextReviewAllowed, comparisonHistoryAllowed: comparisonHistoryAllowed)
                     if publish && epoch == healthEpoch { publishHealthSnapshot(snapshot) }
                     result = ["ok": true, "snapshot": snapshot]
                 } catch {
@@ -149,6 +154,7 @@ final class AlongBridgeModel: ObservableObject {
         // 清除本机保存的读取选择并停掉观察：只清网页里的摘要，下一轮刷新还会被读回来。
         UserDefaults.standard.removeObject(forKey: "along.health.selectedTypes")
         UserDefaults.standard.removeObject(forKey: "along.health.contextReview.v1")
+        UserDefaults.standard.removeObject(forKey: "along.health.comparisonHistory.v1")
         reader.stopObserving()
         selection = []
         preview = nil
@@ -187,7 +193,7 @@ final class AlongBridgeModel: ObservableObject {
         Task {
             defer { busy = false }
             do {
-                let summary = try await reader.read(selected)
+                let summary = try await reader.read(selected, includeComparisonHistory: true)
                 if selection == selected { preview = summary }
             }
             catch { errorMessage = error.localizedDescription }
@@ -206,8 +212,9 @@ final class AlongBridgeModel: ObservableObject {
         invalidateHealthRefreshes()
         UserDefaults.standard.set(preview.selected.map(\.rawValue), forKey: "along.health.selectedTypes")
         UserDefaults.standard.set(true, forKey: "along.health.contextReview.v1")
+        UserDefaults.standard.set(true, forKey: "along.health.comparisonHistory.v1")
         startObservers()
-        finish(snapshot: preview.browserSnapshot(contextReviewAllowed: true))
+        finish(snapshot: preview.browserSnapshot(contextReviewAllowed: true, comparisonHistoryAllowed: true))
     }
 
     func cancel() { finish(error: "已取消健康数据导入") }
@@ -384,7 +391,7 @@ enum AlongConnectionStore {
 
 struct AlongWebView: UIViewRepresentable {
     @ObservedObject var bridge: AlongBridgeModel
-    private let site = URL(string: "along://app/index.html?build=51")!
+    private let site = URL(string: "along://app/index.html?build=52")!
 
     func makeCoordinator() -> Coordinator { Coordinator(bridge: bridge) }
 
@@ -1047,12 +1054,15 @@ struct HealthSyncSheet: View {
                     Section("导入前预览") {
                         ForEach(preview.selected) { metric in
                             LabeledContent(metric.title, value: preview.displayValue(for: metric))
+                            ForEach(preview.historyPreview(for: metric), id: \.self) { line in
+                                Text(line).font(.footnote).foregroundStyle(.secondary)
+                            }
                         }
                         Text("睡眠摘要包含最近一夜的首末睡眠记录时间。运动摘要包含按运动类型、星期和小时分组的次数与时长。空值表示当前读不到记录。")
                             .font(.footnote).foregroundStyle(.secondary)
                     }
                     Section("导入 Along") {
-                        Text("确认后，Along 导入你所选的摘要。连接 Mac 时，Super Agent 可在数据变化或到达复查时间时，结合当前目标与已有安排评估是否调整。")
+                        Text("确认后，已配对的 Mac 可使用上述所选摘要和两个七天窗口的汇总，结合当前目标评估任务调整。")
                             .font(.footnote).foregroundStyle(.secondary)
                         Button("导入并允许 Agent 评估") { bridge.confirmImport() }
                             .disabled(bridge.busy || !preview.hasReadableValue)
