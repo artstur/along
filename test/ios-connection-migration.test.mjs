@@ -67,3 +67,30 @@ test('the old connection is only dropped after it is safely stored in the keycha
   assert.match(output,/^write-failed-kept:true$/m,'钥匙串写失败时不能删掉唯一一份凭证');
   assert.match(output,/^write-ok-removed:true$/m,'迁移成功后旧键要清掉');
 });
+
+test('the iPhone explains the observed proxy failure and an unreachable paired Mac',{skip:!hasSwift||process.platform!=='darwin'},()=>{
+  const start=swiftSource.indexOf('enum AgentBridgeError:');
+  const end=swiftSource.indexOf('\n}',start)+2;
+  const dir=mkdtempSync(join(tmpdir(),'along-transport-'));
+  try {
+    const file=join(dir,'check.swift');
+    writeFileSync(file,`import Foundation
+import CFNetwork
+${swiftSource.slice(start,end)}
+let proxy = NSError(domain: kCFErrorDomainCFNetwork as String, code: 310)
+let wrapped = NSError(domain: NSURLErrorDomain, code: -1004, userInfo: [NSUnderlyingErrorKey: proxy])
+let cases: [Error] = [proxy, wrapped, NSError(domain: NSURLErrorDomain, code: 310),
+    URLError(.timedOut), URLError(.cannotConnectToHost), URLError(.notConnectedToInternet),
+    NSError(domain: "Unrelated", code: 310), URLError(.cancelled)]
+for error in cases { print(AgentBridgeError.transportMessage(error) ?? "unchanged") }
+`);
+    const output=execFileSync('swift',['-module-cache-path',join(dir,'cache'),file],{encoding:'utf8'}).trim().split('\n');
+    for (const message of output.slice(0,3)) assert.match(message,/代理.*局域网/);
+    for (const message of output.slice(3,6)) assert.match(message,/互访.*Mac.*地址/);
+    assert.deepEqual(output.slice(6),['unchanged','unchanged']);
+  } finally {rmSync(dir,{recursive:true,force:true});}
+});
+
+test('every iPhone request has a resource deadline including time spent waiting for connectivity',()=>{
+  assert.match(swiftSource,/configuration\.timeoutIntervalForResource = path == "\/connection\/verify" \? 15 : 120/);
+});

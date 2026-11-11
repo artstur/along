@@ -7,6 +7,7 @@ import vm from 'node:vm';
 import {KimiCodeAgent} from '../host/kimi-code-agent.mjs';
 import {validateGoalReply, normalizeGoalReply} from '../web/goal-agent-core.mjs';
 import {safeAdaptiveLayout, normalizeQuestions, normalizeAdaptiveLayout} from '../web/adaptive-ui.mjs';
+import {validateReassessment} from '../web/contextual-planning.mjs';
 
 // 两条运行时对同一份模型输出必须给出同一个结论：要么都收下同样的目标空间，
 // 要么都明确失败。同一份输出在一边被作废、在另一边照单全收，用户看到的
@@ -52,31 +53,72 @@ function loadDshNormalizer() {
   const start=source.indexOf('function normalizeGoalRun');
   const end=source.indexOf('const server=createServer');
   assert.ok(start>0&&end>start,'找不到宿主的运行归一');
-  const context=vm.createContext({validateGoalReply,normalizeGoalReply,safeAdaptiveLayout,normalizeQuestions,normalizeAdaptiveLayout});
+  const context=vm.createContext({validateGoalReply,normalizeGoalReply,safeAdaptiveLayout,normalizeQuestions,normalizeAdaptiveLayout,validateReassessment});
   vm.runInContext(`${source.slice(start,end)}\nglobalThis.normalizeGoalRun=normalizeGoalRun;`,context);
   return context.normalizeGoalRun;
 }
 
-async function kimiVerdict(layout,extra={}) {
+async function kimiVerdict(layout,extra={},snapshot={},goal={domain:'health',title:'运动',target:120}) {
   const output={reply:'好',proposal:null,layout,...extra};
   const {statePath,fetchImpl}=kimiServer(output);
   try {
     const agent=new KimiCodeAgent({token:'secret-token',statePath,workspace:'/along',fetchImpl});
-    const response=await agent.startGoal({requestId:'along-goal-layout',goal:{domain:'health',title:'运动',target:120},snapshot:{},message:'做一个计划',history:[]});
+    const response=await agent.startGoal({requestId:'along-goal-layout',goal,snapshot,message:'做一个计划',history:[]});
     return response.run;
   } finally { rmSync(statePath,{force:true}); }
 }
 
-function dshVerdict(layout,extra={}) {
+function dshVerdict(layout,extra={},snapshot={}) {
   const normalizeGoalRun=loadDshNormalizer();
   return normalizeGoalRun({
     kind:'goal',runtime:'dsh-superagent',requestId:'along-goal-layout',actual:true,
     source:{kind:'along',label:'Along 目标'},trigger:{kind:'goal',label:'正在提交给 DSH'},
     agents:[],events:[],assignments:[],status:'working',statusLabel:'DSH 正在处理',progress:40,
-    input:{goal:{domain:'health',title:'运动',target:120},message:'做一个计划'},
+    input:{goal:{domain:'health',title:'运动',target:120},message:'做一个计划',snapshot},
     result:{reply:'好',proposal:null,layout,...extra},
   });
 }
+
+test('both runtime adapters deliver an explainable contextual revision and reject one for the wrong observation',async()=>{
+  const task={id:'walk',when:'今天',title:'散步',detail:'午后走一会儿。',state:'planned'};
+  const snapshot={contextReviewAllowed:true,planning:{version:1,kind:'context-review',revisionId:'along-goal-layout',
+    currentPlan:{tasks:[task]},now:'2026-11-11T04:00:00Z'}};
+  const layout={...baseLayout,tasks:[{...task,when:'明早'}]};
+  const reassessment={decision:'revise',basedOnRevision:snapshot.planning.revisionId,
+    changes:[{taskId:'walk',operation:'update',reason:'用户说今天下午没空。'}],reason:'保留散步，调整时段。',
+    nextReviewAt:null,watchFor:['新的日程信息']};
+  for (const verdict of [dshVerdict,kimiVerdict]) {
+    const accepted=await verdict(layout,{reassessment},snapshot);
+    assert.equal(accepted.result.reassessment.decision,'revise');
+    assert.equal(accepted.result.reassessment.changes[0].taskId,'walk');
+    assert.equal(accepted.result.layout.tasks[0].when,'明早');
+    const rejected=await verdict(layout,{reassessment:{...reassessment,basedOnRevision:'other-review'}},snapshot);
+    assert.equal(rejected.status,'blocked');
+    assert.equal(rejected.result,null);
+  }
+});
+
+test('a Kimi review changes only the requested fields while preserving an earlier reminder on a named goal',async()=>{
+  const reminder={id:'wind-down',title:'收工',detail:'这是本人确认过的文案。',when:'凌晨一点',kind:'reminder',
+    state:'planned',scheduledFor:'2026-11-11T01:00:00.000Z'};
+  const walk={id:'walk',title:'晚饭后散步',when:'今晚',detail:'由本人决定是否走。',state:'temporary'};
+  const goal={domain:'custom',title:'睡眠与运动',target:null};
+  const snapshot={contextReviewAllowed:true,planning:{revisionId:'along-goal-layout',now:'2026-11-11T04:00:00Z',currentPlan:{tasks:[reminder,walk]}}};
+  const assessment={decision:'revise',basedOnRevision:'along-goal-layout',reason:'昨晚实测睡了五小时，本人今天不想运动。',
+    changes:[{operation:'update',taskId:'walk',reason:'今天暂缓。'}],nextReviewAt:null,watchFor:[]};
+  const tasks=[{id:reminder.id},{id:walk.id,state:'deferred'}];
+  const run=await kimiVerdict({...baseLayout,tasks},{reassessment:assessment},snapshot,goal);
+  assert.equal(run.status,'done',run.error);
+  assert.deepEqual(run.result.layout.tasks,[reminder,{...walk,state:'deferred'}]);
+  for (const badTasks of [
+    [{...reminder,detail:'悄悄改动承诺。'},tasks[1]],
+    [tasks[0],{...walk,kind:'reminder',scheduledFor:reminder.scheduledFor}],
+    [tasks[1]],
+  ]) {
+    const rejected=await kimiVerdict({...baseLayout,tasks:badTasks},{reassessment:assessment},snapshot,goal);
+    assert.equal(rejected.status,'blocked');
+  }
+});
 
 const malformedLayouts=[
   {name:'模块类型不被允许',layout:{...baseLayout,modules:[{kind:'timeline',id:'x',title:'时间线',content:'x'}]}},

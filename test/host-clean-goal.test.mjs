@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import vm from 'node:vm';
+import {agentHealthSnapshot, cleanPlanningContext, cleanHealthContext} from '../web/contextual-planning.mjs';
 
 const hostSource=readFileSync(new URL('../host/agent-host.mjs',import.meta.url),'utf8');
 
@@ -32,4 +33,23 @@ test('the host still accepts a well formed goal',()=>{
   assert.deepEqual({...cleanGoal({domain:'health',title:'本周累计运动 120 分钟',target:120})},{domain:'health',target:120,title:'本周累计运动 120 分钟'});
   assert.throws(()=>cleanGoal({domain:'health',title:'目标',target:0}),/目标数值无效/);
   assert.throws(()=>cleanGoal({domain:'health',title:'目标',target:1.5}),/目标数值无效/);
+});
+
+test('a custom goal receives only the selected aggregates for an authorized health review',()=>{
+  const start=hostSource.indexOf('function cleanSnapshot');
+  const end=hostSource.indexOf('async function runExclusive',start);
+  const context=vm.createContext({agentHealthSnapshot,cleanPlanningContext,cleanHealthContext});
+  const clean=vm.runInContext(hostSource.slice(start,end)+'\ncleanSnapshot',context);
+  const input={selectedTypes:['sleep'],sleepMinutes:420,steps:1234,rawSamples:['private'],
+    contextReviewAllowed:true,planning:{version:1,revisionId:'review',now:'2026-11-11T04:00:00Z',
+      previous:{selectedTypes:['workout','sleep'],workoutMinutes:80,sleepMinutes:450}}};
+  const snapshot=clean(input,'custom');
+  assert.equal(snapshot.sleepMinutes,420);
+  assert.equal(snapshot.steps,null);
+  assert.equal(snapshot.planning.previous.workoutMinutes,null);
+  assert.equal(snapshot.rawSamples,undefined);
+  assert.throws(()=>clean({...input,contextReviewAllowed:false},'custom'),/确认/);
+  assert.throws(()=>clean({...input,planning:{version:0}},'custom'),/情境/);
+  assert.equal(clean({...input,planning:undefined},'custom').sleepMinutes,undefined);
+  assert.equal(clean(input,'finance').planning,undefined);
 });

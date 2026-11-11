@@ -75,11 +75,14 @@ flowchart LR
 
 几条贯穿全局的约定：
 
-- **确定性的部分在本地算**。进度、剩余量、默认下一步都由前端直接计算，Mac 关机或断网时首页照样更新。
-- **生成式的部分交给 Agent**。新目标的拆解和显著变化后的重排，经由 Mac 上的 Agent Host 调用 DSH Super Agent 或 Kimi Code Swarm。
+- **手机整理观察数据**。Apple Health 提供已选指标的汇总。睡眠摘要包含近七天有数据的天数与平均时长，运动摘要保留最近四周的类型和时段分布。
+- **Agent 判断要不要调整计划**。新观察、目标反馈和到期复查会连同已有任务提交给所选运行时。Agent 可维持原计划、提出逐项更改，或提出一个需要用户回答的问题。
 - **Agent 的输出不会直接生效**。结果先过 `validateGoalReply` 与 `safeAdaptiveLayout`，绑定可信指标后再渲染，最后由你决定是否采用。
+- **可执行结果会进系统通知**。iPhone 上第一次把目标或动态任务交给 Agent 时请求通知权限；编排完成且结果中确实有“下一步”后才发通知。相同 Request ID 只发一次，点通知回到对应目标或任务。
 
 ## 快速开始
+
+健康情境可用广州样本回放。`node examples/guangzhou-health-replay.mjs` 输出完整合成数据集，加上 `--stage short-sleep` 或 `--stage friday-weekend` 会生成与手机同格式的请求。每个阶段只使用当时已出现的睡眠、运动和外部材料。输出请求不会调用 Agent 或排入通知。
 
 ### 只想看看
 
@@ -153,6 +156,8 @@ iPhone App 的签名、安装与 HealthKit 读取口径见 [ios/README.md](ios/R
 | `ALONG_KIMI_CODE_TOKEN` | 读取 `~/.kimi-code/server.token` | 覆盖 Kimi token |
 | `ALONG_KIMI_CODE_MODEL` | `kimi-code/kimi-for-coding` | Kimi 模型 |
 | `ALONG_KIMI_WORKSPACE` | 当前目录 | Kimi 会话工作目录 |
+| `ALONG_CONTEXT_REVIEW_URL` | 同 DSH 服务地址 | 专用健康情境评估服务 |
+| `ALONG_CONTEXT_REVIEW_TOKEN_FILE` | 未设置 | 本机情境评估服务的凭据文件 |
 | `CODEX_BIN` | `~/.local/bin/codex`，否则 PATH 中的 `codex` | 健康变化任务提案使用的 Codex |
 
 ## 隐私与安全
@@ -161,7 +166,7 @@ Along 处理的是健康这类敏感数据，所以边界写得很死：
 
 | 原则 | 具体做法 |
 | --- | --- |
-| 只发汇总，不发原始样本 | 目标问答只发送当前目标与已选健身时长的汇总值；自定义目标只发送你主动输入的文本 |
+| 授权的数据范围 | 旧授权限于已选的周运动总时长。确认导入情境评估后，Agent 可收到所选健康类型的汇总、当前计划、观察变化和近期反馈 |
 | 数据留在手机 | 健康摘要保存在 App 内 WKWebView 的本地页面数据中，不依赖 Mac 同步服务 |
 | Token 留在 Mac | Kimi token 和配对 token 不发给 iPhone，也不写进运行结果 |
 | 只在局域网 | Agent Host 默认只绑定 Mac 的 Wi-Fi 地址，没有公网通道，退出终端即停止 |
@@ -222,6 +227,7 @@ npm run build   # 产出 dist/（GitHub Pages）与 ios/AlongHealth/Web/（App �
 坦白说，这还是一个 Demo，下面这些是有意为之或尚未完成的：
 
 - **没有后台同步**。HealthKit 在 App 打开、回到前台、收到前台更新通知时重新读取，页面可见期间每 60 秒兜底检查；不保证秒级，也不会自动标记运动完成。
+- **通知由 iOS 处理**。App 在前台读到需要用户处理的 Agent 结果后可发系统通知。采用后的定时提醒由 iOS 按通知设置送达。App 挂起期间的新决策在下次前台同步后可见。
 - **Agent 依赖 Mac**。Mac 关闭或网络断开时，首页确定性进度照常更新，Agent 问答和任务提案显示不可用；GitHub Pages 是静态站，无法常驻生成进程。
 - **理财只是演示**。不接真实账户，不转账，不交易。
 - **个人团队签名**。Xcode 个人团队的配置文件通常 7 天后到期，需要重新构建安装。

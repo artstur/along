@@ -4,6 +4,7 @@ import {existsSync, mkdirSync, readFileSync, renameSync, writeFileSync} from 'no
 import {validateGoalReply, normalizeGoalReply} from '../web/goal-agent-core.mjs';
 import {safeAdaptiveLayout, normalizeAdaptiveLayout} from '../web/adaptive-ui.mjs';
 import {KIMI_RUNTIME, AGENT_RUN_TIMEOUT_MS} from '../web/super-agent.mjs';
+import {REASSESSMENT_INSTRUCTIONS,validateReassessment} from '../web/contextual-planning.mjs';
 
 const DEFAULT_URL='http://127.0.0.1:58627';
 const DEFAULT_TOKEN_PATH=join(homedir(),'.kimi-code','server.token');
@@ -34,17 +35,19 @@ function jsonFromText(text) {
   for (const candidate of candidates) { try { return JSON.parse(candidate); } catch { /* Try the next representation. */ } }
   return null;
 }
+const GOAL_OUTPUT_INSTRUCTIONS=`Required JSON shape:
+{"reply":"Chinese response","proposal":{"active":true,"title":"goal title","target":number_or_null,"task":"next step","reason":"reason"},"layout":{"version":1,"title":"space title","badge":"status","summary":"summary","modules":[...],"tasks":[...],"questions":["question"]}}
+Use at most 6 modules, 6 tasks and 6 questions. Each module has kind, id and title. A summary module has content; a fact_list module has items shaped as [{"label":"...","value":"..."}]; a chips module has string items. For a custom goal, do not use metric modules and proposal.target must be null; put learning quantities in fact_list instead. Each task has id, when, title, detail, state (temporary|planned|deferred). Choose kind=agent_action, recommendation or reminder; reminders also require scheduledFor with an absolute future ISO timestamp and timezone. Questions must be strings. Preserve any explicit number, deadline, preference and constraint from the user. Keep all user-facing text in Chinese.`;
 function goalPrompt(input) {
-  return `You are the main Kimi Code session for Along. Swarm mode is enabled. You MUST use Agent Swarm and delegate in parallel to at least three real subagents with distinct roles: goal strategist, constraint/risk reviewer, and dynamic-task designer. Synthesize their work yourself.
+  return `You are the main Kimi Code session for Along. Swarm mode is enabled. ${input.snapshot?.planning?'Choose specialists only when useful for conflicting goals, missing evidence or recommendations; you may review a simple change yourself.':'You MUST use Agent Swarm and delegate in parallel to at least three real subagents with distinct roles: goal strategist, constraint/risk reviewer, and dynamic-task designer.'} Synthesize their work yourself.
 
 This is planning only. Do not edit files, run shell commands, browse private data, publish, pay, delete, or perform any external action. Only use the information below.
 
 Along input:
 ${JSON.stringify({goal:input.goal,snapshot:input.snapshot,message:input.message,history:input.history})}
 
-Return one final JSON object only, without markdown. It must contain:
-{"reply":"Chinese response","proposal":{"active":true,"title":"goal title","target":number_or_null,"task":"next step","reason":"reason"},"layout":{"version":1,"title":"space title","badge":"status","summary":"summary","modules":[...],"tasks":[...],"questions":[...]}}
-Use at most 6 modules, 6 tasks and 6 questions. Each module has kind, id and title. A summary module has content; a fact_list module has items shaped as [{"label":"...","value":"..."}]; a chips module has string items. For a custom goal, do not use metric modules and proposal.target must be null; put learning quantities in fact_list instead. Each task has id, when, title, detail, state (temporary|planned|deferred). Questions must be strings. Preserve any explicit number, deadline, preference and constraint from the user. Keep all user-facing text in Chinese.`;
+Return one final JSON object only, without markdown.
+${input.snapshot?.planning?REASSESSMENT_INSTRUCTIONS:GOAL_OUTPUT_INSTRUCTIONS}`;
 }
 function taskPrompt(input) {
   return `You are the main Kimi Code session for Along. Swarm mode is enabled. Use Agent Swarm and delegate this dynamic task to at least two real subagents with distinct planning and review roles.
@@ -97,7 +100,7 @@ function swarmAgentsFromTranscript(transcript) {
 }
 function synthesisPrompt(entry,transcript) {
   const swarm=swarmToolFromTranscript(transcript);
-  return `You are the final synthesis session for Along. The real Kimi AgentSwarm work is complete. Do not call tools. Use the Along input and the three subagent reports below, resolve conflicts conservatively, and return exactly one JSON object without markdown.
+  return `You are the final synthesis session for Along. Do not call tools. Use the Along input and available agent reports below, resolve conflicts conservatively, and return exactly one JSON object without markdown.
 
 Along input:
 ${JSON.stringify({goal:entry.input.goal,snapshot:entry.input.snapshot,message:entry.input.message,history:entry.input.history})}
@@ -105,16 +108,22 @@ ${JSON.stringify({goal:entry.input.goal,snapshot:entry.input.snapshot,message:en
 Real AgentSwarm reports:
 ${String(swarm?.output||'').slice(0,50_000)}
 
-Required JSON shape:
-{"reply":"Chinese response","proposal":{"active":true,"title":"goal title","target":number_or_null,"task":"next step","reason":"reason"},"layout":{"version":1,"title":"space title","badge":"status","summary":"summary","modules":[...],"tasks":[...],"questions":["question"]}}
-Use at most 6 modules, 6 tasks and 6 questions. Each module has kind, id and title. A summary module has content; a fact_list module has items shaped as [{"label":"...","value":"..."}]; a chips module has string items. Do not use metric modules for a custom goal. Each task must include id, when, title, detail, state (temporary|planned|deferred). Questions must be strings. For a custom goal, proposal.target must be null. Preserve every explicit number, deadline, preference and constraint in the Along input. Keep all user-facing text in Chinese.`;
+${entry.input.snapshot?.planning?REASSESSMENT_INSTRUCTIONS:GOAL_OUTPUT_INSTRUCTIONS}`;
 }
-function goalResultFromOutput(output,domain,message) {
+function goalResultFromOutput(output,domain,message,planning) {
   // 归一放在共享层：两条运行时对同一份模型输出必须给出同一个结论。
   const validated=validateGoalReply(normalizeGoalReply(output),domain,message);
-  const layout=output?.layout==null?null:safeAdaptiveLayout(normalizeAdaptiveLayout(output.layout,domain),domain);
+  const normalized=output?.layout==null?null:normalizeAdaptiveLayout(output.layout,domain);
+  if (planning&&normalized) {
+    if (!Array.isArray(output.layout.tasks)) throw Error('重排缺少任务列表');
+    const previous=new Map(planning.currentPlan.tasks.map(task=>[task.id,task]));
+    normalized.tasks=output.layout.tasks.map(edit=>({...previous.get(edit?.id),...edit}));
+  }
+  const layout=normalized==null?null:safeAdaptiveLayout(normalized,domain);
   if (output?.layout!=null&&!layout) throw Error('Kimi 返回的目标空间格式不正确');
-  return {...validated,layout};
+  const reassessment=planning?validateReassessment(output?.reassessment,layout,planning):null;
+  if (planning&&validated.proposal) throw Error('情境重排不能修改目标');
+  return {...validated,layout,...(planning?{reassessment}:{})};
 }
 
 export class KimiCodeAgent {
@@ -197,7 +206,7 @@ export class KimiCodeAgent {
     const transcriptOutput=[...transcriptFrames(transcript)].reverse().map(frame=>frame?.kind==='text'?jsonFromText(frame.text):null).find(Boolean);
     let output=jsonFromText(textFromMessage(assistant))||transcriptOutput;
     let parsedResult=null,outputError=null;
-    if (entry.kind==='goal'&&output) { try { parsedResult=goalResultFromOutput(output,entry.input.goal.domain,entry.input.message); } catch(error) { outputError=error; } }
+    if (entry.kind==='goal'&&output) { try { parsedResult=goalResultFromOutput(output,entry.input.goal.domain,entry.input.message,entry.input.snapshot?.planning); } catch(error) { outputError=error; } }
     const transcriptAgents=swarmAgentsFromTranscript(transcript);
     const agents=transcriptAgents.length?transcriptAgents:children.map(childAgent);
     const swarmFinished=agents.length>0&&agents.every(agent=>['done','blocked'].includes(agent.status));
@@ -218,7 +227,7 @@ export class KimiCodeAgent {
       const candidate=jsonFromText(textFromMessage(synthesisAssistant))||synthesisOutput;
       if (candidate) {
         output=candidate;
-        try { parsedResult=goalResultFromOutput(candidate,entry.input.goal.domain,entry.input.message);outputError=null; } catch(error) { outputError=error; }
+        try { parsedResult=goalResultFromOutput(candidate,entry.input.goal.domain,entry.input.message,entry.input.snapshot?.planning);outputError=null; } catch(error) { outputError=error; }
       }
       activeSession=synthesisSession;
     }
