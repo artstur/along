@@ -52,3 +52,21 @@ test('a revision explains actual task changes and belongs to the current context
   assert.throws(()=>validateReassessment({...answer,nextReviewAt:'2026-11-10T00:00:00Z'},layout,planning),/复查/);
   assert.throws(()=>validateReassessment({...answer,decision:'keep'},layout,planning),/不能替换/);
 });
+
+test('a consent-scoped bedtime request can ask for timing and then propose a future reminder beside an unchanged private task',()=>{
+  const privateTask={id:'private-1',title:'本机保留的任务',detail:'任务内容来自旧授权范围，请保留。',when:'已安排',state:'planned'};
+  const evening={...planning,goalIntent:'希望睡前收到提醒',timezone:'Asia/Shanghai',localDate:'2026-11-11',
+    now:'2026-11-11T15:00:00Z',protectedTaskIds:[privateTask.id],currentPlan:{title:'健康',tasks:[privateTask]}};
+  const decision={basedOnRevision:evening.revisionId,reason:'需要本人确认今晚的提醒时间',changes:[],nextReviewAt:null};
+  assert.equal(validateReassessment({...decision,decision:'need_data'},null,evening).decision,'need_data');
+  const answered={...evening,recentDecisions:[{decision:'feedback',feedback:'过了零点的 00:20 提醒我准备睡觉'}]};
+  const task={id:'bedtime-nov12',kind:'reminder',title:'准备睡觉',detail:'按你选的时间提醒。',
+    when:'今晚过零点后',scheduledFor:'2026-11-12T00:20:00+08:00',state:'planned'};
+  const proposal={...decision,decision:'revise',changes:[{taskId:task.id,operation:'add',reason:'采用用户刚回复的时刻。'}]};
+  const review=next=>validateReassessment(proposal,{tasks:[privateTask,next]},answered);
+  assert.equal(review(task).changes[0].operation,'add');
+  assert.throws(()=>review({...task,scheduledFor:'2026-11-11T00:20:00+08:00'}),/未来时间/);
+  assert.throws(()=>review({...task,scheduledFor:'2026-11-12T00:20:00'}),/时间|时区/);
+  assert.equal(validateReassessment({...decision,decision:'keep',reason:'同一晚已有已采用的提醒。'},null,
+    {...answered,currentPlan:{title:'健康',tasks:[privateTask,task]}}).decision,'keep');
+});

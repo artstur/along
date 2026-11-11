@@ -28,7 +28,7 @@ const settle=()=>new Promise(resolve=>setImmediate(resolve));
 let browserInstance=0;
 // Health observations and all host responses here are synthetic. The actual Web entry points
 // compose the request, poll it, validate the result, render the proposal, notify and adopt it.
-async function browser({initial=baseline,storage={},nativeHealth,restoreConnection}={}) {
+async function browser({initial=baseline,storage={},nativeHealth,restoreConnection,pendingGoalReminder}={}) {
   const dom=installDomStub({storage:{
     [HEALTH_KEY]:JSON.stringify({version:1,source:'healthkit',snapshot:initial,
       goals:[{id:'weekly',type:'workout',target:180}]}),
@@ -41,6 +41,7 @@ async function browser({initial=baseline,storage={},nativeHealth,restoreConnecti
   window.dispatchEvent=event=>dom.fireWindow(event.type,event);
   const submits=[],polls=[],notifications=[],reminderSets=[];
   window.AlongAgentBridge={
+    ...(pendingGoalReminder?{pendingGoalReminder}:{}),
     ...(restoreConnection?{connection:restoreConnection}:{}),
     request({path,body}) {
       if (path==='/connection/status') return Promise.resolve({along:true,runtime:DSH_RUNTIME,ready:true});
@@ -112,6 +113,49 @@ test('new observations coalesce behind one real run and its stale revision never
   await settle();
   assert.equal(app.read(TICKET_KEY),null);
   assert.deepEqual(app.notifications,[]);
+});
+
+test('home shows the next alert confirmed by iOS even if its task was arranged outside the phone',async()=>{
+  const scheduledFor=new Date(Date.now()+3600000).toISOString();
+  const app=await browser({pendingGoalReminder:async goalKey=>({goalKey,taskId:'external-reminder',title:'今天收工提醒',scheduledFor})});
+  await settle();
+  assert.match(app.app.innerHTML,/iPhone 已安排/);
+  assert.match(app.app.innerHTML,/今天收工提醒/);
+  assert.deepEqual(app.read(ADAPTIVE_LAYOUTS_KEY).health.tasks,confirmedLayout.tasks);
+  await app.app.dispatch('change',{target:{id:'goal-select',value:'finance'}});
+  assert.doesNotMatch(app.app.innerHTML,/今天收工提醒/);
+});
+
+test('a scheduling instruction during a review reaches the Agent with consented context and waits for adoption',async()=>{
+  const app=await browser();
+  const first=app.observe(baseline);
+  const background=app.submits[0];
+  answer(background,null);
+  await first;
+  assert.match(app.app.innerHTML,/data-action="task-instruction"/);
+  await app.click({action:'task-instruction'});
+  const sheet=document.querySelector('#sheet');
+  assert.match(sheet.innerHTML,/task-instruction-form/);
+  const instruction='按我的作息安排今晚的睡觉提醒';
+  await sheet.dispatch('submit',{target:{id:'task-instruction-form',dataset:{goal:'health'},fields:{instruction}},preventDefault(){}});
+  assert.equal(app.submits.length,1);
+  await app.poll();
+  app.polls[0].resolve(hostRun(background.body,resultFor(background.body,'revise',{title:'过期建议'})));
+  await settle();
+  const second=app.submits[1];
+  assert.equal(second.body.message,instruction);
+  const planning=second.body.snapshot.planning;
+  assert.equal(planning.cause,'feedback');
+  assert.ok(planning.now&&planning.timezone);
+  assert.equal(planning.recentDecisions.at(-1).feedback,instruction);
+  assert.deepEqual(app.notifications,[]);
+  const scheduledFor=new Date(Date.now()+3600000).toISOString();
+  const task={...confirmedLayout.tasks[0],title:'按近期作息准备睡觉',kind:'reminder',scheduledFor};
+  answer(second,resultFor(second.body,'revise',{tasks:[task,confirmedLayout.tasks[1]]}));
+  await settle();
+  assert.deepEqual(app.reminderSets,[]);
+  await app.click({action:'accept-task'});
+  assert.equal(app.reminderSets[0][0].scheduledFor,scheduledFor);
 });
 
 test('declining an in-flight proposal keeps the old plan after its delayed reply',async()=>{

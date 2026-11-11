@@ -9,7 +9,7 @@ import {GOAL_SUPER_AGENT_RUNS_KEY, SUPER_AGENT_RUNS_KEY, createFailedGoalSuperAg
   safeGoalSuperAgentRun, safeSuperAgentRun, withRunError, AGENT_RUN_TIMEOUT_MS, AGENT_RUNTIME_KEY, DSH_RUNTIME, KIMI_RUNTIME, agentRuntimeLabel, safeAgentRuntime, newId} from './super-agent.mjs';
 import {AGENT_NOTIFICATION_LEDGER_KEY, goalRunNotification, taskRunNotification, healthProposalNotification,
   notificationWasDelivered, recordNotificationDelivered} from './agent-notifications.mjs';
-import {PLANNING_STATE_KEY,agentHealthSnapshot,cleanPlanningContext,healthContextChanges,createPlanningContext,validateReassessment} from './contextual-planning.mjs';
+import {PLANNING_STATE_KEY,agentHealthSnapshot,cleanPlanningContext,healthContextChanges,createPlanningContext,validateReassessment,buildBackgroundReviewRequest} from './contextual-planning.mjs';
 const TICKET_KEY = 'along.goal-ticket.v1';
 const REMINDER_SYNC_KEY='along.health-reminder-sync.v1';
 const HEALTH_SHARING_KEY='along.health-sharing.v1';
@@ -56,6 +56,76 @@ const reviews=new Map();
 let nativeHealthStatus=window.AlongHealthBridge?.refresh?'checking':'available';
 let nativeObservationSeen=false;
 let sourceGeneration=0;
+const BG_TEMPLATE_KEY='along.health-background-template.v1';
+let nativeConnectionRestored=false;
+let backgroundReplace=null,backgroundClaim=null,backgroundSyncQueued=false;
+function persistAgentConfig(config) {
+  const previous=readStored(AGENT_KEY,{});
+  if (['baseURL','fingerprint','token'].some(field=>previous[field]!==config[field])) localStorage.removeItem(BG_TEMPLATE_KEY);
+  localStorage.setItem(AGENT_KEY,JSON.stringify(config));
+}
+function currentBackgroundTemplate() {
+  if (document.visibilityState==='hidden'||!nativeObservationSeen||!nativeConnectionRestored||!canGiveTaskInstruction(activeGoal)||agentRuntime!==DSH_RUNTIME||
+      state.loop?.experiment===EXPERIMENT||state.snapshot.backgroundReviewAllowed!==true||state.snapshot.backgroundReviewGoalKey!==activeGoal) return null;
+  try { return reviewFor(activeGoal).backgroundTemplate(); }
+  catch { return undefined; } // local storage unavailable: scope cannot be verified
+}
+function queueBackgroundSync() {
+  if (backgroundSyncQueued||!window.AlongHealthBridge?.backgroundReview) return;
+  backgroundSyncQueued=true;
+  queueMicrotask(()=>{backgroundSyncQueued=false;void syncBackgroundTemplate().catch(()=>{});});
+}
+async function syncBackgroundTemplate() {
+  const bridge=window.AlongHealthBridge;
+  if (!bridge?.backgroundReview||!nativeConnectionRestored||nativeHealthStatus==='checking'||
+      !nativeObservationSeen&&nativeHealthStatus==='available'||document.visibilityState==='hidden') return;
+  const template=currentBackgroundTemplate();
+  if (template===undefined) {
+    backgroundReplace=null;
+    await bridge.backgroundReview('disarm',{});
+    return false;
+  }
+  for (const review of reviews.values()) review.retireNative(template);
+  if (!template) localStorage.removeItem(BG_TEMPLATE_KEY);
+  const goals=template?[template]:[];
+  const value=JSON.stringify(goals);
+  if (backgroundReplace?.value===value) return backgroundReplace.promise;
+  const entry={value};
+  backgroundReplace=entry;
+  // Bridge messages are enqueued in call order. A newer revocation must not wait
+  // for a previous response, and its completion must never re-arm an older scope.
+  entry.promise=(async()=>bridge.backgroundReview('replace',{goals}))().then(reply=>{
+    if (template&&reply?.enabled!==true) throw Error('后台授权失效');
+    return true;
+  }).catch(async()=>{
+    if (backgroundReplace===entry) {
+      backgroundReplace=null;
+      try { await bridge.backgroundReview('disarm',{}); } catch { /* native disarms on entering foreground */ }
+    }
+    return false;
+  });
+  return entry.promise;
+}
+async function claimBackgroundReview(template) {
+  if (backgroundClaim?.version===template.version) return backgroundClaim.promise;
+  const entry={version:template.version};
+  backgroundClaim=entry;
+  entry.promise=(async()=>{
+    const bridge=window.AlongHealthBridge;
+    const response=await bridge.backgroundReview('pending',{goalKey:template.goalKey,version:template.version});
+    if (currentBackgroundTemplate()?.version!==template.version||response?.enabled!==true||!Array.isArray(response.runs)) return false;
+    for (const receipt of response.runs) {
+      if (receipt.goalKey!==template.goalKey||receipt.version!==template.version) continue;
+      const review=reviewFor(template.goalKey);
+      if (!review.claimBackground(receipt,template)) return false;
+      try { await bridge.backgroundReview('ack',{goalKey:template.goalKey,version:template.version,requestId:receipt.requestId}); }
+      catch { /* local request ownership is durable; acknowledgement is idempotent */ }
+    }
+    return true;
+  })().catch(()=>false).finally(()=>{if (backgroundClaim===entry) backgroundClaim=null;});
+  return entry.promise;
+}
+
 function hasHealthSource(key) {
   const types=goalCustom[key]?.healthTypes;
   if (!Array.isArray(types)) return key==='health'; // Existing imports belong to the original health workspace.
@@ -120,6 +190,24 @@ function notice(message) {
   toast.classList.add('show');
   setTimeout(() => toast.classList.remove('show'), 3200);
 }
+// The OS queue can include a dated action explicitly requested on the paired Mac.
+let reminderRead=null;
+function readNextGoalReminder(goalKey,force=false) {
+  if (!window.AlongAgentBridge?.pendingGoalReminder||goalKey==='finance') return;
+  if (!force&&reminderRead?.goalKey===goalKey&&Date.now()-reminderRead.at<60000) return;
+  const read={goalKey,at:Date.now(),item:reminderRead?.goalKey===goalKey?reminderRead.item:null};
+  reminderRead=read;
+  Promise.resolve().then(()=>window.AlongAgentBridge.pendingGoalReminder(goalKey)).then(item=>{
+    if (reminderRead!==read) return;
+    read.item=item?.goalKey===goalKey&&typeof item.title==='string'&&typeof item.taskId==='string'&&Date.parse(item.scheduledFor)>Date.now()?item:null;
+    if (screen==='home'&&activeGoal===goalKey) render();
+  }).catch(()=>{if (reminderRead===read&&read.item) {read.item=null;if (screen==='home'&&activeGoal===goalKey) render();}});
+}
+function nextReminderLine() {
+  const item=reminderRead?.goalKey===activeGoal?reminderRead.item:null;
+  if (!item||Date.parse(item.scheduledFor)<=Date.now()) return '';
+  return `<div class="next-reminder"><span>iPhone 已安排</span><strong>${esc(item.title)}</strong><time datetime="${esc(item.scheduledFor)}">${esc(formatDate(item.scheduledFor))}</time></div>`;
+}
 const notificationAttempts=new Set();
 async function enableAgentNotifications() {
   if (!window.AlongAgentBridge?.notification) return;
@@ -156,6 +244,7 @@ async function syncHealthReminders(goalKey) {
     const items=tasks.filter(t=>t.kind==='reminder'&&Date.parse(t.scheduledFor)>Date.now())
       .map(t=>({goalKey,id:t.id,taskId:t.id,title:t.title,body:t.detail,scheduledFor:t.scheduledFor,requestId:sync.requestId}));
     const reply=await window.AlongAgentBridge.notification('replaceHealthReminders',{goalKey,items});
+    readNextGoalReminder(goalKey,true);
     if (!Number.isInteger(reply?.scheduledCount)||reply.scheduledCount!==items.length) throw Error('请检查 Along 的系统通知权限');
     if (readStored(syncKey,null)?.requestId===sync.requestId) localStorage.removeItem(syncKey);
   } catch(error) {
@@ -616,7 +705,7 @@ function adaptiveTaskSection(layout) {
   };
   const visible=layout.tasks.slice(0,2).map(taskButton).join('');
   const later=layout.tasks.slice(2);
-  return `<section class="task-section adaptive-tasks" aria-label="动态任务"><div class="section-heading"><h2>动态任务</h2>${hasHealthSource(activeGoal)?'':'<span>Along 根据目标与情境生成</span>'}</div>${taskProposalCard()}<div class="adaptive-task-card">${visible}${later.length?`<details class="adaptive-more"><summary>查看其余 ${later.length} 项任务</summary>${later.map(taskButton).join('')}</details>`:''}${layout.questions.length?`<div class="missing-strip">待确认 ${layout.questions.length} 项：${esc(layout.questions[0])}</div>`:''}<div class="card-actions"><button class="agent-action" data-action="edit-goal">补充信息</button></div></div>${healthReviewDetails()}</section>`;
+  return `<section class="task-section adaptive-tasks" aria-label="动态任务"><div class="section-heading"><h2>动态任务</h2>${hasHealthSource(activeGoal)?'':'<span>Along 根据目标与情境生成</span>'}</div>${nextReminderLine()}${taskProposalCard()}<div class="adaptive-task-card">${visible}${later.length?`<details class="adaptive-more"><summary>查看其余 ${later.length} 项任务</summary>${later.map(taskButton).join('')}</details>`:''}${layout.questions.length?`<div class="missing-strip">待确认 ${layout.questions.length} 项：${esc(layout.questions[0])}</div>`:''}<div class="card-actions"><button class="agent-action" data-action="${canGiveTaskInstruction(activeGoal)?'task-instruction':'edit-goal'}">补充信息</button></div></div>${healthReviewDetails()}</section>`;
 }
 function adaptiveConnectionSection(layout) {
   if (!layout.connections?.length) return '';
@@ -626,6 +715,7 @@ function goalListTitle(title) {
   return /(日语|Japanese|N5|五十音)/i.test(title)?'日语学习':title;
 }
 function home() {
+  readNextGoalReminder(activeGoal);
   const linked=hasHealthSource(activeGoal);
   const suggestedHealth=offersHealthSource(activeGoal);
   const model = activeGoal === 'finance' ? financeView(finance, goalCustom.finance) : isCustomGoalKey(activeGoal) ? customView(activeGoal) : healthView(localHealthViewState(), goalCustom.health);
@@ -648,8 +738,8 @@ function home() {
       </section>`;
   const taskContent=layout?adaptiveTaskSection(layout):`<section class="task-section" aria-label="动态任务">
         <div class="section-heading"><h2>动态任务</h2>${linked?'':'<span>随目标与数据更新</span>'}</div>
-        ${taskProposalCard()}
-        <div class="focus-task"><div class="focus-top"><span>下一步</span><span class="task-chip">${esc(model.primary.status)}</span></div><h3>${esc(model.primary.title)}</h3><p>${esc(model.primary.detail)}</p><div class="card-actions"><button class="agent-action" data-action="edit-goal">补充信息</button></div></div>
+        ${nextReminderLine()}${taskProposalCard()}
+        <div class="focus-task"><div class="focus-top"><span>下一步</span><span class="task-chip">${esc(model.primary.status)}</span></div><h3>${esc(model.primary.title)}</h3><p>${esc(model.primary.detail)}</p><div class="card-actions"><button class="agent-action" data-action="${canGiveTaskInstruction(activeGoal)?'task-instruction':'edit-goal'}">补充信息</button></div></div>
         ${model.secondary.length ? `<div class="task-list">${model.secondary.map((task,index) => `<button class="task-row task-row-button" data-action="open-task" data-task-id="follow-up-${index}"><span class="task-row-mark" aria-hidden="true"></span><div><strong>${esc(task.title)}</strong><p>${esc(task.detail)}</p></div><span class="task-row-status">${esc(task.status)}</span></button>`).join('')}</div>` : ''}
         ${healthReviewDetails()}
       </section>`;
@@ -854,7 +944,7 @@ function experimentPanel() {
 function lab() {
   return `<div class="app-shell"><header class="topbar"><div class="topbar-inner">${brand()}<span class="topbar-caption">目标变化实验</span></div></header><main class="content lab-content">${backButton('back-home','返回目标')}<h1>当进度变化，下一步会怎样变？</h1><p class="lab-intro">这是与真实健康数据隔离的模拟实验。Along 计算进度，再判断是否需要更新建议。</p>${experimentPanel()}</main></div>`;
 }
-function render() { app.innerHTML = screen === 'lab' ? lab() : screen === 'agent' ? goalAgentPage() : screen === 'task' ? taskDetailPage() : home(); }
+function render() { app.innerHTML = screen === 'lab' ? lab() : screen === 'agent' ? goalAgentPage() : screen === 'task' ? taskDetailPage() : home(); queueBackgroundSync(); }
 function renderAgentUpdate({follow=false}={}) {
   const previous=app.querySelector('.agent-scroll');
   if (!previous) {render();return;}
@@ -880,7 +970,7 @@ async function connectHealth(goalKey=activeGoal) {
   try {
     const previousTypes=state.source==='healthkit'&&nativeHealthStatus==='available'&&state.snapshot?.contextReviewAllowed
       ? state.snapshot.selectedTypes||[]:[];
-    const snapshot = await window.AlongHealthBridge.connect({types:['steps','weight','workout','sleep']});
+    const snapshot = await window.AlongHealthBridge.connect({goalKey,types:['steps','weight','workout','sleep']});
     sourceGeneration++;
     nativeHealthStatus='available';
     nativeObservationSeen=true;
@@ -1033,6 +1123,11 @@ app.addEventListener('click', event => {
     }
   }
   if (action === 'task-back') { selectedTaskId=null;screen='home';render(); }
+  if (action==='task-instruction'&&canGiveTaskInstruction(activeGoal)) {
+    show(`<div class="sheet-head"><h2>让 Along 安排</h2><button class="icon-button" data-action="close" aria-label="关闭">×</button></div>
+      <form id="task-instruction-form" class="agent-composer" data-goal="${esc(activeGoal)}"><textarea name="instruction" maxlength="300" required aria-label="这次想怎么安排" placeholder="例如：根据我的近期作息，安排今晚的睡觉提醒"></textarea>
+      <button class="button sheet-main-button">交给 ${esc(agentRuntimeLabel(agentRuntime))} 安排</button></form>`);
+  }
   if (action === 'edit-goal') { screen='agent'; render();if (agentConfig.token) void refreshAgentConnection(); }
   if (action === 'agent-back') {
     if (isCustomGoalKey(activeGoal) && !goalCustom[activeGoal] && !goalLayouts[activeGoal]) {
@@ -1120,7 +1215,7 @@ app.addEventListener('submit', async event => {
       if (!verified?.paired) throw Error('未能验证已配对的 Mac');
       await saveNativeConnection(config);
       agentConfig=config;
-      localStorage.setItem(AGENT_KEY,JSON.stringify(config));
+      persistAgentConfig(config);
       await refreshAgentConnection();
       void reviewAll();
       notice('已更新 Mac 地址');
@@ -1136,7 +1231,7 @@ app.addEventListener('submit', async event => {
       const result=await agentCall(config,'/pair',{code:String(form.get('code')).trim()});
       agentConfig={...config,token:result.token};
       agentConnection={status:'ready',error:''};
-      localStorage.setItem(AGENT_KEY,JSON.stringify(agentConfig));
+      persistAgentConfig(agentConfig);
       await saveNativeConnection(agentConfig);
       void reviewAll();
       notice('已连接 Along，之后会自动恢复');
@@ -1267,6 +1362,10 @@ function weeklyExerciseEvidence(text) {
   }
   return {values,ambiguous};
 }
+function canGiveTaskInstruction(key) {
+  return hasHealthSource(key)&&!!agentConfig.token&&nativeHealthStatus==='available'&&
+    state.source==='healthkit'&&state.snapshot?.contextReviewAllowed===true&&scopedSnapshot(key).selectedTypes.length>0;
+}
 let activeAccessPreview=null;
 function openReviewAccess(key) {
   if (!hasHealthSource(key)) return;
@@ -1281,6 +1380,16 @@ function openReviewAccess(key) {
     <form id="review-access-form">${boxes}<button class="button sheet-main-button">保存并重新评估</button></form>`);
 }
 sheet.addEventListener('submit',event=>{
+  if (event.target.id==='task-instruction-form') {
+    event.preventDefault();
+    if (event.target.dataset.goal!==activeGoal||!canGiveTaskInstruction(activeGoal)) {
+      sheet.close();notice('目标或授权已变化，请重新打开当前任务');return;
+    }
+    const instruction=String(new FormData(event.target).get('instruction')||'').trim().slice(0,300);
+    if (!instruction) return;
+    sheet.close();void enableAgentNotifications();reviewFor(activeGoal).instruct(instruction);
+    return;
+  }
   if (event.target.id!=='review-access-form') return;
   event.preventDefault();
   const preview=activeAccessPreview;
@@ -1305,23 +1414,26 @@ function createHealthReview(goalKey) {
     pendingTask=ticket;
     if (ticket) localStorage.setItem(ticketKey,JSON.stringify(ticket));
     else localStorage.removeItem(ticketKey);
+    queueBackgroundSync();
   }
   let planningState=readStored(planningKey,{});
   if (!planningState||typeof planningState!=='object'||Array.isArray(planningState)) planningState={};
-  if (planningState.run?.actual!==true&&planningState.run?.status==='working') planningState={...planningState,
+  if (planningState.run?.actual!==true&&planningState.run?.status==='working'&&planningState.nativeRequestId!==planningState.run.requestId) planningState={...planningState,
     run:{...planningState.run,status:'blocked',statusLabel:'需要重试',error:'上次情境评估未收到运行记录'}};
-  let planningBusy=false;
+  let planningBusy=false,lastNativeReconnectProbe=0;
   function canRecoverConnection() {
     const {run,request,dismissedRequest,recoveredRequestId}=planningState;
+    if (request&&planningState.nativeRequestId===request.requestId&&run?.requestId===request.requestId)
+      return run.status==='blocked'&&dismissedRequest!==run.requestId&&localConnectionError(run.error);
     if (!request||!run||run.status!=='blocked'||run.actual!==false||run.runtime!==agentRuntime||
         run.requestId!==request.requestId||dismissedRequest===run.requestId||recoveredRequestId===run.requestId) return false;
     return run.error==='上次情境评估未收到运行记录'||localConnectionError(run.error);
   }
-  function savePlanning(next) { planningState=next;localStorage.setItem(planningKey,JSON.stringify(next)); }
+  function savePlanning(next) { planningState=next;localStorage.setItem(planningKey,JSON.stringify(next));queueBackgroundSync(); }
   let healthSharing=readStored(sharingKey,{});
   function saveHealthSharing(next) {
     healthSharing=next;
-    localStorage.setItem(sharingKey,JSON.stringify(next));
+    localStorage.setItem(sharingKey,JSON.stringify(next));queueBackgroundSync();
   }
   function recordPlanningFeedback(feedback,reason=pendingTask?.reason) {
     if (!pendingTask?.requestId) return;
@@ -1440,14 +1552,101 @@ function createHealthReview(goalKey) {
     const currentIds=new Set(localHealthPlan().tasks.map(t=>t.id));
     return (healthSharing.tasks||[]).filter(t=>currentIds.has(t.id)&&t.localText&&!Object.hasOwn(fields,'task-'+t.alias)).map(t=>t.alias);
   }
+  function includesInstruction(request) {
+    const instruction=planningState.instruction;
+    return !instruction||request?.snapshot?.planning?.recentDecisions?.some(d=>d.at===instruction.at&&d.feedback===instruction.feedback);
+  }
+  function instruct(feedback) {
+    const instruction={at:new Date().toISOString(),decision:'feedback',feedback};
+    savePlanning({...planningState,instruction,queued:true,recentDecisions:[...(planningState.recentDecisions||[]),instruction].slice(-6)});
+    if (pendingTask?.status!=='assigned') saveTicket(null);
+    void reviewHealthContext('feedback');
+    if (screen==='home') render();
+  }
+  function backgroundTemplate() {
+    const fields=reviewFields(),after=scopedSnapshot(goalKey);
+    const weeklyWorkoutMinutes=workoutTarget(false,fields);
+    const goal={domain:goalDomain(goalKey),title:reviewTitle(fields),target:weeklyWorkoutMinutes};
+    const previous=planningState.evaluated||after;
+    const planning=cleanPlanningContext({version:1,goalIntent:healthGoalIntent(fields),weeklyWorkoutMinutes,
+      protectedTaskIds:protectedTaskIds(fields),currentPlan:currentHealthPlan(fields),recentDecisions:planningState.recentDecisions,
+      previous:{...previous,selectedTypes:(previous.selectedTypes||[]).filter(type=>after.selectedTypes.includes(type)),
+        comparisonHistoryAllowed:previous.comparisonHistoryAllowed===true&&after.comparisonHistoryAllowed===true}});
+    // Do not hash/serialize local-only text or the pairing token. The native version
+    // covers the precise approved plan and the recipient, independently of sample time.
+    const {previous:ignored,...policy}=planning;
+    const identity=JSON.stringify([goalKey,healthSharing.scope||0,agentConfig.fingerprint,goal,policy,after.selectedTypes,after.comparisonHistoryAllowed]);
+    let stored=readStored(BG_TEMPLATE_KEY,null);
+    if (!stored||stored.identity!==identity) {
+      stored={identity,version:newId('bg-scope')};
+      localStorage.setItem(BG_TEMPLATE_KEY,JSON.stringify(stored));
+    }
+    return {goalKey,version:stored.version,runtime:DSH_RUNTIME,goal,planning,selectedTypes:after.selectedTypes,
+      comparisonHistoryAllowed:after.comparisonHistoryAllowed===true,
+      evaluatedLocalDate:planningState.localDate||null,nextReviewAt:planningState.nextReviewAt||null,
+      paused:!!pendingTask||planningState.run?.status==='working'||!!planningState.instruction};
+  }
+  function retireNative(template) {
+    const {request,nativeRequestId,nativeVersion}=planningState;
+    if (!nativeRequestId||nativeRequestId!==request?.requestId||
+        template?.goalKey===goalKey&&template.version===nativeVersion) return;
+    // A response to this ID must not be polled, re-posted or applied after
+    // withdrawing its goal, pairing, task text or HealthKit category scope.
+    savePlanning({...planningState,request:null,run:null,nativeRequestId:null,nativeVersion:null,uncertainNativeReceipt:false});
+    if (pendingTask?.requestId===nativeRequestId) saveTicket(null);
+  }
+  function claimBackground(receipt,template) {
+    const request=receipt.request,id=receipt.requestId;
+    if (!id||request?.requestId!==id||request.runtime!==DSH_RUNTIME||!['accepted','uncertain'].includes(receipt.state)) return false;
+    if (planningState.request?.requestId===id) {
+      if (receipt.state==='accepted'&&planningState.uncertainNativeReceipt) savePlanning({...planningState,uncertainNativeReceipt:false});
+      return true;
+    }
+    if (planningBusy||planningState.run?.status==='working'||pendingTask||planningState.instruction) return false;
+    const p=request.snapshot?.planning;
+    let basis=template;
+    if (receipt.previousRequestId!=null) {
+      const baseline=receipt.baseline;
+      if (typeof receipt.previousRequestId!=='string'||!/^along-review-[A-Za-z0-9_-]+$/.test(receipt.previousRequestId)||receipt.previousRequestId===id||
+          baseline?.contextReviewAllowed!==true||!Array.isArray(baseline.selectedTypes)||!baseline.selectedTypes.length||
+          baseline.selectedTypes.some(type=>!template.selectedTypes.includes(type))||
+          baseline.comparisonHistoryAllowed===true&&!template.comparisonHistoryAllowed) return false;
+      // Native verified the previous run's ticket in this same goal/consent
+      // generation. Only its allowed health facts can advance the baseline.
+      basis={...template,evaluatedLocalDate:receipt.evaluatedLocalDate,nextReviewAt:receipt.nextReviewAt,
+        planning:{...template.planning,previous:agentHealthSnapshot(baseline)}};
+    }
+    const previous=receipt.previousRequestId||planningState.evaluated?basis.planning.previous:p?.previous;
+    const rebuilt=buildBackgroundReviewRequest({...basis,paused:false,planning:{...basis.planning,previous}},{...request.snapshot,backgroundReviewAllowed:true,backgroundReviewGoalKey:goalKey},
+      id,{now:p?.now,timezone:p?.timezone,localDate:p?.localDate});
+    if (!rebuilt||request.goal?.domain!==rebuilt.goal.domain||request.goal?.title!==rebuilt.goal.title||request.goal?.target!==rebuilt.goal.target||
+        request.message!==rebuilt.message||!Array.isArray(request.history)||request.history.length||
+        JSON.stringify(cleanPlanningContext(p))!==JSON.stringify(rebuilt.snapshot.planning)) return false;
+    const at=Date.now();
+    const saved={...planningState,lastDecision:latestDecision(),request:rebuilt,queued:false,nativeVersion:template.version,
+      nativeRequestId:id,uncertainNativeReceipt:receipt.state==='uncertain',run:createPendingGoalSuperAgentRun(rebuilt,at,DSH_RUNTIME)};
+    // ACK follows the durable write. If storage fails, native retains ownership.
+    localStorage.setItem(planningKey,JSON.stringify(saved));
+    planningState=saved;
+    saveTicket({id,requestId:id,goalKey,source:'healthkit',status:'assigned',reason:'正在接回后台健康评估'});
+    void refreshHealthReview();
+    return true;
+  }
   function planningResultIsCurrent(request) {
-    return nativeHealthStatus==='available'&&state.source==='healthkit'&&state.snapshot?.contextReviewAllowed===true&&healthGoalIntent()===request.snapshot.planning.goalIntent&&
+    return includesInstruction(request)&&nativeHealthStatus==='available'&&state.source==='healthkit'&&state.snapshot?.contextReviewAllowed===true&&healthGoalIntent()===request.snapshot.planning.goalIntent&&
       (request.snapshot.planning.weeklyWorkoutMinutes??null)===workoutTarget()&&
       JSON.stringify(request.snapshot.planning.protectedTaskIds||[])===JSON.stringify(protectedTaskIds(reviewFields()))&&
       healthContextChanges(request.snapshot,scopedSnapshot(goalKey)).length===0&&
       JSON.stringify(cleanPlanningContext({...request.snapshot.planning,currentPlan:currentHealthPlan()}).currentPlan)===JSON.stringify(request.snapshot.planning.currentPlan);
   }
   function consumeHealthReview(raw,request) {
+    if (planningState.nativeRequestId===request.requestId) {
+      if (document.visibilityState==='hidden'||!nativeObservationSeen||!nativeConnectionRestored) return;
+      const template=currentBackgroundTemplate();
+      if (template===undefined) return;
+      retireNative(template);
+      if (planningState.request?.requestId!==request.requestId) return;
+    }
     const run=safeGoalSuperAgentRun(raw);
     if (!run?.actual||run.requestId!==request.requestId||run.runtime!==request.runtime) throw Error('Super Agent 没有返回该请求的真实评估记录');
     savePlanning({...planningState,run:{...run,createdAt:planningState.run?.createdAt||Date.now()}});
@@ -1479,7 +1678,7 @@ function createHealthReview(goalKey) {
     }
     if (layout&&goalLayouts[goalKey]) layout={...goalLayouts[goalKey],tasks:layout.tasks};
     const at=new Date().toISOString();
-    savePlanning({...planningState,lastDecision:{requestId:run.requestId,at,runtime:run.runtime,decision:assessment.decision,reason:assessment.reason,
+    savePlanning({...planningState,instruction:null,nativeRequestId:null,nativeVersion:null,uncertainNativeReceipt:false,lastDecision:{requestId:run.requestId,at,runtime:run.runtime,decision:assessment.decision,reason:assessment.reason,
       reply:typeof result.reply==='string'?result.reply.trim().slice(0,1200):''},
       evaluated:agentHealthSnapshot(request.snapshot),localDate:request.snapshot.planning.localDate,
       goalIntent:request.snapshot.planning.goalIntent,nextReviewAt:assessment.nextReviewAt,
@@ -1503,7 +1702,24 @@ function createHealthReview(goalKey) {
     if (userTask||removed) void deliverAgentNotification(healthProposalNotification(ticket));
   }
   async function reviewHealthContext(cause='observation',before=null) {
-    if (nativeHealthStatus!=='available'||!hasHealthSource(goalKey)||state.source!=='healthkit'||!state.snapshot?.contextReviewAllowed||state.loop?.experiment===EXPERIMENT||!agentConfig.token) return;
+    if (document.visibilityState==='hidden'||nativeHealthStatus!=='available'||!hasHealthSource(goalKey)||state.source!=='healthkit'||!state.snapshot?.contextReviewAllowed||state.loop?.experiment===EXPERIMENT||!agentConfig.token) return;
+    if (window.AlongHealthBridge?.backgroundReview&&goalKey===activeGoal&&state.snapshot.backgroundReviewAllowed&&state.snapshot.backgroundReviewGoalKey===goalKey&&agentRuntime===DSH_RUNTIME) {
+      // A native submission may have left the phone while this WebView was suspended.
+      // Take ownership before creating any foreground request for the same observation.
+      const template=currentBackgroundTemplate();
+      if (!template||!await claimBackgroundReview(template)||document.visibilityState==='hidden'||currentBackgroundTemplate()?.version!==template.version) return;
+    }
+    if (planningState.nativeRequestId&&planningState.nativeRequestId===planningState.request?.requestId&&planningState.run?.status==='blocked') {
+      if (cause==='retry'||verifiedHealthHost&&canRecoverConnection()) {
+        savePlanning({...planningState,run:{...planningState.run,status:'working',error:null,createdAt:Date.now()}});
+        if (pendingTask?.requestId===planningState.nativeRequestId) saveTicket({...pendingTask,status:'assigned',error:null});
+        void refreshHealthReview();
+      } else if (cause==='observation'&&!verifiedHealthHost&&canRecoverConnection()&&Date.now()-lastNativeReconnectProbe>15_000) {
+        lastNativeReconnectProbe=Date.now();
+        void refreshAgentConnection({healthOnly:true});
+      }
+      return;
+    }
     if (planningBusy) {
       if (planningState.request&&!planningResultIsCurrent(planningState.request)) savePlanning({...planningState,queued:true});
       return;
@@ -1517,7 +1733,7 @@ function createHealthReview(goalKey) {
     const localDate=new Intl.DateTimeFormat('en-CA').format(new Date());
     const recover=verifiedHealthHost&&canRecoverConnection();
     if (cause==='reconnect'&&!recover) return;
-    const changed=(!planningState.request&&!planningState.lastDecision)||healthContextChanges(planningState.evaluated,after).length>0||healthGoalIntent()!==planningState.goalIntent;
+    const changed=!includesInstruction(planningState.request)||(!planningState.request&&!planningState.lastDecision)||healthContextChanges(planningState.evaluated,after).length>0||healthGoalIntent()!==planningState.goalIntent;
     const due=planningState.nextReviewAt&&Date.parse(planningState.nextReviewAt)<=Date.now();
     if (!recover&&!['feedback','retry'].includes(cause)&&!changed&&!due&&planningState.localDate===localDate) return;
     // A failed run is retained for inspection; a new observation or context change
@@ -1527,12 +1743,12 @@ function createHealthReview(goalKey) {
     const fields=reviewFields(),weeklyWorkoutMinutes=workoutTarget(false,fields);
     const previous=planningState.evaluated||(before&&healthContextChanges(before,after).length?before:null);
     const planning=createPlanningContext({before:previous,after,goalIntent:healthGoalIntent(fields),
-      protectedTaskIds:protectedTaskIds(fields),weeklyWorkoutMinutes,currentPlan:currentHealthPlan(fields),recentDecisions:planningState.recentDecisions,cause:due?'review':cause,revisionId:requestId});
+      protectedTaskIds:protectedTaskIds(fields),weeklyWorkoutMinutes,currentPlan:currentHealthPlan(fields),recentDecisions:planningState.recentDecisions,cause:planningState.instruction?'feedback':due?'review':cause,revisionId:requestId});
     // Use the original idempotent submission only while its goal and observation match.
     const previousRequest=planningState.request;
     const resume=recover&&previousRequest.snapshot?.planning?.localDate===localDate&&planningResultIsCurrent(previousRequest);
     const request=resume?previousRequest:{...createGoalSuperAgentRequest({domain:goalDomain(goalKey),goal:{domain:goalDomain(goalKey),title:reviewTitle(fields),target:weeklyWorkoutMinutes},snapshot:{...after,planning},
-      message:'请结合目标、已有安排和最新情境，评估是否需要调整；给出判断与任务变更依据。',history:[],requestId}),runtime:agentRuntime};
+      message:planningState.instruction?.feedback||'请结合目标、已有安排和最新情境，评估是否需要调整；给出判断与任务变更依据。',history:[],requestId}),runtime:agentRuntime};
     planningBusy=true;
     const submittedId=request.requestId;
     savePlanning({...planningState,lastDecision:latestDecision(),request,queued:false,recoveredRequestId:recover?submittedId:null,run:createPendingGoalSuperAgentRun(request,Date.now(),request.runtime)});
@@ -1555,12 +1771,24 @@ function createHealthReview(goalKey) {
   }
   async function refreshHealthReview() {
     const {run,request}=planningState;
-    if (nativeHealthStatus!=='available'||planningBusy||run?.status!=='working'||!request||!agentConfig.token) return;
+    if (document.visibilityState==='hidden'||nativeHealthStatus!=='available'||planningBusy||run?.status!=='working'||!request||!agentConfig.token) return;
+    if (planningState.nativeRequestId===request.requestId) {
+      if (!nativeObservationSeen||!nativeConnectionRestored) return;
+      const template=currentBackgroundTemplate();
+      if (template===undefined) return;
+      retireNative(template);
+      if (request.requestId!==planningState.request?.requestId) return;
+    }
     planningBusy=true;
     try {
-      const latest=await agentCall(agentConfig,'/super-agent/goals/status',{requestId:request.requestId,runtime:request.runtime,contextReview:true});
+      const retryNative=planningState.nativeRequestId===request.requestId&&planningState.uncertainNativeReceipt&&planningResultIsCurrent(request);
+      const latest=retryNative?(await agentCall(agentConfig,'/super-agent/goals',request))?.run:
+        await agentCall(agentConfig,'/super-agent/goals/status',{requestId:request.requestId,runtime:request.runtime,contextReview:true});
       if (planningState.request?.requestId===request.requestId) {
-        try { consumeHealthReview(latest,request); }
+        try {
+          if (retryNative&&latest?.actual&&latest.requestId===request.requestId) savePlanning({...planningState,uncertainNativeReceipt:false});
+          consumeHealthReview(latest,request);
+        }
         catch(error) {
           savePlanning({...planningState,run:{...run,status:'blocked',error:error.message}});
           if (pendingTask?.requestId===request.requestId) saveTicket({...pendingTask,status:'waiting',error:error.message});
@@ -1570,7 +1798,10 @@ function createHealthReview(goalKey) {
       }
     } catch(error) {
       if (planningState.request?.requestId===request.requestId) {
-        const failed=run.actual?withRunError(run,error.message):createFailedGoalSuperAgentRun(request,error.message,Date.now(),request.runtime);
+        const interrupted=planningState.nativeRequestId===request.requestId&&localConnectionError(error.message);
+        if (interrupted) verifiedHealthHost=false;
+        const failed=interrupted?{...run,status:'blocked',error:error.message}:
+          run.actual?withRunError(run,error.message):createFailedGoalSuperAgentRun(request,error.message,Date.now(),request.runtime);
         savePlanning({...planningState,run:failed});
         if (failed.status==='blocked'&&pendingTask?.requestId===request.requestId) saveTicket({...pendingTask,status:'waiting',error:failed.error});
       }
@@ -1663,10 +1894,10 @@ function createHealthReview(goalKey) {
     saveGoalCustom();saveTicket(null);render();notice('下一步已更新');
   }
   return {get state(){return planningState;},get sharing(){return healthSharing;},get ticket(){return pendingTask;},
-    localHealthPlan,shareableHealthTask,accessOptions,workoutTarget,latestDecision,setAccess,canRecoverConnection,reviewHealthContext,refreshHealthReview,accept,dismiss,answer,clear,restrict,goalUpdated};
+    localHealthPlan,shareableHealthTask,accessOptions,workoutTarget,latestDecision,setAccess,canRecoverConnection,backgroundTemplate,retireNative,claimBackground,reviewHealthContext,refreshHealthReview,accept,dismiss,answer,instruct,clear,restrict,goalUpdated};
 }
 window.addEventListener('along-health-update', async event => {
-  if (state.loop?.experiment === EXPERIMENT) return;
+  if (document.visibilityState==='hidden'||state.loop?.experiment === EXPERIMENT) return;
   const previous=state.source==='healthkit'?state.snapshot:null;
   let next;
   try { next=setSnapshot(state,event.detail,'healthkit'); }
@@ -1689,6 +1920,10 @@ window.addEventListener('along-notification-open', event => {
   } else if (detail.kind==='task' && typeof detail.taskId==='string'&&currentTaskRecords().some(t=>t.id===detail.taskId)) {
     selectedTaskId=detail.taskId;
     screen='task';
+  } else if (detail.reminderTitle&&detail.kind==='task') {
+    screen='home';
+    readNextGoalReminder(goalKey,true);
+    notice(String(detail.reminderTitle));
   } else screen='agent';
   render();
 });
@@ -1713,7 +1948,7 @@ async function restoreAlongConnection() {
     const saved=await loadNativeConnection();
     if (saved?.baseURL&&saved?.fingerprint&&saved?.token) {
       agentConfig=saved;
-      localStorage.setItem(AGENT_KEY,JSON.stringify(saved));
+      persistAgentConfig(saved);
       render();
     } else if (agentConfig.token) {
       await saveNativeConnection(agentConfig);
@@ -1721,6 +1956,7 @@ async function restoreAlongConnection() {
   } catch {
     // A transient Keychain failure leaves the WKWebView connection available.
   }
+  nativeConnectionRestored=true;queueBackgroundSync();
   if (agentConfig.token) {
     void refreshAgentConnection();
     if (nativeObservationSeen) void reviewAll();
@@ -1752,9 +1988,17 @@ async function refreshFromNative(force=false) {
   } finally { readingNative=false; }
 }
 void refreshFromNative();
-window.addEventListener('pageshow', () => {void refreshFromNative();for (const key of healthGoalKeys()) void syncHealthReminders(key);});
+function resumeNativeHealth() {
+  if (window.AlongHealthBridge?.backgroundReview&&window.AlongHealthBridge.refresh) {
+    nativeObservationSeen=false;
+    nativeHealthStatus='checking';
+    backgroundReplace=null;
+    void refreshFromNative(true);
+  } else void refreshFromNative();
+}
+window.addEventListener('pageshow', () => {resumeNativeHealth();for (const key of healthGoalKeys()) void syncHealthReminders(key);});
 window.addEventListener('focus', () => void refreshFromNative());
-document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') void refreshFromNative(); });
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') resumeNativeHealth(); });
 setInterval(async () => {
   if (document.visibilityState!=='visible') return;
   await refreshFromNative();

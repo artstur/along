@@ -112,6 +112,10 @@ p { line-height: 1.5; }
 .health-review p { font-size: 13px; line-height: 1.65; }
 .health-review small { display: block; margin-top: 4px; color: #666; }
 .health-review .minor-action { min-height: 44px; margin: 0; }
+.next-reminder { display: flex; gap: 9px; align-items: baseline; flex-wrap: wrap; padding: 9px 0 14px; font-size: 13px; }
+.next-reminder span, .next-reminder time { color: #555; font-size: 12px; }
+.next-reminder strong { flex: 1; }
+.next-reminder time { white-space: nowrap; }
 .task-open-hint { display: flex; align-items: center; justify-content: space-between; margin-top: 13px; color: #8a8a8a; font-size: 10px; }
 .task-open-hint b { color: #333; font-size: 14px; font-weight: 400; }
 .generated-task-button:hover .task-open-hint { color: #222; }
@@ -207,6 +211,8 @@ footer { padding: 0 0 26px; color: #aaa; text-align: center; font-size: 10px; }
 .permission-list { display: flex; flex-wrap: wrap; gap: 7px; margin: 17px 0; }
 .permission-list span { padding: 7px 9px; border-radius: 7px; background: #f3f3f3; color: #555; font-size: 11px; }
 .sheet-main-button { width: 100%; }
+#task-instruction-form { display: grid; gap: 12px; }
+#task-instruction-form textarea { padding-right: 15px; }
 .sheet-footnote { color: #999; margin-top: 10px; font-size: 10px; }
 #toast { position: fixed; bottom: calc(24px + env(safe-area-inset-bottom)); left: 50%; z-index: 10; transform: translateX(-50%); max-width: calc(100% - 36px); padding: 10px 14px; border-radius: 9px; background: #222; color: #fff; font-size: 11px; white-space: nowrap; opacity: 0; pointer-events: none; transition: opacity .2s; }
 #toast.show { opacity: 1; }
@@ -332,7 +338,7 @@ footer { padding: 0 0 26px; color: #aaa; text-align: center; font-size: 10px; }
   .orchestration-flow > div:nth-of-type(4) { grid-column: 3; grid-row: 2; }
   .worker-grid { grid-template-columns: 1fr; }
   .worker-objective { min-height: 0; }
-  #sheet { position: fixed; inset: auto 0 0; width: 100%; margin: auto 0 0; border-radius: 18px 18px 0 0; padding: 24px 22px calc(26px + env(safe-area-inset-bottom)); }
+  #sheet { position: fixed; inset: auto 0 0; width: 100%; max-width: 100%; margin: auto 0 0; border-radius: 18px 18px 0 0; padding: 24px 22px calc(26px + env(safe-area-inset-bottom)); }
   .change-flow { grid-template-columns: 1fr; }
   .flow-arrow { transform: rotate(90deg); }
 }

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import vm from 'node:vm';
-import {agentHealthSnapshot,cleanHealthContext,cleanPlanningContext,createPlanningContext,healthContextChanges,validateReassessment} from '../web/contextual-planning.mjs';
+import {SLEEP_REMINDER_CRITERIA,agentHealthSnapshot,cleanHealthContext,cleanPlanningContext,createPlanningContext,healthContextChanges,validateReassessment} from '../web/contextual-planning.mjs';
 import {initialState,setSnapshot} from '../web/health.mjs';
 
 const previous={startAt:'2026-10-27T16:00:00Z',endAt:'2026-11-03T16:00:00Z',daysWithData:6,value:472};
@@ -67,7 +67,7 @@ test('protected aliases survive cleaning and cannot be changed or removed even w
 test('both runtime dispatches receive the window guidance, metric semantics and no invented weekly target',async()=>{
   const host=readFileSync(new URL('../host/agent-host.mjs',import.meta.url),'utf8');
   const source=host.slice(host.indexOf('function cleanGoalTitle'),host.indexOf('async function runExclusive'));
-  const {cleanGoal,cleanSnapshot}=vm.runInNewContext(source+'\n;({cleanGoal,cleanSnapshot})',{agentHealthSnapshot,cleanHealthContext,cleanPlanningContext});
+  const {cleanGoal,cleanSnapshot}=vm.runInNewContext(source+'\n;({cleanGoal,cleanSnapshot})',{SLEEP_REMINDER_CRITERIA,agentHealthSnapshot,cleanHealthContext,cleanPlanningContext});
   const planning=makePlanning();
   const review=cleanSnapshot({...raw,planning},'health',120);
   assert.equal(review.planning.weeklyWorkoutMinutes,120);
@@ -95,6 +95,27 @@ test('both runtime dispatches receive the window guidance, metric semantics and 
   for (const runtime of ['kimi-code-swarm','dsh-superagent']) await send({method:'POST',input:{
     requestId:'review-1',runtime,goal:{domain:'health',title:'12周计划',target:12},message:'评估我近期的目标进展',history:[],snapshot:{...raw,planning},
   }},null,'/super-agent/goals');
+  const bedtimePlan={...planning,goalIntent:'我想稳定作息，下一次睡前请提醒我。',
+    reviewCriteria:'从旧版客户端带来的任意指示',currentPlan:{...planning.currentPlan,tasks:[task]}};
+  for (const runtime of ['dsh-superagent','kimi-code-swarm']) await send({method:'POST',input:{
+    requestId:'review-1',runtime,goal:{domain:'health',title:'健康',target:null},message:'复查已采用的任务',history:[],
+    snapshot:{...raw,selectedTypes:['workout'],planning:bedtimePlan},
+  }},null,'/super-agent/goals');
+  for (const {snapshot} of received.slice(2)) {
+    assert.equal(snapshot.sleepSummary,null,'an explicit sleep goal cannot unlock observations');
+    assert.deepEqual(snapshot.planning.protectedTaskIds,[task.id]);
+    const criteria=snapshot.planning.reviewCriteria;
+    assert.doesNotMatch(criteria,/从旧版客户端/);
+    assert.match(criteria,/睡前提醒/);
+    assert.match(criteria,/kind=reminder/);
+    assert.match(criteria,/scheduledFor/);
+    assert.match(criteria,/need_data/);
+    assert.match(criteria,/planning.timezone/);
+    assert.match(criteria,/一次性请求/);
+    assert.match(criteria,/授权睡眠摘要/);
+    assert.match(criteria,/本地今天余下的时间/);
+    assert.match(criteria,/拒绝|暂停/);
+  }
   assert.deepEqual(received[0],received[1]);
   assert.equal(received[0].goal.target,null,'the plan horizon must not become an exercise target');
   assert.equal(received[0].snapshot.recentHistory.sleep.recent.value,411);
