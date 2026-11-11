@@ -441,7 +441,7 @@ enum AlongConnectionStore {
 
 struct AlongWebView: UIViewRepresentable {
     @ObservedObject var bridge: AlongBridgeModel
-    private let site = URL(string: "along://app/index.html?build=55")!
+    private let site = URL(string: "along://app/index.html?build=56")!
 
     func makeCoordinator() -> Coordinator { Coordinator(bridge: bridge) }
 
@@ -527,6 +527,7 @@ struct AlongWebView: UIViewRepresentable {
           agentPending.set(id, {resolve, reject});
           window.webkit.messageHandlers.alongAgent.postMessage({id, operation: 'connection', action, value});
         }),
+        dailyReminderStatus: value => window.AlongAgentBridge.notification('dailyReminderStatus', value),
         pendingGoalReminder: goalKey => window.AlongAgentBridge.notification('upcomingGoalReminder', {goalKey}),
         notification: (action, value = null) => new Promise((resolve, reject) => {
           const id = newId();
@@ -659,6 +660,13 @@ struct AlongWebView: UIViewRepresentable {
             case "status":
                 let settings = await center.notificationSettings()
                 return ["status": notificationStatus(settings.authorizationStatus)]
+            case "dailyReminderStatus", "applyDailyReminders", "cancelDailyReminders":
+                guard let value = input["value"] as? [String: Any] else { throw AgentBridgeError.invalidConfiguration }
+                switch input["action"] as? String {
+                case "applyDailyReminders": return try await DailyHealthReminders.apply(value)
+                case "cancelDailyReminders": return try await DailyHealthReminders.cancel(value)
+                default: return await DailyHealthReminders.status(try DailyReminderScope(value))
+                }
             case "upcomingGoalReminder":
                 guard let value = input["value"] as? [String: Any], let goalKey = value["goalKey"] as? String,
                       goalKey == "health" || (goalKey.hasPrefix("custom:") && (8...100).contains(goalKey.count))
@@ -668,13 +676,13 @@ struct AlongWebView: UIViewRepresentable {
                 let candidates = pending.compactMap { request -> (Date, UNNotificationRequest, String)? in
                     guard let id = request.content.userInfo["taskId"] as? String,
                           request.content.userInfo["goalKey"] as? String == goalKey,
-                          request.identifier == prefix + notificationIdentifier(id),
+                          (request.identifier == prefix + notificationIdentifier(id) || DailyHealthReminders.owns(request, goalKey: goalKey)),
                           let trigger = request.trigger as? UNCalendarNotificationTrigger,
                           !trigger.repeats, let date = trigger.nextTriggerDate(), date > Date() else { return nil }
                     return (date, request, id)
                 }
                 guard let (date, request, taskID) = candidates.min(by: { $0.0 < $1.0 }) else { return [:] }
-                return ["goalKey": goalKey, "taskId": taskID, "title": request.content.title,
+                return ["goalKey": goalKey, "taskId": taskID, "requestId": request.content.userInfo["requestId"] as? String ?? "", "title": request.content.title,
                         "scheduledFor": ISO8601DateFormatter().string(from: date)]
             case "replaceHealthReminders":
                 guard let value = input["value"] as? [String: Any],
@@ -739,25 +747,17 @@ struct AlongWebView: UIViewRepresentable {
             return "along.custom-health-plan." + notificationIdentifier(goalKey) + "."
         }
 
-        // A new plan can be adopted or cleared while the OS is still adding
-        // requests for the preceding plan. Apply entire batches in call order.
-        @MainActor private static var lastReminderReplacement: Task<Void, Never>?
-
         @MainActor private static func enqueueHealthReminderReplacement(_ items: [[String: Any]], goalKey: String,
                     center: UNUserNotificationCenter) async throws -> [String: Any] {
-            let previous = lastReminderReplacement
-            let work = Task {
-                await previous?.value
-                return try await replaceHealthReminders(items, goalKey: goalKey, center: center)
-            }
-            lastReminderReplacement = Task { _ = try? await work.value }
-            return try await work.value
+            try await DailyHealthReminders.serialized { try await replaceHealthReminders(items, goalKey: goalKey, center: center) }
         }
 
         private static func replaceHealthReminders(_ items: [[String: Any]], goalKey: String, center: UNUserNotificationCenter) async throws -> [String: Any] {
             let prefix = healthReminderPrefix(goalKey)
             var desired: [UNNotificationRequest] = []
             var identifiers = Set<String>()
+            let existingAtStart = await center.pendingNotificationRequests()
+            var dailyCoverage = Set<String>()
             var calendar = Calendar(identifier: .gregorian)
             calendar.timeZone = TimeZone(secondsFromGMT: 0)!
             let parser = ISO8601DateFormatter()
@@ -773,6 +773,10 @@ struct AlongWebView: UIViewRepresentable {
                       raw.range(of: #"(Z|[+-][0-9]{2}:[0-9]{2})$"#, options: .regularExpression) != nil,
                       let date = parser.date(from: raw) ?? fractionalParser.date(from: raw), date > Date()
                 else { throw AgentBridgeError.server("健康提醒缺少任务信息或有效的未来时间") }
+                if let dailyID = DailyHealthReminders.coveredAdoptedID(taskID, goalKey: goalKey, date: date, pending: existingAtStart) {
+                    guard dailyCoverage.insert(dailyID).inserted else { throw AgentBridgeError.server("健康提醒重复") }
+                    continue
+                }
                 let identifier = prefix + notificationIdentifier(id)
                 guard identifiers.insert(identifier).inserted else { throw AgentBridgeError.server("健康提醒重复") }
                 let content = UNMutableNotificationContent()
@@ -785,12 +789,12 @@ struct AlongWebView: UIViewRepresentable {
                 desired.append(UNNotificationRequest(identifier: identifier, content: content,
                     trigger: UNCalendarNotificationTrigger(dateMatching: components, repeats: false)))
             }
-            let old = await center.pendingNotificationRequests().filter { $0.identifier.hasPrefix(prefix) }
+            let old = await center.pendingNotificationRequests().filter { $0.identifier.hasPrefix(prefix) && !DailyHealthReminders.preservesIndependentRequest($0) }
             let permission = await center.notificationSettings().authorizationStatus
             let permitted = [.authorized, .provisional, .ephemeral].contains(permission)
-            if desired.isEmpty || !permitted {
+            if (desired.isEmpty && dailyCoverage.isEmpty) || !permitted {
                 center.removePendingNotificationRequests(withIdentifiers: old.map(\.identifier))
-                let remaining = await center.pendingNotificationRequests().filter { $0.identifier.hasPrefix(prefix) }.count
+                let remaining = await center.pendingNotificationRequests().filter { $0.identifier.hasPrefix(prefix) && !DailyHealthReminders.preservesIndependentRequest($0) }.count
                 guard remaining == 0 else { throw AgentBridgeError.server("系统仍保留部分旧健康提醒，请稍后重试") }
                 return ["status": desired.isEmpty ? "cleared" : notificationStatus(permission), "scheduledCount": 0]
             }
@@ -812,11 +816,13 @@ struct AlongWebView: UIViewRepresentable {
                 throw error
             }
             center.removePendingNotificationRequests(withIdentifiers: old.map(\.identifier).filter { !identifiers.contains($0) })
-            let pending = await center.pendingNotificationRequests().filter { $0.identifier.hasPrefix(prefix) }
+            let pending = await center.pendingNotificationRequests().filter { $0.identifier.hasPrefix(prefix) && (identifiers.contains($0.identifier) || !DailyHealthReminders.preservesIndependentRequest($0)) }
             guard Set(pending.map(\.identifier)) == identifiers else {
                 throw AgentBridgeError.server("系统中的健康提醒与当前安排不一致，请稍后重试")
             }
-            return ["status": "scheduled", "scheduledCount": pending.count]
+            let confirmed = Set(await center.pendingNotificationRequests().map(\.identifier))
+            guard dailyCoverage.isSubset(of: confirmed) else { throw AgentBridgeError.server("每日提醒已变化，请重新读取") }
+            return ["status": "scheduled", "scheduledCount": pending.count + dailyCoverage.count]
         }
 
         func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
@@ -832,9 +838,10 @@ struct AlongWebView: UIViewRepresentable {
                 if let value = info[key] as? String { payload[key] = value }
             }
             if let goalKey = payload["goalKey"], let id = payload["taskId"],
-               response.notification.request.identifier == Self.healthReminderPrefix(goalKey) + Self.notificationIdentifier(id),
+               (response.notification.request.identifier == Self.healthReminderPrefix(goalKey) + Self.notificationIdentifier(id) || DailyHealthReminders.owns(response.notification.request, goalKey: goalKey)),
                response.notification.request.trigger is UNCalendarNotificationTrigger {
                 payload["reminderTitle"] = response.notification.request.content.title
+                if let daily = DailyHealthReminders.deliveryTopic(response.notification.request, goalKey: goalKey) { payload["dailyTopic"] = daily }
             }
             DispatchQueue.main.async {
                 self.openNotification(payload)
@@ -873,7 +880,7 @@ struct AlongWebView: UIViewRepresentable {
                   let fingerprint = input["fingerprint"] as? String,
                   fingerprint.count == 64, fingerprint.allSatisfy(\.isHexDigit),
                   let path = input["path"] as? String,
-                  ["/pair", "/connection/verify", "/connection/status", "/goal/event", "/super-agent/tasks", "/super-agent/tasks/status",
+                  ["/pair", "/connection/verify", "/connection/status", "/goal/event", "/super-agent/tasks", "/super-agent/tasks/status", "/super-agent/daily-delegation",
                    "/super-agent/goals", "/super-agent/goals/status"].contains(path),
                   let body = input["body"] as? [String: Any],
                   let url = URL(string: base + path) else { throw AgentBridgeError.invalidConfiguration }

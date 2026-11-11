@@ -1,3 +1,4 @@
+import {rememberDailyAction,includeEarlierDailyAction,pruneDailyActions} from './daily-action-history.mjs';
 import {createServer} from 'node:https';
 import {randomBytes, randomInt, createHash, timingSafeEqual} from 'node:crypto';
 import {execFileSync} from 'node:child_process';
@@ -10,11 +11,17 @@ import {runTaskCodex} from './codex-agent.mjs';
 import {KimiCodeAgent} from './kimi-code-agent.mjs';
 import {DSH_RUNTIME, KIMI_RUNTIME, safeAgentRuntime} from '../web/super-agent.mjs';
 import {readJsonBody} from './request-body.mjs';
+import {findDailyGrant} from './daily-delegation.mjs';
 import {HostError, upstream, statusForError} from './host-error.mjs';
-import {agentHealthSnapshot,cleanHealthContext,cleanPlanningContext,validateReassessment,SLEEP_REMINDER_CRITERIA} from '../web/contextual-planning.mjs';
+import {agentHealthSnapshot,cleanHealthContext,cleanPlanningContext,validateReassessment,SLEEP_REMINDER_CRITERIA,DAILY_ACTIONS_CRITERIA,parseDailyActionReply} from '../web/contextual-planning.mjs';
 
 const dir = process.env.ALONG_AGENT_STATE_DIR||join(homedir(), '.along', 'agent-host');
 mkdirSync(dir, {recursive:true, mode:0o700});
+function pruneExpiredPlans() {
+  try {pruneDailyActions(dir);} catch {console.warn('Along 未能清理已过期的安排索引');}
+}
+pruneExpiredPlans();
+setInterval(pruneExpiredPlans,60_000).unref();
 const key = join(dir, 'key.pem'), cert = join(dir, 'cert.pem');
 if (!existsSync(key) || !existsSync(cert)) {
   execFileSync('openssl', ['req','-x509','-newkey','rsa:3072','-nodes','-keyout',key,'-out',cert,'-days','30','-subj','/CN=Along Local Agent']);
@@ -99,6 +106,9 @@ function cleanSnapshot(value,domain,goalTarget=null) {
   const planning=cleanPlanningContext(value?.planning);
   if (value?.planning && !planning) throw Error('情境评估的版本无效');
   if (planning) {
+    if (value.planning.dailyDelegation!=null&&(!planning.dailyDelegation||
+      (planning.dailyDelegation.goalKey==='health'?'health':'custom')!==domain||
+      !planning.dailyDelegation.topics.every(t=>snapshot.selectedTypes.includes(t)))) throw Error('每日委托超出当前目标的数据范围');
     planning.previous=cleanHealthContext({...planning.previous,
       comparisonHistoryAllowed:snapshot.comparisonHistoryAllowed&&planning.previous.comparisonHistoryAllowed,
       selectedTypes:planning.previous.selectedTypes.filter(type=>snapshot.selectedTypes.includes(type))});
@@ -111,6 +121,7 @@ function cleanSnapshot(value,domain,goalTarget=null) {
       '当前自然周的 workoutMinutes 应与明确的 weeklyWorkoutMinutes（分钟/周）比较。滚动七天与自然周分开计算。其他目标按 goalIntent 判断，不把目标期限或体重当运动分钟。',
       '结合目标、剩余日期与已有安排，给出支持你判断的时间、数值和任务。若长期任务仍正确但下一步太笼统，考虑一个有依据、可执行的阶段任务。区别补量候选与用户约好的固定活动，已有安排适合时可以保留。',
       SLEEP_REMINDER_CRITERIA,
+      ...(planning.dailyDelegation?[DAILY_ACTIONS_CRITERIA]:[]),
       'protectedTaskIds 的正文不可见，原样保留。不得猜测其作用或重复补排。可以提出确有依据、与原安排无冲突的行动；若缺失的信息实质影响下一步，只问一个具体问题。',
     ].join('\n');
     if (!planning.now||!planning.revisionId) throw Error('情境评估的版本或时间无效');
@@ -132,12 +143,14 @@ function requestedRuntime(value) {
   if (value!==undefined && ![DSH_RUNTIME,KIMI_RUNTIME].includes(value)) throw Error('Super Agent 运行时无效');
   return safeAgentRuntime(value);
 }
-function normalizeGoalRun(run) {
+function normalizeGoalRun(run,pair=null) {
   if (!run?.result) return run;
   try {
     const domain=run.input?.goal?.domain;
     if (!['health','finance','custom'].includes(domain)) throw Error('Along 返回的目标类型无效');
-    const output=validateGoalReply(normalizeGoalReply(run.result),domain,String(run.input?.message??''));
+    const tagged=run.input?.snapshot?.planning?.dailyDelegation||typeof run.result.reply==='string'&&run.result.reply.includes('ALONG_DAILY_ACTIONS_');
+    const daily=tagged?parseDailyActionReply(run):{reply:run.result.reply};
+    const output=validateGoalReply(normalizeGoalReply({...run.result,reply:daily.reply}),domain,String(run.input?.message??''));
     // 待确认问题这一项要和 Kimi 运行时用同一套口径：否则同一份模型输出，
     // 一边被作废整份目标空间、一边照单全收。
     // 归一放在共享层：两条运行时对同一份模型输出必须给出同一个结论。
@@ -145,9 +158,13 @@ function normalizeGoalRun(run) {
     const layout=rawLayout==null?null:safeAdaptiveLayout(rawLayout,domain);
     if (run.result.layout!=null && !layout) throw Error('Along 返回的目标空间格式不正确');
     const planning=run.input?.snapshot?.planning;
-    const reassessment=planning?validateReassessment(run.result.reassessment,layout,planning):null;
+    const reassessment=planning?validateReassessment({...run.result.reassessment,...(daily.dailyActions?{dailyActions:daily.dailyActions}:{})},layout,planning):null;
     if (planning&&output.proposal) throw Error('情境重排不能修改目标');
-    return {...run,result:{...output,layout,...(planning?{reassessment}:{})}};
+    const normalized={...run,result:{...output,layout,...(planning?{reassessment}:{})}};
+    if (daily.dailyActions&&pair) {
+      try {rememberDailyAction(dir,pair,normalized);} catch {console.warn('Along 未能保存今天的安排索引');}
+    }
+    return normalized;
   } catch(error) {
     // 输出校验失败是确定性的错误：这一次运行不会再变好，必须落到终态。
     // 抛成 5xx 的话，前端会把它当成「暂时读不到状态」继续轮询，
@@ -170,6 +187,11 @@ const server=createServer({key:readFileSync(key),cert:readFileSync(cert)},async(
       return respond(res,200,{token});
     }
     if (!authorized(req)) return respond(res,401,{error:'请先配对这台 Mac'});
+    const recipient=tokenHash.toString('hex');
+    if (req.method==='POST'&&path==='/super-agent/daily-delegation') {
+      const input=await body(req);
+      return respond(res,200,{grant:findDailyGrant(dir,tokenHash.toString('hex'),input?.goalKey,input?.anchors)});
+    }
     if (req.method==='POST'&&path==='/connection/verify') {
       console.log(`已验证原配对连接 (${new Date().toISOString()})`);
       return respond(res,200,{paired:true});
@@ -200,6 +222,7 @@ const server=createServer({key:readFileSync(key),cert:readFileSync(cert)},async(
     if (req.method==='POST' && path==='/super-agent/goals') {
       const input=await body(req),runtime=requestedRuntime(input?.runtime);
       const goal=cleanGoal(input.goal,!!input.snapshot?.planning), snapshot=cleanSnapshot(input.snapshot,goal.domain,goal.target);
+      if (snapshot.planning?.dailyDelegation&&runtime!==DSH_RUNTIME) throw Error('每日委托需要 DSH 运行时');
       if (snapshot.planning&&goal.domain==='health') goal.target=snapshot.planning.weeklyWorkoutMinutes;
       // 客户端发来的必须是真字符串：String() 兜底会把对象变成 "[object Object]"，
       // 混过长度检查后送进模型（和目标标题那一条同一个坑）。
@@ -209,16 +232,19 @@ const server=createServer({key:readFileSync(key),cert:readFileSync(cert)},async(
       // requestId 是客户端给的，要在包上游之前校验：发错了仍然是 400。
       const id=requestId(input.requestId);
       if (snapshot.planning&&snapshot.planning.revisionId!==id) throw Error('情境版本与请求编号不符');
+      if (snapshot.planning?.dailyDelegation) {
+        try {includeEarlierDailyAction(dir,recipient,snapshot);} catch {console.warn('Along 未能读取今天的安排索引');}
+      }
       const goalInput={requestId:id,goal,snapshot,message,history};
       if (runtime===KIMI_RUNTIME) return respond(res,200,await upstream(()=>kimiAgent.startGoal(goalInput)));
       const response=await upstream(()=>superAgentCall('/along-source/api/goals',{value:goalInput,contextReview:!!snapshot.planning}));
-      return respond(res,200,{...response,run:await upstream(()=>normalizeGoalRun(response.run))});
+      return respond(res,200,{...response,run:await upstream(()=>normalizeGoalRun(response.run,snapshot.planning?.dailyDelegation?recipient:null))});
     }
     if (req.method==='POST' && path==='/super-agent/goals/status') {
       const input=await body(req),id=requestId(input?.requestId),runtime=requestedRuntime(input?.runtime);
       if (runtime===KIMI_RUNTIME) return respond(res,200,await upstream(()=>kimiAgent.goalStatus(id)));
       const raw=await upstream(()=>superAgentCall(`/along-source/api/goals/${encodeURIComponent(id)}`,{method:'GET',contextReview:input.contextReview===true||id.startsWith('along-review-')}));
-      return respond(res,200,await upstream(()=>normalizeGoalRun(raw)));
+      return respond(res,200,await upstream(()=>normalizeGoalRun(raw,recipient)));
     }
     if (req.method==='POST' && path==='/goal/chat') {
       return respond(res,409,{error:'目标输入已升级，请更新 Along 后重试'});
