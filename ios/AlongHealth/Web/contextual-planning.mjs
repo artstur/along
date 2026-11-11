@@ -93,13 +93,76 @@ function privateTaskIds(value) {
     (t.title==='本机保留的任务'&&t.detail==='任务内容来自旧授权范围，请保留。'))).map(t=>t.id);
 }
 
+// A standing instruction is a separate goal-scoped grant. Never infer it from
+// a HealthKit read permission, a goal title, or the model's own output.
+export function cleanDailyDelegation(value) {
+  if (!value || typeof value.id!=='string'||!/^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$/.test(value.id)||
+      !(value.goalKey==='health'||typeof value.goalKey==='string'&&/^custom:[A-Za-z0-9_:-]{1,90}$/.test(value.goalKey))||
+      !Array.isArray(value.topics)||!value.topics.length||value.topics.some(t=>!['sleep','workout'].includes(t))||
+      new Set(value.topics).size!==value.topics.length) return null;
+  const topics=['sleep','workout'].filter(t=>value.topics.includes(t));
+  const weekly=value.weeklyWorkoutMinutes;
+  if (weekly!=null&&(!topics.includes('workout')||!Number.isInteger(weekly)||weekly<1||weekly>10080)) return null;
+  return {id:value.id,goalKey:value.goalKey,topics,...(weekly!=null?{weeklyWorkoutMinutes:weekly}:{})};
+}
+
+export function validateDailyActions(value,planning) {
+  const grant=cleanDailyDelegation(planning?.dailyDelegation);
+  const fields=['localDate','workoutMinutes','workoutReminderAt','sleepReminderAt','bedtimeAt','reason'];
+  if (!grant||!value||typeof value!=='object'||Array.isArray(value)||Object.keys(value).length!==fields.length||
+      !fields.every(field=>Object.hasOwn(value,field))||value.localDate!==planning.localDate||
+      typeof value.reason!=='string'||!value.reason.trim()||value.reason.length>300) throw Error('每日安排的授权、日期或依据不完整');
+  const {workoutMinutes,workoutReminderAt,sleepReminderAt,bedtimeAt}=value;
+  if (workoutMinutes!==null&&(!Number.isInteger(workoutMinutes)||workoutMinutes<0||workoutMinutes>1440)||
+      workoutReminderAt!==null&&!(workoutMinutes>0)||!grant.topics.includes('workout')&&(workoutMinutes!==null||workoutReminderAt!==null)||
+      !grant.topics.includes('sleep')&&(sleepReminderAt!==null||bedtimeAt!==null)) throw Error('每日安排超出授权或运动分钟无效');
+  const format=new Intl.DateTimeFormat('en-CA',{timeZone:planning.timezone,year:'numeric',month:'2-digit',day:'2-digit'});
+  const now=Date.parse(planning.now);
+  if (!Number.isFinite(now)||!planning.timezone||format.format(now)!==value.localDate) throw Error('每日评估的当地日期无效');
+  const nextDate=new Date(Date.parse(value.localDate+'T00:00:00Z')+86400_000).toISOString().slice(0,10);
+  for (const field of ['workoutReminderAt','sleepReminderAt','bedtimeAt']) {
+    const time=value[field];
+    if (time===null) continue;
+    if (typeof time!=='string'||!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})$/.test(time)||
+        !(Date.parse(time)>now)) throw Error('每日时刻需要评估时刻之后的绝对时间');
+    const day=format.format(Date.parse(time));
+    if (day!==value.localDate&&!(field==='bedtimeAt'&&day===nextDate)) throw Error('每日提醒须落在评估所指的当地日期');
+  }
+  if (bedtimeAt&&sleepReminderAt&&Date.parse(bedtimeAt)<Date.parse(sleepReminderAt)) throw Error('就寝建议早于睡前提醒');
+  return {...value,reason:value.reason.trim()};
+}
+
+export const DAILY_ACTIONS_CRITERIA=[
+  'planning.dailyDelegation 是本人给当前目标的长期每日委托。只对 topics 中的项目生成今天的具体行动，不修改或重排旧任务来表达每日委托。仍然要独立评估原任务。一次明确的每日委托可与 keep 共存。',
+  '依据获准汇总、最近负荷、本人约束及今天剩余时段决定今天从现在起建议再运动的分钟数、运动提醒、睡前收尾提醒和可选就寝时刻。不要机械平分周缺口，不把未记录当休息或当作零。用户提供的 weeklyWorkoutMinutes 是周目标。运动时段可参考本人已记录习惯，日程和入睡时间推测不得写成事实。',
+  'recentDecisions 中 daily_actions 是同目标、同委托、同一天 DSH 已规划的分钟与时刻；动手前比对此项，若新证据不影响执行就保留原定时刻。改变时在 reason 说明依据，不重复已过的通知。',
+  '两种提醒若能确定，应晚于 planning.now 且在 planning.timezone 的当日；提醒已安排时保留，勿声称已经投递。今日已无需再运动须有具体依据才填 0 且不另排运动提醒。不足以判断写 null，在 reply 里问一个有意义的问题。可选就寝时刻可以次日凌晨，且不可早于睡前收尾。没委托的项目必须是 null。',
+  '在正常中文 reply 的最末另起一行，输出恰好一次 ALONG_DAILY_ACTIONS_V1 后加一个空格和单行 JSON 对象（无代码围栏）。全部字段必填：localDate=planning.localDate，workoutMinutes=非负整数或 null，workoutReminderAt/sleepReminderAt/bedtimeAt=带Z或UTC偏移的绝对ISO时刻或null，reason=简短中文依据及缺失。不要在 reassessment 或顶层新增字段。即使 keep 或 need_data 也提交这一行，整个 reply 限1200字。'
+].join('\n');
+
+export function parseDailyActionReply(run) {
+  const raw=run.result.reply,p=run.input?.snapshot?.planning,grant=cleanDailyDelegation(p?.dailyDelegation);
+  const lines=typeof raw==='string'?raw.trimEnd().split(/\r?\n/):[];
+  const marker='ALONG_DAILY_ACTIONS_V1 ';
+  const matches=lines.filter(line=>line.startsWith('ALONG_DAILY_ACTIONS_'));
+  if (!grant&&!matches.length) return {reply:raw};
+  if (!grant||run.actual!==true||run.kind!=='goal'||run.runtime!=='dsh-superagent'||run.status!=='done'||
+      typeof run.ticket?.id!=='string'||!run.ticket.id.trim()||run.requestId!==p.revisionId||
+      run.input.goal?.domain!==(grant.goalKey==='health'?'health':'custom')||
+      run.input.snapshot.contextReviewAllowed!==true||!grant.topics.every(t=>run.input.snapshot.selectedTypes?.includes(t))||
+      matches.length!==1||!lines.at(-1)?.startsWith(marker)) throw Error('未收到符合当前每日委托的 DSH 工单或行动记录');
+  const dailyActions=validateDailyActions(JSON.parse(lines.pop().slice(marker.length)),p);
+  return {reply:lines.join('\n').trim(),dailyActions};
+}
+
 export function cleanPlanningContext(value) {
   if (!value||value.version!==1) return null;
   const plan=value.currentPlan;
   const previous=cleanHealthContext(value.previous);
   const hasBaseline=previous.selectedTypes.length>0;
   const weekly=value.weeklyWorkoutMinutes;
-  return {version:1,kind:'context-review',revisionId:text(value.revisionId,96),
+  const dailyDelegation=cleanDailyDelegation(value.dailyDelegation);
+  return {version:1,...(dailyDelegation?{dailyDelegation}:{}),kind:'context-review',revisionId:text(value.revisionId,96),
     cause:['observation','review','feedback'].includes(value.cause)?value.cause:'observation',
     now:stamp(value.now),timezone:text(value.timezone,80),localDate:text(value.localDate,10),
     goalIntent:text(value.goalIntent,1600),
@@ -113,13 +176,13 @@ export function cleanPlanningContext(value) {
   };
 }
 
-export function createPlanningContext({before,after,goalIntent,currentPlan,weeklyWorkoutMinutes=null,protectedTaskIds=[],recentDecisions=[],cause='observation',now=new Date(),revisionId}) {
+export function createPlanningContext({before,after,goalIntent,currentPlan,weeklyWorkoutMinutes=null,dailyDelegation=null,protectedTaskIds=[],recentDecisions=[],cause='observation',now=new Date(),revisionId}) {
   const timezone=Intl.DateTimeFormat().resolvedOptions().timeZone;
   const previous=cleanHealthContext({...before,selectedTypes:(before?.selectedTypes||[]).filter(type=>after.selectedTypes.includes(type)),
     comparisonHistoryAllowed:before?.comparisonHistoryAllowed===true&&after.comparisonHistoryAllowed===true});
   return cleanPlanningContext({version:1,revisionId,cause,now:now.toISOString(),timezone,
     localDate:new Intl.DateTimeFormat('en-CA',{timeZone:timezone}).format(now),goalIntent,
-    previous,changes:healthContextChanges(previous,after),currentPlan,weeklyWorkoutMinutes,protectedTaskIds,recentDecisions});
+    previous,changes:healthContextChanges(previous,after),currentPlan,weeklyWorkoutMinutes,dailyDelegation,protectedTaskIds,recentDecisions});
 }
 
 // Also evaluated in JavaScriptCore by the native HealthKit observer.
@@ -136,7 +199,8 @@ export function buildBackgroundReviewRequest(template,snapshot,requestId,clock) 
   const history=template.comparisonHistoryAllowed===true&&snapshot.comparisonHistoryAllowed===true;
   const after=agentHealthSnapshot({...snapshot,selectedTypes,comparisonHistoryAllowed:history});
   const source=cleanPlanningContext(template.planning);
-  if (!source||!source.previous.selectedTypes.length) return null;
+  if (!source||!source.previous.selectedTypes.length||source.dailyDelegation&&(source.dailyDelegation.goalKey!==key||
+      !source.dailyDelegation.topics.every(t=>selectedTypes.includes(t)))) return null;
   const previous=cleanHealthContext({...source.previous,selectedTypes:source.previous.selectedTypes.filter(t=>selectedTypes.includes(t)),
     comparisonHistoryAllowed:history&&source.previous.comparisonHistoryAllowed});
   const observed=Object.keys(METRICS).some(field=>after[field]!=null)||
@@ -144,9 +208,13 @@ export function buildBackgroundReviewRequest(template,snapshot,requestId,clock) 
   const changes=healthContextChanges(previous,after);
   const nextReview=stamp(template.nextReviewAt);
   const due=!!nextReview&&Date.parse(nextReview)<=Date.parse(clock.now);
-  const nextDay=/^\d{4}-\d{2}-\d{2}$/.test(template.evaluatedLocalDate)&&template.evaluatedLocalDate!==clock.localDate;
+  const knownDay=/^\d{4}-\d{2}-\d{2}$/.test(template.evaluatedLocalDate);
+  const nextDay=knownDay?template.evaluatedLocalDate!==clock.localDate:!!source.dailyDelegation;
   if (!observed||!changes.length&&!due&&!nextDay) return null;
-  const planning=cleanPlanningContext({...source,previous,changes,cause:due||nextDay?'review':'observation',revisionId:requestId,
+  // A same-day follow-up time may be due for the existing tasks even though
+  // the daily agenda has no new evidence. Do not issue it a second time.
+  const dailyDelegation=changes.length||nextDay?source.dailyDelegation:null;
+  const planning=cleanPlanningContext({...source,previous,changes,dailyDelegation,cause:due||nextDay?'review':'observation',revisionId:requestId,
     now:clock.now,timezone:clock.timezone,localDate:clock.localDate});
   const goal={domain,title:text(template.goal.title,120),target:domain==='health'?planning.weeklyWorkoutMinutes:null};
   if (!goal.title) return null;
@@ -187,6 +255,7 @@ export function validateReassessment(value,layout,planning) {
     }
   } else if (changes.length) throw Error('未重排时不能声明任务变更');
   return {decision:value.decision,basedOnRevision:value.basedOnRevision,reason:value.reason.trim(),changes,nextReviewAt,
+    ...(value.dailyActions!=null?{dailyActions:validateDailyActions(value.dailyActions,planning)}:{}),
     watchFor:list(value.watchFor,8).map(v=>text(v,180)).filter(Boolean)};
 }
 

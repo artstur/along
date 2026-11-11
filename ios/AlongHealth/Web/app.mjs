@@ -9,7 +9,7 @@ import {GOAL_SUPER_AGENT_RUNS_KEY, SUPER_AGENT_RUNS_KEY, createFailedGoalSuperAg
   safeGoalSuperAgentRun, safeSuperAgentRun, withRunError, AGENT_RUN_TIMEOUT_MS, AGENT_RUNTIME_KEY, DSH_RUNTIME, KIMI_RUNTIME, agentRuntimeLabel, safeAgentRuntime, newId} from './super-agent.mjs';
 import {AGENT_NOTIFICATION_LEDGER_KEY, goalRunNotification, taskRunNotification, healthProposalNotification,
   notificationWasDelivered, recordNotificationDelivered} from './agent-notifications.mjs';
-import {PLANNING_STATE_KEY,agentHealthSnapshot,cleanPlanningContext,healthContextChanges,createPlanningContext,validateReassessment,buildBackgroundReviewRequest} from './contextual-planning.mjs';
+import {PLANNING_STATE_KEY,cleanDailyDelegation,validateDailyActions,agentHealthSnapshot,cleanPlanningContext,healthContextChanges,createPlanningContext,validateReassessment,buildBackgroundReviewRequest} from './contextual-planning.mjs';
 const TICKET_KEY = 'along.goal-ticket.v1';
 const REMINDER_SYNC_KEY='along.health-reminder-sync.v1';
 const HEALTH_SHARING_KEY='along.health-sharing.v1';
@@ -61,6 +61,9 @@ let nativeConnectionRestored=false;
 let backgroundReplace=null,backgroundClaim=null,backgroundSyncQueued=false;
 function persistAgentConfig(config) {
   const previous=readStored(AGENT_KEY,{});
+  if (previous.token&&(previous.token!==config.token||previous.fingerprint!==config.fingerprint)) {
+    for (const key of healthGoalKeys()) reviewFor(key).revokeDaily();
+  }
   if (['baseURL','fingerprint','token'].some(field=>previous[field]!==config[field])) localStorage.removeItem(BG_TEMPLATE_KEY);
   localStorage.setItem(AGENT_KEY,JSON.stringify(config));
 }
@@ -208,6 +211,115 @@ function nextReminderLine() {
   if (!item||Date.parse(item.scheduledFor)<=Date.now()) return '';
   return `<div class="next-reminder"><span>iPhone 已安排</span><strong>${esc(item.title)}</strong><time datetime="${esc(item.scheduledFor)}">${esc(formatDate(item.scheduledFor))}</time></div>`;
 }
+const dailyReads=new Map(), dailyJobs=new Map(), dailyCancels=new Map();
+function localCalendarDay(now=new Date()) {
+  return [now.getFullYear(),String(now.getMonth()+1).padStart(2,'0'),String(now.getDate()).padStart(2,'0')].join('-');
+}
+const currentZone=()=>Intl.DateTimeFormat().resolvedOptions().timeZone;
+function dailyPhoneScope(goalKey) {
+  if (!hasHealthSource(goalKey)||state.source!=='healthkit'||state.loop?.experiment===EXPERIMENT||agentRuntime!==DSH_RUNTIME) return null;
+  const health=scopedSnapshot(goalKey);
+  return health.contextReviewAllowed?health:null;
+}
+function cancelDailyAgenda(goalKey) {
+  dailyReads.delete(goalKey);dailyJobs.delete(goalKey);
+  if (!window.AlongAgentBridge?.dailyReminderStatus) return;
+  const previous=dailyCancels.get(goalKey)||Promise.resolve();
+  const cancel=previous.catch(()=>{}).then(()=>window.AlongAgentBridge.notification('cancelDailyReminders',{goalKey}));
+  dailyCancels.set(goalKey,cancel);
+  void cancel.catch(()=>{}).finally(()=>{if (dailyCancels.get(goalKey)===cancel) dailyCancels.delete(goalKey);});
+}
+function readDailyAgenda(goalKey,force=false) {
+  const bridge=window.AlongAgentBridge,scope=dailyPhoneScope(goalKey);
+  if (!scope||!bridge?.dailyReminderStatus||document.visibilityState==='hidden'||activeGoal!==goalKey) return;
+  const review=reviewFor(goalKey),plan=review.todayActions(),day=localCalendarDay(),timezone=currentZone();
+  const anchor=reminderRead?.goalKey===goalKey?reminderRead.item?.requestId:null;
+  const recipient=agentConfig.fingerprint;
+  const signature=JSON.stringify([day,timezone,scope.selectedTypes,plan?.requestId,anchor||null,recipient,nativeHealthStatus,nativeObservationSeen,nativeConnectionRestored]);
+  const old=dailyReads.get(goalKey);
+  if (dailyJobs.has(goalKey)||(!force&&old?.signature===signature&&Date.now()-old.at<60000)) return;
+  const job={}; dailyJobs.set(goalKey,job);
+  const valid=()=>dailyJobs.get(goalKey)===job&&activeGoal===goalKey&&recipient===agentConfig.fingerprint&&localCalendarDay()===day&&currentZone()===timezone&&
+    document.visibilityState!=='hidden'&&JSON.stringify(dailyPhoneScope(goalKey)?.selectedTypes)===JSON.stringify(scope.selectedTypes);
+  const read={signature,at:Date.now(),day,timezone,items:old?.day===day&&old.timezone===timezone?old.items:{}};
+  dailyReads.set(goalKey,read);
+  void (async()=>{
+    await dailyCancels.get(goalKey);if (!valid()) return;
+    const readOS=async()=>{let result;try {result=await bridge.dailyReminderStatus({goalKey,localDate:day,timezone});} catch {if (valid()) read.items={};throw Error('无法读取系统通知');}
+      if (valid()) {
+        const confirmed=result?.goalKey===goalKey&&result?.localDate===day&&result?.timezone===timezone;
+        read.items=confirmed?result.items||{}:{};read.appliedRequestId=confirmed?result.appliedRequestId:null;read.delegationId=confirmed?result.delegationId:null;
+      }
+    };
+    await readOS();
+    if (!valid()) return;
+    if (!review.dailyDelegation()&&nativeConnectionRestored&&nativeObservationSeen&&nativeHealthStatus==='available'&&agentConfig.token) {
+      const anchors=[...new Set([anchor,read.items.sleep?.requestId,read.items.workout?.requestId,review.state.lastDecision?.requestId].filter(Boolean))].slice(0,4);
+      if (anchors.length) {
+        const {grant}=await agentCall(agentConfig,'/super-agent/daily-delegation',{goalKey,anchors});
+        if (valid()&&grant?.goalKey===goalKey&&grant.topics?.every(t=>scope.selectedTypes.includes(t))) {
+          const run=await agentCall(agentConfig,'/super-agent/goals/status',{runtime:DSH_RUNTIME,requestId:grant.requestId,contextReview:true});
+          if (valid()) await review.claimDailyDelegation(grant,run);
+        }
+      }
+    }
+    if (!valid()) return;
+    const current=review.todayActions(),grant=review.dailyDelegation();
+    if (nativeHealthStatus!=='available'||!nativeObservationSeen||!current||!grant||current.delegationId!==grant.id||current.localDate!==day||current.timezone!==timezone) return;
+    const needs=read.appliedRequestId!==current.requestId||read.delegationId!==grant.id||grant.topics.some(topic=>{
+      const expected=topic==='sleep'?current.sleepReminderAt:current.workoutReminderAt,item=read.items[topic];
+      const scheduled=item?.status==='scheduled';
+      if (!expected||Date.parse(expected)<=Date.now()) return scheduled&&!!item?.delegationId;
+      return !scheduled||Date.parse(item.scheduledFor)!==Date.parse(expected);
+    });
+    if (!needs) return;
+    await bridge.notification('applyDailyReminders',{goalKey,localDate:day,timezone,delegated:true,delegationId:grant.id,
+      selectedTypes:scope.selectedTypes.filter(t=>grant.topics.includes(t)),requestId:current.requestId,ticketId:current.ticketId});
+    if (valid()) await readOS();
+  })().catch(()=>{/* A DSH suggestion remains visible even when the phone cannot confirm scheduling. */})
+    .finally(()=>{if (dailyJobs.get(goalKey)===job) {dailyJobs.delete(goalKey);if (screen==='home'&&activeGoal===goalKey) render();}});
+}
+function nativeDailyReceipt(topic,action) {
+  const read=dailyReads.get(activeGoal);
+  if (read?.day!==localCalendarDay()||read.timezone!==currentZone()) return null;
+  const item=read.items?.[topic],due=topic==='sleep'?action.sleepReminderAt:action.workoutReminderAt;
+  if (!item||!due||!Number.isFinite(Date.parse(due))||Date.parse(item.scheduledFor)!==Date.parse(due)) return null;
+  if (item.status==='scheduled'&&Date.parse(due)>Date.now()) return 'iPhone 已安排';
+  if (item.status==='delivered') return '已送达通知中心';
+  return null;
+}
+// A preserved private task is matched for local display only; never send its text
+// to DSH. Ambiguous matches get a distinct daily row rather than a wrong join.
+function dailyTopicTaskIds(layout,weekly) {
+  const ids={};
+  for (const topic of ['sleep','workout']) {
+    const candidates=(layout?.tasks||[]).filter(t=>!(t.kind==='reminder'&&t.scheduledFor)&&
+      !/记录|回顾|统计|复盘|测量|评估/.test(t.title)&&
+      (topic==='sleep'?/睡眠|入睡|就寝|睡觉|睡前|早睡/.test(t.title):/运动|锻炼|散步|快走|步行|训练/.test(t.title))&&
+      !(topic==='sleep'?/运动|锻炼|散步|训练/:/睡眠|入睡|就寝|睡觉/).test(t.title));
+    if (topic==='workout'&&weekly) ids[topic]=weekly.id;
+    else if (candidates.length===1) ids[topic]=candidates[0].id;
+  }
+  return ids;
+}
+function dayPresentation(topic,action,legacy) {
+  if (!action||topic==='sleep'&&!action.sleepReminderAt&&!action.bedtimeAt) {
+    if (!legacy||topic!=='sleep') return null;
+    return {title:formatTime(legacy.scheduledFor)+' 提醒准备睡觉',status:'iPhone 已安排',sub:'',date:localCalendarDay()};
+  }
+  const due=topic==='sleep'?action.sleepReminderAt:action.workoutReminderAt;
+  const minutes=action.workoutMinutes,bed=action.bedtimeAt;
+  if (topic==='sleep'&&!due&&!bed||topic==='workout'&&minutes==null) return null;
+  const clock=t=>formatTime(t);
+  const bedtime=bed?(localCalendarDay(new Date(bed))===action.localDate?'今晚':'次日')+' '+clock(bed)+' 建议就寝':'';
+  const title=topic==='sleep'?(due?clock(due)+' 提醒准备睡觉':bedtime):
+    minutes===0?'今天休息，不安排运动':'今天建议运动 '+minutes+' 分钟';
+  const status=nativeDailyReceipt(topic,action);
+  const sub=[topic==='sleep'&&due?bedtime:'',topic==='workout'&&due?clock(due)+' '+(minutes===0?'休息提醒':'运动提醒'):'',
+    due&&!status?(Date.parse(due)>Date.now()?'手机排程待确认':'未确认送达'):''].filter(Boolean).join(' · ');
+  return {title,status:status||'DSH 已规划',sub,date:action.localDate,source:true};
+}
+
 const notificationAttempts=new Set();
 async function enableAgentNotifications() {
   if (!window.AlongAgentBridge?.notification) return;
@@ -689,23 +801,54 @@ function localWeeklyWorkoutProgress(layout) {
   }
   return {id:matches[0].id,minutes,target,remaining,history:lines};
 }
+function dailyCardContext(layout,weekly) {
+  const scope=dailyPhoneScope(activeGoal),review=scope?reviewFor(activeGoal):null,agenda=review?.todayActions(),grant=review?.dailyDelegation();
+  const ids=dailyTopicTaskIds(layout,weekly);
+  const item=reminderRead?.goalKey===activeGoal?reminderRead.item:null;
+  const localSleep=scope?.selectedTypes.includes('sleep')&&ids.sleep&&item&&
+    localCalendarDay(new Date(item.scheduledFor))===localCalendarDay()&&Date.parse(item.scheduledFor)>Date.now()&&
+    /睡前|入睡|就寝|睡觉/.test(item.title)?item:null;
+  const actions={};
+  for (const topic of ['sleep','workout']) if (scope?.selectedTypes.includes(topic)) {
+    const presentation=dayPresentation(topic,agenda,localSleep);
+    if (presentation&&topic==='sleep'&&localSleep&&agenda?.sleepReminderAt&&Date.parse(localSleep.scheduledFor)!==Date.parse(agenda.sleepReminderAt)) {
+      presentation.sub=[presentation.sub,'iPhone 另有 '+formatTime(localSleep.scheduledFor)+' 的提醒'].filter(Boolean).join(' · ');
+    }
+    if (presentation) actions[topic]=presentation;
+    else if (grant?.topics.includes(topic)) actions[topic]={title:topic==='sleep'?'今晚的睡眠安排待定':'今天的运动安排待定',
+      status:agenda?'DSH 暂无建议':'等待 DSH 更新',sub:'',date:localCalendarDay()};
+  }
+  const consumes=!!localSleep||agenda&&item&&['sleepReminderAt','workoutReminderAt'].some(k=>Date.parse(agenda[k])===Date.parse(item.scheduledFor)&&item.requestId===agenda.requestId);
+  return {ids,actions,agenda,consumes};
+}
+function dailyRowContent(topic,d,extra='') {
+  const topicLabel=topic==='sleep'?'睡眠':'运动';
+  return `<div class="task-meta"><span>今天 · ${topicLabel}${d.source?' · DSH 已规划':''}</span>${d.source&&d.status==='DSH 已规划'?'':`<span class="day-status">${esc(d.status)}</span>`}</div><strong>${esc(d.title)}</strong>${d.sub?`<p class="day-sub">${esc(d.sub)}</p>`:''}${extra}`;
+}
+function unattachedDailyRows(ctx) {
+  return Object.entries(ctx.actions).filter(([topic])=>!ctx.ids[topic]).map(([topic,day])=>
+    `<div class="generated-task day-task" data-daily-topic="${topic}">${dailyRowContent(topic,day)}</div>`).join('');
+}
 function adaptiveTaskSection(layout) {
   const kinds={reminder:'定时提醒',agent_action:'Agent 处理',recommendation:'推荐'};
-  const workout=localWeeklyWorkoutProgress(layout);
+  const workout=localWeeklyWorkoutProgress(layout),ctx=dailyCardContext(layout,workout);
   const taskButton=task=>{
     const timing=task.kind==='reminder'&&task.scheduledFor?formatDate(task.scheduledFor):task.when;
     const meta=[kinds[task.kind],timing].filter(Boolean).join(' · ');
     const weekly=task.id===workout?.id;
     const body=weekly?`<div data-weekly-workout-progress><p>本周运动 <strong>${workout.minutes} / ${workout.target}</strong> 分钟</p><span>${esc(workout.remaining)}</span></div>`:`<p>${esc(task.detail)}</p>`;
     const hint=localOnlyTask(task)?'查看任务':'查看任务协作';
-    const button=`<button class="generated-task generated-task-button" data-action="open-task" data-task-id="${esc(task.id)}"><div class="task-meta"><span>${esc(meta)}</span><span class="state-pill">${esc(taskStateLabel[task.state])}</span></div><strong>${esc(task.title)}</strong>${body}<span class="task-open-hint">${hint}</span></button>`;
+    const topic=Object.keys(ctx.actions).find(t=>ctx.ids[t]===task.id),daily=ctx.actions[topic];
+    const inner=daily?dailyRowContent(topic,daily,weekly?body:''):`<div class="task-meta"><span>${esc(meta)}</span><span class="state-pill">${esc(taskStateLabel[task.state])}</span></div><strong>${esc(task.title)}</strong>${body}`;
+    const button=`<button class="generated-task generated-task-button${daily?' day-task':''}" data-action="open-task" data-task-id="${esc(task.id)}"${daily?` data-daily-topic="${topic}"`:''}>${inner}<span class="task-open-hint">${daily?'查看今天的安排':hint}</span></button>`;
     if (!weekly||!workout.history.length) return button;
     const history=workout.history.map(line=>`<p>${esc(line)}</p>`).join('');
     return `<article data-weekly-task="${esc(task.id)}">${button}<details class="workout-history" ${homeDisclosure('workout/'+task.id)}><summary>近两期运动记录</summary>${history}</details></article>`;
   };
-  const visible=layout.tasks.slice(0,2).map(taskButton).join('');
-  const later=layout.tasks.slice(2);
-  return `<section class="task-section adaptive-tasks" aria-label="动态任务"><div class="section-heading"><h2>动态任务</h2>${hasHealthSource(activeGoal)?'':'<span>Along 根据目标与情境生成</span>'}</div>${nextReminderLine()}${taskProposalCard()}<div class="adaptive-task-card">${visible}${later.length?`<details class="adaptive-more"><summary>查看其余 ${later.length} 项任务</summary>${later.map(taskButton).join('')}</details>`:''}${layout.questions.length?`<div class="missing-strip">待确认 ${layout.questions.length} 项：${esc(layout.questions[0])}</div>`:''}<div class="card-actions"><button class="agent-action" data-action="${canGiveTaskInstruction(activeGoal)?'task-instruction':'edit-goal'}">补充信息</button></div></div>${healthReviewDetails()}</section>`;
+  const ordered=[...layout.tasks].sort((a,b)=>Number(Object.keys(ctx.actions).some(t=>ctx.ids[t]===b.id))-Number(Object.keys(ctx.actions).some(t=>ctx.ids[t]===a.id)));
+  const visible=unattachedDailyRows(ctx)+ordered.slice(0,2).map(taskButton).join('');
+  const later=ordered.slice(2);
+  return `<section class="task-section adaptive-tasks" aria-label="动态任务"><div class="section-heading"><h2>动态任务</h2>${hasHealthSource(activeGoal)?'':'<span>Along 根据目标与情境生成</span>'}</div>${ctx.consumes?'':nextReminderLine()}${taskProposalCard()}<div class="adaptive-task-card">${visible}${later.length?`<details class="adaptive-more"><summary>查看其余 ${later.length} 项任务</summary>${later.map(taskButton).join('')}</details>`:''}${layout.questions.length?`<div class="missing-strip">待确认 ${layout.questions.length} 项：${esc(layout.questions[0])}</div>`:''}<div class="card-actions"><button class="agent-action" data-action="${canGiveTaskInstruction(activeGoal)?'task-instruction':'edit-goal'}">补充信息</button></div></div>${healthReviewDetails()}</section>`;
 }
 function adaptiveConnectionSection(layout) {
   if (!layout.connections?.length) return '';
@@ -716,6 +859,7 @@ function goalListTitle(title) {
 }
 function home() {
   readNextGoalReminder(activeGoal);
+  readDailyAgenda(activeGoal);
   const linked=hasHealthSource(activeGoal);
   const suggestedHealth=offersHealthSource(activeGoal);
   const model = activeGoal === 'finance' ? financeView(finance, goalCustom.finance) : isCustomGoalKey(activeGoal) ? customView(activeGoal) : healthView(localHealthViewState(), goalCustom.health);
@@ -738,7 +882,7 @@ function home() {
       </section>`;
   const taskContent=layout?adaptiveTaskSection(layout):`<section class="task-section" aria-label="动态任务">
         <div class="section-heading"><h2>动态任务</h2>${linked?'':'<span>随目标与数据更新</span>'}</div>
-        ${nextReminderLine()}${taskProposalCard()}
+        ${nextReminderLine()}${taskProposalCard()}${unattachedDailyRows(dailyCardContext(null,null))}
         <div class="focus-task"><div class="focus-top"><span>下一步</span><span class="task-chip">${esc(model.primary.status)}</span></div><h3>${esc(model.primary.title)}</h3><p>${esc(model.primary.detail)}</p><div class="card-actions"><button class="agent-action" data-action="${canGiveTaskInstruction(activeGoal)?'task-instruction':'edit-goal'}">补充信息</button></div></div>
         ${model.secondary.length ? `<div class="task-list">${model.secondary.map((task,index) => `<button class="task-row task-row-button" data-action="open-task" data-task-id="follow-up-${index}"><span class="task-row-mark" aria-hidden="true"></span><div><strong>${esc(task.title)}</strong><p>${esc(task.detail)}</p></div><span class="task-row-status">${esc(task.status)}</span></button>`).join('')}</div>` : ''}
         ${healthReviewDetails()}
@@ -819,12 +963,15 @@ function taskDetailPage() {
   } else {
     status=submitting?`正在提交给 ${meta.short}`:'待提交';
   }
+  const layout=goalLayouts[activeGoal],dayCtx=dailyCardContext(layout,layout?localWeeklyWorkoutProgress(layout):null);
+  const dayTopic=Object.keys(dayCtx.actions).find(t=>dayCtx.ids[t]===task.id),daily=dayCtx.actions[dayTopic];
   const showProgress=actual&&!stopped&&Number.isFinite(run.progress),percent=showProgress?runProgress(run.progress):0;
   return `<div class="app-shell super-agent-shell"><header class="topbar"><div class="topbar-inner">${brand()}<span class="topbar-caption">Along · ${local?'任务详情':'任务协作'}</span></div></header><main class="content task-detail">
     ${backButton('task-back','返回动态任务')}
     <section class="task-hero"><div class="task-hero-top"><span class="eyebrow">${esc(task.when)} · ${esc(taskStateLabel[task.state])}</span><span class="run-status ${actual?runStatus(stopped?'blocked':run.status):''}">${local?'':'<i></i>'}${esc(status)}</span></div><h1>${esc(task.title)}</h1><p>${esc(task.detail)}</p>
     ${showProgress?`<div class="run-progress-head"><span>总体进展</span><strong>${percent}%</strong></div><div class="run-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}"><span style="width:${percent}%"></span></div>`:''}</section>
-    ${reason?`<section class="task-record" aria-live="polite"><h2>${local?'为什么没有提交':actual&&!stopped&&run.refreshFailed?'状态读取失败':'原因'}</h2><p>${esc(reason)}</p>${action?`<button class="minor-action" data-action="${action}">${button}</button>`:''}</section>`:''}
+    ${daily?`<section class="task-record day-detail" aria-label="今天的安排">${dailyRowContent(dayTopic,daily)}${dayCtx.agenda?`<p>${esc(dayCtx.agenda.reason)}</p><small>DSH 工单 · ${esc(dayCtx.agenda.ticketId)}</small>`:''}</section>`:''}
+    ${reason?`<section class="task-record" aria-live="polite"><h2>${local?(daily?'原任务的分享范围':'为什么没有提交'):actual&&!stopped&&run.refreshFailed?'状态读取失败':'原因'}</h2><p>${esc(reason)}</p>${action?`<button class="minor-action" data-action="${action}">${button}</button>`:''}</section>`:''}
     ${actual?taskExecutionRecord(run):''}</main></div>`;
 }
 
@@ -1307,6 +1454,8 @@ function healthConnection(key) {
     return {...source,actionId:'connect-health',action:'启用任务评估',detail:`${source.detail}。允许 Agent 评估后，将按所选摘要复查任务。`};
   if (state.source==='healthkit'&&nativeHealthStatus!=='available')
     return {...source,label:'本机缓存',kind:'none',actionId:'connect-health',detail:'正在等待 iPhone 当前的读取结果。'};
+  if (approved&&state.snapshot.backgroundReviewAllowed===true&&state.snapshot.backgroundReviewGoalKey===key&&agentRuntime===DSH_RUNTIME)
+    return {...source,detail:source.detail.replace('前台自动检查','已允许后台评估'),actionId:'connect-health'};
   return {...source,actionId:'connect-health'};
 }
 function bindHealthSource(key,startReview=true) {
@@ -1520,6 +1669,7 @@ function createHealthReview(goalKey) {
   function setAccess(selected) {
     const grants=Object.fromEntries(selected.map(o=>[o.key,o.value]));
     if (JSON.stringify(grants)===JSON.stringify(healthSharing.reviewAccess||{})) return;
+    if (Object.keys(healthSharing.reviewAccess||{}).some(key=>!Object.hasOwn(grants,key))) revokeDaily();
     const scope=(healthSharing.scope||0)+1;
     saveHealthSharing({...healthSharing,scope,reviewAccess:grants});
     // Old request bodies, reasons and feedback can quote a newly withheld task.
@@ -1552,23 +1702,133 @@ function createHealthReview(goalKey) {
     const currentIds=new Set(localHealthPlan().tasks.map(t=>t.id));
     return (healthSharing.tasks||[]).filter(t=>currentIds.has(t.id)&&t.localText&&!Object.hasOwn(fields,'task-'+t.alias)).map(t=>t.alias);
   }
+  function dailyDelegation() {
+    const grant=cleanDailyDelegation(healthSharing.dailyDelegation);
+    if (!grant||grant.goalKey!==goalKey||!hasHealthSource(goalKey)||!agentConfig.token||agentRuntime!==DSH_RUNTIME||
+        !healthSharing.dailyRecipient||healthSharing.dailyRecipient!==agentConfig.fingerprint||state.loop?.experiment===EXPERIMENT||
+        nativeHealthStatus==='unlinked'||state.source!=='healthkit'||state.snapshot?.contextReviewAllowed!==true) return null;
+    // Display can use the last approved local category list while a locked
+    // phone cannot read new observations. Submission and claiming still need
+    // fresh native availability. Explicit withdrawal clears this grant.
+    const allowed=goalCustom[goalKey]?.healthTypes;
+    return grant.topics.every(t=>state.snapshot.selectedTypes?.includes(t)&&(!Array.isArray(allowed)||allowed.includes(t)))?grant:null;
+  }
+  function dailyReceipt(run,grant) {
+    const p=run?.input?.snapshot?.planning;
+    if (!grant||!p||run?.actual!==true||run.kind!=='goal'||run.runtime!==DSH_RUNTIME||run.status!=='done'||
+        typeof run.ticket?.id!=='string'||!run.ticket.id||typeof run.requestId!=='string'||run.requestId!==p.revisionId||
+        run.input.goal?.domain!==goalDomain(goalKey)||run.result?.proposal!=null||run.result?.reassessment?.basedOnRevision!==run.requestId||
+        JSON.stringify(cleanDailyDelegation(p.dailyDelegation))!==JSON.stringify(grant)) return null;
+    const snapshot=run.input.snapshot,scope=scopedSnapshot(goalKey);
+    if (snapshot.contextReviewAllowed!==true||!Array.isArray(snapshot.selectedTypes)||
+        !grant.topics.every(t=>snapshot.selectedTypes.includes(t))||snapshot.selectedTypes.some(t=>!scope.selectedTypes.includes(t))||
+        snapshot.comparisonHistoryAllowed===true&&!scope.comparisonHistoryAllowed||
+        (p.previous?.selectedTypes||[]).some(t=>!scope.selectedTypes.includes(t))||
+        p.previous?.comparisonHistoryAllowed===true&&!scope.comparisonHistoryAllowed) return null;
+    try {
+      const assessment=validateReassessment(run.result.reassessment,run.result.layout,p);
+      const action=validateDailyActions(assessment.dailyActions,p);
+      return {action:{...action,timezone:p.timezone,evaluatedAt:p.now,delegationId:grant.id,runtime:run.runtime,
+        requestId:run.requestId,ticketId:run.ticket.id},evidence:agentHealthSnapshot(snapshot)};
+    } catch { return null; }
+  }
+  function todayActions() {
+    const grant=dailyDelegation(),saved=planningState.dailyRecord?.action;
+    const timezone=Intl.DateTimeFormat().resolvedOptions().timeZone;
+    if (!grant||saved?.delegationId!==grant.id||saved.runtime!==DSH_RUNTIME||!saved.ticketId||!saved.requestId||
+        saved.timezone!==timezone||saved.localDate!==new Intl.DateTimeFormat('en-CA',{timeZone:timezone}).format(new Date())) return null;
+    return saved;
+  }
+  function needsDailyReview(after) {
+    return !!dailyDelegation()&&(!todayActions()||healthContextChanges(planningState.dailyRecord?.evidence,after).length>0);
+  }
+  function claimDailyDelegation(value,raw) {
+    const grant=cleanDailyDelegation(value),run=safeGoalSuperAgentRun(raw);
+    if (!nativeObservationSeen||!canGiveTaskInstruction(goalKey)||agentRuntime!==DSH_RUNTIME||state.loop?.experiment===EXPERIMENT||
+        !grant||grant.goalKey!==goalKey||value.requestId!==run?.requestId||value.ticketId!==run?.ticket?.id||
+        healthSharing.dailyDelegation&&dailyDelegation()?.id!==grant.id) return false;
+    const receipt=dailyReceipt(run,grant);
+    if (!receipt||healthSharing.dailyRevokedIds?.includes(grant.id)||Date.parse(receipt.action.evaluatedAt)>Date.now()||
+        Date.parse(receipt.action.evaluatedAt)<=(healthSharing.dailyRevokedAt||0)) return false;
+    if (planningState.dailyRecord?.action?.delegationId===grant.id&&Date.parse(planningState.dailyRecord.action.evaluatedAt)>Date.parse(receipt.action.evaluatedAt)) return true;
+    saveHealthSharing({...healthSharing,dailyDelegation:grant,dailyRecipient:agentConfig.fingerprint});
+    const previous=planningState;
+    // A Mac handoff acknowledges this daily instruction only. Preserve an
+    // unrelated pending adopt/reject proposal or working health review.
+    savePlanning({...previous,dailyRecord:receipt});
+    if (!previous.evaluated&&!previous.request&&!pendingTask) savePlanning({...planningState,evaluated:receipt.evidence,
+      localDate:receipt.action.localDate,goalIntent:healthGoalIntent()});
+    if (needsDailyReview(scopedSnapshot(goalKey))&&!pendingTask) void reviewHealthContext();
+    return true;
+  }
+  function revokeDaily() {
+    const old=healthSharing.dailyDelegation?.id;
+    const revoked=healthSharing.dailyRevokedIds||[];
+    const next={...healthSharing,dailyRevokedAt:Date.now(),dailyRevokedIds:old?[...new Set([...revoked,old])].slice(-32):revoked};
+    delete next.dailyDelegation;delete next.dailyRecipient;
+    saveHealthSharing(next);
+    const {dailyRecord,...saved}=planningState;
+    if (saved.request?.snapshot?.planning?.dailyDelegation) {
+      if (pendingTask?.requestId===saved.request.requestId&&pendingTask.status!=='proposed') saveTicket(null);
+      Object.assign(saved,{request:null,run:null,nativeRequestId:null,nativeVersion:null,uncertainNativeReceipt:false});
+    }
+    savePlanning(saved);
+    cancelDailyAgenda(goalKey);
+  }
+  function applyDailyInstruction(feedback) {
+    // Full imperative matches only. A question, tentative suggestion, quoted
+    // sentence, once-only request or reference to reading health data gives no grant.
+    const command=feedback.trim().replace(/[。！!]$/u,'');
+    const stop=/^(?:请)?(?:停止|取消|关闭|暂停|不要再)(?:我的)?(?:每天|每日)(?:的)?(?:任务)?提醒$/.test(command);
+    const starting=command.match(/^(?:请)?(?:从今天起|从今天开始|以后)?(?:每天|每日)(?:都)?(?:帮我)?(?:安排并)?提醒我(睡觉|就寝|运动)(?:和(睡觉|就寝|运动))?$/u);
+    const stopping=command.match(/^(?:请)?(?:停止|取消|关闭|暂停)(?:每天|每日)(?:的)?(运动|就寝|睡觉|睡前)提醒$/u)||
+      command.match(/^(?:请)?(?:不要|别|不要再|别再|停止|取消|暂停)(?:每天|每日)(?:都)?提醒我(运动|就寝|睡觉|睡前)(?:和(运动|就寝|睡觉|睡前))?$/u);
+    if (stop) {revokeDaily();return;}
+    const toTopic=word=>word==='运动'?'workout':'sleep';
+    const old=dailyDelegation();
+    if (stopping) {
+      revokeDaily();
+      if (!old) return;
+      const removed=stopping.slice(1).filter(Boolean).map(toTopic);
+      const topics=old.topics.filter(t=>!removed.includes(t));
+      if (topics.length) saveHealthSharing({...healthSharing,dailyRecipient:agentConfig.fingerprint,
+        dailyDelegation:cleanDailyDelegation({id:newId('daily'),goalKey,topics,weeklyWorkoutMinutes:topics.includes('workout')?old.weeklyWorkoutMinutes:null})});
+      return;
+    }
+    if (!starting||agentRuntime!==DSH_RUNTIME||!canGiveTaskInstruction(goalKey)) return;
+    const topics=[...new Set([...(old?.topics||[]),...starting.slice(1).filter(Boolean).map(toTopic)])].sort();
+    if (!topics.every(t=>scopedSnapshot(goalKey).selectedTypes.includes(t))||JSON.stringify(topics)===JSON.stringify(old?.topics)) return;
+    if (old) revokeDaily();
+    saveHealthSharing({...healthSharing,dailyRecipient:agentConfig.fingerprint,
+      dailyDelegation:cleanDailyDelegation({id:newId('daily'),goalKey,topics,weeklyWorkoutMinutes:topics.includes('workout')?workoutTarget():null})});
+  }
   function includesInstruction(request) {
     const instruction=planningState.instruction;
     return !instruction||request?.snapshot?.planning?.recentDecisions?.some(d=>d.at===instruction.at&&d.feedback===instruction.feedback);
   }
   function instruct(feedback) {
+    applyDailyInstruction(feedback);
     const instruction={at:new Date().toISOString(),decision:'feedback',feedback};
     savePlanning({...planningState,instruction,queued:true,recentDecisions:[...(planningState.recentDecisions||[]),instruction].slice(-6)});
     if (pendingTask?.status!=='assigned') saveTicket(null);
     void reviewHealthContext('feedback');
     if (screen==='home') render();
   }
+  function awaitingEarlierProposal() {
+    return pendingTask?.status==='proposed'&&!!dailyDelegation();
+  }
+  function retainEarlierProposal() {
+    if (!awaitingEarlierProposal()) return false;
+    if (!pendingTask.originalRequest&&planningState.request?.requestId===pendingTask.requestId)
+      saveTicket({...pendingTask,originalRequest:planningState.request});
+    return true;
+  }
   function backgroundTemplate() {
     const fields=reviewFields(),after=scopedSnapshot(goalKey);
     const weeklyWorkoutMinutes=workoutTarget(false,fields);
     const goal={domain:goalDomain(goalKey),title:reviewTitle(fields),target:weeklyWorkoutMinutes};
     const previous=planningState.evaluated||after;
-    const planning=cleanPlanningContext({version:1,goalIntent:healthGoalIntent(fields),weeklyWorkoutMinutes,
+    const planning=cleanPlanningContext({version:1,dailyDelegation:dailyDelegation(),goalIntent:healthGoalIntent(fields),weeklyWorkoutMinutes,
       protectedTaskIds:protectedTaskIds(fields),currentPlan:currentHealthPlan(fields),recentDecisions:planningState.recentDecisions,
       previous:{...previous,selectedTypes:(previous.selectedTypes||[]).filter(type=>after.selectedTypes.includes(type)),
         comparisonHistoryAllowed:previous.comparisonHistoryAllowed===true&&after.comparisonHistoryAllowed===true}});
@@ -1583,8 +1843,8 @@ function createHealthReview(goalKey) {
     }
     return {goalKey,version:stored.version,runtime:DSH_RUNTIME,goal,planning,selectedTypes:after.selectedTypes,
       comparisonHistoryAllowed:after.comparisonHistoryAllowed===true,
-      evaluatedLocalDate:planningState.localDate||null,nextReviewAt:planningState.nextReviewAt||null,
-      paused:!!pendingTask||planningState.run?.status==='working'||!!planningState.instruction};
+      evaluatedLocalDate:planning.dailyDelegation?(planningState.dailyRecord?.action?.localDate||null):(planningState.localDate||null),nextReviewAt:planningState.nextReviewAt||null,
+      paused:!!pendingTask&&!awaitingEarlierProposal()||planningState.run?.status==='working'||!!planningState.instruction};
   }
   function retireNative(template) {
     const {request,nativeRequestId,nativeVersion}=planningState;
@@ -1602,7 +1862,7 @@ function createHealthReview(goalKey) {
       if (receipt.state==='accepted'&&planningState.uncertainNativeReceipt) savePlanning({...planningState,uncertainNativeReceipt:false});
       return true;
     }
-    if (planningBusy||planningState.run?.status==='working'||pendingTask||planningState.instruction) return false;
+    if (planningBusy||planningState.run?.status==='working'||pendingTask&&!awaitingEarlierProposal()||planningState.instruction) return false;
     const p=request.snapshot?.planning;
     let basis=template;
     if (receipt.previousRequestId!=null) {
@@ -1622,18 +1882,20 @@ function createHealthReview(goalKey) {
     if (!rebuilt||request.goal?.domain!==rebuilt.goal.domain||request.goal?.title!==rebuilt.goal.title||request.goal?.target!==rebuilt.goal.target||
         request.message!==rebuilt.message||!Array.isArray(request.history)||request.history.length||
         JSON.stringify(cleanPlanningContext(p))!==JSON.stringify(rebuilt.snapshot.planning)) return false;
+    const keepProposal=retainEarlierProposal();
     const at=Date.now();
     const saved={...planningState,lastDecision:latestDecision(),request:rebuilt,queued:false,nativeVersion:template.version,
       nativeRequestId:id,uncertainNativeReceipt:receipt.state==='uncertain',run:createPendingGoalSuperAgentRun(rebuilt,at,DSH_RUNTIME)};
     // ACK follows the durable write. If storage fails, native retains ownership.
     localStorage.setItem(planningKey,JSON.stringify(saved));
     planningState=saved;
-    saveTicket({id,requestId:id,goalKey,source:'healthkit',status:'assigned',reason:'正在接回后台健康评估'});
+    if (!keepProposal) saveTicket({id,requestId:id,goalKey,source:'healthkit',status:'assigned',reason:'正在接回后台健康评估'});
     void refreshHealthReview();
     return true;
   }
   function planningResultIsCurrent(request) {
-    return includesInstruction(request)&&nativeHealthStatus==='available'&&state.source==='healthkit'&&state.snapshot?.contextReviewAllowed===true&&healthGoalIntent()===request.snapshot.planning.goalIntent&&
+    const sentGrant=request.snapshot.planning.dailyDelegation;
+    return (!sentGrant||JSON.stringify(cleanDailyDelegation(sentGrant))===JSON.stringify(dailyDelegation()))&&includesInstruction(request)&&nativeHealthStatus==='available'&&state.source==='healthkit'&&state.snapshot?.contextReviewAllowed===true&&healthGoalIntent()===request.snapshot.planning.goalIntent&&
       (request.snapshot.planning.weeklyWorkoutMinutes??null)===workoutTarget()&&
       JSON.stringify(request.snapshot.planning.protectedTaskIds||[])===JSON.stringify(protectedTaskIds(reviewFields()))&&
       healthContextChanges(request.snapshot,scopedSnapshot(goalKey)).length===0&&
@@ -1678,12 +1940,15 @@ function createHealthReview(goalKey) {
     }
     if (layout&&goalLayouts[goalKey]) layout={...goalLayouts[goalKey],tasks:layout.tasks};
     const at=new Date().toISOString();
-    savePlanning({...planningState,instruction:null,nativeRequestId:null,nativeVersion:null,uncertainNativeReceipt:false,lastDecision:{requestId:run.requestId,at,runtime:run.runtime,decision:assessment.decision,reason:assessment.reason,
+    const daily=request.snapshot.planning.dailyDelegation?dailyReceipt(run,dailyDelegation()):null;
+    if (request.snapshot.planning.dailyDelegation&&!daily) throw Error('未收到符合本目标每日委托的 DSH 评估回执');
+    const updateDaily=daily&&!(Date.parse(planningState.dailyRecord?.action?.evaluatedAt)>Date.parse(daily.action.evaluatedAt));
+    savePlanning({...planningState,...(updateDaily?{dailyRecord:daily}:{}),instruction:null,nativeRequestId:null,nativeVersion:null,uncertainNativeReceipt:false,lastDecision:{requestId:run.requestId,at,runtime:run.runtime,decision:assessment.decision,reason:assessment.reason,
       reply:typeof result.reply==='string'?result.reply.trim().slice(0,1200):''},
       evaluated:agentHealthSnapshot(request.snapshot),localDate:request.snapshot.planning.localDate,
       goalIntent:request.snapshot.planning.goalIntent,nextReviewAt:assessment.nextReviewAt,
       recentDecisions:[...(planningState.recentDecisions||[]),{at:new Date().toISOString(),decision:assessment.decision,reason:assessment.reason,watchFor:assessment.watchFor}].slice(-6)});
-    if (planningState.dismissedRequest===request.requestId) return;
+    if (planningState.dismissedRequest===request.requestId||pendingTask?.status==='proposed'&&pendingTask.requestId!==request.requestId&&daily) return;
     if (assessment.decision==='keep') {
       if (pendingTask?.requestId===request.requestId) saveTicket(null);
       return;
@@ -1721,7 +1986,7 @@ function createHealthReview(goalKey) {
       return;
     }
     if (planningBusy) {
-      if (planningState.request&&!planningResultIsCurrent(planningState.request)) savePlanning({...planningState,queued:true});
+      if (!planningState.request||!planningResultIsCurrent(planningState.request)) savePlanning({...planningState,queued:true});
       return;
     }
     if (planningState.run?.status==='working') {
@@ -1733,26 +1998,29 @@ function createHealthReview(goalKey) {
     const localDate=new Intl.DateTimeFormat('en-CA').format(new Date());
     const recover=verifiedHealthHost&&canRecoverConnection();
     if (cause==='reconnect'&&!recover) return;
-    const changed=!includesInstruction(planningState.request)||(!planningState.request&&!planningState.lastDecision)||healthContextChanges(planningState.evaluated,after).length>0||healthGoalIntent()!==planningState.goalIntent;
+    const updateDaily=needsDailyReview(after);
+    const changed=updateDaily||!includesInstruction(planningState.request)||(!planningState.request&&!planningState.lastDecision)||healthContextChanges(planningState.evaluated,after).length>0||healthGoalIntent()!==planningState.goalIntent;
     const due=planningState.nextReviewAt&&Date.parse(planningState.nextReviewAt)<=Date.now();
     if (!recover&&!['feedback','retry'].includes(cause)&&!changed&&!due&&planningState.localDate===localDate) return;
     // A failed run is retained for inspection; a new observation or context change
     // may start another, but the same failed request must not spin forever.
-    if (!recover&&cause!=='retry'&&planningState.run?.status==='blocked'&&planningState.request&&planningResultIsCurrent(planningState.request)&&planningState.request.snapshot.planning.localDate===localDate) return;
+    if (!recover&&cause!=='retry'&&planningState.run?.status==='blocked'&&planningState.request&&planningResultIsCurrent(planningState.request)&&
+        planningState.request.snapshot.planning.localDate===localDate&&(!updateDaily||planningState.request.snapshot.planning.dailyDelegation?.id===dailyDelegation()?.id)) return;
     const requestId=newId('along-review');
     const fields=reviewFields(),weeklyWorkoutMinutes=workoutTarget(false,fields);
     const previous=planningState.evaluated||(before&&healthContextChanges(before,after).length?before:null);
-    const planning=createPlanningContext({before:previous,after,goalIntent:healthGoalIntent(fields),
+    const planning=createPlanningContext({before:previous,after,dailyDelegation:updateDaily?dailyDelegation():null,goalIntent:healthGoalIntent(fields),
       protectedTaskIds:protectedTaskIds(fields),weeklyWorkoutMinutes,currentPlan:currentHealthPlan(fields),recentDecisions:planningState.recentDecisions,cause:planningState.instruction?'feedback':due?'review':cause,revisionId:requestId});
     // Use the original idempotent submission only while its goal and observation match.
     const previousRequest=planningState.request;
     const resume=recover&&previousRequest.snapshot?.planning?.localDate===localDate&&planningResultIsCurrent(previousRequest);
     const request=resume?previousRequest:{...createGoalSuperAgentRequest({domain:goalDomain(goalKey),goal:{domain:goalDomain(goalKey),title:reviewTitle(fields),target:weeklyWorkoutMinutes},snapshot:{...after,planning},
       message:planningState.instruction?.feedback||'请结合目标、已有安排和最新情境，评估是否需要调整；给出判断与任务变更依据。',history:[],requestId}),runtime:agentRuntime};
+    const keepProposal=updateDaily&&retainEarlierProposal();
     planningBusy=true;
     const submittedId=request.requestId;
     savePlanning({...planningState,lastDecision:latestDecision(),request,queued:false,recoveredRequestId:recover?submittedId:null,run:createPendingGoalSuperAgentRun(request,Date.now(),request.runtime)});
-    saveTicket({id:submittedId,requestId:submittedId,goalKey,source:'healthkit',status:'assigned',reason:'Super Agent 正在评估目标、最新情境与已有安排'});
+    if (!keepProposal) saveTicket({id:submittedId,requestId:submittedId,goalKey,source:'healthkit',status:'assigned',reason:'Super Agent 正在评估目标、最新情境与已有安排'});
     if (screen==='home'&&activeGoal===goalKey) render();
     try {
       const response=await agentCall(agentConfig,'/super-agent/goals',request);
@@ -1813,13 +2081,15 @@ function createHealthReview(goalKey) {
   }
 
   function clear() {
+    revokeDaily();
     if (pendingTask?.source==='healthkit') saveTicket(null);
     planningState={};
     localStorage.removeItem(planningKey);
   }
   function restrict() {
+    revokeDaily();
     const oldRuns=Object.entries(goalSuperAgentRuns).filter(([key,run])=>key.startsWith(goalKey+':')&&run.status==='working').map(([,run])=>run.requestId);
-    saveHealthSharing({localGoalTitle:true,localPlanText:true,scope:(healthSharing.scope||0)+1,oldRuns:[...new Set([...(healthSharing.oldRuns||[]),...oldRuns])].slice(-20),
+    saveHealthSharing({dailyRevokedAt:healthSharing.dailyRevokedAt,dailyRevokedIds:healthSharing.dailyRevokedIds,localGoalTitle:true,localPlanText:true,scope:(healthSharing.scope||0)+1,oldRuns:[...new Set([...(healthSharing.oldRuns||[]),...oldRuns])].slice(-20),
       tasks:localHealthPlan().tasks.map(task=>({id:task.id,alias:newId('private-task'),localText:true}))});
     conversations[goalKey]=(conversations[goalKey]||[]).map(entry=>({...entry,localOnly:true,proposal:null,layout:null}));
     saveConversations();
@@ -1828,6 +2098,7 @@ function createHealthReview(goalKey) {
     if (pendingTask?.requestId) saveTicket(null);
   }
   function goalUpdated(item,validatedLayout) {
+    if (healthSharing.dailyDelegation) revokeDaily();
     if (healthSharing.reviewAccess) {
       saveHealthSharing({...healthSharing,reviewAccess:{},scope:(healthSharing.scope||0)+1});
       savePlanning({queued:true});
@@ -1843,6 +2114,7 @@ function createHealthReview(goalKey) {
   async function answer(value) {
     if (pendingTask?.assessment?.decision==='need_data'&&!planningBusy) {
       recordPlanningFeedback(value,pendingTask.error);
+      if (pendingTask.originalRequest) saveTicket(null);
       await reviewHealthContext('feedback');
     }
   }
@@ -1850,7 +2122,8 @@ function createHealthReview(goalKey) {
     if (!pendingTask?.suggestion) return;
     let grantsNarrowed=false;
     if (pendingTask.layout) {
-      if (!planningState.request || !planningResultIsCurrent(planningState.request)) {
+      const original=pendingTask.originalRequest||planningState.request;
+      if (!original||original.requestId!==pendingTask.requestId||!planningResultIsCurrent(original)) {
         saveTicket(null);void reviewHealthContext('review');render();return;
       }
       const changesById=new Map((pendingTask.assessment?.changes||[]).map(change=>[change.taskId,change.operation]));
@@ -1894,7 +2167,7 @@ function createHealthReview(goalKey) {
     saveGoalCustom();saveTicket(null);render();notice('下一步已更新');
   }
   return {get state(){return planningState;},get sharing(){return healthSharing;},get ticket(){return pendingTask;},
-    localHealthPlan,shareableHealthTask,accessOptions,workoutTarget,latestDecision,setAccess,canRecoverConnection,backgroundTemplate,retireNative,claimBackground,reviewHealthContext,refreshHealthReview,accept,dismiss,answer,instruct,clear,restrict,goalUpdated};
+    localHealthPlan,shareableHealthTask,accessOptions,workoutTarget,latestDecision,setAccess,dailyDelegation,todayActions,claimDailyDelegation,revokeDaily,canRecoverConnection,backgroundTemplate,retireNative,claimBackground,reviewHealthContext,refreshHealthReview,accept,dismiss,answer,instruct,clear,restrict,goalUpdated};
 }
 window.addEventListener('along-health-update', async event => {
   if (document.visibilityState==='hidden'||state.loop?.experiment === EXPERIMENT) return;
@@ -1915,6 +2188,12 @@ window.addEventListener('along-notification-open', event => {
   if (goalKey!=='health' && goalKey!=='finance' && !isCustomGoalKey(goalKey)) return;
   activeGoal=goalKey;
   localStorage.setItem(ACTIVE_GOAL_KEY,activeGoal);
+  if (hasHealthSource(goalKey)&&['sleep','workout'].includes(detail.dailyTopic)) {
+    screen='home';
+    readNextGoalReminder(goalKey,true);readDailyAgenda(goalKey,true);render();
+    requestAnimationFrame(()=>app.querySelector('[data-daily-topic="'+detail.dailyTopic+'"]')?.scrollIntoView?.({block:'center'}));
+    return;
+  }
   if (hasHealthSource(goalKey)&&detail.requestId&&detail.requestId===reviewFor(goalKey).ticket?.requestId) {
     screen='home';
   } else if (detail.kind==='task' && typeof detail.taskId==='string'&&currentTaskRecords().some(t=>t.id===detail.taskId)) {
@@ -2002,6 +2281,7 @@ document.addEventListener('visibilitychange', () => { if (document.visibilitySta
 setInterval(async () => {
   if (document.visibilityState!=='visible') return;
   await refreshFromNative();
+  if (screen==='home') {readNextGoalReminder(activeGoal);readDailyAgenda(activeGoal);}
   if (!readingNative) void reviewAll('review');
   if (!verifiedHealthHost&&agentConfig.token&&nativeHealthStatus==='available'&&healthGoalKeys().some(key=>reviewFor(key).canRecoverConnection()))
     void refreshAgentConnection({healthOnly:true});

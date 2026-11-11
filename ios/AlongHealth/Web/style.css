@@ -348,3 +348,10 @@ footer { padding: 0 0 26px; color: #aaa; text-align: center; font-size: 10px; }
   .section-heading span { max-width: 140px; }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+
+.day-task > strong { font-size: 18px; line-height: 1.45; }
+.day-task .day-sub, .day-detail .day-sub { color: #424240; font-size: 13px; }
+.day-status { color: #485646; font-size: 11px; }
+.day-task .task-meta { color: #575754; font-size: 11px; }
+.day-task [data-weekly-workout-progress], .day-task [data-weekly-workout-progress] strong { font-size: 11px; color: #656561; font-weight: 400; }
+.day-detail small { display: block; margin-top: 12px; overflow-wrap: anywhere; color: #666; }
