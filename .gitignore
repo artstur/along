@@ -1,6 +1,7 @@
 dist/
 node_modules/
 .codegraph/
+.archify/
 .artifacts/
 .DS_Store
 .qa/
