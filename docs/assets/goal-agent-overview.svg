@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1040" height="720" viewBox="0 0 1040 720" role="img" aria-labelledby="title desc">
+  <title id="title">Along：从目标到 Agent，再回到行动</title>
+  <desc id="desc">用户在手机描述目标，手机通过原生桥接向 Mac Host 发送请求，Host 分流至 Kimi 或 DSH。结果经校验返回手机，创建或更新目标空间。新健康数据和用户反馈可触发下一轮评估。</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#557086"/></marker>
+    <style>
+      text{font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif;fill:#183248}
+      .heading{font-size:29px;font-weight:700}.sub{font-size:16px;fill:#526b7e}.label{font-size:20px;font-weight:650}.body{font-size:17px}.small{font-size:15px;fill:#526b7e}
+      .line{fill:none;stroke:#557086;stroke-width:2.3;marker-end:url(#arrow)}
+    </style>
+  </defs>
+  <rect width="1040" height="720" rx="22" fill="#f5f8fc"/>
+  <text x="44" y="55" class="heading">一句目标，怎样变成下一步行动？</text>
+  <text x="44" y="85" class="sub">手机整理与展示 · Mac 连接与校验 · Agent 分析与规划</text>
+  <rect x="36" y="113" width="300" height="420" rx="18" fill="#e8f1ff" stroke="#c5d9f5"/>
+  <rect x="370" y="113" width="300" height="420" rx="18" fill="#e8f5f0" stroke="#bfdfd2"/>
+  <rect x="704" y="113" width="300" height="420" rx="18" fill="#f1ecfb" stroke="#d9ccef"/>
+  <text x="58" y="149" class="label">① iPhone 工作台</text>
+  <text x="392" y="149" class="label">② Mac Agent Host</text>
+  <text x="726" y="149" class="label">③ Agent 运行时</text>
+  <rect x="56" y="173" width="260" height="76" rx="12" fill="white"/>
+  <text x="74" y="203" class="body">用户描述目标、期限与约束</text>
+  <text x="74" y="229" class="small">先保存草稿和消息</text>
+  <path d="M186 249 V277" class="line"/>
+  <rect x="56" y="281" width="260" height="82" rx="12" fill="white"/>
+  <text x="74" y="312" class="body">目标 + 摘要 + 近期对话</text>
+  <text x="74" y="340" class="small">原生网络桥接发往 Mac</text>
+  <path d="M316 322 H390" class="line"/>
+  <rect x="390" y="281" width="260" height="82" rx="12" fill="white"/>
+  <text x="408" y="312" class="body">鉴权、清洗输入、分流</text>
+  <text x="408" y="340" class="small">连接所选运行时</text>
+  <path d="M650 322 H724" class="line"/>
+  <rect x="724" y="181" width="260" height="87" rx="12" fill="white"/>
+  <text x="742" y="214" class="label">Kimi Swarm</text>
+  <text x="742" y="242" class="small">主会话分工、子 Agent 协作</text>
+  <rect x="724" y="285" width="260" height="77" rx="12" fill="white"/>
+  <text x="742" y="317" class="label">DSH Agents</text>
+  <text x="742" y="343" class="small">Along Source 工单与分工</text>
+  <text x="742" y="391" class="small">按选择进入其中一种运行时</text>
+  <path d="M854 402 V429 H650" class="line"/>
+  <rect x="390" y="393" width="260" height="95" rx="12" fill="white"/>
+  <text x="408" y="425" class="body">整理并校验结构化结果</text>
+  <text x="408" y="452" class="small">解释 / 目标提案 / 空间与任务</text>
+  <text x="408" y="475" class="small">无效输出给出明确原因</text>
+  <path d="M390 440 H316" class="line"/>
+  <rect x="56" y="393" width="260" height="111" rx="12" fill="white"/>
+  <text x="74" y="424" class="body">展示进展与可用结果</text>
+  <text x="74" y="452" class="small">首次完整自定义目标自动创建</text>
+  <text x="74" y="479" class="small">已有目标调整由用户采用</text>
+  <path d="M186 504 V568 H519" class="line"/>
+  <rect x="523" y="550" width="461" height="83" rx="14" fill="white" stroke="#c5d9f5"/>
+  <text x="545" y="582" class="label">目标空间：进度、计划、动态任务</text>
+  <text x="545" y="611" class="small">新健康摘要、用户反馈、到期复查可触发再评估</text>
+  <path d="M754 633 V660 H28 V322 H56" class="line" stroke-dasharray="6 5"/>
+  <text x="54" y="692" class="small">运行完成 ≠ 目标达成；每日委托与后台评估另有授权及运行条件。</text>
+</svg>
