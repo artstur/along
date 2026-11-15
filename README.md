@@ -43,16 +43,22 @@ Along 把一个目标拆成三样东西，并让它们保持联动：
 
 ## 新架构与实现状态
 
-新方案以 [Along 本地 Agent 系统架构](https://github.com/artstur/along-superagent/blob/main/docs/along/001-architecture.md) 为准：首期自用，Mac 上运行 Along Host、DSH fork 与 Hy-Memory，iPhone 提供聊天和授权健康摘要。Mac 保存业务状态，手机保留离线缓存与待同步事件。复盘、记忆提取和 Skill 整理由定时作业批量处理。
+新方案以 [Along 本地 Agent 系统架构](https://github.com/artstur/along-superagent/blob/feature/along-phase0/docs/along/001-architecture.md) 为准：首期自用，Mac 上运行 Along Host、DSH fork 与 Hy-Memory，iPhone 提供聊天和授权健康摘要。Mac 保存业务状态，手机保留离线缓存与待同步事件。复盘、记忆提取和 Skill 整理由定时作业批量处理。
 
 已确定的交互边界：
 
 - **明确行动意图才自动建目标**。例如「我想改善睡眠」可直接建立目标；「最近睡得不好」先回应，仅在缺少意图时询问，不把现象直接变成目标。
 - **校验后自动生效，通过聊天纠正**。不设采用、确认或审批环节，界面不提供直接编辑或删除目标的入口。
 - **按需要通知**。普通变化只在目标里展示；需要你回答、近期安排有实质变化或执行受阻时才通知。通知仍受 iOS 权限与执行机会限制。
-- **忘记不删除历史聊天**。撤回对应记忆，立即停止将其作为有效记忆使用，并清理派生记忆与索引；历史聊天保留，不能从旧聊天重新提取并复活已撤回的记忆。
+- **忘记不删除历史聊天**。撤回对应记忆，立即停止将其作为有效记忆使用，并清理派生记忆与索引；历史聊天保留，不能从旧聊天重新提取并复活已撤回的记忆。不因此自动取消目标或重排已有任务。
 
-**上述是待实现方案。** 当前代码仍有双运行时、采用流程和目标编辑入口；首次自定义目标在结果完整时可自动创建，已有目标的后续调整通常仍待采用。下文体验、连接与配置说明描述当前实现，不代表新架构已上线。阶段与验收见 [实施与验收](https://github.com/artstur/along-superagent/blob/main/docs/along/003-implementation.md)。
+- **多目标由 Agent 协调**。优先遵守你明确的优先级和硬约束，其余自动协调；无法同时满足硬约束时才询问。
+- **首期按本人自用简化**。不做额外的健康授权撤回及关联历史数据清理流程，系统数据不可用时仍正常处理。
+- **不设应用侧模型用量上限**。不设每日预算或累计调用额度；批量作业、超时和失败重试仍按技术方案运行。
+
+本轮方案与验证记录保存在 `along-superagent` 的 `feature/along-phase0` 分支，上述链接指向该分支。
+
+**上述是待实现方案。** 当前代码仍有双运行时、采用流程和目标编辑入口；首次自定义目标在结果完整时可自动创建，已有目标的后续调整通常仍待采用。下文体验、连接与配置说明描述当前实现，不代表新架构已上线。阶段与验收见 [实施与验收](https://github.com/artstur/along-superagent/blob/feature/along-phase0/docs/along/003-implementation.md)。
 
 ## 能体验什么
 
@@ -253,10 +259,10 @@ npm run build   # 产出 dist/（GitHub Pages）与 ios/AlongHealth/Web/（App �
 ## 相关文档
 
 - [新架构与决策入口](docs/agent-architecture.md)：当前有效方案在 `along-superagent` 仓库，以下链接指向远端文档
-- [决策记录](https://github.com/artstur/along-superagent/blob/main/docs/along/000-decisions.md)：已定边界及其原因
-- [本地 Agent 系统架构](https://github.com/artstur/along-superagent/blob/main/docs/along/001-architecture.md)：Mac 与 iPhone 分工、可靠事件、目标与任务自动维护
-- [记忆与技能](https://github.com/artstur/along-superagent/blob/main/docs/along/002-memory-and-skills.md)：Hy-Memory、记忆撤回、批量复盘与 Skill 自动发布
-- [实施与验收](https://github.com/artstur/along-superagent/blob/main/docs/along/003-implementation.md)：阶段 0 到 E、迁移与验收条件
+- [决策记录](https://github.com/artstur/along-superagent/blob/feature/along-phase0/docs/along/000-decisions.md)：已定边界及其原因
+- [本地 Agent 系统架构](https://github.com/artstur/along-superagent/blob/feature/along-phase0/docs/along/001-architecture.md)：Mac 与 iPhone 分工、可靠事件、目标与任务自动维护
+- [记忆与技能](https://github.com/artstur/along-superagent/blob/feature/along-phase0/docs/along/002-memory-and-skills.md)：Hy-Memory、记忆撤回、批量复盘与 Skill 自动发布
+- [实施与验收](https://github.com/artstur/along-superagent/blob/feature/along-phase0/docs/along/003-implementation.md)：阶段 0 到 E、迁移与验收条件
 - [目标与 Agent 技术链路](docs/goal-agent-flow.md)：迁移前的代码行为，含采用流程，不作为新架构规范
 - [健康评估离线暂存与恢复方案](docs/offline-health-review-plan.md)：旧链路的恢复设计参考；新架构的事件补传与自动生效以本地 Agent 系统架构为准
 - [ios/README.md](ios/README.md)：iPhone App 的运行步骤、HealthKit 读取范围与数据口径
