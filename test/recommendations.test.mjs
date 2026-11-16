@@ -46,3 +46,10 @@ test('explicit unknown checks in general recommendations and invalid source life
   assert.equal(safeRecommendation(r).status,'partial');
   r.sources[0].expiresAt='2098-12-31T00:00:00Z';assert.equal(safeRecommendation(r),null);
 });
+
+test('retrieval labels use the actual source receipt time rather than later recommendation assembly',()=>{
+  const r=recommendation();r.retrievedAt='2099-01-02T00:00:00Z';
+  const html=recommendationCard(r,{now:Date.parse('2099-01-01T01:00:00Z')});
+  const stamp=new Date(r.sources[0].retrievedAt).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',year:'numeric',month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit',hourCycle:'h23'});
+  assert.ok(html.includes(stamp+' 检索'));assert.ok(html.includes('检索于 '+stamp));
+});
