@@ -21,11 +21,12 @@ function conversationGoal(value) {
 }
 
 // Apply the same navigation invariant to restored caches and every state transition. Keep
-// history and drafts intact; only detach a conversation bound to the goal being removed.
+// history and drafts intact. Once a selection disappears, only an unbound new conversation
+// may remain selected; a root bound to any existing goal must not receive a fresh goal message.
 function reconcileSelection(value) {
   const activeGoalId = isActiveGoal(value, value.activeGoalId) ? value.activeGoalId : null;
   const lostSelection = value.activeGoalId != null && activeGoalId === null;
-  const detachConversation = lostSelection && conversationGoal(value) === value.activeGoalId;
+  const detachConversation = lostSelection && conversationGoal(value) !== null;
   return {...value, activeGoalId,
     returnGoalId: isActiveGoal(value, value.returnGoalId) ? value.returnGoalId : null,
     conversationId: detachConversation ? null : value.conversationId};
@@ -115,7 +116,7 @@ export function createEventWorkspace({config,onChange=()=>{}}) {
   }
   function view() {
     const next=recoverPending(),failures=readEventFailures(config),pending=new Set(pendingEvents(config).map(item=>item.event_id));
-    return {...next,error:lastError,messages:Object.values(next.messages).map(message=>({...message,
+    return {...next,draftScope:draftScope(next),error:lastError,messages:Object.values(next.messages).map(message=>({...message,
       status:failures.some(item=>item.event_id===message.eventId)?'rejected':pending.has(message.eventId)?'pending':message.status}))};
   }
   function draftScope(value=state) { return value.activeGoalId?`goal:${value.activeGoalId}`:`conversation:${value.conversationId??'new'}`; }

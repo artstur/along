@@ -188,3 +188,26 @@ test('reopening an older cache removes archived selections and keeps an unbound 
   assert.equal(reopened.draft(),'新目标的第二句草稿');
   assert.ok(reopened.view().messages.some(message=>message.eventId===eventId));
 });
+
+test('archiving after switching goals detaches any previously bound conversation root',async()=>{
+  const item=(seq,goalId,status='active',revision=1)=>({seq,userId:config.userId,kind:'goal_updated',goalId,payload:{snapshot:{
+    goal:{id:goalId,domain:'custom',status,currentRevision:revision},
+    revision:{goalId,revision,title:goalId,status},tasks:[]}}});
+  let items=[item(1,'g_one'),item(2,'g_two')];
+  const {workspace}=setup(input=>{
+    if(input.path==='/events')return {status:'accepted',event_id:input.body.event_id};
+    if(input.path==='/sync/ack')return {acked:input.body.seqs.length};
+    return {items:items.filter(item=>item.seq>input.body.after_seq)};
+  });
+  await workspace.sync();
+  workspace.select('g_one');const first=await workspace.submit('First goal message');
+  workspace.select('g_two');await workspace.submit('Archive second goal');
+  assert.equal(workspace.view().conversationId,first,'the old root must be present to expose this boundary');
+  items=[item(3,'g_two','archived',2)];await workspace.sync();
+  assert.equal(workspace.view().activeGoalId,null);
+  assert.equal(workspace.view().conversationId,null);
+  const fresh=await workspace.submit('A fresh goal');
+  const envelope=pendingEvents(config).find(item=>item.event_id===fresh).envelope;
+  assert.equal(envelope.goal_id,undefined);
+  assert.equal(envelope.causation_id,undefined);
+});

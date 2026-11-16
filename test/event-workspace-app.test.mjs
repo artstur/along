@@ -124,3 +124,54 @@ test('archiving a goal while chatting still lets the user return to the goal hom
   assert.doesNotMatch(dom.app.innerHTML,/一项合成目标/,'archived goals must not remain on the active home');
   assert.match(dom.app.innerHTML,/当前目标/);
 });
+
+// Unlike the default lightweight stub, this rebuilds a composing element on every render.
+// That makes stale .value restoration observable instead of testing only the HTML string.
+function trackComposingTextarea(dom) {
+  let html=dom.app.innerHTML,input=null;
+  const query=dom.app.querySelector.bind(dom.app);
+  Object.defineProperty(dom.app,'innerHTML',{get:()=>html,set:value=>{
+    html=value;
+    const match=html.match(/<textarea\b([^>]*)>([\s\S]*?)<\/textarea>/);
+    input=match?{value:match[2],dataset:{draftScope:match[1].match(/data-draft-scope="([^"]*)"/)?.[1]},
+      style:{},scrollHeight:48,selectionStart:0,matches:selector=>selector==='#agent-form textarea',
+      focus(){document.activeElement=this;},setSelectionRange(){}}:null;
+  }});
+  dom.app.querySelector=selector=>selector==='#agent-form textarea'?input:query(selector);
+  return ()=>input;
+}
+
+test('a draft in the real composing element never migrates from an archived goal to a fresh conversation',async()=>{
+  const dom=installDomStub({storage:{'along.agent.v1':JSON.stringify(config)}});
+  const composing=trackComposingTextarea(dom);
+  document.visibilityState='visible';
+  const snapshot={goal:{id:'g_draft',domain:'custom',status:'active',currentRevision:1},
+    revision:{goalId:'g_draft',revision:1,title:'Old synthetic goal',status:'active'},tasks:[]};
+  const bridge={syncItems:[{seq:1,userId:'u_app_b',kind:'goal_updated',goalId:'g_draft',payload:{snapshot}}]};
+  const requests=installEventBridge(bridge);
+  await import(`../web/app.mjs?event-draft-scope=${Date.now()}`);await settle();
+  await dom.app.dispatch('change',{target:{id:'event-goal-select',value:'g_draft'}});
+  await dom.click({action:'event-chat'});
+  const submit=async()=>{
+    await dom.app.dispatch('submit',{target:{id:'agent-form',fields:{message:composing().value},querySelector:()=>composing(),reset(){},setAttribute(){}},preventDefault(){}});
+    await settle();
+  };
+  composing().value='Archive this synthetic goal';await submit();
+  composing().value='Supplement intended for old goal';
+  await dom.app.dispatch('input',{target:composing()});
+  // A same-scope poll must retain the actual input and its focused selection.
+  await dom.tick(3000);await settle();
+  assert.equal(composing().value,'Supplement intended for old goal');
+  const archived=structuredClone(snapshot);
+  Object.assign(archived.goal,{status:'archived',currentRevision:2});
+  Object.assign(archived.revision,{status:'archived',revision:2});
+  bridge.syncItems.push({seq:2,userId:'u_app_b',kind:'goal_updated',goalId:'g_draft',payload:{snapshot:archived}});
+  await dom.tick(3000);await settle();
+  assert.equal(composing().value,'','the new conversation must not inherit another goal’s text');
+  const cache=JSON.parse(localStorage.getItem('along.event-workspace.v1:u_app_b'));
+  assert.equal(cache.drafts['goal:g_draft'],'Supplement intended for old goal');
+  composing().value='A fresh synthetic goal';await submit();
+  const sent=requests.filter(item=>item.path==='/events').at(-1).body;
+  assert.equal(sent.payload.text,'A fresh synthetic goal');
+  assert.equal(sent.goal_id,undefined);assert.equal(sent.causation_id,undefined);
+});
