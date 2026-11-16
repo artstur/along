@@ -53,3 +53,44 @@ test('feedback cannot bind a recommendation from a different goal or resurrect a
   };
   await reopened.submit('改成室内活动');await reopened.sync();assert.equal(sent.task_id,undefined);assert.equal(sent.goal_id,'g_research');
 });
+
+test('upgrading an older client rehydrates already-acknowledged recommendations once without duplicate alerts or lost drafts',async()=>{
+  const goal={id:'g_research',domain:'custom',status:'active',revision:1,title:'运动安排',metric:null,context:[],tasks:[
+    {id:'t_research',goalId:'g_research',status:'open',content:'周五查天气安排周末徒步',revision:1},
+    {id:'t_sleep',goalId:'g_research',status:'open',content:'按原计划准备睡觉',revision:2,scheduledAt:'2099-01-01T17:30:00Z'}]};
+  const old={version:1,userId:config.userId,cursor:10,activeGoalId:goal.id,conversationId:null,goals:{[goal.id]:goal},drafts:{'goal:g_research':'保留原草稿'},
+    messages:{reply_research:{eventId:'reply_research',role:'assistant',text:'已找到方案',goalId:goal.id,notificationEventId:'reply_research',status:'received'}}};
+  const key='along.event-workspace.v1:'+config.userId;installDomStub({storage:{[key]:JSON.stringify(old)}});
+  window.AlongAgentBridge={request:async()=>{throw Error('offline');}};
+  const projections=[],w=createEventWorkspace({config,onNotifications:async p=>projections.push(p)});await w.sync();
+  assert.equal(w.view().cursor,10);assert.equal(w.draft(),'保留原草稿');assert.equal(w.view().goals.g_research.tasks.length,2);
+  const originalTasks=w.view().goals.g_research.tasks;
+  const requests=[];window.AlongAgentBridge.request=async input=>{
+    requests.push(input);return input.path==='/sync'?{items:input.body.after_seq===0?[{...message(),seq:9,createdAt:new Date().toISOString()}]:[]}:{acked:1};
+  };
+  await w.sync();assert.equal(w.view().cursor,10);assert.equal(w.view().messages.length,1);
+  assert.equal(w.view().messages[0].recommendation.options.length,1);assert.equal(w.draft(),'保留原草稿');
+  assert.deepEqual(w.view().goals.g_research.tasks,originalTasks);assert.deepEqual(projections.at(-1).results,[]);
+  await w.sync();assert.deepEqual(requests.filter(r=>r.path==='/sync').map(r=>r.body.after_seq),[0,10]);
+  assert.equal(JSON.parse(localStorage.getItem(key)).recommendationsVersion,1);
+});
+
+
+test('an interrupted upgrade replay resumes its page cursor without moving the acknowledged cursor backwards',async()=>{
+  const seed={version:1,userId:config.userId,cursor:10,activeGoalId:null,conversationId:null,goals:{},messages:{},drafts:{}};
+  const key='along.event-workspace.v1:'+config.userId;installDomStub({storage:{[key]:JSON.stringify(seed)}});
+  const cursors=[];let interrupted=true;
+  window.AlongAgentBridge={request:async input=>{
+    if(input.path!=='/sync')return {acked:1};
+    const after=input.body.after_seq;cursors.push(after);
+    if(after===0)return {items:[{...message(null),seq:2}],nextCursor:'2'};
+    if(interrupted)throw Error('connection interrupted');
+    return {items:[{...message(),seq:9}]};
+  }};
+  const first=createEventWorkspace({config});await first.sync();
+  assert.equal(first.view().cursor,10);assert.equal(JSON.parse(localStorage.getItem(key)).recommendationReplayAfter,2);
+  interrupted=false;const reopened=createEventWorkspace({config});await reopened.sync();
+  assert.deepEqual(cursors,[0,2,2]);assert.equal(reopened.view().cursor,10);
+  assert.equal(reopened.view().messages[0].recommendation.options.length,1);
+  assert.equal(JSON.parse(localStorage.getItem(key)).recommendationsVersion,1);
+});

@@ -9,7 +9,7 @@ const record = value => value!==null && typeof value==='object' && !Array.isArra
 const text = (value,max) => typeof value==='string' && value.trim().length>0 && value.length<=max;
 const version = value => Number.isSafeInteger(value) && value>=0;
 const time = value => typeof value==='string' && Number.isFinite(Date.parse(value));
-const empty = userId => ({version:1,userId,cursor:0,goals:{},messages:{},drafts:{},activeGoalId:null,conversationId:null,returnGoalId:null});
+const empty = userId => ({version:1,recommendationsVersion:1,userId,cursor:0,goals:{},messages:{},drafts:{},activeGoalId:null,conversationId:null,returnGoalId:null});
 
 function absoluteReminderTime(value) {
   if (!time(value)||!/^\d{4}-\d\d-\d\dT(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)$/.test(value)) return false;
@@ -190,6 +190,7 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
       saved.notificationReceipts=Array.isArray(saved.notificationReceipts)?saved.notificationReceipts.filter(eventId):[];
       saved.drafts=saved.drafts??{};
       saved.returnGoalId=saved.returnGoalId??null;
+      if (saved.recommendationsVersion!==1&&(!version(saved.recommendationReplayAfter)||saved.recommendationReplayAfter>saved.cursor)) saved.recommendationReplayAfter=0;
       state=saved;
       if (migratedReceipt) {
         try { localStorage.setItem(key,JSON.stringify(saved)); } catch { /* Keep the validated goals available offline. */ }
@@ -315,7 +316,10 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
     if (JSON.stringify([pendingEvents(config),readEventFailures(config)])!==pendingBefore) onChange();
     for (;;) {
       const receipts=onNotifications?(state.notificationReceipts??[]).slice(0,50):[];
-      const page=await agentCall(config,'/sync',{after_seq:state.cursor,limit:50,
+      // Old clients acknowledged messages without retaining the optional recommendation.
+      // Replay once from the durable outbox, preserving the acknowledged cursor and drafts.
+      const replay=state.recommendationsVersion!==1,after=replay?state.recommendationReplayAfter??0:state.cursor;
+      const page=await agentCall(config,'/sync',{after_seq:after,limit:50,
         ...(onNotifications?{notificationFallback:true,notificationReceipts:receipts}:{})});
       if(disposed) return;
       if (!record(page)||!Array.isArray(page.items)||page.items.length>50) throw Error('同步响应格式不正确');
@@ -331,10 +335,11 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
       if (receipts.length) next.notificationReceipts=next.notificationReceipts.filter(id=>!receipts.includes(id));
       if (page.items.length===0) {
         if (page.nextCursor!==undefined) throw Error('同步分页游标不正确');
-        if (fallbacks.length||receipts.length) save(next);
+        if (replay) {next.recommendationsVersion=1;delete next.recommendationReplayAfter;}
+        if (replay||fallbacks.length||receipts.length) save(next);
         break;
       }
-      let previous=state.cursor;
+      let previous=after;
       for (const item of page.items) {
         if (!record(item)||!version(item.seq)||item.seq<=previous||item.userId!==config.userId||!record(item.payload)||
             !['goal_updated','task_updated','changeset_note','message','delivery_failed'].includes(item.kind)||
@@ -345,7 +350,7 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
           if (goal.id!==item.goalId) throw Error('目标同步关联不正确');
           if (!next.goals[goal.id]||goal.revision>=next.goals[goal.id].revision) next.goals[goal.id]=goal;
         }
-        if (onNotifications) {
+        if (onNotifications&&(!replay||item.seq>state.cursor)) {
           const notice=localResult(item,item.remoteNotifications??page.remoteNotifications);
           if (notice) {
             const queue=next.notificationResults??[];
@@ -366,7 +371,11 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
       }
       if (page.nextCursor!==undefined&&String(page.nextCursor)!==String(previous)) throw Error('同步分页游标不正确');
       restoreSelection(next);
-      next.cursor=previous;next.pendingAck=seqs;
+      next.cursor=Math.max(next.cursor,previous);next.pendingAck=seqs;
+      if (replay) {
+        if (page.nextCursor===undefined) {next.recommendationsVersion=1;delete next.recommendationReplayAfter;}
+        else next.recommendationReplayAfter=previous;
+      }
       save(next);onChange();
       // Cache commit precedes ack. A failed ack is retried before pulling further, without replaying data.
       await agentCall(config,'/sync/ack',{seqs});
