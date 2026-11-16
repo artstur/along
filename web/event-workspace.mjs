@@ -9,7 +9,7 @@ const record = value => value!==null && typeof value==='object' && !Array.isArra
 const text = (value,max) => typeof value==='string' && value.trim().length>0 && value.length<=max;
 const version = value => Number.isSafeInteger(value) && value>=0;
 const time = value => typeof value==='string' && Number.isFinite(Date.parse(value));
-const empty = userId => ({version:1,recommendationsVersion:1,userId,cursor:0,goals:{},messages:{},drafts:{},activeGoalId:null,conversationId:null,returnGoalId:null});
+const empty = userId => ({version:1,recommendationsVersion:1,conversationVersion:1,userId,cursor:0,goals:{},messages:{},drafts:{},activeGoalId:null,conversationId:null,returnGoalId:null});
 
 function absoluteReminderTime(value) {
   if (!time(value)||!/^\d{4}-\d\d-\d\dT(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)$/.test(value)) return false;
@@ -113,10 +113,13 @@ function safeMessage(message,item) {
       !['inbound','outbound'].includes(message.direction)||!text(message.text,2000)||!version(message.seq)||message.seq<1||
       (message.causationId!==undefined&&!id(message.causationId))||
       (message.userId!==undefined&&message.userId!==item.userId)||
-      (item.payload.conversation_id!==undefined&&!id(item.payload.conversation_id))) throw Error('对话同步格式不正确');
+      (item.payload.conversation_id!==undefined&&!id(item.payload.conversation_id))||
+      (message.audience!==undefined&&!['conversation','background'].includes(message.audience))||
+      (item.payload.audience!==undefined&&(!['conversation','background'].includes(item.payload.audience)||message.audience!==undefined&&message.audience!==item.payload.audience))) throw Error('对话同步格式不正确');
   return {id:message.id,eventId:message.eventId,role:message.role,text:message.text,seq:message.seq,
     goalId:item.goalId,conversationId:item.payload.conversation_id??message.causationId??(item.payload.presentation==='execution'?undefined:message.eventId),
     replyToMessageId:message.replyToMessageId,presentation:item.payload.presentation,
+    audience:message.audience??item.payload.audience??(item.payload.presentation==='execution'?'background':'conversation'),
     ...(item.goalId&&id(item.taskId)?{taskId:item.taskId}:{}),
     ...(message.role==='assistant'&&item.goalId&&safeRecommendation(item.payload.recommendation)?{recommendation:safeRecommendation(item.payload.recommendation)}:{}),
     notificationEventId:eventId(item.payload.notification?.event_id)&&['recommendation_ready','task_result'].includes(item.payload.notification.kind)
@@ -145,7 +148,7 @@ function applicableResult(r,goals) {
 
 function localResult(item,remote) {
   const n=item.payload.notification;
-  if (remote!==false||!record(n)||!id(item.goalId)||!eventId(n.event_id)||
+  if (item.payload.classification_only===true||remote!==false||!record(n)||!id(item.goalId)||!eventId(n.event_id)||
       !['recommendation_ready','task_result'].includes(n.kind)||!version(n.revision)||
       !freshResult(item.createdAt)||(item.taskId!=null&&!id(item.taskId))) return null;
   return {eventId:n.event_id,kind:n.kind,goalId:item.goalId,taskId:item.taskId??undefined,revision:n.revision,createdAt:item.createdAt};
@@ -168,6 +171,7 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
       for (const [key,message] of Object.entries(saved.messages)) {
         if (!record(message)||message.eventId!==key||!text(message.text,2000)||
           !['user','assistant','system'].includes(message.role)||(message.goalId!==undefined&&!id(message.goalId))) throw Error('bad cache');
+        if (message.audience!==undefined&&!['conversation','background'].includes(message.audience)) throw Error('bad cache');
         if (message.recommendation!==undefined) {
           const r=message.role==='assistant'&&message.goalId&&safeRecommendation(message.recommendation);
           if (r) message.recommendation=r; else delete message.recommendation;
@@ -191,6 +195,7 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
       saved.drafts=saved.drafts??{};
       saved.returnGoalId=saved.returnGoalId??null;
       if (saved.recommendationsVersion!==1&&(!version(saved.recommendationReplayAfter)||saved.recommendationReplayAfter>saved.cursor)) saved.recommendationReplayAfter=0;
+      if (saved.conversationVersion!==1&&(!version(saved.conversationReplayAfter)||saved.conversationReplayAfter>saved.cursor)) saved.conversationReplayAfter=0;
       state=saved;
       if (migratedReceipt) {
         try { localStorage.setItem(key,JSON.stringify(saved)); } catch { /* Keep the validated goals available offline. */ }
@@ -318,8 +323,10 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
       const receipts=onNotifications?(state.notificationReceipts??[]).slice(0,50):[];
       // Old clients acknowledged messages without retaining the optional recommendation.
       // Replay once from the durable outbox, preserving the acknowledged cursor and drafts.
-      const replay=state.recommendationsVersion!==1,after=replay?state.recommendationReplayAfter??0:state.cursor;
-      const page=await agentCall(config,'/sync',{after_seq:after,limit:50,
+      const replayConversation=state.conversationVersion!==1;
+      const replay=state.recommendationsVersion!==1||replayConversation;
+      const after=replayConversation?state.conversationReplayAfter??0:replay?state.recommendationReplayAfter??0:state.cursor;
+      const page=await agentCall(config,'/sync',{after_seq:after,limit:50,conversation_version:1,
         ...(onNotifications?{notificationFallback:true,notificationReceipts:receipts}:{})});
       if(disposed) return;
       if (!record(page)||!Array.isArray(page.items)||page.items.length>50) throw Error('同步响应格式不正确');
@@ -335,7 +342,7 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
       if (receipts.length) next.notificationReceipts=next.notificationReceipts.filter(id=>!receipts.includes(id));
       if (page.items.length===0) {
         if (page.nextCursor!==undefined) throw Error('同步分页游标不正确');
-        if (replay) {next.recommendationsVersion=1;delete next.recommendationReplayAfter;}
+        if (replay) {next.recommendationsVersion=1;next.conversationVersion=1;delete next.recommendationReplayAfter;delete next.conversationReplayAfter;}
         if (replay||fallbacks.length||receipts.length) save(next);
         break;
       }
@@ -373,8 +380,8 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
       restoreSelection(next);
       next.cursor=Math.max(next.cursor,previous);next.pendingAck=seqs;
       if (replay) {
-        if (page.nextCursor===undefined) {next.recommendationsVersion=1;delete next.recommendationReplayAfter;}
-        else next.recommendationReplayAfter=previous;
+        if (page.nextCursor===undefined) {next.recommendationsVersion=1;next.conversationVersion=1;delete next.recommendationReplayAfter;delete next.conversationReplayAfter;}
+        else {next.recommendationReplayAfter=previous;if(replayConversation)next.conversationReplayAfter=previous;}
       }
       save(next);onChange();
       // Cache commit precedes ack. A failed ack is retried before pulling further, without replaying data.

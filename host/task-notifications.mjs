@@ -52,7 +52,7 @@ function relevant(route,detail) {
 }
 function notification(item,who) {
   const n=item.payload?.notification;
-  if (!n||!['recommendation_ready','task_result','reminder_due'].includes(n.kind)||!eventId(n.event_id)||
+  if (item.payload?.classification_only===true||!n||!['recommendation_ready','task_result','reminder_due'].includes(n.kind)||!eventId(n.event_id)||
       !Number.isSafeInteger(n.revision)||n.revision<0||item.userId!==who.userId||!id(item.goalId)||
       (item.taskId!==undefined&&!id(item.taskId))) return null;
   let scheduledAt;

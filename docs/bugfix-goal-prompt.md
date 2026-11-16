@@ -273,3 +273,16 @@ Along 是手机优先的目标工作台：把一个目标拆成「目标 / 来�
 - **换成 Codex 执行**：把阶段 2 的 `task` / `verifier` 换成「开一个独立的 Codex 只读会话」，其余不变。
 - **只要修 bug，不巡检**：删掉第 2.0 节。
 - **只做一轮就收工**：删掉第 2.5 节里的提交与推送部分，但版本号同步与 `npm run build` 不能省。
+
+
+## 8. 目标对话与后台执行边界（2026-11-17）
+
+目标的 chat 仅承载用户本人直接输入与 Agent 面向该输入的答复，以及确需用户回答的澄清。Router/Worker 自动补提醒、健康跟进、续排、开发纠正与验收不写成用户对话。来源与 audience 由宿主依据真实事件/因果关系决定，模型不得自行提升权限；不得用文案关键词判定。开发和验收使用隔离用户与配对，禁止借正式 user_message 伪装本人提需求。
+
+推荐的存储载体可以继续是 message，但后台推荐不属于 chat；它在原目标既有推荐区展示，通知回到该推荐/原任务，反馈时才进入用户可编辑的聊天。通知成功或后台执行完成均不等于用户完成目标。
+
+本轮：主分类 data/agent，下游 ui/client/release。Agent 上游扩展宿主维护的 audience=conversation/background，按当前持久分类投影同步，并为旧端作安全降级。客户端声明 conversation_version=1，保持所有消息载体以承载推荐/通知；聊天单独过滤。旧缓存从耐久 outbox 单次分页重放补齐分类，保留已确认游标、草稿、目标、提醒与原 event ID，不按文本删除。已知开发输入仅凭本机开发回执精准重分类并保留审计；未证实的旧用户对话维持兼容。
+
+验收：直接用户对话（即使包含“补齐提醒”等词）可见；内部补排和后台推荐不进 chat；推荐区和通知/同任务反馈仍可用；历史缓存重放、重启、多页游标以及目标隔离通过；目标任务、原提醒和配对逐项保留。手机断开期间完成代码/主线/服务/签名包交接，真机安装与前台同步待重连。
+
+Historical audience-only corrections carry `classification_only:true`: retain evidence/deep-link identity but never create another alert in either Host or iOS fallback.

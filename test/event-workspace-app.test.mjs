@@ -569,3 +569,49 @@ test('a completed research task result opens the matching sourced recommendation
   assert.equal(receipts.length,1);assert.equal(receipts[0].taskId,'t_research_done');
   assert.equal(JSON.parse(localStorage.getItem('along.event-workspace.v1:u_app_b')).goals[goal.id].tasks.find(t=>t.id==='t_outing').status,'open');
 });
+
+
+test('goal chat contains direct dialogue while background recommendations stay in the goal and notification target',async()=>{
+  const goal={id:'g_private_chat',domain:'custom',status:'active',revision:1,title:'真实目标',metric:null,context:[],tasks:[
+    {id:'t_private_chat',goalId:'g_private_chat',status:'open',content:'周五安排徒步',revision:1}]};
+  const direct={eventId:'direct_user',role:'user',text:'请补齐提醒计划，这是我本人发的消息',goalId:goal.id,audience:'conversation',status:'received'};
+  const answer={eventId:'direct_answer',role:'assistant',text:'这是给你的直接答复',goalId:goal.id,audience:'conversation',status:'received'};
+  const internal={eventId:'internal_run',role:'assistant',text:'内部验收补排完成流水',goalId:goal.id,audience:'background',status:'received'};
+  const result={eventId:'background_recommendation',role:'assistant',text:'后台推荐任务完成',goalId:goal.id,taskId:'t_private_chat',
+    audience:'background',recommendation:recommendation(),notificationEventId:'background_recommendation',status:'received'};
+  const saved={version:1,conversationVersion:1,recommendationsVersion:1,userId:'u_app_b',cursor:4,activeGoalId:goal.id,conversationId:null,goals:{[goal.id]:goal},messages:Object.fromEntries([direct,answer,internal,result].map(m=>[m.eventId,m])),drafts:{}};
+  const dom=installDomStub({storage:{'along.agent.v1':JSON.stringify(config),'along.event-workspace.v1:u_app_b':JSON.stringify(saved)}});
+  installEventBridge();const receipts=[],scrolled=[];
+  window.AlongAgentBridge.notification=async(name,value)=>{if(name==='eventTaskOpened')receipts.push(value);return {};};
+  document.getElementById=id=>dom.app.innerHTML.includes('id="'+id+'"')?{focus(){},scrollIntoView:()=>scrolled.push(id)}:null;
+  await import(`../web/app.mjs?direct-chat-boundary=${Date.now()}`);await settle();
+  assert.match(dom.app.innerHTML,/周末徒步方案/);
+  await dom.click({action:'event-chat'});
+  assert.match(dom.app.innerHTML,/这是我本人发的消息/);assert.match(dom.app.innerHTML,/这是给你的直接答复/);
+  assert.doesNotMatch(dom.app.innerHTML,/内部验收补排完成流水|后台推荐任务完成|周末徒步方案/);
+  await dom.fireWindow('along-notification-open',{detail:{userId:'u_app_b',goalId:goal.id,taskId:'t_private_chat',eventId:result.eventId,kind:'recommendation_ready'}});
+  assert.match(dom.app.innerHTML,/周末徒步方案/);assert.doesNotMatch(dom.app.innerHTML,/agent-composer/);
+  assert.ok(scrolled.includes('event-message-'+result.eventId));assert.equal(receipts.length,1);
+  await dom.click({action:'event-recommendation-feedback',eventId:result.eventId});
+  assert.match(dom.app.innerHTML,/关于「周末徒步方案」/);assert.doesNotMatch(dom.app.innerHTML,/内部验收补排完成流水/);
+});
+
+
+test('leaving an opened notification lets the goal show a newer background recommendation',async()=>{
+  const goal={id:'g_focus',domain:'custom',status:'active',revision:1,title:'原目标',metric:null,context:[],tasks:[]};
+  const r=recommendation();r.title='旧方案';
+  const m={eventId:'reply_old',role:'assistant',text:'旧结果',goalId:goal.id,audience:'background',status:'received',recommendation:r,notificationEventId:'reply_old'};
+  const saved={version:1,conversationVersion:1,recommendationsVersion:1,userId:'u_app_b',cursor:1,activeGoalId:goal.id,conversationId:null,goals:{[goal.id]:goal},messages:{reply_old:m},drafts:{}};
+  const dom=installDomStub({storage:{'along.agent.v1':JSON.stringify(config),'along.event-workspace.v1:u_app_b':JSON.stringify(saved)}});
+  document.visibilityState='visible';const state={syncItems:[]};installEventBridge(state);
+  window.AlongAgentBridge.notification=async()=>({});
+  document.getElementById=id=>dom.app.innerHTML.includes('id="'+id+'"')?{focus(){},scrollIntoView(){}}:null;
+  await import(`../web/app.mjs?focus-review=${Date.now()}`);await settle();
+  await dom.fireWindow('along-notification-open',{detail:{userId:'u_app_b',goalId:goal.id,eventId:'reply_old',kind:'recommendation_ready'}});
+  assert.match(dom.app.innerHTML,/旧方案/);
+  const newer=recommendation();newer.title='新方案';
+  state.syncItems=[{seq:2,userId:'u_app_b',kind:'message',goalId:goal.id,payload:{audience:'background',recommendation:newer,snapshot:{goal:{...goal,currentRevision:1},revision:{goalId:goal.id,revision:1,title:goal.title,status:'active'},tasks:[]},message:{id:'msg_new',eventId:'reply_new',role:'assistant',direction:'outbound',text:'新结果',seq:2,audience:'background'}}}];
+  await dom.tick(3000);await settle();
+  await dom.click({action:'event-chat'});await dom.click({action:'agent-back'});
+  assert.match(dom.app.innerHTML,/新方案/);assert.doesNotMatch(dom.app.innerHTML,/旧方案/);
+});

@@ -48,6 +48,7 @@ let verifiedHealthHost=false;
 let checkingHealthHost=false;
 let agentConnection = {status:agentConfig.token?'checking':'unconfigured',error:''};
 let eventWorkspace=null,eventWorkspaceBinding='';
+let focusedEventRecommendation=null;
 let pendingRecommendationOpen=null;
 let localSelection=null,waitingForSavedGoal=false;
 let lastNotificationProjection='',lastNotificationCheck=0;
@@ -1183,7 +1184,8 @@ async function openEventNotification(route,synced=false) {
   localSelection=null;waitingForSavedGoal=false;
   eventWorkspace.select(goal.id);
   const recommendation=Boolean(recommendationMessage?.recommendation)||(route.kind==='recommendation_ready'&&Boolean(recommendationMessage));
-  screen=goal.status==='active'&&task&&!recommendation?'home':'agent';render();
+  focusedEventRecommendation=recommendation?recommendationMessage?.eventId:null;
+  screen=goal.status==='active'&&(recommendationMessage?.audience==='background'||task&&!recommendation)?'home':'agent';render();
   if (task&&goal.status==='active'&&!recommendation) {
     const row=document.getElementById('event-task-'+task.id);
     if (!row) return;
@@ -1261,15 +1263,17 @@ function eventWorkspacePage() {
   const selectedLocal=localChoices.find(item=>item.key===localSelection?.key);
   if (!selectedLocal) localSelection=null;
   const options=goals.map(item=>`<option value="${esc(item.id)}" ${!localSelection&&item.id===view.activeGoalId?'selected':''}>${esc(item.title)}</option>`).join('');
-  const messages=view.messages.filter(message=>(message.presentation!=='execution'||message.notificationEventId)&&(view.activeGoalId
+  const scopedMessages=view.messages.filter(message=>(view.activeGoalId
     ?message.goalId===view.activeGoalId:message.conversationId===view.conversationId));
+  const messages=scopedMessages.filter(message=>message.audience!=='background'&&message.presentation!=='execution');
   const connectionError=view.error||agentConnection.error;
   const connection=connectionError?`<details class="agent-setup"><summary>连接需处理 · ${esc(connectionError)}</summary><form id="host-address-form"><label>Along 服务地址<input name="baseURL" type="url" value="${esc(agentConfig.baseURL||'')}" required></label><button class="button">验证并更新</button></form></details>`:'';
   const goalPicker=`<div class="goal-switch"><label for="event-goal-select">当前目标</label><div class="goal-switch-actions"><div class="select-wrap"><select id="event-goal-select" aria-label="切换目标"><option value="" ${!localSelection&&!view.activeGoalId?'selected':''}>新对话</option>${options}${localChoices.length?`<optgroup label="本机已存目标">${localChoices.map(l=>`<option value="local:${esc(l.key)}" ${localSelection?.key===l.key?'selected':''}>${esc(l.title)}</option>`).join('')}</optgroup>`:''}</select></div><button class="goal-add-button" data-action="new-goal">新建</button></div></div>`;
   if (selectedLocal) return localRecordPage(localSelection,selectedLocal.title,goalPicker,connection);
   const history=messages.map(message=>`<div ${message.notificationEventId?`id="event-message-${esc(message.notificationEventId)}"`: ''} class="agent-message ${message.role==='user'?'user':'assistant'}">${message.recommendation?recommendationCard(message.recommendation,{eventId:message.eventId}):`<p>${esc(message.text)}</p>`}${message.status==='pending'?'<p class="agent-disclaimer">待同步</p>':message.status==='rejected'||message.status==='failed'?'<p class="agent-disclaimer">发送未完成，请通过聊天重新说明。</p>':''}</div>`).join('');
-  const latestRecommendation=messages.filter(m=>m.recommendation).at(-1);
-  const recommendation=latestRecommendation?`<section class="task-section">${recommendationCard(latestRecommendation.recommendation,{eventId:latestRecommendation.eventId})}</section>`:'';
+  const candidates=scopedMessages.filter(m=>m.recommendation);
+  const latestRecommendation=candidates.find(m=>m.eventId===focusedEventRecommendation)??candidates.at(-1);
+  const recommendation=latestRecommendation?`<section class="task-section" ${latestRecommendation.notificationEventId?`id="event-message-${esc(latestRecommendation.notificationEventId)}"`: ''}>${recommendationCard(latestRecommendation.recommendation,{eventId:latestRecommendation.eventId})}</section>`:'';
   const content=chat?`${backButton('agent-back','返回目标')}<div class="agent-title"><h1>${esc(goal?.title||'说说你想做什么')}</h1></div>${connection}<div class="agent-messages" role="log" aria-live="polite">${history||'<p class="agent-empty">说说你的想法，Along 会和你一起理清下一步。</p>'}</div>`
     :goal?`${connection}<section class="goal-card"><h1>${esc(goal.title)}</h1>${goal.metric?`<p class="goal-note">${esc(goal.metric.target)} ${esc(goal.metric.unit)} · ${esc(goal.metric.period)}</p>`:''}${goal.context.length?`<p class="goal-note">${goal.context.map(item=>esc(typeof item==='string'?item:item.text)).join('；')}</p>`:''}<div class="card-actions"><button class="agent-action" data-action="event-chat">聊聊这个目标</button></div></section>${eventHealthConnection(goal)}${recommendation}<section class="task-section"><div class="section-heading"><h2>动态任务</h2></div><div class="task-list">${goal.tasks.filter(task=>task.status!=='cancelled').map(task=>`<div class="task-row" tabindex="-1" id="event-task-${esc(task.id)}"><div><strong>${esc(task.content)}</strong>${taskReminderLine(task)}</div><span class="task-row-status">${task.status==='done'?'已完成':'待完成'}</span></div>`).join('')||'<p class="agent-empty">通过聊天安排下一步。</p>'}</div></section>`:'';
   return `<div class="app-shell ${chat?'agent-shell':''}"><header class="topbar"><div class="topbar-inner">${brand()}</div></header><main class="content ${chat?'agent-page':''}"><div class="${chat?'agent-scroll':''}">${goalPicker}${content}</div>${chat?`<div class="agent-composer-dock"><form id="agent-form" class="agent-composer"><textarea name="message" rows="1" placeholder="说说你的想法" maxlength="800" data-draft-scope="${esc(view.draftScope)}" required>${esc(eventWorkspace.draft())}</textarea><button class="agent-send" aria-label="发送" ${agentBusy?'disabled':''}>↑</button></form><p class="agent-disclaimer">Along · 一起，慢慢向前</p></div>`:''}</main></div>`;
@@ -1424,7 +1428,7 @@ async function injectEvent(event) {
 }
 
 function beginNewGoal() {
-  if (eventWorkspace) {localSelection=null;waitingForSavedGoal=false;eventWorkspace.select(null);screen='agent';render();return;}
+  if (eventWorkspace) {localSelection=null;focusedEventRecommendation=null;waitingForSavedGoal=false;eventWorkspace.select(null);screen='agent';render();return;}
   previousGoalBeforeDraft=activeGoal;
   activeGoal=`custom:${newId('goal')}`;
   conversations[activeGoal]=[];
@@ -1445,7 +1449,7 @@ app.addEventListener('change', event => {
       const key=value.slice(6);
       if (localGoalEntries().some(l=>l.key===key)) {localSelection={key};screen='home';render();}
     } else {
-      localSelection=null;eventWorkspace.select(value||null);screen=value?'home':'agent';render();
+      localSelection=null;focusedEventRecommendation=null;eventWorkspace.select(value||null);screen=value?'home':'agent';render();
     }
     return;
   }
@@ -1477,12 +1481,13 @@ app.addEventListener('click', event => {
     } else if (action==='local-task-back'&&localSelection) {localSelection={key:localSelection.key};render();}
     else if (action==='local-task'&&localSelection&&localTasks(localSelection.key).some(t=>t.id===actionTarget.dataset.taskId)) {
       localSelection={key:localSelection.key,taskId:actionTarget.dataset.taskId};render();
-    } else if (action==='event-chat') {screen='agent';render();}
+    } else if (action==='event-chat') {focusedEventRecommendation=null;screen='agent';render();}
     else if (action==='event-recommendation-feedback') {
-      if (eventWorkspace.prepareRecommendationFeedback(actionTarget.dataset.eventId)) {screen='agent';render();}
+      if (eventWorkspace.prepareRecommendationFeedback(actionTarget.dataset.eventId)) {focusedEventRecommendation=null;screen='agent';render();}
     }
     else if (action==='event-health-connect') {void connectHealth();}
     else if (action==='agent-back') {
+      focusedEventRecommendation=null;
       if (!eventWorkspace.view().activeGoalId) eventWorkspace.leaveConversation();
       screen='home';render();
     }
