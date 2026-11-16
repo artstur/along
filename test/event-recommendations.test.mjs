@@ -106,3 +106,29 @@ test('a completed research task publishes a current task result while ordinary c
   installDomStub();window.AlongAgentBridge={request:async input=>input.path==='/sync'?{items:input.body.after_seq?[]:[other]}:{acked:1}};
   const p=[];await createEventWorkspace({config,onNotifications:async v=>p.push(v)}).sync();assert.deepEqual(p.at(-1).results,[]);
 });
+
+
+test('an already-acknowledged chat cache replays authoritative audience and keeps drafts and background recommendation evidence',async()=>{
+  const wire=message();wire.payload.audience='background';wire.payload.message.audience='background';
+  const goal={id:'g_research',domain:'custom',status:'active',revision:1,title:'运动安排',metric:null,context:[],tasks:snapshot.tasks.map(t=>({...t,revision:t.currentRevision}))};
+  const old={version:1,recommendationsVersion:1,userId:config.userId,cursor:10,activeGoalId:goal.id,conversationId:null,goals:{[goal.id]:goal},drafts:{'goal:g_research':'真正未发送的补充'},messages:{reply_research:{eventId:'reply_research',role:'assistant',text:'已找到方案',goalId:goal.id,status:'received'}}};
+  const key='along.event-workspace.v1:'+config.userId;installDomStub({storage:{[key]:JSON.stringify(old)}});
+  const requests=[];window.AlongAgentBridge={request:async input=>{requests.push(input);return input.path==='/sync'?{items:input.body.after_seq===0?[wire]:[]}:{acked:1};}};
+  const w=createEventWorkspace({config});await w.sync();
+  assert.equal(requests.find(r=>r.path==='/sync').body.conversation_version,1);
+  assert.equal(requests.find(r=>r.path==='/sync').body.after_seq,0);assert.equal(w.view().cursor,10);
+  assert.equal(w.view().messages[0].audience,'background');assert.equal(w.view().messages[0].recommendation.options.length,1);
+  assert.equal(w.draft(),'真正未发送的补充');assert.equal(JSON.parse(localStorage.getItem(key)).conversationVersion,1);
+  window.AlongAgentBridge.request=async()=>{throw Error('offline');};
+  const reopened=createEventWorkspace({config});await reopened.sync();
+  assert.equal(reopened.view().messages[0].audience,'background');assert.equal(reopened.draft(),'真正未发送的补充');
+});
+
+test('audience metadata cannot contradict itself or silently classify unknown wire values as direct chat',async()=>{
+  for(const [outer,inner] of [['conversation','background'],['background','unknown'],['invalid','conversation']]){
+    installDomStub();const wire=message();wire.payload.audience=outer;wire.payload.message.audience=inner;
+    window.AlongAgentBridge={request:async input=>input.path==='/sync'?{items:[wire]}:{acked:1}};
+    const w=createEventWorkspace({config});await w.sync();
+    assert.equal(w.view().cursor,0);assert.equal(w.view().messages.length,0);assert.match(w.view().error,/对话同步格式/);
+  }
+});

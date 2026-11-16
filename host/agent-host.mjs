@@ -176,8 +176,8 @@ async function ensurePairingRegistered() {
   } catch (error) { console.warn('Along 未能把配对身份注册到 Along Source（稍后自动重试）：',error.message); }
 }
 ensurePairingRegistered();
-function readSyncPage(who,afterSeq,limit) {
-  return upstream(()=>bridge.call(`/along-source/api/sync?user_id=${encodeURIComponent(who.userId)}&after_seq=${afterSeq}&limit=${limit}`,{method:'GET',identity:who}));
+function readSyncPage(who,afterSeq,limit,conversationVersion=1) {
+  return upstream(()=>bridge.call(`/along-source/api/sync?user_id=${encodeURIComponent(who.userId)}&after_seq=${afterSeq}&limit=${limit}${conversationVersion===1?'&conversation_version=1':''}`,{method:'GET',identity:who}));
 }
 const notifications=taskNotifications({dir,identity:()=>identity,readPage:readSyncPage,send:createApnsProvider()});
 let registeringForNotifications=false;
@@ -216,7 +216,7 @@ async function handleAlongNewLink(req,res,path) {
   if (path==='/sync') {
     const afterSeq=Number.isInteger(input?.after_seq)&&input.after_seq>=0?input.after_seq:0;
     const limit=Number.isInteger(input?.limit)?Math.min(Math.max(input.limit,1),200):50;
-    const result=await readSyncPage(who,afterSeq,limit);
+    const result=await readSyncPage(who,afterSeq,limit,input?.conversation_version===1?1:0);
     return respond(res,200,notifications.decorate(who,result,input));
   }
   if (path==='/sync/ack') {
