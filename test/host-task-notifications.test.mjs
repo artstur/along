@@ -330,3 +330,12 @@ test('system second precision matches Agent timestamps with fractional milliseco
   due.payload.snapshot.tasks[0].scheduledAt=firstScheduledAt;f.pages.push(due);
   await one.dispatch();assert.equal(f.sent.length,0);
 });
+
+
+test('classification-only history never becomes a new Host alert and still advances its scan cursor',async t=>{
+  const f=fixture(t),service=taskNotifications(f.options);service.register(f.who,f.input);
+  const classified=f.item(1);classified.payload.classification_only=true;
+  f.pages.push(classified,f.item(2));await service.dispatch();
+  assert.deepEqual(f.sent.map(r=>r.eventId),['event:2']);
+  await taskNotifications(f.options).dispatch();assert.equal(f.sent.length,1);
+});

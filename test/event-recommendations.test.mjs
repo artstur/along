@@ -132,3 +132,12 @@ test('audience metadata cannot contradict itself or silently classify unknown wi
     assert.equal(w.view().cursor,0);assert.equal(w.view().messages.length,0);assert.match(w.view().error,/对话同步格式/);
   }
 });
+
+
+test('classification-only history updates retain evidence and notification routing without generating a fresh alert',async()=>{
+  const wire=message();wire.payload.classification_only=true;wire.payload.audience='background';wire.payload.message.audience='background';wire.createdAt=new Date().toISOString();
+  installDomStub();const projections=[];window.AlongAgentBridge={request:async input=>input.path==='/sync'?{items:input.body.after_seq?[]:[wire]}:{acked:1}};
+  const w=createEventWorkspace({config,onNotifications:async p=>projections.push(p)});await w.sync();
+  assert.equal(w.view().messages[0].notificationEventId,'reply_research');assert.ok(w.view().messages[0].recommendation);
+  assert.deepEqual(projections.at(-1).results,[]);assert.equal(w.view().cursor,1);
+});

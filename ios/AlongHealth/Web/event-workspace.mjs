@@ -148,7 +148,7 @@ function applicableResult(r,goals) {
 
 function localResult(item,remote) {
   const n=item.payload.notification;
-  if (remote!==false||!record(n)||!id(item.goalId)||!eventId(n.event_id)||
+  if (item.payload.classification_only===true||remote!==false||!record(n)||!id(item.goalId)||!eventId(n.event_id)||
       !['recommendation_ready','task_result'].includes(n.kind)||!version(n.revision)||
       !freshResult(item.createdAt)||(item.taskId!=null&&!id(item.taskId))) return null;
   return {eventId:n.event_id,kind:n.kind,goalId:item.goalId,taskId:item.taskId??undefined,revision:n.revision,createdAt:item.createdAt};
