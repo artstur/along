@@ -35,6 +35,15 @@ function summaryReason(summary) {
   if (!textBetween(summary.timezone, 1, 64)) return '摘要时区无效';
   if (!textBetween(summary.summarizer_version, 1, 64)) return '摘要器版本无效';
   if (!AVAILABILITIES.includes(summary.availability)) return '摘要可用性无效';
+  if (summary.value!==undefined&&summary.value!==null&&(typeof summary.value!=='number'||!Number.isFinite(summary.value))) return '摘要只能包含有限数值';
+  if (summary.summarizer_version==='along-health-v1'&&HEALTH_SUMMARY_TYPES.includes(summary.type)) {
+    const units={steps:'count',workout:'min',active_energy:'kcal',weight:'kg',resting_heart_rate:'bpm',wrist_temperature:'degC',sleep:'min'};
+    if (summary.unit!==units[summary.type]) return '摘要单位不符';
+    if (!summary.window||!('start' in summary.window)||!isTime(summary.window.start)||!isTime(summary.window.end)||Date.parse(summary.window.start)>Date.parse(summary.window.end)) return '摘要观测窗口无效';
+    if (!isTime(summary.metric_version)) return '摘要读取版本无效';
+    if (summary.availability==='ok'&&typeof summary.value!=='number') return '有效摘要缺少数值';
+    if (summary.availability!=='ok'&&summary.value!==null&&summary.value!==undefined) return '不可用摘要带有数值';
+  }
   if (summary.window !== undefined) {
     if (!isRecord(summary.window)) return '摘要窗口无效';
     const windowKeys = Object.keys(summary.window).sort();

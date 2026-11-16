@@ -43,7 +43,7 @@ iPhone 的原话通过阶段 A 事件队列进入 Mac；Worker 读取服务端�
 - 独立只读核实通过：lossless JSON、严格参数、同 work 创建后绑定、不能用无效 stop 变相忽略聊天。
 - 真实 Harness 0.2.2-rc.3 / MiniMax-M3.1-Flash 合成验证通过：现象先回应不建目标；明确意图建立 custom 目标且没有数值指标；聊天纠正更新任务；3 条答复落库且工单结束。证明在 fork 忽略目录 `.artifacts/along-phaseb-chat-ready/proof.json`；失败的早期探针没有计作通过。验证进程已停止。
 - Playwright 390×844（原生桥/响应替身）：目标和任务自动展示，草稿及焦点跨空轮询保持，没有横向溢出、旧接口请求或控制台错误。
-- Xcode 27.2 对 generic iOS 目标的无签名构建成功；尚未在实际 iPhone 上安装、配对或验证离线重连。健康新协议及完整迁移恢复仍待后续实施。记忆宿主接线已于后续实现，见 `../along-superagent/docs/along/006-memory-implementation.md` §5；定时提取仍属阶段 E。
+- Xcode 27.2 对 generic iOS 目标的无签名构建成功；尚未在实际 iPhone 上安装、配对或验证离线重连。健康新协议已在后续阶段 C 实现，见 [阶段 C](stage-c-tech-design.md)；完整迁移恢复仍待后续验收。记忆宿主接线已于后续实现，见 `../along-superagent/docs/along/006-memory-implementation.md` §5；定时提取仍属阶段 E。
 
 ## 本地验证与手机连接
 

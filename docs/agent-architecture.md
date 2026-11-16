@@ -1,5 +1,7 @@
 # Along 新架构入口
 
+2026-11-16：阶段 C 健康事件自动跟进已实现，覆盖原生前后台摘要队列、按目标筛选、自动派工和校验后的任务调整；需要重新安装 App，真机后台机会仍待验收。见 [阶段 C 设计与验收](stage-c-tech-design.md)。
+
 2026-11-16：已实现记忆定时维护的 DSH 工单闭环，支持在 Superagent 的 Deployment / Plugin Manager 配置中设置 `alongMaintenanceTime`（Mac 本地时间，默认 `03:00`，保存后生效）。[设计与验收记录](https://github.com/artstur/along-superagent/blob/feature/along-phase0/docs/along/008-scheduled-maintenance.md)位于相邻仓库；不涉及手机页面或资源版本变更。
 
 > 2026-11-16 更新。当前有效方案在相邻的 `along-superagent` 仓库 `feature/along-phase0` 分支；本页替代 2026-11-14 的云端、多用户与逐次复盘草案。阶段 A 基座与 B 最小聊天闭环已有实现，记忆已接入 Runtime 和定时维护；完整架构尚未完成，见 [阶段 B 实施范围](stage-b-tech-design.md)。

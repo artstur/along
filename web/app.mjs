@@ -67,6 +67,7 @@ function connectEventWorkspace(userId) {
   localStorage.setItem(AGENT_RUNTIME_KEY,agentRuntime);
   verifiedHealthHost=false;
   void Promise.resolve(window.AlongHealthBridge?.backgroundReview?.('disarm',{})).catch(()=>{});
+  void Promise.resolve(window.AlongHealthBridge?.healthEvents?.()).catch(()=>{});
   queueBackgroundSync();
 }
 let goalCustom = readStored(GOALS_KEY, {health:null, finance:null, custom:null});
@@ -1126,6 +1127,11 @@ function experimentPanel() {
 function lab() {
   return `<div class="app-shell"><header class="topbar"><div class="topbar-inner">${brand()}<span class="topbar-caption">目标变化实验</span></div></header><main class="content lab-content">${backButton('back-home','返回目标')}<h1>当进度变化，下一步会怎样变？</h1><p class="lab-intro">这是与真实健康数据隔离的模拟实验。Along 计算进度，再判断是否需要更新建议。</p>${experimentPanel()}</main></div>`;
 }
+function eventHealthConnection(goal) {
+  if (!goal||goal.domain==='finance') return '';
+  const connected=state.source==='healthkit'&&state.snapshot?.contextReviewAllowed;
+  return `<section class="connection-section"><div class="connection-card"><div class="connection-symbol" aria-hidden="true">♥</div><div class="connection-copy"><div class="connection-name"><strong>Apple Health</strong></div><p>${connected?'所选健康摘要变化后，Along 会自动跟进。':'连接所选健康摘要，让 Along 随变化自动跟进。'}</p></div><button class="agent-action connection-agent-action" data-action="event-health-connect">${connected?'管理':'连接'}</button></div></section>`;
+}
 function eventWorkspacePage() {
   const view=eventWorkspace.view();
   const goals=Object.values(view.goals).filter(goal=>goal.status==='active');
@@ -1139,7 +1145,7 @@ function eventWorkspacePage() {
   const goalPicker=`<div class="goal-switch"><label for="event-goal-select">当前目标</label><div class="goal-switch-actions"><div class="select-wrap"><select id="event-goal-select" aria-label="切换目标"><option value="" ${!view.activeGoalId?'selected':''}>新对话</option>${options}</select></div><button class="goal-add-button" data-action="new-goal">新建</button></div></div>`;
   const history=messages.map(message=>`<div class="agent-message ${message.role==='user'?'user':'assistant'}"><p>${esc(message.text)}</p>${message.status==='pending'?'<p class="agent-disclaimer">待同步</p>':message.status==='rejected'||message.status==='failed'?'<p class="agent-disclaimer">发送未完成，请通过聊天重新说明。</p>':''}</div>`).join('');
   const content=chat?`${goal?backButton('agent-back','返回目标'):''}<div class="agent-title"><h1>${esc(goal?.title||'说说你想做什么')}</h1></div>${connection}<div class="agent-messages" role="log" aria-live="polite">${history||'<p class="agent-empty">说说你的想法，Along 会和你一起理清下一步。</p>'}</div>`
-    :`${connection}<section class="goal-card"><h1>${esc(goal.title)}</h1>${goal.metric?`<p class="goal-note">${esc(goal.metric.target)} ${esc(goal.metric.unit)} · ${esc(goal.metric.period)}</p>`:''}${goal.context.length?`<p class="goal-note">${goal.context.map(item=>esc(typeof item==='string'?item:item.text)).join('；')}</p>`:''}<div class="card-actions"><button class="agent-action" data-action="event-chat">聊聊这个目标</button></div></section><section class="task-section"><div class="section-heading"><h2>动态任务</h2></div><div class="task-list">${goal.tasks.filter(task=>task.status!=='cancelled').map(task=>`<div class="task-row"><div><strong>${esc(task.content)}</strong>${task.scheduledAt?`<p>${esc(new Date(task.scheduledAt).toLocaleString('zh-CN'))}</p>`:''}</div><span class="task-row-status">${task.status==='done'?'已完成':'待完成'}</span></div>`).join('')||'<p class="agent-empty">通过聊天安排下一步。</p>'}</div></section>`;
+    :`${connection}<section class="goal-card"><h1>${esc(goal.title)}</h1>${goal.metric?`<p class="goal-note">${esc(goal.metric.target)} ${esc(goal.metric.unit)} · ${esc(goal.metric.period)}</p>`:''}${goal.context.length?`<p class="goal-note">${goal.context.map(item=>esc(typeof item==='string'?item:item.text)).join('；')}</p>`:''}<div class="card-actions"><button class="agent-action" data-action="event-chat">聊聊这个目标</button></div></section>${eventHealthConnection(goal)}<section class="task-section"><div class="section-heading"><h2>动态任务</h2></div><div class="task-list">${goal.tasks.filter(task=>task.status!=='cancelled').map(task=>`<div class="task-row"><div><strong>${esc(task.content)}</strong>${task.scheduledAt?`<p>${esc(new Date(task.scheduledAt).toLocaleString('zh-CN'))}</p>`:''}</div><span class="task-row-status">${task.status==='done'?'已完成':'待完成'}</span></div>`).join('')||'<p class="agent-empty">通过聊天安排下一步。</p>'}</div></section>`;
   return `<div class="app-shell ${chat?'agent-shell':''}"><header class="topbar"><div class="topbar-inner">${brand()}</div></header><main class="content ${chat?'agent-page':''}"><div class="${chat?'agent-scroll':''}">${goalPicker}${content}</div>${chat?`<div class="agent-composer-dock"><form id="agent-form" class="agent-composer"><textarea name="message" rows="1" placeholder="说说你的想法" maxlength="800" required></textarea><button class="agent-send" aria-label="发送" ${agentBusy?'disabled':''}>↑</button></form><p class="agent-disclaimer">Along · 一起，慢慢向前</p></div>`:''}</main></div>`;
 }
 function renderEventUpdate() {
@@ -1180,6 +1186,16 @@ function connectInfo() {
 }
 async function connectHealth(goalKey=activeGoal) {
   if (!window.AlongHealthBridge?.connect) { connectInfo(); return; }
+  if (eventWorkspace) {
+    try {
+      if (!window.AlongHealthBridge.healthEvents) throw Error('请重新安装新版 Along App 以启用健康自动跟进');
+      const snapshot=await window.AlongHealthBridge.connect({types:['steps','weight','workout','sleep']});
+      state=setSnapshot(state,snapshot,'healthkit'); localStorage.setItem(KEY,JSON.stringify(state));
+      await window.AlongHealthBridge.healthEvents();
+      renderEventUpdate();notice('所选健康摘要变化后将自动跟进');
+    } catch(error) {notice(error?.message||'健康连接未完成');}
+    return;
+  }
   try {
     const previousTypes=state.source==='healthkit'&&nativeHealthStatus==='available'&&state.snapshot?.contextReviewAllowed
       ? state.snapshot.selectedTypes||[]:[];
@@ -1310,6 +1326,7 @@ app.addEventListener('click', event => {
   if (eventWorkspace) {
     if (action==='new-goal') beginNewGoal();
     else if (action==='event-chat') {screen='agent';render();}
+    else if (action==='event-health-connect') {void connectHealth();}
     else if (action==='agent-back') {screen='home';render();}
     return;
   }

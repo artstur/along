@@ -61,6 +61,7 @@ final class AlongBridgeModel: ObservableObject {
     private(set) var managedGoal: String?
     var foregroundReadsAllowed: () -> Bool = { true }
     var backgroundConsentChanged: () -> Void = {}
+    var requestHealthEventSync: () -> Void = {}
     private let backgroundPreference = "along.health.backgroundReviewGoal.v1"
 
     private let reader = HealthKitReader()
@@ -77,7 +78,7 @@ final class AlongBridgeModel: ObservableObject {
         if foregroundReadsAllowed() { resumeForeground() }
     }
 
-    func resumeForeground() { startObservers(); refreshHealth() }
+    func resumeForeground() { startObservers(); refreshHealth(); requestHealthEventSync() }
     func pauseForeground() { reader.stopObserving() }
 
     private var savedSelection: Set<HealthMetric> {
@@ -137,7 +138,7 @@ final class AlongBridgeModel: ObservableObject {
                     let summary = try await reader.read(savedSelection, requestPermission: false, includeContext: contextReviewAllowed,
                                                         includeComparisonHistory: comparisonHistoryAllowed)
                     let snapshot = scopedSnapshot(summary)
-                    if publish && epoch == healthEpoch && foregroundReadsAllowed() { publishHealthSnapshot(snapshot) }
+                    if publish && epoch == healthEpoch && foregroundReadsAllowed() { publishHealthSnapshot(snapshot); requestHealthEventSync() }
                     result = ["ok": true, "snapshot": snapshot]
                 } catch {
                     if publish && epoch == healthEpoch { errorMessage = error.localizedDescription }
@@ -441,13 +442,14 @@ enum AlongConnectionStore {
 
 struct AlongWebView: UIViewRepresentable {
     @ObservedObject var bridge: AlongBridgeModel
-    private let site = URL(string: "along://app/index.html?build=58")!
+    private let site = URL(string: "along://app/index.html?build=59")!
 
     func makeCoordinator() -> Coordinator { Coordinator(bridge: bridge) }
 
     func makeUIView(context: Context) -> WKWebView {
         bridge.foregroundReadsAllowed = { UIApplication.shared.applicationState != .background }
-        bridge.backgroundConsentChanged = { BackgroundHealthReviews.shared.consentChanged() }
+        bridge.requestHealthEventSync = { HealthEventDelivery.shared.request() }
+        bridge.backgroundConsentChanged = { BackgroundHealthReviews.shared.consentChanged(); HealthEventDelivery.shared.consentChanged() }
         let controller = WKUserContentController()
         controller.add(context.coordinator, name: "alongHealth")
         controller.add(context.coordinator, name: "alongHealthRefresh")
@@ -492,6 +494,10 @@ struct AlongWebView: UIViewRepresentable {
           const id = newId();
           pending.set(id, {resolve, reject});
           window.webkit.messageHandlers.alongHealth.postMessage({id, types, goalKey});
+        }),
+        healthEvents: () => new Promise((resolve, reject) => {
+          const id = newId(); agentPending.set(id, {resolve, reject});
+          window.webkit.messageHandlers.alongAgent.postMessage({id, operation: 'healthEvents'});
         }),
         backgroundReview: (action, value = {}) => new Promise((resolve, reject) => {
           const id = newId();
@@ -607,6 +613,17 @@ struct AlongWebView: UIViewRepresentable {
                         do { result = ["ok": true, "value": try await Self.notificationOperation(body)] }
                         catch { result = ["ok": false, "error": error.localizedDescription] }
                         await MainActor.run { Self.deliverAlongResult(id: id, result: result, webView: webView) }
+                    }
+                    return
+                }
+                if body["operation"] as? String == "healthEvents" {
+                    Task { @MainActor in
+                        let result: [String: Any]
+                        do {
+                            guard origin.protocol == "along", origin.host == "app" else { throw AgentBridgeError.invalidConfiguration }
+                            result = ["ok": true, "value": try await HealthEventDelivery.shared.configure()]
+                        } catch { result = ["ok": false, "error": error.localizedDescription] }
+                        Self.deliverAlongResult(id: id, result: result, webView: webView)
                     }
                     return
                 }

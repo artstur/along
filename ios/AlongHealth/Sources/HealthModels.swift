@@ -157,6 +157,7 @@ struct HealthSummary {
     var sleepSummary: [String: Any]?
     var workoutSummary: [String: Any]?
     var recentHistory: [String: [String: Any]] = [:]
+    var readingDates: [HealthMetric: Date] = [:]
 
     private var previousSleepMinutes: Int? {
         (recentHistory["sleep"]?["previous"] as? [String: Any])?["value"] as? Int
@@ -211,6 +212,42 @@ struct HealthSummary {
             default: return nil
             }
             return "\(dates) · \(days)/7 天有记录 · \(amount)"
+        }
+    }
+
+    // Only scalar aggregates cross the event boundary. The read revision is separate from the observation window.
+    func eventSummaries(calendar: Calendar = .current) -> [[String: Any]] {
+        let iso = ISO8601DateFormatter(); iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let day = calendar.dateInterval(of: .day, for: capturedAt)!
+        var weekCalendar = Calendar(identifier: .iso8601); weekCalendar.timeZone = calendar.timeZone
+        let week = weekCalendar.dateInterval(of: .weekOfYear, for: capturedAt)!
+        let sleep = SleepObservationWindow(now: capturedAt, calendar: calendar)
+        return selected.map { metric in
+            let type: String, unit: String, statistic: String, value: Double?
+            var start = day.start, end = day.end
+            switch metric {
+            case .steps: type = "steps"; unit = "count"; statistic = "sum"; value = steps.map(Double.init)
+            case .workout:
+                type = "workout"; unit = "min"; statistic = "sum"; value = workoutMinutes.map(Double.init)
+                start = week.start; end = week.end
+            case .activeEnergy: type = "active_energy"; unit = "kcal"; statistic = "sum"; value = activeEnergyKcal.map(Double.init)
+            case .weight: type = "weight"; unit = "kg"; statistic = "latest"; value = weightKg
+            case .restingHeartRate: type = "resting_heart_rate"; unit = "bpm"; statistic = "latest"; value = restingHeartRate.map(Double.init)
+            case .wristTemperature: type = "wrist_temperature"; unit = "degC"; statistic = "latest"; value = wristTemperatureC
+            case .sleep:
+                type = "sleep"; unit = "min"; statistic = "night_sum"
+                // An open sleep window is explicit in its end timestamp; absence remains unknown, never zero.
+                end = sleep.latestBoundary
+                if sleepMinutes == nil { end = calendar.date(byAdding: .day, value: -1, to: sleep.latestBoundary)! }
+                start = calendar.date(byAdding: .day, value: -1, to: end)!
+                value = sleepMinutes.map(Double.init) ?? (sleepSummary?["previousNightMinutes"] as? NSNumber)?.doubleValue
+            }
+            if statistic == "latest", let observed = readingDates[metric] { start = observed; end = observed }
+            let available = value?.isFinite == true
+            return ["type": type, "unit": unit, "statistic": statistic,
+                    "value": available ? value! as Any : NSNull(), "availability": available ? "ok" : "unavailable",
+                    "window": ["start": iso.string(from: start), "end": iso.string(from: end)],
+                    "timezone": calendar.timeZone.identifier, "metric_version": iso.string(from: capturedAt), "summarizer_version": "along-health-v1"]
         }
     }
 

@@ -49,7 +49,7 @@ const VECTOR_CASES = [
   ['健康摘要（带窗口）合法', {...VECTOR, event_id: 'evt-vector-0002', event_type: 'along.health_summary_updated',
     payload: {event_type: 'along.health_summary_updated', summaries: [{type: 'steps', metric_version: 'mv1', unit: '步',
       statistic: 'sum', window: {start: '2026-11-14T00:00:00+08:00', end: '2026-11-15T00:00:00+08:00'}, timezone: 'Asia/Shanghai',
-      value: {total: 5200}, availability: 'ok', summarizer_version: 'summarizer-7'}]}}, true],
+      value: 5200, availability: 'ok', summarizer_version: 'summarizer-7'}]}}, true],
   ['task.completed 反馈合法', {...VECTOR, event_id: 'evt-vector-0003', event_type: 'along.message', kind: 'task.completed',
     task_id: 't_vector00001', payload: {event_type: 'along.message', kind: 'task.completed', task_id: 't_vector00001', note: '已完成'}}, true],
   ['authorization.changed 无业务载荷合法', {...VECTOR, event_id: 'evt-vector-0004', event_type: 'along.message',

@@ -8,6 +8,10 @@ test('the real app discovers the new protocol, uses events during ongoing work, 
   document.visibilityState='visible';
   let current=[],seq=0;
   const requests=[];
+  let healthImports=0,healthEventBindings=0;
+  window.AlongHealthBridge={healthEvents:async()=>{healthEventBindings++;return {enabled:true};},connect:async()=>{
+    healthImports++;return {contextReviewAllowed:true,selectedTypes:['steps'],steps:1200,capturedAt:new Date().toISOString()};
+  }};
   window.AlongAgentBridge={request:async input=>{
     requests.push(input);
     if(input.path==='/connection/status')return {along:true,ready:true,runtime:'dsh-superagent',eventProtocol:1,userId:'u_app_b'};
@@ -34,6 +38,12 @@ test('the real app discovers the new protocol, uses events during ongoing work, 
   assert.match(dom.app.innerHTML,/改善睡眠/);
   await dom.click({action:'agent-back'});
   assert.match(dom.app.innerHTML,/睡前放下手机/);
+  assert.match(dom.app.innerHTML,/event-health-connect/);
+  await dom.click({action:'event-health-connect'});await settle();
+  assert.equal(healthImports,1);
+  assert.ok(healthEventBindings>=2,'protocol discovery and import both configure native event delivery');
+  assert.match(dom.app.innerHTML,/所选健康摘要变化后/);
+  assert.equal(requests.filter(item=>item.path==='/events').length,2,'the native outbox owns health uploads; the web app sends only chat');
   assert.doesNotMatch(dom.app.innerHTML,/accept-goal|accept-task|edit-goal|delete-goal|select-runtime|采用/);
   await dom.click({action:'accept-goal',requestId:'forged'});
   assert.equal(requests.some(item=>item.path.startsWith('/super-agent/')),false);

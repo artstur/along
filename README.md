@@ -43,6 +43,8 @@ Along 把一个目标拆成三样东西，并让它们保持联动：
 
 ## 新架构与实现状态
 
+阶段 C 已接入健康事件自动跟进：在新协议目标页复用 Apple Health 连接卡，导入并允许 Agent 使用所选摘要后，手机在前台及系统允许的后台机会自动补传；Mac 按目标筛选变化并自动建评估工单，经校验调整任务。无须再发聊天，也无采用步骤。原始样本仍留在手机。设计、验证与真机边界见 [阶段 C](docs/stage-c-tech-design.md)。
+
 新方案以 [Along 本地 Agent 系统架构](https://github.com/artstur/along-superagent/blob/feature/along-phase0/docs/along/001-architecture.md) 为准：首期自用，Mac 上运行 Along Host、DSH fork 与 Hy-Memory，iPhone 提供聊天和授权健康摘要。Mac 保存业务状态，手机保留离线缓存与待同步事件。复盘、记忆提取和 Skill 整理由定时作业批量处理。
 
 已确定的交互边界：
