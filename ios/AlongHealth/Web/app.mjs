@@ -47,6 +47,7 @@ let verifiedHealthHost=false;
 let checkingHealthHost=false;
 let agentConnection = {status:agentConfig.token?'checking':'unconfigured',error:''};
 let eventWorkspace=null,eventWorkspaceBinding='';
+let localSelection=null,waitingForSavedGoal=false;
 let lastNotificationProjection='',lastNotificationCheck=0;
 const EVENT_CONNECTION_KEY='along.event-connection.v1';
 function eventConnection(config=agentConfig) {
@@ -64,7 +65,14 @@ function connectEventWorkspace(userId) {
     eventWorkspace=createEventWorkspace({config:{...agentConfig,userId},onChange:()=>renderEventUpdate(),
       onNotifications:window.AlongAgentBridge?.notification?value=>syncEventNotifications(value,bindingKey):undefined});
     eventWorkspaceBinding=bindingKey;
-    if (!eventWorkspace.view().activeGoalId) screen='agent';
+    const view=eventWorkspace.view();
+    waitingForSavedGoal=!view.activeGoalId&&!view.composing;
+    if (!localSelection&&waitingForSavedGoal) {
+      const choices=localGoalEntries();
+      const local=choices.find(item=>item.key===storedActiveGoal)??choices[0];
+      if (local) localSelection={key:local.key,initial:true};
+    }
+    screen=localSelection||view.activeGoalId?'home':'agent';
   }
   agentRuntime=DSH_RUNTIME;
   localStorage.setItem(AGENT_RUNTIME_KEY,agentRuntime);
@@ -176,7 +184,7 @@ function reviewFor(key) {
 // - 上次停在一个还没拿到结果的请求上：那次请求在 App 关掉时就没有下文了，
 //   落成明确终态，别把用户锁在一页禁用的输入框上。
 const draftKey=isCustomGoalKey(activeGoal)&&!goalCustom[activeGoal]&&!goalLayouts[activeGoal]?activeGoal:null;
-if (draftKey) {
+if (draftKey&&!eventConnection()) {
   const draftRunKey=Object.keys(goalSuperAgentRuns).find(key=>key.startsWith(`${draftKey}:`));
   const draftRun=draftRunKey?goalSuperAgentRuns[draftRunKey]:null;
   if ((conversations[draftKey]?.length||0)>0 || draftRun) {
@@ -200,7 +208,7 @@ function syncAgentViewportHeight() {
 syncAgentViewportHeight();
 window.visualViewport?.addEventListener('resize',syncAgentViewportHeight);
 window.addEventListener('resize',syncAgentViewportHeight);
-localStorage.setItem(KEY, JSON.stringify(state));
+if (!eventConnection()) localStorage.setItem(KEY, JSON.stringify(state));
 
 const esc = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
 // 仓库外的 Agent 服务给出的字段不保证是字符串：不能直接对它调用 .slice()，
@@ -1139,10 +1147,11 @@ async function syncEventNotifications(value,binding) {
   if (binding!==eventWorkspaceBinding) return;
   const projection=JSON.stringify(value);
   if (projection===lastNotificationProjection && Date.now()-lastNotificationCheck<30_000) return;
+  const generation=notificationGeneration;
   const response=await window.AlongAgentBridge.notification('eventTaskSync',value);
   if (binding!==eventWorkspaceBinding) return;
   lastNotificationProjection=projection;lastNotificationCheck=Date.now();
-  if (response?.route) await openEventNotification(response.route,true);
+  if (response?.route&&generation===notificationGeneration) await openEventNotification(response.route,true);
 }
 async function openEventNotification(route,synced=false) {
   if (!eventWorkspace||route?.userId!==eventWorkspace.view().userId) return;
@@ -1152,6 +1161,7 @@ async function openEventNotification(route,synced=false) {
     void eventWorkspace.sync();return;
   }
   const task=goal.tasks.find(t=>t.id===route.taskId&&t.status!=='cancelled');
+  localSelection=null;waitingForSavedGoal=false;
   eventWorkspace.select(goal.id);
   screen=goal.status==='active'&&task?'home':'agent';render();
   if (task&&goal.status==='active') {
@@ -1164,17 +1174,53 @@ async function openEventNotification(route,synced=false) {
   await window.AlongAgentBridge.notification('eventTaskOpened',{eventId:route.eventId,userId:route.userId,
     goalId:goal.id,taskId:task?.id??null});
 }
+function localGoalEntries() {
+  const custom=customGoalEntries(goalCustom,goalLayouts);
+  const entries=[];
+  for (const key of ['health','finance']) {
+    const hasHistory=goalCustom[key]||goalLayouts[key]||conversations[key]?.length||storedActiveGoal===key||
+      (key==='health'?(state.source||state.goals.some(g=>g&&(g.type!=='workout'||g.target!==120))):
+        finance.connected||finance.recordCount>0);
+    if (hasHistory) entries.push({key,title:goalCustom[key]?.title||goalLayouts[key]?.title||currentGoal(key).title});
+  }
+  return [...entries,...custom];
+}
+function localTasks(key) {
+  if (goalLayouts[key]) return goalLayouts[key].tasks;
+  // Built-in computed tasks use the same on-device selection/metric checks as their original home.
+  if (key==='health'||key==='finance') return currentTaskRecords(key);
+  const old=goalCustom[key];
+  return old?.task?[{id:'primary',title:old.task,detail:old.reason||''}]:[];
+}
+function localRecordPage(choice,picker,connection) {
+  const {key,taskId,reminderTitle,reminderAt,dailyTopic}=choice;
+  const allowedTopic=!dailyTopic||dailyPhoneScope(key)?.selectedTypes.includes(dailyTopic);
+  const reminderBody=allowedTopic?choice.reminderBody:null;
+  const entry=localGoalEntries().find(e=>e.key===key);
+  const title=entry?.title||(key==='health'?'本机健康目标':key==='finance'?'本机理财目标':'本机目标');
+  const tasks=entry?localTasks(key):[];
+  const task=taskId?tasks.find(item=>item.id===taskId):null;
+  const receipt=reminderTitle?`<p>${esc(reminderTitle)}${reminderAt&&Number.isFinite(Date.parse(reminderAt))?` · ${esc(formatDate(reminderAt))}`:''}</p>${reminderBody?`<p>${esc(reminderBody)}</p>`:''}`:'';
+  const card=task?`${backButton('local-task-back','返回本机目标')}<section class="goal-card"><p class="goal-note">${esc(title)}</p><h1>${esc(task.title)}</h1><p>${esc(task.detail)}</p>${receipt}${task.scheduledFor||task.when?`<p class="goal-note">${esc(task.scheduledFor?formatDate(task.scheduledFor):task.when)}</p>`:''}</section>`
+    :`${backButton('local-exit','返回 Along 目标')}<section class="goal-card"><h1>${esc(title)}</h1>${goalLayouts[key]?.summary?`<p class="goal-note">${esc(goalLayouts[key].summary)}</p>`:''}
+      ${receipt||(taskId?'<p>原提醒关联的任务已调整</p>':'')}</section>
+      <section class="task-section"><div class="section-heading"><h2>本机任务</h2></div><div class="task-list">${tasks.map(t=>`<button class="generated-task generated-task-button" data-action="local-task" data-task-id="${esc(t.id)}"><strong>${esc(t.title)}</strong><p>${esc(t.detail)}</p></button>`).join('')||'<p class="agent-empty">这个目标没有已保存的任务。</p>'}</div></section>`;
+  return `<div class="app-shell"><header class="topbar"><div class="topbar-inner">${brand()}</div></header><main class="content">${picker}${connection}${card}</main></div>`;
+}
 function eventWorkspacePage() {
   const view=eventWorkspace.view();
   const goals=Object.values(view.goals).filter(goal=>goal.status==='active');
   const goal=view.goals[view.activeGoalId];
   const chat=screen==='agent'||Boolean(goal&&goal.status!=='active');
-  const options=goals.map(item=>`<option value="${esc(item.id)}" ${item.id===view.activeGoalId?'selected':''}>${esc(item.title)}</option>`).join('');
+  const localChoices=localGoalEntries();
+  if (localSelection&&!localChoices.some(i=>i.key===localSelection.key)) localChoices.push({key:localSelection.key,title:'原提醒的本机目标'});
+  const options=goals.map(item=>`<option value="${esc(item.id)}" ${!localSelection&&item.id===view.activeGoalId?'selected':''}>${esc(item.title)}</option>`).join('');
   const messages=view.messages.filter(message=>(message.presentation!=='execution'||message.notificationEventId)&&(view.activeGoalId
     ?message.goalId===view.activeGoalId:message.conversationId===view.conversationId));
   const connectionError=view.error||agentConnection.error;
   const connection=connectionError?`<details class="agent-setup"><summary>连接需处理 · ${esc(connectionError)}</summary><form id="host-address-form"><label>Along 服务地址<input name="baseURL" type="url" value="${esc(agentConfig.baseURL||'')}" required></label><button class="button">验证并更新</button></form></details>`:'';
-  const goalPicker=`<div class="goal-switch"><label for="event-goal-select">当前目标</label><div class="goal-switch-actions"><div class="select-wrap"><select id="event-goal-select" aria-label="切换目标"><option value="" ${!view.activeGoalId?'selected':''}>新对话</option>${options}</select></div><button class="goal-add-button" data-action="new-goal">新建</button></div></div>`;
+  const goalPicker=`<div class="goal-switch"><label for="event-goal-select">当前目标</label><div class="goal-switch-actions"><div class="select-wrap"><select id="event-goal-select" aria-label="切换目标"><option value="" ${!localSelection&&!view.activeGoalId?'selected':''}>新对话</option>${options}${localChoices.length?`<optgroup label="本机已存目标">${localChoices.map(l=>`<option value="local:${esc(l.key)}" ${localSelection?.key===l.key?'selected':''}>${esc(l.title)}</option>`).join('')}</optgroup>`:''}</select></div><button class="goal-add-button" data-action="new-goal">新建</button></div></div>`;
+  if (localSelection) return localRecordPage(localSelection,goalPicker,connection);
   const history=messages.map(message=>`<div ${message.notificationEventId?`id="event-message-${esc(message.notificationEventId)}"`: ''} class="agent-message ${message.role==='user'?'user':'assistant'}"><p>${esc(message.text)}</p>${message.status==='pending'?'<p class="agent-disclaimer">待同步</p>':message.status==='rejected'||message.status==='failed'?'<p class="agent-disclaimer">发送未完成，请通过聊天重新说明。</p>':''}</div>`).join('');
   const content=chat?`${backButton('agent-back','返回目标')}<div class="agent-title"><h1>${esc(goal?.title||'说说你想做什么')}</h1></div>${connection}<div class="agent-messages" role="log" aria-live="polite">${history||'<p class="agent-empty">说说你的想法，Along 会和你一起理清下一步。</p>'}</div>`
     :goal?`${connection}<section class="goal-card"><h1>${esc(goal.title)}</h1>${goal.metric?`<p class="goal-note">${esc(goal.metric.target)} ${esc(goal.metric.unit)} · ${esc(goal.metric.period)}</p>`:''}${goal.context.length?`<p class="goal-note">${goal.context.map(item=>esc(typeof item==='string'?item:item.text)).join('；')}</p>`:''}<div class="card-actions"><button class="agent-action" data-action="event-chat">聊聊这个目标</button></div></section>${eventHealthConnection(goal)}<section class="task-section"><div class="section-heading"><h2>动态任务</h2></div><div class="task-list">${goal.tasks.filter(task=>task.status!=='cancelled').map(task=>`<div class="task-row" tabindex="-1" id="event-task-${esc(task.id)}"><div><strong>${esc(task.content)}</strong>${task.scheduledAt?`<p>${esc(new Date(task.scheduledAt).toLocaleString('zh-CN'))}</p>`:''}</div><span class="task-row-status">${task.status==='done'?'已完成':'待完成'}</span></div>`).join('')||'<p class="agent-empty">通过聊天安排下一步。</p>'}</div></section>`:'';
@@ -1182,6 +1228,10 @@ function eventWorkspacePage() {
 }
 function renderEventUpdate() {
   if (!eventWorkspace) return;
+  if (waitingForSavedGoal&&eventWorkspace.view().activeGoalId) {
+    if (!localSelection||localSelection.initial) {localSelection=null;screen='home';}
+    waitingForSavedGoal=false;
+  }
   // Preserve live input only within the same draft scope. A sync can archive the goal and
   // move the composer to a fresh conversation; that scope must use its own persisted draft.
   const input=app.querySelector('#agent-form textarea');
@@ -1322,7 +1372,7 @@ async function injectEvent(event) {
 }
 
 function beginNewGoal() {
-  if (eventWorkspace) {eventWorkspace.select(null);screen='agent';render();return;}
+  if (eventWorkspace) {localSelection=null;waitingForSavedGoal=false;eventWorkspace.select(null);screen='agent';render();return;}
   previousGoalBeforeDraft=activeGoal;
   activeGoal=`custom:${newId('goal')}`;
   conversations[activeGoal]=[];
@@ -1337,7 +1387,15 @@ function beginNewGoal() {
 
 app.addEventListener('change', event => {
   if (eventWorkspace&&event.target.id==='event-goal-select') {
-    eventWorkspace.select(event.target.value||null);screen=event.target.value?'home':'agent';render();return;
+    const value=event.target.value;
+    waitingForSavedGoal=false;
+    if (value.startsWith('local:')) {
+      const key=value.slice(6);
+      if (localGoalEntries().some(l=>l.key===key)) {localSelection={key};screen='home';render();}
+    } else {
+      localSelection=null;eventWorkspace.select(value||null);screen=value?'home':'agent';render();
+    }
+    return;
   }
   if (event.target.id !== 'goal-select') return;
   if (event.target.value === 'new-custom') {
@@ -1350,7 +1408,7 @@ app.addEventListener('change', event => {
 });
 app.addEventListener('input', event => {
   if (!event.target.matches('#agent-form textarea')) return;
-  if (eventWorkspace) eventWorkspace.setDraft(event.target.value);
+  if (eventWorkspace) {waitingForSavedGoal=false;eventWorkspace.setDraft(event.target.value);}
   event.target.style.height='auto';
   event.target.style.height=`${Math.min(event.target.scrollHeight,120)}px`;
 });
@@ -1360,7 +1418,14 @@ app.addEventListener('click', event => {
   if (!action) return;
   if (eventWorkspace) {
     if (action==='new-goal') beginNewGoal();
-    else if (action==='event-chat') {screen='agent';render();}
+    else if (action==='local-exit') {
+      localSelection=null;waitingForSavedGoal=false;
+      if (!eventWorkspace.view().activeGoalId) eventWorkspace.select(null);
+      screen=eventWorkspace.view().activeGoalId?'home':'agent';render();
+    } else if (action==='local-task-back'&&localSelection) {localSelection={key:localSelection.key};render();}
+    else if (action==='local-task'&&localSelection&&localTasks(localSelection.key).some(t=>t.id===actionTarget.dataset.taskId)) {
+      localSelection={key:localSelection.key,taskId:actionTarget.dataset.taskId};render();
+    } else if (action==='event-chat') {screen='agent';render();}
     else if (action==='event-health-connect') {void connectHealth();}
     else if (action==='agent-back') {
       if (!eventWorkspace.view().activeGoalId) eventWorkspace.leaveConversation();
@@ -1522,6 +1587,7 @@ app.addEventListener('submit', async event => {
   const message=String(form.get('message')).trim();
   if (!message) return;
   if (eventWorkspace) {
+    waitingForSavedGoal=false;
     void enableAgentNotifications().then(()=>{lastNotificationProjection='';return eventWorkspace?.sync();});
     agentBusy=true;
     try {
@@ -2329,8 +2395,7 @@ window.addEventListener('along-health-update', async event => {
   await reviewAll('observation',previous);
   if (screen==='home') render();
 });
-window.addEventListener('along-notification-open', event => {
-  const detail=event.detail;
+function openAlongNotification(detail) {
   if (!detail || typeof detail!=='object') return;
   if (detail.userId && detail.eventId) {
     lastNotificationProjection='';
@@ -2339,6 +2404,12 @@ window.addEventListener('along-notification-open', event => {
   }
   const goalKey=detail.goalKey;
   if (goalKey!=='health' && goalKey!=='finance' && !isCustomGoalKey(goalKey)) return;
+  const planTask=detail.dailyTopic&&typeof detail.planTaskId==='string'&&localTasks(goalKey).some(t=>t.id===detail.planTaskId)?detail.planTaskId:null;
+  localSelection={key:goalKey,taskId:detail.kind==='task'?(planTask??(typeof detail.taskId==='string'?detail.taskId:null)):null,
+    dailyTopic:['sleep','workout'].includes(detail.dailyTopic)?detail.dailyTopic:null,reminderAt:detail.reminderAt,
+    reminderTitle:typeof detail.reminderTitle==='string'?detail.reminderTitle:null,reminderBody:typeof detail.reminderBody==='string'?detail.reminderBody:null};
+  waitingForSavedGoal=false;
+  if (eventWorkspace) {screen='home';render();return;}
   activeGoal=goalKey;
   localStorage.setItem(ACTIVE_GOAL_KEY,activeGoal);
   if (hasHealthSource(goalKey)&&['sleep','workout'].includes(detail.dailyTopic)) {
@@ -2358,7 +2429,16 @@ window.addEventListener('along-notification-open', event => {
     notice(String(detail.reminderTitle));
   } else screen='agent';
   render();
-});
+}
+let notificationGeneration=0;
+function receiveAlongNotification(detail) {
+  notificationGeneration++;
+  openAlongNotification(detail);
+  if (typeof detail?.legacyOpenId==='string'&&localSelection?.key===detail.goalKey) {
+    void Promise.resolve(window.AlongAgentBridge?.notification?.('legacyNotificationOpened',{id:detail.legacyOpenId})).catch(()=>{});
+  }
+}
+window.addEventListener('along-notification-open',event=>receiveAlongNotification(event.detail));
 sheet.addEventListener('click', event => {
   const action = event.target.closest('[data-action]')?.dataset.action;
   if (action === 'close') sheet.close();
@@ -2397,6 +2477,12 @@ async function restoreAlongConnection() {
   }
 }
 void restoreAlongConnection();
+if (window.AlongAgentBridge?.notification) {
+  const generation=notificationGeneration;
+  void Promise.resolve(window.AlongAgentBridge.notification('pendingLegacyNotification')).then(reply=>{
+    if (reply?.route&&generation===notificationGeneration) receiveAlongNotification(reply.route);
+  }).catch(()=>{});
+}
 let lastNativeRefresh = 0;
 let readingNative=false;
 async function refreshFromNative(force=false) {

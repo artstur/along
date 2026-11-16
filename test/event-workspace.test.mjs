@@ -318,8 +318,9 @@ test('archiving after switching goals detaches any previously bound conversation
   workspace.select('g_two');await workspace.submit('Archive second goal');
   assert.equal(workspace.view().conversationId,first,'the old root must be present to expose this boundary');
   items=[item(3,'g_two','archived',2)];await workspace.sync();
-  assert.equal(workspace.view().activeGoalId,null);
+  assert.equal(workspace.view().activeGoalId,'g_one','upstream restores the remaining active goal');
   assert.equal(workspace.view().conversationId,null);
+  workspace.select(null);
   const fresh=await workspace.submit('A fresh goal');
   const envelope=pendingEvents(config).find(item=>item.event_id===fresh).envelope;
   assert.equal(envelope.goal_id,undefined);

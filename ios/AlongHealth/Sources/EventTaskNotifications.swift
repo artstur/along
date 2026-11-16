@@ -23,7 +23,15 @@ import UserNotifications
     private var nextPlan: (connection: [String:String], body: [String:Any])?
     private var sendingPlan = false
     weak var coordinator: AlongWebView.Coordinator?
-    private var legacyResponse: UNNotificationResponse?
+    private let legacyKey = "along.notification.legacy-open.v1"
+    var legacyOpen: [String:String]? { defaults.dictionary(forKey:legacyKey) as? [String:String] }
+    func ackLegacy(_ id: String) { if legacyOpen?["legacyOpenId"] == id {defaults.removeObject(forKey:legacyKey)} }
+    func receiveLegacy(_ request: UNNotificationRequest) {
+        guard let route=AlongWebView.Coordinator.legacyPayload(request) else {return}
+        defaults.removeObject(forKey:routeKey)
+        defaults.set(route,forKey:legacyKey)
+        coordinator?.openNotification(route)
+    }
 
     private func valid(_ value: String?) -> Bool {
         guard let value else { return false }
@@ -266,10 +274,7 @@ import UserNotifications
 
     func attach(_ coordinator: AlongWebView.Coordinator) {
         self.coordinator = coordinator
-        if let response = legacyResponse {
-            legacyResponse = nil
-            coordinator.userNotificationCenter(center,didReceive:response,withCompletionHandler:{})
-        }
+        if let route=legacyOpen {coordinator.openNotification(route)}
     }
 
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
@@ -288,14 +293,13 @@ import UserNotifications
                   ["reminder","reminder_due","recommendation_ready","task_result"].contains(kind),
                   route["taskId"] == nil || valid(route["taskId"] as? String) else { handler(); return }
             let clean = route.compactMapValues { $0 as? String }.filter { ["userId","goalId","taskId","eventId","kind"].contains($0.key) }
+            defaults.removeObject(forKey:legacyKey)
             defaults.set(clean,forKey:routeKey)
             if let task = clean["taskId"] { updateProbe(task,["deliveredAt":ISO8601DateFormatter().string(from:response.notification.date),
                                                               "tappedAt":ISO8601DateFormatter().string(from:Date())]) }
             coordinator?.openNotification(clean)
             handler()
-        } else if let coordinator {
-            coordinator.userNotificationCenter(center,didReceive:response,withCompletionHandler:handler)
-        } else { legacyResponse = response; handler() }
+        } else { receiveLegacy(response.notification.request);handler() }
     }
 
     private func updateProbe(_ task: String, _ values: [String:String]) {

@@ -20,18 +20,6 @@ function conversationGoal(value, conversationId = value.conversationId) {
     message.conversationId === conversationId && message.goalId)?.goalId ?? null;
 }
 
-// Apply the same navigation invariant to restored caches and every state transition. Keep
-// history and drafts intact. Once a selection disappears, only an unbound new conversation
-// may remain selected; a root bound to any existing goal must not receive a fresh goal message.
-function reconcileSelection(value) {
-  const activeGoalId = isActiveGoal(value, value.activeGoalId) ? value.activeGoalId : null;
-  const lostSelection = value.activeGoalId != null && activeGoalId === null;
-  const detachConversation = lostSelection && conversationGoal(value) !== null;
-  return {...value, activeGoalId,
-    returnGoalId: isActiveGoal(value, value.returnGoalId) ? value.returnGoalId : null,
-    conversationId: detachConversation ? null : value.conversationId};
-}
-
 // Wire snapshots are validated before entering the cache; layouts are deterministic projections, not model HTML.
 export function safeWorkspaceGoal(snapshot) {
   if (!record(snapshot)||!record(snapshot.goal)||!record(snapshot.revision)||!Array.isArray(snapshot.tasks)) throw Error('目标同步格式不正确');
@@ -128,14 +116,34 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
       saved.notificationReceipts=Array.isArray(saved.notificationReceipts)?saved.notificationReceipts.filter(eventId):[];
       saved.drafts=saved.drafts??{};
       saved.returnGoalId=saved.returnGoalId??null;
-      state=reconcileSelection(saved);
+      state=saved;
     }
   } catch { /* A damaged cache is rebuilt from the durable server outbox. */ }
+  // Old v1 caches did not record an explicit composer selection. Preserve actual unbound messages/drafts.
+  function restoreSelection(next) {
+    const selected=next.goals[next.activeGoalId];
+    if (!isActiveGoal(next,next.returnGoalId)) next.returnGoalId=null;
+    if (selected?.status==='active') return;
+    // A removed selection may keep a truly unbound conversation, never a root of an old goal.
+    if (next.activeGoalId!=null && conversationGoal(next)!==null) next.conversationId=null;
+    if (next.composing===undefined) {
+      const conversation=next.conversationId;
+      next.composing=!selected && (Boolean(next.drafts?.[`conversation:${conversation??'new'}`]) ||
+        Boolean(conversation && Object.values(next.messages).some(m=>m.conversationId===conversation&&!m.goalId) &&
+          !Object.values(next.messages).some(m=>m.conversationId===conversation&&m.goalId)));
+    }
+    if (next.composing) {next.activeGoalId=null;return;}
+    const last=next.goals[next.returnGoalId];
+    const candidate=last?.status==='active'?last:Object.values(next.goals).find(g=>g.status==='active');
+    next.activeGoalId=candidate?.id??null;
+    next.returnGoalId=candidate?.id??null;
+  }
+  restoreSelection(state);
   function save(next) {
     if (disposed) throw Error('连接已切换');
-    const reconciled = reconcileSelection(next);
-    localStorage.setItem(key, JSON.stringify(reconciled));
-    state = reconciled;
+    restoreSelection(next);
+    localStorage.setItem(key,JSON.stringify(next));
+    state=next;
   }
   function recoverPending() {
     const next=structuredClone(state);
@@ -168,30 +176,32 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
     const drafts={...state.drafts};
     if (clean) drafts[draftScope()]=clean;
     else delete drafts[draftScope()];
-    save({...state,drafts});
+    save({...state,drafts,composing:state.activeGoalId?state.composing:true});
   }
   function select(goalId) {
     if (goalId!==null&&!isActiveGoal(state,goalId)) return;
     const returnGoalId=goalId===null
-      ? (isActiveGoal(state,state.activeGoalId)?state.activeGoalId:state.returnGoalId)
+      ? (state.goals[state.activeGoalId]?.status==='active'?state.activeGoalId:state.returnGoalId)
       : goalId;
     // Reopening "new goal" resumes an unbound conversation. This preserves both its durable
     // messages and any follow-up draft written after the first send. Once the server binds that
     // conversation to a goal, the next "new goal" starts from a clean conversation instead.
     const conversationId=goalId===null&&conversationGoal(state)?null:state.conversationId;
-    save({...state,activeGoalId:goalId,conversationId,returnGoalId});onChange();
+    save({...state,activeGoalId:goalId,conversationId,returnGoalId,composing:goalId===null});onChange();
   }
   function leaveConversation() {
-    const returnGoalId=isActiveGoal(state,state.returnGoalId)?state.returnGoalId:null;
+    const returnGoalId=state.goals[state.returnGoalId]?.status==='active'?state.returnGoalId:null;
     // Keep conversationId and its durable outbox intact. A late Agent result must stay bound to
     // this conversation, while the goal the user returned to remains the visible selection.
-    save({...state,activeGoalId:returnGoalId,returnGoalId});onChange();
-    return returnGoalId;
+    const next={...state,activeGoalId:returnGoalId,returnGoalId,composing:false};
+    restoreSelection(next);save(next);onChange();
+    return next.activeGoalId;
   }
   async function submit(message) {
     if (!text(message,800)) throw Error('请输入 800 字以内的消息');
     const next=recoverPending();
     const composingScope=draftScope(next);
+    if (!next.activeGoalId) next.composing=true;
     const assembled=assembleEnvelope({event_type:'along.user_message',occurred_at:new Date().toISOString(),
       timezone:Intl.DateTimeFormat().resolvedOptions().timeZone||'Asia/Shanghai',goal_id:next.activeGoalId??undefined,
       causation_id:next.activeGoalId===null?next.conversationId??undefined:undefined,
@@ -259,7 +269,9 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
         if (item.kind==='message') {
           const message=safeMessage(item.payload.message,item);
           next.messages[message.eventId]=message;
-          if (item.goalId&&state.activeGoalId===null&&message.conversationId===state.conversationId) next.activeGoalId=item.goalId;
+          if (item.goalId&&state.activeGoalId===null&&message.conversationId===state.conversationId) {
+            next.activeGoalId=item.goalId;next.returnGoalId=item.goalId;next.composing=false;
+          }
         }
         if (item.kind==='delivery_failed') {
           const eventId=item.payload.event_id;
@@ -267,6 +279,7 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
         }
       }
       if (page.nextCursor!==undefined&&String(page.nextCursor)!==String(previous)) throw Error('同步分页游标不正确');
+      restoreSelection(next);
       next.cursor=previous;next.pendingAck=seqs;
       save(next);onChange();
       // Cache commit precedes ack. A failed ack is retried before pulling further, without replaying data.

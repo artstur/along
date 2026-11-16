@@ -121,6 +121,81 @@ test('a system notification opens its bound goal and focuses the exact task befo
   assert.deepEqual(focused,['event-task-t_goal_two']);assert.equal(receipts.at(-1).taskId,'t_goal_two');
 });
 
+function localNoticeSeed() {
+  const localKey='custom:legacy';
+  const layouts={[localKey]:{version:1,title:'本机原目标',summary:'旧记录',modules:[],questions:[],connections:[],
+    tasks:[{id:'task_old',title:'原任务',detail:'原来保存的行动细节',when:'今天',state:'planned'}]}};
+  return {'along.agent.v1':JSON.stringify(config),'along.event-connection.v1':JSON.stringify({userId:'u_app_b',fingerprint:config.fingerprint}),
+    'along.adaptive-layouts.v1':JSON.stringify(layouts),'along.goal-custom.v1':JSON.stringify({[localKey]:{title:'本机原目标'}}),
+    'along.active-goal.v1':localKey};
+}
+test('legacy notification reopens exactly its own saved task offline and returns to the event workspace',async()=>{
+  const seed=localNoticeSeed(),dom=installDomStub({storage:seed});
+  document.visibilityState='visible';
+  const calls=[];window.AlongAgentBridge={request:async input=>{calls.push(input.path);throw Error('offline');}};
+  await import(`../web/app.mjs?legacy-notice=${Date.now()}`);await settle();
+  await dom.fireWindow('along-notification-open',{detail:{kind:'task',goalKey:'custom:legacy',taskId:'task_old',requestId:'old_run'}});
+  assert.match(dom.app.innerHTML,/<h1>原任务<\/h1>/);
+  assert.match(dom.app.innerHTML,/原来保存的行动细节/);
+  assert.doesNotMatch(dom.app.innerHTML,/agent-composer|retry-task/);
+  await dom.click({action:'local-task-back'});assert.match(dom.app.innerHTML,/<h1>本机原目标<\/h1>/);
+  await dom.click({action:'new-goal'});assert.match(dom.app.innerHTML,/agent-composer/);
+  for(const key of ['along.adaptive-layouts.v1','along.goal-custom.v1','along.active-goal.v1'])assert.equal(dom.storage.get(key),seed[key]);
+  assert.ok(!calls.some(p=>p.startsWith('/super-agent')||p==='/events'));
+});
+test('already-saved event goals recover on launch without losing access to independent local records',async()=>{
+  const seed=localNoticeSeed(),eventKey='along.event-workspace.v1:u_app_b';
+  seed[eventKey]=JSON.stringify({version:1,userId:'u_app_b',cursor:1,activeGoalId:null,returnGoalId:null,conversationId:null,drafts:{},messages:{},
+    goals:{g_saved:{id:'g_saved',domain:'custom',status:'active',revision:1,title:'服务端已存目标',metric:null,context:[],tasks:[]}}});
+  const dom=installDomStub({storage:seed});installEventBridge();
+  await import(`../web/app.mjs?restore-saved-event=${Date.now()}`);await settle();
+  assert.match(dom.app.innerHTML,/<h1>服务端已存目标<\/h1>/);
+  assert.match(dom.app.innerHTML,/本机原目标/);
+  await dom.fireWindow('along-notification-open',{detail:{kind:'task',goalKey:'custom:legacy',taskId:'old_gone',reminderTitle:'调整前的原提醒'}});
+  assert.match(dom.app.innerHTML,/<h1>本机原目标<\/h1>/);assert.match(dom.app.innerHTML,/调整前的原提醒/);
+  await dom.click({action:'local-exit'});assert.match(dom.app.innerHTML,/<h1>服务端已存目标<\/h1>/);
+});
+test('cold legacy tap survives late pairing and live sync without stealing the view; new selection sees synced tasks',async()=>{
+  const seed=localNoticeSeed();delete seed['along.event-connection.v1'];
+  const dom=installDomStub({storage:seed});document.visibilityState='visible';
+  let connect;const calls=[],ack=[];
+  const snapshot={goal:{id:'legacy',domain:'custom',status:'active',currentRevision:1},revision:{goalId:'legacy',revision:1,title:'同名服务端目标',status:'active'},
+    tasks:[{id:'task_old',goalId:'legacy',status:'open',content:'另一份服务端任务',currentRevision:1}]};
+  window.AlongAgentBridge={
+    request:async input=>{
+      calls.push(input.path);
+      if(input.path==='/connection/status')return new Promise(resolve=>{connect=resolve;});
+      if(input.path==='/sync')return {items:input.body.after_seq?[]:[{seq:1,userId:'u_app_b',goalId:'legacy',kind:'task_updated',payload:{snapshot}}]};
+      return {};
+    },notification:async (name,value)=>{
+      if(name==='pendingLegacyNotification')return {route:{legacyOpenId:'open_old',kind:'task',goalKey:'custom:legacy',taskId:'daily-sleep-day',
+        planTaskId:'task_old',dailyTopic:'sleep',reminderTitle:'已预约的睡前提醒',reminderBody:'未授权睡眠摘要应隐藏'}};
+      if(name==='legacyNotificationOpened')ack.push(value.id);
+      return {};
+    }};
+  await import(`../web/app.mjs?late-local=${Date.now()}`);await settle();
+  connect({along:true,ready:true,runtime:'dsh-superagent',eventProtocol:1,userId:'u_app_b'});await settle();
+  await dom.tick(3000);await settle();assert.match(dom.app.innerHTML,/<h1>原任务<\/h1>/);
+  assert.match(dom.app.innerHTML,/已预约的睡前提醒/);assert.doesNotMatch(dom.app.innerHTML,/另一份服务端任务|未授权睡眠摘要应隐藏/);
+  assert.match(dom.app.innerHTML,/<option value="legacy"/);assert.deepEqual(ack,['open_old']);
+  await dom.app.dispatch('change',{target:{id:'event-goal-select',value:'legacy'}});
+  assert.match(dom.app.innerHTML,/<h1>同名服务端目标<\/h1>/);assert.match(dom.app.innerHTML,/另一份服务端任务/);
+  assert.ok(!calls.some(p=>p==='/events'||p.startsWith('/super-agent')));
+});
+test('initial network sync opens the saved goal; user can intentionally return to an empty new chat through reconnect',async()=>{
+  const dom=installDomStub({storage:{'along.agent.v1':JSON.stringify(config)}});
+  const state={syncItems:[]};installEventBridge(state);
+  await import(`../web/app.mjs?new-choice=${Date.now()}`);await settle();
+  const snapshot={goal:{id:'g_server',domain:'custom',status:'active',currentRevision:1},revision:{goalId:'g_server',revision:1,title:'已有目标',status:'active'},tasks:[]};
+  state.syncItems=[{seq:1,userId:'u_app_b',kind:'goal_updated',goalId:'g_server',payload:{snapshot}}];
+  await dom.tick(3000);await settle();assert.match(dom.app.innerHTML,/<h1>已有目标<\/h1>/);assert.doesNotMatch(dom.app.innerHTML,/agent-composer/);
+  await dom.click({action:'new-goal'});await dom.tick(3000);await settle();assert.match(dom.app.innerHTML,/agent-composer/);
+  const cache=Object.fromEntries(dom.store);const restored=installDomStub({storage:cache});installEventBridge(state);
+  await import(`../web/app.mjs?preserve-choice=${Date.now()}`);await settle();
+  assert.match(restored.app.innerHTML,/说说你想做什么/);await restored.click({action:'agent-back'});
+  assert.match(restored.app.innerHTML,/<h1>已有目标<\/h1>/);
+});
+
 test('archiving a goal while chatting still lets the user return to the goal home',async()=>{
   const dom=installDomStub({storage:{'along.agent.v1':JSON.stringify(config)}});
   document.visibilityState='visible';
@@ -212,6 +287,7 @@ test('binding a live conversation to a goal preserves the unsent follow-up throu
   bridge.syncItems.push({seq:1,userId:'u_app_b',kind:'message',goalId:'g_bound',payload:{snapshot,conversation_id:root,
     message:{id:'msg_bound',eventId:'evt_bound',role:'assistant',direction:'outbound',text:'已建立合成目标',seq:1,causationId:root}}});
   await dom.tick(3000);await settle();
+  if (!composing()) await dom.click({action:'event-chat'});
   assert.equal(composing().value,'Second sentence intended for the same conversation');
   assert.equal(composing().dataset.draftScope,`conversation:${root}`);
   await dom.click({action:'agent-back'});await dom.click({action:'event-chat'});

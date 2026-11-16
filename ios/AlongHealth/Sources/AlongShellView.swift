@@ -442,7 +442,7 @@ enum AlongConnectionStore {
 
 struct AlongWebView: UIViewRepresentable {
     @ObservedObject var bridge: AlongBridgeModel
-    private let site = URL(string: "along://app/index.html?build=62")!
+    private let site = URL(string: "along://app/index.html?build=63")!
 
     func makeCoordinator() -> Coordinator { Coordinator(bridge: bridge) }
 
@@ -604,7 +604,7 @@ struct AlongWebView: UIViewRepresentable {
                 Task { @MainActor in bridge.clearHealth(id: id, webView: webView) }
             } else {
                 if body["operation"] as? String == "notification" {
-                    if ["upcomingGoalReminder","eventTaskSync","eventTaskOpened"].contains(body["action"] as? String ?? ""), origin.protocol != "along" || origin.host != "app" {
+                    if ["upcomingGoalReminder","eventTaskSync","eventTaskOpened","pendingLegacyNotification","legacyNotificationOpened"].contains(body["action"] as? String ?? ""), origin.protocol != "along" || origin.host != "app" {
                         Self.deliverAlongResult(id: id, result: ["ok":false,"error":"请在 Along 中查看提醒"], webView: webView)
                         return
                     }
@@ -675,6 +675,11 @@ struct AlongWebView: UIViewRepresentable {
         static func notificationOperation(_ input: [String: Any]) async throws -> [String: Any] {
             let center = UNUserNotificationCenter.current()
             switch input["action"] as? String {
+            case "pendingLegacyNotification":
+                return EventTaskNotifications.shared.legacyOpen.map { ["route":$0] } ?? [:]
+            case "legacyNotificationOpened":
+                if let id=(input["value"] as? [String:Any])?["id"] as? String { EventTaskNotifications.shared.ackLegacy(id) }
+                return [:]
             case "eventTaskSync", "eventTaskOpened":
                 guard let value = input["value"] as? [String:Any] else { throw AgentBridgeError.invalidConfiguration }
                 if input["action"] as? String == "eventTaskSync" { return try await EventTaskNotifications.shared.synchronize(value) }
@@ -858,21 +863,28 @@ struct AlongWebView: UIViewRepresentable {
 
         func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
                                     withCompletionHandler completionHandler: @escaping () -> Void) {
-            let info = response.notification.request.content.userInfo
-            var payload: [String: String] = [:]
-            for key in ["kind", "goalKey", "taskId", "requestId"] {
-                if let value = info[key] as? String { payload[key] = value }
+            EventTaskNotifications.shared.receiveLegacy(response.notification.request)
+            completionHandler()
+        }
+
+        static func legacyPayload(_ request: UNNotificationRequest) -> [String:String]? {
+            let info=request.content.userInfo
+            guard let goal=info["goalKey"] as? String, ["health","finance","custom"].contains(goal) ||
+                    goal.range(of:#"^custom:[A-Za-z0-9_:-]{1,90}$"#,options:.regularExpression) != nil,
+                  let kind=info["kind"] as? String, ["task","goal"].contains(kind) else { return nil }
+            var payload=["kind":kind,"goalKey":goal,"legacyOpenId":UUID().uuidString]
+            for key in ["taskId","requestId"] {
+                if let value=info[key] as? String, !value.isEmpty, value.count<=160 {payload[key]=value}
             }
-            if let goalKey = payload["goalKey"], let id = payload["taskId"],
-               (response.notification.request.identifier == Self.healthReminderPrefix(goalKey) + Self.notificationIdentifier(id) || DailyHealthReminders.owns(response.notification.request, goalKey: goalKey)),
-               response.notification.request.trigger is UNCalendarNotificationTrigger {
-                payload["reminderTitle"] = response.notification.request.content.title
-                if let daily = DailyHealthReminders.deliveryTopic(response.notification.request, goalKey: goalKey) { payload["dailyTopic"] = daily }
+            if let id=payload["taskId"], let timer=request.trigger as? UNCalendarNotificationTrigger,
+               request.identifier == healthReminderPrefix(goal)+notificationIdentifier(id) || DailyHealthReminders.owns(request,goalKey:goal) {
+                payload["reminderTitle"]=String(request.content.title.prefix(80))
+                payload["reminderBody"]=String(request.content.body.prefix(180))
+                if let date=timer.dateComponents.date {payload["reminderAt"]=ISO8601DateFormatter().string(from:date)}
+                payload["dailyTopic"]=DailyHealthReminders.deliveryTopic(request,goalKey:goal)
+                payload["planTaskId"]=DailyHealthReminders.deliveryTaskID(request,goalKey:goal)
             }
-            DispatchQueue.main.async {
-                self.openNotification(payload)
-                completionHandler()
-            }
+            return payload
         }
 
         func openNotification(_ payload: [String: String]) {
