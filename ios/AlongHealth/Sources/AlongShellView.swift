@@ -442,7 +442,7 @@ enum AlongConnectionStore {
 
 struct AlongWebView: UIViewRepresentable {
     @ObservedObject var bridge: AlongBridgeModel
-    private let site = URL(string: "along://app/index.html?build=60")!
+    private let site = URL(string: "along://app/index.html?build=61")!
 
     func makeCoordinator() -> Coordinator { Coordinator(bridge: bridge) }
 
@@ -461,7 +461,7 @@ struct AlongWebView: UIViewRepresentable {
         configuration.setURLSchemeHandler(BundledWebSchemeHandler(), forURLScheme: "along")
         let webView = WKWebView(frame: .zero, configuration: configuration)
         context.coordinator.attach(webView)
-        UNUserNotificationCenter.current().delegate = context.coordinator
+        EventTaskNotifications.shared.attach(context.coordinator)
         webView.navigationDelegate = context.coordinator
         let request = URLRequest(url: site, cachePolicy: .reloadIgnoringLocalCacheData)
 #if DEBUG
@@ -604,7 +604,7 @@ struct AlongWebView: UIViewRepresentable {
                 Task { @MainActor in bridge.clearHealth(id: id, webView: webView) }
             } else {
                 if body["operation"] as? String == "notification" {
-                    if body["action"] as? String == "upcomingGoalReminder", origin.protocol != "along" || origin.host != "app" {
+                    if ["upcomingGoalReminder","eventTaskSync","eventTaskOpened"].contains(body["action"] as? String ?? ""), origin.protocol != "along" || origin.host != "app" {
                         Self.deliverAlongResult(id: id, result: ["ok":false,"error":"请在 Along 中查看提醒"], webView: webView)
                         return
                     }
@@ -675,6 +675,11 @@ struct AlongWebView: UIViewRepresentable {
         static func notificationOperation(_ input: [String: Any]) async throws -> [String: Any] {
             let center = UNUserNotificationCenter.current()
             switch input["action"] as? String {
+            case "eventTaskSync", "eventTaskOpened":
+                guard let value = input["value"] as? [String:Any] else { throw AgentBridgeError.invalidConfiguration }
+                if input["action"] as? String == "eventTaskSync" { return try await EventTaskNotifications.shared.synchronize(value) }
+                EventTaskNotifications.shared.opened(value)
+                return [:]
             case "enable":
                 let granted = try await center.requestAuthorization(options: [.alert, .sound, .badge])
                 return ["status": granted ? "authorized" : "denied"]
@@ -870,7 +875,7 @@ struct AlongWebView: UIViewRepresentable {
             }
         }
 
-        private func openNotification(_ payload: [String: String]) {
+        func openNotification(_ payload: [String: String]) {
             guard !payload.isEmpty else { return }
             guard webReady, let webView,
                   let data = try? JSONSerialization.data(withJSONObject: payload),
@@ -888,7 +893,7 @@ struct AlongWebView: UIViewRepresentable {
             webView.evaluateJavaScript("window.__alongAgentBridgeFinish(...\(json))")
         }
 
-        static func agentRequest(_ input: [String: Any], background: Bool = false) async throws -> [String: Any] {
+        static func agentRequest(_ input: [String: Any], background: Bool = false, privateNotificationRequest: Bool = false) async throws -> [String: Any] {
             guard let base = input["baseURL"] as? String, let components = URLComponents(string: base),
                   components.scheme == "https", let host = components.host,
                   host.split(separator: ".").count == 4,
@@ -902,8 +907,8 @@ struct AlongWebView: UIViewRepresentable {
                   fingerprint.count == 64, fingerprint.allSatisfy(\.isHexDigit),
                   let path = input["path"] as? String,
                   // 新链路端点（docs/stage-a-tech-design.md §2.4.2）：全部 POST，语义与旧路径一致——仅网络转发。
-                  ["/pair", "/connection/verify", "/connection/status", "/goal/event", "/super-agent/tasks", "/super-agent/tasks/status", "/super-agent/daily-delegation",
-                   "/super-agent/goals", "/super-agent/goals/status", "/events", "/sync", "/sync/ack"].contains(path),
+                  (["/pair", "/connection/verify", "/connection/status", "/goal/event", "/super-agent/tasks", "/super-agent/tasks/status", "/super-agent/daily-delegation",
+                   "/super-agent/goals", "/super-agent/goals/status", "/events", "/sync", "/sync/ack"].contains(path) || (privateNotificationRequest && ["/notifications/device","/notifications/scheduled"].contains(path))),
                   let body = input["body"] as? [String: Any],
                   let url = URL(string: base + path) else { throw AgentBridgeError.invalidConfiguration }
             var request = URLRequest(url: url)
