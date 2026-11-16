@@ -595,3 +595,23 @@ test('goal chat contains direct dialogue while background recommendations stay i
   await dom.click({action:'event-recommendation-feedback',eventId:result.eventId});
   assert.match(dom.app.innerHTML,/关于「周末徒步方案」/);assert.doesNotMatch(dom.app.innerHTML,/内部验收补排完成流水/);
 });
+
+
+test('leaving an opened notification lets the goal show a newer background recommendation',async()=>{
+  const goal={id:'g_focus',domain:'custom',status:'active',revision:1,title:'原目标',metric:null,context:[],tasks:[]};
+  const r=recommendation();r.title='旧方案';
+  const m={eventId:'reply_old',role:'assistant',text:'旧结果',goalId:goal.id,audience:'background',status:'received',recommendation:r,notificationEventId:'reply_old'};
+  const saved={version:1,conversationVersion:1,recommendationsVersion:1,userId:'u_app_b',cursor:1,activeGoalId:goal.id,conversationId:null,goals:{[goal.id]:goal},messages:{reply_old:m},drafts:{}};
+  const dom=installDomStub({storage:{'along.agent.v1':JSON.stringify(config),'along.event-workspace.v1:u_app_b':JSON.stringify(saved)}});
+  document.visibilityState='visible';const state={syncItems:[]};installEventBridge(state);
+  window.AlongAgentBridge.notification=async()=>({});
+  document.getElementById=id=>dom.app.innerHTML.includes('id="'+id+'"')?{focus(){},scrollIntoView(){}}:null;
+  await import(`../web/app.mjs?focus-review=${Date.now()}`);await settle();
+  await dom.fireWindow('along-notification-open',{detail:{userId:'u_app_b',goalId:goal.id,eventId:'reply_old',kind:'recommendation_ready'}});
+  assert.match(dom.app.innerHTML,/旧方案/);
+  const newer=recommendation();newer.title='新方案';
+  state.syncItems=[{seq:2,userId:'u_app_b',kind:'message',goalId:goal.id,payload:{audience:'background',recommendation:newer,snapshot:{goal:{...goal,currentRevision:1},revision:{goalId:goal.id,revision:1,title:goal.title,status:'active'},tasks:[]},message:{id:'msg_new',eventId:'reply_new',role:'assistant',direction:'outbound',text:'新结果',seq:2,audience:'background'}}}];
+  await dom.tick(3000);await settle();
+  await dom.click({action:'event-chat'});await dom.click({action:'agent-back'});
+  assert.match(dom.app.innerHTML,/新方案/);assert.doesNotMatch(dom.app.innerHTML,/旧方案/);
+});

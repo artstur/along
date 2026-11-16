@@ -1428,7 +1428,7 @@ async function injectEvent(event) {
 }
 
 function beginNewGoal() {
-  if (eventWorkspace) {localSelection=null;waitingForSavedGoal=false;eventWorkspace.select(null);screen='agent';render();return;}
+  if (eventWorkspace) {localSelection=null;focusedEventRecommendation=null;waitingForSavedGoal=false;eventWorkspace.select(null);screen='agent';render();return;}
   previousGoalBeforeDraft=activeGoal;
   activeGoal=`custom:${newId('goal')}`;
   conversations[activeGoal]=[];
@@ -1449,7 +1449,7 @@ app.addEventListener('change', event => {
       const key=value.slice(6);
       if (localGoalEntries().some(l=>l.key===key)) {localSelection={key};screen='home';render();}
     } else {
-      localSelection=null;eventWorkspace.select(value||null);screen=value?'home':'agent';render();
+      localSelection=null;focusedEventRecommendation=null;eventWorkspace.select(value||null);screen=value?'home':'agent';render();
     }
     return;
   }
@@ -1481,7 +1481,7 @@ app.addEventListener('click', event => {
     } else if (action==='local-task-back'&&localSelection) {localSelection={key:localSelection.key};render();}
     else if (action==='local-task'&&localSelection&&localTasks(localSelection.key).some(t=>t.id===actionTarget.dataset.taskId)) {
       localSelection={key:localSelection.key,taskId:actionTarget.dataset.taskId};render();
-    } else if (action==='event-chat') {screen='agent';render();}
+    } else if (action==='event-chat') {focusedEventRecommendation=null;screen='agent';render();}
     else if (action==='event-recommendation-feedback') {
       if (eventWorkspace.prepareRecommendationFeedback(actionTarget.dataset.eventId)) {screen='agent';render();}
     }
