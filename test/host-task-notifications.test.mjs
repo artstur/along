@@ -1,0 +1,126 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
+
+test('the paired Host registers notification devices and dispatches without a phone sync',()=>{
+  const source=readFileSync(new URL('../host/agent-host.mjs',import.meta.url),'utf8');
+  assert.ok(source.includes("'/notifications/device'"),'missing paired registration endpoint');
+  assert.match(source,/setInterval\(.*dispatchNotifications/);
+});
+
+import {mkdtempSync,statSync,rmSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {taskNotifications} from '../host/task-notifications.mjs';
+
+function fixture(t) {
+  const dir=mkdtempSync(join(tmpdir(),'along-notes-'));
+  t.after(()=>rmSync(dir,{force:true,recursive:true}));
+  const who={userId:'u_test',deviceId:'d_test'};
+  let clock=Date.UTC(2026,9,11,1);
+  const pages=[],sent=[];
+  const options={dir,now:()=>clock,identity:()=>who,
+    readPage:async (_,cursor)=>({items:pages.filter(item=>item.seq>cursor)}),
+    send:async (device,route)=>{sent.push(route);return 'accepted';}};
+  const input={token:'ab'.repeat(32),environment:'development',expectedUserId:who.userId};
+  const item=(seq,kind='recommendation_ready')=>({
+    seq,createdAt:new Date(clock+1).toISOString(),userId:who.userId,goalId:'g_test',taskId:'t_test',
+    payload:{notification:{kind,event_id:'event:'+seq,revision:2},snapshot:{
+      goal:{id:'g_test',status:'active'},tasks:[{id:'t_test',goalId:'g_test',status:'open',content:'private task'}]}}});
+  return {options,dir,input,who,pages,sent,item,tick:ms=>{clock+=ms;}};
+}
+test('offline retry, duplicate event, process restart and repeated phone sync preserve one routing receipt',async t=>{
+  const f=fixture(t);
+  const one=taskNotifications(f.options);
+  one.register(f.who,f.input);
+  f.pages.push(f.item(1),f.item(2,'task_result'));
+  f.pages[1].payload.notification=f.pages[0].payload.notification;
+  const receipt=one.decorate(f.who,{items:f.pages});
+  assert.equal(receipt.items[0].remoteNotifications,true);
+  const offline=taskNotifications({...f.options,send:async()=>{throw Error('offline');}});
+  await offline.dispatch();
+  await Promise.all([one.dispatch(),one.dispatch()]);
+  const two=taskNotifications(f.options);
+  await two.dispatch();
+  assert.deepEqual(f.sent,[{userId:'u_test',goalId:'g_test',taskId:'t_test',kind:'recommendation_ready',eventId:'event:1',revision:2}]);
+  assert.deepEqual(two.decorate(f.who,{items:f.pages}),receipt);
+  assert.equal(statSync(join(f.dir,'notification-device.json')).mode&0o777,0o600);
+});
+test('only fresh, explicit and still relevant notices owned by this device are sent',async t=>{
+  const f=fixture(t),service=taskNotifications(f.options);
+  const before=f.item(1);
+  f.tick(2000);
+  service.register(f.who,f.input);
+  f.pages.push(before,f.item(2),f.item(3),f.item(4),f.item(5,'task_result'));
+  delete f.pages[1].payload.notification;
+  f.pages[2].payload.snapshot.tasks[0].status='cancelled';
+  f.pages[3].payload.snapshot.goal.status='archived';
+  f.pages[4].payload.snapshot.tasks[0].status='done';
+  assert.equal(service.decorate(f.who,{items:[before]}).items[0].remoteNotifications,false);
+  await service.dispatch();
+  assert.deepEqual(f.sent.map(item=>item.eventId),['event:5']);
+  f.pages.push(f.item(6));
+  f.tick(11*60_000);
+  await service.dispatch();
+  assert.equal(f.sent.length,1);
+});
+test('revocation during fetch, re-pairing, absent provider and invalid device stay scoped',async t=>{
+  const f=fixture(t);
+  let resolve;
+  const service=taskNotifications({...f.options,readPage:()=>new Promise(r=>{resolve=r;})});
+  assert.throws(()=>service.register(f.who,{...f.input,expectedUserId:'other'}),/绑定/);
+  service.register(f.who,f.input);
+  const flight=service.dispatch();
+  assert.equal(service.register(f.who,{expectedUserId:f.who.userId,enabled:false}).remoteNotifications,false);
+  resolve({items:[f.item(1)]});
+  await flight;
+  assert.equal(f.sent.length,0);
+  service.register(f.who,f.input);
+  assert.equal(service.decorate({...f.who,deviceId:'new'},{items:[]}).remoteNotifications,false);
+  const disabled=taskNotifications({...f.options,send:null});
+  assert.equal(disabled.register(f.who,f.input).remoteNotifications,false);
+  const invalid=taskNotifications({...f.options,send:async()=>'invalid_device'});
+  f.pages.push(f.item(1));
+  await invalid.dispatch();
+  assert.equal(invalid.decorate(f.who,{items:f.pages}).remoteNotifications,false);
+});
+
+import {generateKeyPairSync,verify} from 'node:crypto';
+import {writeFileSync} from 'node:fs';
+import {EventEmitter} from 'node:events';
+import {createApnsProvider} from '../host/apns.mjs';
+test('Apple request uses ES256, the signed environment and a generic alert with a stable collapse ID',async t=>{
+  const f=fixture(t);
+  const {publicKey,privateKey}=generateKeyPairSync('ec',{namedCurve:'prime256v1'});
+  const path=join(f.dir,'test.p8');
+  writeFileSync(path,privateKey.export({type:'pkcs8',format:'pem'}),{mode:0o600});
+  const env={ALONG_APNS_KEY_FILE:path,ALONG_APNS_TEAM_ID:'ABCDEFGHIJ',ALONG_APNS_KEY_ID:'1234567890'};
+  const requests=[];
+  const provider=createApnsProvider(env,authority=>{
+    const client=new EventEmitter();
+    client.unref=()=>{};
+    client.request=headers=>{
+      const stream=new EventEmitter();
+      stream.setEncoding=()=>{};
+      stream.end=data=>{
+        requests.push({authority,headers,body:JSON.parse(data)});
+        stream.emit('response',{':status':200});
+        stream.emit('end');
+      };
+      return stream;
+    };
+    return client;
+  });
+  const route={userId:f.who.userId,eventId:'result:1',goalId:'g1',revision:1,kind:'task_result'};
+  for (let i=0;i<2;i++) assert.equal(await provider(f.input,route,Date.now()+60000),'accepted');
+  const {headers,body,authority}=requests[0];
+  assert.equal(authority,'https://api.sandbox.push.apple.com');
+  assert.equal(headers['apns-topic'],'com.artstur.AlongHealth');
+  assert.equal(headers['apns-push-type'],'alert');
+  assert.equal(headers['apns-collapse-id'],requests[1].headers['apns-collapse-id']);
+  assert.deepEqual(body,{aps:{alert:{title:'Along 任务有了结果',body:'打开查看详情'},sound:'default'},along:route});
+  const [head,claims,sig]=headers.authorization.slice(7).split('.');
+  assert.equal(JSON.parse(Buffer.from(head,'base64url')).alg,'ES256');
+  assert.equal(JSON.parse(Buffer.from(claims,'base64url')).iss,env.ALONG_APNS_TEAM_ID);
+  assert.equal(verify('sha256',Buffer.from(head+'.'+claims),{key:publicKey,dsaEncoding:'ieee-p1363'},Buffer.from(sig,'base64url')),true);
+});
