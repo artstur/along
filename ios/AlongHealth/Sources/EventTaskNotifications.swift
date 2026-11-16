@@ -119,6 +119,31 @@ import UserNotifications
         try await DailyHealthReminders.serialized { try await self.reconcile(value) }
     }
 
+    static func reminderTiming(date: Date, rule: String?, timezone: String?, weekday: Int?, wallTime: Date?, now: Date) -> (parts: DateComponents, repeats: Bool)? {
+        var calendar = Calendar(identifier:.gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT:0)!
+        let once = calendar.dateComponents([.calendar,.timeZone,.year,.month,.day,.hour,.minute,.second],from:date)
+        guard let rule else { return (once,false) }
+        guard ["daily","weekly"].contains(rule), let timezone, let zone=TimeZone(identifier:timezone),
+              rule == "weekly" ? (weekday.map { (1...7).contains($0) } ?? false) : weekday == nil else { return nil }
+        calendar.timeZone = zone
+        if let weekday, calendar.component(.weekday,from:date) != weekday % 7 + 1 { return nil }
+        var parts = calendar.dateComponents([.calendar,.timeZone,.hour,.minute,.second],from:wallTime ?? date)
+        if let weekday { parts.weekday = weekday % 7 + 1 }
+        guard let next=calendar.nextDate(after:now,matching:parts,matchingPolicy:.nextTimePreservingSmallerComponents,
+                                        repeatedTimePolicy:.first) else { return nil }
+        // Calendar repeats have no start date. Keep an intentionally later first occurrence as
+        // a dated request until the app next synchronizes, rather than notifying too early.
+        if date > now && abs(next.timeIntervalSince(date)) > 1 { return (once,false) }
+        return (parts,true)
+    }
+
+    static func oneTimeMayHaveFired(_ request: UNNotificationRequest, now: Date) -> Bool {
+        guard let trigger=request.trigger as? UNCalendarNotificationTrigger, !trigger.repeats,
+              let date=trigger.dateComponents.date else { return false }
+        return date <= now
+    }
+
     private func reconcile(_ value: [String:Any]) async throws -> [String:Any] {
         guard let c = AlongConnectionStore.load(), let user = value["userId"] as? String, valid(user),
               let pin = value["fingerprint"] as? String, pin.uppercased() == c["fingerprint"],
@@ -156,17 +181,30 @@ import UserNotifications
                       !body.isEmpty, body.utf16.count <= 120, let date = DailyReminderScope.date(row["scheduledAt"] as? String) else {
                     throw AgentBridgeError.invalidConfiguration
                 }
-                guard date > now else { continue }
+                guard (row["repeat"] == nil || row["repeat"] is String),
+                      (row["timezone"] == nil || row["timezone"] is String),
+                      (row["weekday"] == nil || row["weekday"] is Int),
+                      (row["wallTime"] == nil || DailyReminderScope.date(row["wallTime"] as? String) != nil),
+                      let timing = Self.reminderTiming(date:date,rule:row["repeat"] as? String,timezone:row["timezone"] as? String,
+                        weekday:row["weekday"] as? Int,wallTime:DailyReminderScope.date(row["wallTime"] as? String),now:now) else {
+                    throw AgentBridgeError.invalidConfiguration
+                }
+                guard date > now || timing.repeats else { continue }
                 let identifier = requestID(scope:scope,goal:goal,task:task)
-                var calendar = Calendar(identifier:.gregorian)
-                calendar.timeZone = TimeZone(secondsFromGMT:0)!
-                let parts = calendar.dateComponents([.calendar,.timeZone,.year,.month,.day,.hour,.minute,.second],from:date)
                 let content = UNMutableNotificationContent()
                 content.title = "Along 任务提醒"; content.body = body; content.sound = .default
                 content.userInfo = ["along":["kind":"reminder","userId":user,"goalId":goal,"taskId":task,
                     "eventId":DailyReminderScope.hash(identifier+"|"+String(revision)), "revision":revision] as [String:Any]]
-                desired.append((date,UNNotificationRequest(identifier:identifier,content:content,
-                    trigger:UNCalendarNotificationTrigger(dateMatching:parts,repeats:false))))
+                let trigger = UNCalendarNotificationTrigger(dateMatching:timing.parts,repeats:timing.repeats)
+                // The system decides the actual next civil occurrence, including DST behavior.
+                // A system recurrence disagreeing with the Agent's first deadline stays one-time.
+                let actual: UNCalendarNotificationTrigger
+                if timing.repeats, date > now, let next=trigger.nextTriggerDate(), abs(next.timeIntervalSince(date)) > 1,
+                   let once=Self.reminderTiming(date:date,rule:nil,timezone:nil,weekday:nil,wallTime:nil,now:now) {
+                    actual = UNCalendarNotificationTrigger(dateMatching:once.parts,repeats:false)
+                } else { actual = trigger }
+                guard let next=actual.nextTriggerDate() else { throw AgentBridgeError.invalidConfiguration }
+                desired.append((next,UNNotificationRequest(identifier:identifier,content:content,trigger:actual)))
             }
         } else { defaults.removeObject(forKey: sinceKey) }
         // Keep slots already occupied by other app features. iOS retains at most 64 pending requests per app.
@@ -188,14 +226,23 @@ import UserNotifications
         let returned = Set(readback.map(\.identifier))
         let confirmed = Dictionary(uniqueKeysWithValues:readback.map { ($0.identifier,$0) })
         guard planned.allSatisfy({ r in confirmed[r.identifier].map { sameRequest($0,r) } == true ||
-            ((r.trigger as? UNCalendarNotificationTrigger)?.dateComponents.date ?? .distantFuture) <= Date() }),
+            Self.oneTimeMayHaveFired(r,now:Date()) }),
               returned.isDisjoint(with:obsolete.map(\.identifier)) else { throw AgentBridgeError.server("系统提醒预约尚未完成") }
         // The Host can cover deadlines not already scheduled on this phone (for example tomorrow's renewal).
         // A missing or offline Host never invalidates an iOS receipt.
         let inventory = rows.compactMap { row -> [String:Any]? in
             guard let goal=row["goalId"] as? String, let task=row["taskId"] as? String,
-                  ids.contains(requestID(scope:scope,goal:goal,task:task)), returned.contains(requestID(scope:scope,goal:goal,task:task)) else { return nil }
-            return row.filter { ["goalId","taskId","revision","scheduledAt"].contains($0.key) }
+                  ids.contains(requestID(scope:scope,goal:goal,task:task)),
+                  let request=confirmed[requestID(scope:scope,goal:goal,task:task)],
+                  let trigger=request.trigger as? UNCalendarNotificationTrigger, let next=trigger.nextTriggerDate() else { return nil }
+            var receipt=row.filter { ["goalId","taskId","revision"].contains($0.key) }
+            receipt["scheduledAt"]=ISO8601DateFormatter().string(from:next)
+            if trigger.repeats {
+                receipt["repeat"]=row["repeat"]; receipt["timezone"]=trigger.dateComponents.timeZone?.identifier
+                receipt["weekday"]=row["weekday"]; receipt["firstScheduledAt"]=row["scheduledAt"]
+                receipt["wallTime"]=row["wallTime"]
+            }
+            return receipt
         }
         queuePlanReport(connection:c,user:user,inventory:inventory)
         cursor = version
@@ -235,8 +282,8 @@ import UserNotifications
 
     private func sameRequest(_ a: UNNotificationRequest, _ b: UNNotificationRequest) -> Bool {
         guard let x=a.trigger as? UNCalendarNotificationTrigger, let y=b.trigger as? UNCalendarNotificationTrigger,
-              !x.repeats, !y.repeats, let at=x.dateComponents.date, let bt=y.dateComponents.date else { return false }
-        return at == bt && a.content.body == b.content.body &&
+              x.repeats == y.repeats else { return false }
+        return x.dateComponents == y.dateComponents && a.content.body == b.content.body &&
             (a.content.userInfo["along"] as? NSDictionary) == (b.content.userInfo["along"] as? NSDictionary)
     }
 
@@ -325,9 +372,18 @@ import UserNotifications
         guard let task = ProcessInfo.processInfo.environment["ALONG_NOTIFICATION_PROBE_TASK"] else { return }
         func matches(_ r: UNNotificationRequest)->Bool { (r.content.userInfo["along"] as? [String:Any])?["taskId"] as? String == task }
         var state = ["checkedAt":ISO8601DateFormatter().string(from:Date()),"authorized":String([.authorized,.provisional,.ephemeral].contains(permission)),
-                     "pending":String(pending.filter(matches).count)]
+                     "pending":String(pending.filter(matches).count),"scheduledFor":"","nextTriggerDate":"",
+                     "repeats":"","timezone":"","weekday":"","hour":"","minute":""]
         if let request = pending.first(where:matches), let date = (request.trigger as? UNCalendarNotificationTrigger)?.nextTriggerDate() {
             state["scheduledFor"] = ISO8601DateFormatter().string(from:date)
+            state["nextTriggerDate"] = ISO8601DateFormatter().string(from:date)
+            if let trigger=request.trigger as? UNCalendarNotificationTrigger {
+                state["repeats"]=String(trigger.repeats)
+                state["timezone"]=trigger.dateComponents.timeZone?.identifier
+                state["weekday"]=trigger.dateComponents.weekday.map { String(($0+5)%7+1) } ?? ""
+                state["hour"]=trigger.dateComponents.hour.map(String.init) ?? ""
+                state["minute"]=trigger.dateComponents.minute.map(String.init) ?? ""
+            }
         }
         if let notice = delivered.last(where:{ matches($0.request) }) { state["deliveredAt"] = ISO8601DateFormatter().string(from:notice.date) }
         updateProbe(task,state)

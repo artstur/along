@@ -10,20 +10,27 @@ const version = value => Number.isSafeInteger(value) && value>=0;
 const time = value => typeof value==='string' && Number.isFinite(Date.parse(value));
 const empty = userId => ({version:1,userId,cursor:0,goals:{},messages:{},drafts:{},activeGoalId:null,conversationId:null,returnGoalId:null});
 
-function isActiveGoal(value, goalId) {
-  return goalId != null && value.goals[goalId]?.status === 'active';
-}
-
-function conversationGoal(value, conversationId = value.conversationId) {
-  if (!conversationId) return null;
-  return Object.values(value.messages).find(message =>
-    message.conversationId === conversationId && message.goalId)?.goalId ?? null;
-}
-
 function absoluteReminderTime(value) {
   if (!time(value)||!/^\d{4}-\d\d-\d\dT(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)$/.test(value)) return false;
   const day=value.slice(0,10),utc=Date.parse(day+'T00:00:00Z');
   return Number.isFinite(utc)&&new Date(utc).toISOString().slice(0,10)===day;
+}
+function matchesReminderClock(scheduledAt,wallTime,timezone) {
+  const day=86400_000;
+  const civil=instant=>{
+    const fields=Object.fromEntries(new Intl.DateTimeFormat('en-GB',{timeZone:timezone,hourCycle:'h23',
+      year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'})
+      .formatToParts(new Date(instant)).map(part=>[part.type,part.value]));
+    return Date.UTC(+fields.year,+fields.month-1,+fields.day,+fields.hour,+fields.minute,+fields.second);
+  };
+  const scheduled=Date.parse(scheduledAt),local=civil(scheduled),clock=civil(Date.parse(wallTime))%day;
+  if (local%day===clock) return true;
+  // A shifted clock is valid only for the exact civil-time gap on this occurrence's date.
+  const target=Math.floor(local/day)*day+clock;
+  const offsets=[-day,day].map(delta=>civil(target+delta)-(target+delta));
+  const next=[...new Set(offsets)].map(offset=>target-offset).filter(at=>civil(at)>=target)
+    .sort((a,b)=>civil(a)-civil(b)||a-b)[0];
+  return next===Math.floor(scheduled/1000)*1000;
 }
 function cleanTaskReminder(task) {
   const {reminderPlan:plan,scheduledAt}=task;
@@ -38,7 +45,18 @@ function cleanTaskReminder(task) {
     const weekly=plan.repeat==='weekly';
     if (explanation.length<2||explanation.length>240||
         (weekly?!(Number.isInteger(plan.weekday)&&plan.weekday>=1&&plan.weekday<=7):plan.weekday!==undefined)) return {};
-    return {scheduledAt,reminderPlan:{state:'scheduled',source:plan.source,explanation,repeat:plan.repeat,...(weekly?{weekday:plan.weekday}:{})}};
+    if (plan.timezone!==undefined) {
+      if (!text(plan.timezone,100)||!/^\w+(?:\/[\w+.-]+)*$/.test(plan.timezone)) return {};
+      try {
+        const day=new Intl.DateTimeFormat('en-US',{timeZone:plan.timezone,weekday:'short'}).format(new Date(scheduledAt));
+        if (weekly&&['Mon','Tue','Wed','Thu','Fri','Sat','Sun'].indexOf(day)+1!==plan.weekday) return {};
+      } catch { return {}; }
+    }
+    if (plan.wallTime!==undefined&&(!absoluteReminderTime(plan.wallTime)||!plan.timezone||
+        !matchesReminderClock(scheduledAt,plan.wallTime,plan.timezone))) return {};
+    return {scheduledAt,reminderPlan:{state:'scheduled',source:plan.source,explanation,repeat:plan.repeat,
+      ...(weekly?{weekday:plan.weekday}:{}),...(plan.timezone===undefined?{}:{timezone:plan.timezone}),
+      ...(plan.wallTime===undefined?{}:{wallTime:plan.wallTime})}};
   }
   if (scheduledAt!==undefined) return {};
   if (plan.state==='off'&&['opt_out','untimed'].includes(plan.reason)) return {reminderPlan:{state:'off',reason:plan.reason}};
@@ -47,6 +65,18 @@ function cleanTaskReminder(task) {
     if (question.length>=2&&question.length<=240) return {reminderPlan:{state:'needs_time',question}};
   }
   return {};
+}
+
+const recurringPlan = task => task.reminderPlan?.state==='scheduled'&&task.reminderPlan.timezone&&['daily','weekly'].includes(task.reminderPlan.repeat);
+
+function isActiveGoal(value, goalId) {
+  return goalId != null && value.goals[goalId]?.status === 'active';
+}
+
+function conversationGoal(value, conversationId = value.conversationId) {
+  if (!conversationId) return null;
+  return Object.values(value.messages).find(message =>
+    message.conversationId === conversationId && message.goalId)?.goalId ?? null;
 }
 
 // Wire snapshots are validated before entering the cache; layouts are deterministic projections, not model HTML.
@@ -329,8 +359,11 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
     if (onNotifications&&!disposed) {
       // Reconcile only a complete sync. A torn page, stale connection or offline cache must never withdraw other tasks.
       const active=Object.values(state.goals).filter(g=>g.status==='active');
-      const reminders=active.flatMap(g=>g.tasks.filter(t=>t.status==='open'&&Date.parse(t.scheduledAt)>Date.now())
-        .map(t=>({goalId:g.id,taskId:t.id,revision:t.revision,scheduledAt:new Date(t.scheduledAt).toISOString(),body:t.content})));
+      const reminders=active.flatMap(g=>g.tasks.filter(t=>t.status==='open'&&(Date.parse(t.scheduledAt)>Date.now()||recurringPlan(t)))
+        .map(t=>({goalId:g.id,taskId:t.id,revision:t.revision,scheduledAt:new Date(t.scheduledAt).toISOString(),body:t.content,
+          ...(recurringPlan(t)?{repeat:t.reminderPlan.repeat,timezone:t.reminderPlan.timezone,
+            ...(t.reminderPlan.wallTime?{wallTime:t.reminderPlan.wallTime}:{}),
+            ...(t.reminderPlan.repeat==='weekly'?{weekday:t.reminderPlan.weekday}:{})}:{})})));
       const activeTasks=active.flatMap(g=>g.tasks.filter(t=>t.status==='open').map(t=>({goalId:g.id,taskId:t.id,revision:t.revision})));
       const queued=state.notificationResults??[];
       const results=queued.filter(r=>applicableResult(r,state.goals));
