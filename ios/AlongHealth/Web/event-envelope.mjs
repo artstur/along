@@ -1,10 +1,10 @@
 // 事件信封的组装与校验（docs/stage-a-tech-design.md §4.1，SD-1/SG-1）——浏览器与 Node 双端共享，
-// 不引 Node 专用模块（AGENTS.md §2）。这里是 fork 侧 src/along/envelope.ts 同一 Schema 的 JS 移植：
+// 不引 Node 专用模块（AGENTS.md §2）。这里是 Along Agent 侧 src/along/envelope.ts 同一 Schema 的 JS 移植：
 // 信封字段的取值范围、跨字段一致性（payload.event_type 与顶层一致；仅 along.message 可带 kind 且
 // envelope.kind === payload.kind；task.completed/feedback 必须带 task_id；authorization.changed 无业务
 // 载荷）与 strict 拒绝多余字段（user_id/device_id/adapter/原始样本一律不收）全部对齐。
 //
-// 两端以静态用例向量对齐：本文件与 fork tests/along-inbox.spec.ts 使用同一组向量（含合法/越界/未知
+// 两端以静态用例向量对齐：本文件与 Along Agent tests/along-inbox.spec.ts 使用同一组向量（含合法/越界/未知
 // 类型/越权/authorization.changed），任何一端改协议必须先改向量再改实现。
 // 身份只由服务端配对会话绑定（§4.2）：信封从不携带 user_id/device_id，事件号在此生成并保持稳定
 // （同号重试是去重与幂等的锚，001 §4.3）。
@@ -73,7 +73,7 @@ function payloadReason(envelope) {
     }
     return null;
   }
-  // along.message：kind 必填且与顶层一致（信封顶层也必须带同值 kind，与 fork Schema 一致）；
+  // along.message：kind 必填且与顶层一致（信封顶层也必须带同值 kind，与 Along Agent Schema 一致）；
   // task.completed/feedback 必须带 task_id；authorization.changed 无业务载荷（D15：接受并记录、不投递）。
   const messageAllowed = ['kind', 'task_id', 'completed_at', 'note', 'reply_to_message_id'];
   for (const key of extra) if (!messageAllowed.includes(key)) return `message 载荷带了多余字段 ${key}`;
@@ -94,7 +94,7 @@ function payloadReason(envelope) {
 
 /**
  * 校验一个信封：合法返回 null，否则返回拒绝原因（对外统一按 invalid_envelope/rejected 口径应答，
- * 详细原因只用于本端排查）。语义与 fork 的 zod Schema 一致，两端向量锁定。
+ * 详细原因只用于本端排查）。语义与 Along Agent 的 zod Schema 一致，两端向量锁定。
  */
 export function validateEnvelope(envelope) {
   if (!isRecord(envelope)) return '信封不是对象';

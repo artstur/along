@@ -2,7 +2,7 @@
 
 > 2026-11-15。阶段 A（骨架与数据契约）的模块级实施设计。规格依据：[决策记录](https://github.com/artstur/along-superagent/blob/feature/along-phase0/docs/along/000-decisions.md)（D1–D17）、[系统架构](https://github.com/artstur/along-superagent/blob/feature/along-phase0/docs/along/001-architecture.md) v0.6 §4/§5/§7/§8/§9、[实施与验收](https://github.com/artstur/along-superagent/blob/feature/along-phase0/docs/along/003-implementation.md) v0.6 §2/§3/§4、[阶段 0 验证](https://github.com/artstur/along-superagent/blob/feature/along-phase0/docs/along/004-phase0-validation.md)、[业务测试用例](business-test-cases.md)。本文不推翻任何已定决策；对规格未拍板的点以 `SD-n` 编号给出决策与理由（§5），实施中方案有变化须回写本文（AGENTS.md §3）。
 >
-> 代码基线（本次实测核对）：fork `along-superagent` 分支 `feature/along-phase0`，工作树干净，`src/along/` 尚不存在；`along` 仓库分支 `feature/new-structure`。行号引用以该基线为准。
+> 设计时基线（2026-11-15，非当前实现状态）：Along Agent（`along-superagent`）分支 `feature/along-phase0`，工作树干净，`src/along/` 尚不存在；`along` 仓库分支 `feature/new-structure`。行号引用以该基线为准。
 
 ## 0. 范围与读法
 
@@ -18,13 +18,13 @@ UI 约束：`web/` 页面结构、样式、文案、交互流程零改动。允�
 
 | 模块 | 仓库 | 核心产出 | 依赖 |
 | --- | --- | --- | --- |
-| 存储 | fork | `along.sqlite`、Schema 迁移、唯一业务服务层、幂等导入 | — |
-| inbox | fork + along | 事件信封、可靠接收、回执、待投递 | 存储、配对、worklink |
-| 版本 | fork | 对象版本、ChangeSet 校验与自动提交、Along 业务工具 | 存储 |
-| 配对 | along | 配对身份绑定、Host↔fork 回环接口、访问边界 | 存储（接口契约） |
-| worklink | fork | 业务对象↔Ticket/Assignment 映射、thread 命名 | 存储 |
-| 记录 | fork | Worker 结束宿主登记 RunRecord（不调模型） | 存储、worklink |
-| 集成 | along + fork | 装配、端到端联测、迁移备份、红线回归 | 全部 |
+| 存储 | Along Agent | `along.sqlite`、Schema 迁移、唯一业务服务层、幂等导入 | — |
+| inbox | Along Agent + along | 事件信封、可靠接收、回执、待投递 | 存储、配对、worklink |
+| 版本 | Along Agent | 对象版本、ChangeSet 校验与自动提交、Along 业务工具 | 存储 |
+| 配对 | along | 配对身份绑定、Host↔Along Agent 回环接口、访问边界 | 存储（接口契约） |
+| worklink | Along Agent | 业务对象↔Ticket/Assignment 映射、thread 命名 | 存储 |
+| 记录 | Along Agent | Worker 结束宿主登记 RunRecord（不调模型） | 存储、worklink |
+| 集成 | along + Along Agent | 装配、端到端联测、迁移备份、红线回归 | 全部 |
 
 ### 1.2 数据流
 
@@ -37,7 +37,7 @@ Along Host（现有 Node，host/agent-host.mjs）
   │ ② 输出校验（validateGoalReply/safeAdaptiveLayout，现状保留）
   │ ③ 本机回环调用（bridge token + x-along-bridge-token）
   ▼
-DSH fork 进程（src/along/*，Along 业务服务）
+Along Agent 进程（src/along/*，Along 业务服务）
   ├─④ 回环接口（/along-source/api/*）：Schema/归属/去重 → 事务写入 along.sqlite
   │     Inbox + 业务记录（消息/摘要）+ Delivery 待投递 —— 同一事务 → 返回持久回执
   ├─⑤ 投递泵（进程内计时器）：Delivery → SourceContext.receive(Trigger)（至少一次）
@@ -51,23 +51,23 @@ DSH 核心（不改）：Trigger → Intake 去重 → 评估 → Ticket/Assignm
 along.sqlite（权威业务库） ←→ Host /sync 拉取 → iPhone 展示（BC-00-05）
 ```
 
-两份权威源互不越界（001 §5.2）：`along.sqlite` 只由 fork 内 Along 业务服务读写；DSH Store 只归 DSH；Host 两边都不直读，只走回环接口。
+两份权威源互不越界（001 §5.2）：`along.sqlite` 只由 Along Agent 内 Along 业务服务读写；DSH Store 只归 DSH；Host 两边都不直读，只走回环接口。
 
 ### 1.3 进程、目录与凭证布局
 
 | 路径 | 内容 | 权限 | 归属 |
 | --- | --- | --- | --- |
-| `~/.along/along-data/along.sqlite` | 业务库 | 0600 | fork 独占 |
-| `~/.along/along-data/bridge-token` | Host→fork 回环凭证（32B hex） | 0600 | Host 读、fork 读，绝不发 iPhone、不进 Worker |
+| `~/.along/along-data/along.sqlite` | 业务库 | 0600 | Along Agent 独占 |
+| `~/.along/along-data/bridge-token` | Host→Along Agent 回环凭证（32B hex） | 0600 | Host 读、Along Agent 读，绝不发 iPhone、不进 Worker |
 | `~/.along/agent-host/` | Host 现有状态（证书、pairing.json） | 0700 | 本轮不迁移（001 §5.2） |
 | `~/.along/memory/` | Hy-Memory 正式数据与索引（阶段 D 接入时启用） | 0700 | 不在 Worker 工作目录内 |
 | DSH `stateDir`（profile 配置，如 `~/.dsh/state/superagent`） | orchestrator.sqlite、锁、worker shim、工单目录 | — | DSH 备份语义（docs/006-deployment.md:99），不放业务数据 |
 
-路径经 fork 配置键显式传入、绝对路径校验（`src/deployment.ts:13` 的 `absolute()` 模式），不硬编码；SD-5 记录选位理由。配置键本身**可选**，仅 localDeployment（along 启用且 github 显式关闭）装配时 fail-fast 必填（§2.7.1），不影响现有 GitHub profile。启动时 fail-fast 断言 `alongStateDir` 不在 `executionRoot(settings, machine.stateDir)`（`src/app/execution-environment.ts:18`）之下，否则拒绝启动（BC-07-02 实现侧保证）。目录隔离是约定非沙箱（阶段 0 已实证 Worker 能读 cwd 外兄弟目录，`tests/along-phase0.spec.ts:120-135`）：业务写入只认 Along 工具 + 校验这条红线由服务层强制，不靠目录承诺。
+路径经 Along Agent 配置键显式传入、绝对路径校验（`src/deployment.ts:13` 的 `absolute()` 模式），不硬编码；SD-5 记录选位理由。配置键本身**可选**，仅 localDeployment（along 启用且 github 显式关闭）装配时 fail-fast 必填（§2.7.1），不影响现有 GitHub profile。启动时 fail-fast 断言 `alongStateDir` 不在 `executionRoot(settings, machine.stateDir)`（`src/app/execution-environment.ts:18`）之下，否则拒绝启动（BC-07-02 实现侧保证）。目录隔离是约定非沙箱（阶段 0 已实证 Worker 能读 cwd 外兄弟目录，`tests/along-phase0.spec.ts:120-135`）：业务写入只认 Along 工具 + 校验这条红线由服务层强制，不靠目录承诺。
 
 ## 2. 模块设计
 
-### 2.1 存储模块（fork）
+### 2.1 存储模块（Along Agent）
 
 **职责**：`along.sqlite` 的建库与迁移、唯一业务写入口（存储原语 `AlongStore` + Runtime 装配的门面 `AlongService`）、归属检查、对象版本与输入版本基元、按目标的分页查询、幂等导入。所有业务写入必须经此服务层（001 §5.2），其余模块不得自行拼 SQL 写业务库。
 
@@ -118,29 +118,29 @@ export class AlongStore {
 1. 打开方式照抄 `src/app/store.ts:58-64`：`mkdirSync(0o700)` → `new DatabaseSync(path)` → `chmodSync(path, 0o600)` → `PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL` → 读 `meta.schema_version` → 版本检查（高于当前版本拒绝「新版本库旧程序打开」；低于 `OLDEST_SCHEMA` 拒绝并提示备份恢复）→ 单事务内执行 §3 DDL 与迁移步骤。迁移失败时库不变、句柄关闭（`store.ts:92-100` 的错误包装模式）。
 2. 目录独占锁照 `src/app/runtime.ts:91-94` 由 **Runtime 持有**（`lockSync(alongStateDir, { stale: 30_000, onCompromised })`）；`AlongStore` 构造函数只开库与迁移、**不加锁**——同进程对同一目录二次加锁会启动即败。锁与库同目录（`~/.along/along-data/`），Runtime 在 `stop()` 时先关 AlongStore 再释放锁（`runtime.ts:246-251` 顺序）。
 3. **所有写入过 `atomic()`**：001 §4.3 的事务性（Inbox+业务记录+待投递同事务）、001 §8.4 的原子提交、幂等导入，都落在这一层；测试以「半途抛错后全量回滚」锁定。
-4. `message.id` **按事件锚定**：`msg:<user_id>:<event_id>`（幂等键=事件，重传不新落行）；客户端 `message_id` 只作关联与展示、不参与主键——`task.completed/feedback` 与原消息共用同一 `message_id` 时各落一行不冲突（落行规则见 §2.2.6）。`seq`（消息顺序）为 per-user 单调整数，事务内 `SELECT IFNULL(MAX(seq),0)+1 FROM message WHERE user_id=?` 分配。**不信任客户端时间**：`occurred_at` 只作展示与参考，因果顺序一律按 `seq`（BC-08-07，001 §5.3）。时间归一复用 `src/core/model.ts:17` 的 `isoTime`（fork 同仓库可直接 import）。
+4. `message.id` **按事件锚定**：`msg:<user_id>:<event_id>`（幂等键=事件，重传不新落行）；客户端 `message_id` 只作关联与展示、不参与主键——`task.completed/feedback` 与原消息共用同一 `message_id` 时各落一行不冲突（落行规则见 §2.2.6）。`seq`（消息顺序）为 per-user 单调整数，事务内 `SELECT IFNULL(MAX(seq),0)+1 FROM message WHERE user_id=?` 分配。**不信任客户端时间**：`occurred_at` 只作展示与参考，因果顺序一律按 `seq`（BC-08-07，001 §5.3）。时间归一复用 `src/core/model.ts:17` 的 `isoTime`（Along Agent 同仓库可直接 import）。
 5. 版本基元：每对象 `current_revision` 行内单调；`input_version` 独立成表（§3），用户新聊天即提升。ChangeSet 提交的 base_revision / input_version 比较在此之上实现（§2.3）。
 6. 幂等导入（BC-09-02）：`legacy-import.ts` 输入旧链路导出 JSON（App localStorage：`along.goal-custom.v1`、`along.goal-conversations.v1`，`web/agent-client.mjs:2-3`）+ 固定稳定 ID 映射表（旧 domain key `health|finance|custom` → `g_health|g_finance|g_custom`；消息按导出顺序重编 `msg:<user>:import:<n>`）。写入一律 `INSERT … ON CONFLICT(id) DO NOTHING`，重复导入不产生重复记录；产出核对报告（目标/任务/对话条数与内容 hash 对照）。已删除且无备份的旧消息不凭摘要或模型推测恢复原文（001 §5.3）。
-7. 文件位置常量：`along.sqlite` 与 `bridge-token` 在 `alongStateDir`；`alongStateDir`、`alongBridgeTokenFile` 为 fork 配置**可选键**（集成模块在 `src/deployment.ts` Config 登记，`absolute()` 模式校验），仅 localDeployment 装配时 fail-fast 必填（§2.7.1）——GitHub profile 不受影响。
+7. 文件位置常量：`along.sqlite` 与 `bridge-token` 在 `alongStateDir`；`alongStateDir`、`alongBridgeTokenFile` 为 Along Agent 配置**可选键**（集成模块在 `src/deployment.ts` Config 登记，`absolute()` 模式校验），仅 localDeployment 装配时 fail-fast 必填（§2.7.1）——GitHub profile 不受影响。
 
 **错误路径**：schema 版本不符 → 启动失败并给「先备份恢复」指引；归属不符 → `OwnershipError`（回环层统一转 404，与「不存在」同码防存在性泄露，§4.2）；事务内任何抛错 → savepoint 回滚、回执不发（BC-08-01 的失败侧）；磁盘/锁异常 → `onCompromised` 中止运行时（照 `runtime.ts:92`）。
 
-### 2.2 inbox 模块（fork + along）
+### 2.2 inbox 模块（Along Agent + along）
 
 **职责**：事件信封 Schema 与双端共享校验、可靠接收（事务回执）、去重与冲突、待投递（至少一次送入 DSH）、健康摘要保存（7 类口径）。
 
 **文件所有权**：
 
-- fork 拥有：`src/along/envelope.ts`（zod Schema、`payloadHash`、`envelopeForTrigger` 映射；`BoundIdentity`/`EventEnvelope`/`EventReceipt` 类型定义于此）、`src/along/inbox.ts`（接收状态机，工厂 `createInbox(store)` 注入 `AlongStore`，对外统一入口为门面的 `acceptEvent`）、`src/along/delivery.ts`（投递泵）
-- fork 扩展：`src/sources/along.ts` 的触发与线程映射接线由 worklink 模块统一负责（§2.5，单 owner；本模块经 `envelopeForTrigger` 消费其命名函数）——阶段 0 注释已预留 "Authenticated event translation and phone APIs are added in phase A"，`along.ts:1`
+- Along Agent 拥有：`src/along/envelope.ts`（zod Schema、`payloadHash`、`envelopeForTrigger` 映射；`BoundIdentity`/`EventEnvelope`/`EventReceipt` 类型定义于此）、`src/along/inbox.ts`（接收状态机，工厂 `createInbox(store)` 注入 `AlongStore`，对外统一入口为门面的 `acceptEvent`）、`src/along/delivery.ts`（投递泵）
+- Along Agent 扩展：`src/sources/along.ts` 的触发与线程映射接线由 worklink 模块统一负责（§2.5，单 owner；本模块经 `envelopeForTrigger` 消费其命名函数）——阶段 0 注释已预留 "Authenticated event translation and phone APIs are added in phase A"，`along.ts:1`
 - along 拥有：`web/event-envelope.mjs`（拟新增，浏览器+Node 双端共享信封组装/校验；登记 `tools/build.mjs:3` files 与 `web/sw.js:2` FILES）、`web/agent-client.mjs`（待同步队列协议层，不改 UI）、`host/agent-host.mjs`（事件接收端点与回执）
 - iOS 仅协议层：`ios/AlongHealth/Sources/AlongShellView.swift` `agentRequest` 路径白名单（`AlongShellView.swift:882-883`）追加新路径；不改视觉与交互
-- 测试：`tests/along-inbox.spec.ts`（fork）、`test/event-queue.test.mjs`（along）
+- 测试：`tests/along-inbox.spec.ts`（Along Agent）、`test/event-queue.test.mjs`（along）
 
 **对外接口**：
 
 ```ts
-// fork src/along/envelope.ts（类型 owner：BoundIdentity/EventEnvelope/EventReceipt 定义于此，§4.6）
+// Along Agent src/along/envelope.ts（类型 owner：BoundIdentity/EventEnvelope/EventReceipt 定义于此，§4.6）
 export const EVENT_SCHEMA_VERSION = '1'
 export const EventEnvelopeSchema: z.ZodType<EventEnvelope>       // §4.1
 export type BoundIdentity = { userId: string; deviceId: string }  // Host 绑定身份（回环头注入）
@@ -148,14 +148,14 @@ export function payloadHash(envelope: EventEnvelope): string      // 覆盖域�
 export function envelopeForTrigger(envelope: EventEnvelope, identity: BoundIdentity,
   threadId: string): Trigger                                      // Trigger id/threads/actor/human/meta 映射（§4.6）
 
-// fork src/along/inbox.ts（工厂注入 AlongStore，依赖单向；对外统一入口是门面 AlongService.acceptEvent）
+// Along Agent src/along/inbox.ts（工厂注入 AlongStore，依赖单向；对外统一入口是门面 AlongService.acceptEvent）
 export function createInbox(store: AlongStore): {
   acceptEvent(envelope: EventEnvelope, identity: BoundIdentity): EventReceipt
 }
 export type EventReceipt = { status: 'accepted' | 'duplicate' | 'conflict' | 'rejected';
   event_id: string; received_seq?: number; reason?: string }
 
-// fork src/along/delivery.ts
+// Along Agent src/along/delivery.ts
 export function startDeliveryPump(store: AlongStore, deps: DeliveryDeps, signal: AbortSignal): () => void
 // DeliveryDeps = { receive(trigger): ReceiveResult | Promise<ReceiveResult>   // SourceContext.receive
 //                 , filteredReason(triggerId): string | undefined }            // 经 orchestrator Store 读 disposition
@@ -177,12 +177,12 @@ export function startDeliveryPump(store: AlongStore, deps: DeliveryDeps, signal:
 4. **健康摘要保存**（001 §4.4，D5）：每份摘要一行（§3 `health_summary`），字段含类型标识、单位、统计方法、窗口、时区、版本、摘要器版本；`availability ∈ ok|no_permission|unavailable|not_synced`，「实际为零」= `availability='ok'` 且 `value=0`，四态可区分（BC-03-11 的存储侧）。**`adapter` 由服务端派生、不采信客户端自报**：信封不携带 adapter 字段（§4.1），接收层按 D5 七类清单（`steps|workout|active_energy|weight|resting_heart_rate|wrist_temperature|sleep`，以 `ios/AlongHealth/Sources/HealthKitReader.swift:56-62` 实测的 7 个 sampleType 为准）判定 `known|pending`——未知类型 `adapter='pending'`，保存但 `along_health_read` 不返回、不进模型上下文（001 §4.4「服务端遇到未知类型标记为待适配」；BC-03-10 的服务端权威判定）。变化语义筛选/合并/多目标拆分是阶段 C，阶段 A 只保存 + 投递 Trigger。
 5. **D15**：`along.message kind='authorization.changed'` 与 `src/sources/along.ts:6` 口径一致——接收层接受并记录（信封 Schema 含该 kind，§4.1）、不投递（§2.2.1f 跳过）、不当作失败；不做撤回业务。
 6. **任务反馈落行与状态/版本语义**（001 §4.1；D4「完成反馈是事实，不是对目标的编辑」）：`task.completed`/`task.feedback` 各自作为独立事件落一条消息行——`id=msg:<user_id>:<event_id>`，与原消息（可能共用同一 `message_id`）不冲突；`text = payload.note`，无 note 时服务端兜底生成（completed：`任务完成反馈：{task.content}`；feedback：`任务反馈`），保证非空约束有来源；`reply_to_message_id` 指向同 user 内该 `message_id` 的原 user 消息，实现「用同一 `message_id` 关联对话、不当作两次请求」。状态与版本由**接收层确定性变更、不经 ChangeSet**：`task.completed` 把 `user_task.status` 置 `done`、更新 `completed_feedback_event_id`、`current_revision+1` 并写 `task_revision`（`origin_event_id`=事件号、`basis_changeset`=NULL——非 Agent 来源的标记，与 Agent 变更经 changeset 区分）；`task.feedback` 不改状态不推版本。防护口径：后续 `task.update/cancel` 走 ChangeSet 时受 base_revision 校验（反馈已推版本，旧基准自然 conflicted），且不得清除 `completed_feedback_event_id`（BC-02-07「已收到的完成反馈不被覆盖」的机制）。**红线**：健康只发汇总值，不收原始样本（接收层 Schema 无样本字段，zod strict 拒绝多余字段）。
-7. **客户端待同步队列**（along 仓库，协议层）：`web/event-envelope.mjs` 导出 `buildEnvelope(...)` 与共享校验（与 fork 同一 Schema 语义的 JS 版本，静态用例向量对齐，见 SD-1/SG-1）；`web/agent-client.mjs` 新增 `queueEvent(config, envelope)`：信封入 localStorage 待同步队列（**重试复用队列中同一份序列化信封，不重新组包**，保证 `payload_hash` 稳定）→ `agentCall('/events', envelope)` → 收到持久回执后按 `event_id` 删除本地项。回执处置口径：`200 accepted|duplicate` → 删除本地项；**`400 rejected` → 终止重试并删除本地项**（本地记录失败状态可查——被拒事件重发不会变成 accepted）；**`409 conflict` → 终止重试并删除本地项**（同号已存在不同内容，重发只会继续冲突）；`401/404/5xx` 与网络失败 → 保留待同步项并同号重试（BC-08-01/02 的客户端断言）。不接到任何 UI 交互（页面零改动）；真机接线随阶段 B 迁移切换。
+7. **客户端待同步队列**（along 仓库，协议层）：`web/event-envelope.mjs` 导出 `buildEnvelope(...)` 与共享校验（与 Along Agent 同一 Schema 语义的 JS 版本，静态用例向量对齐，见 SD-1/SG-1）；`web/agent-client.mjs` 新增 `queueEvent(config, envelope)`：信封入 localStorage 待同步队列（**重试复用队列中同一份序列化信封，不重新组包**，保证 `payload_hash` 稳定）→ `agentCall('/events', envelope)` → 收到持久回执后按 `event_id` 删除本地项。回执处置口径：`200 accepted|duplicate` → 删除本地项；**`400 rejected` → 终止重试并删除本地项**（本地记录失败状态可查——被拒事件重发不会变成 accepted）；**`409 conflict` → 终止重试并删除本地项**（同号已存在不同内容，重发只会继续冲突）；`401/404/5xx` 与网络失败 → 保留待同步项并同号重试（BC-08-01/02 的客户端断言）。不接到任何 UI 交互（页面零改动）；真机接线随阶段 B 迁移切换。
 8. **`payload_hash` 覆盖域固定**：哈希输入为信封中**客户端声明的全部字段**（`event_id/schema_version/event_type/kind/goal_id/task_id/occurred_at/timezone/message_id/causation_id/base_revision/payload`）按 key 排序的稳定 JSON 序列化；服务端绑定字段（回环头）与接收时刻元数据（`received_at`）不参与。客户端重试必须复用同一份序列化信封（§2.2.7），否则同号重试会被误判 conflict（001 §4.3、BC-08-02）。
 
 **错误路径**：`client_goal_mutation`/`identity_in_body`/归属不符/Schema 不符（有合法 `event_id`）→ 落 `rejected` 行并返回 400（对外 reason 统一为 `not_found`/`rejected` 口径，§4.2；内部行记精确原因供「拒绝原因可查」；同号重试返回 rejected 而非 duplicate）；无合法 `event_id` → 400 不落行；`duplicate` 200 / `conflict` 409 仅对 accepted 行成立；投递失败不回滚接收（业务记录已持久），只保留重试与失败状态；`filtered` 终态不再重试；泵异常不阻塞接收路径。
 
-### 2.3 版本模块（fork）
+### 2.3 版本模块（Along Agent）
 
 **职责**：对象版本与 ChangeSet 四层校验、自动提交（applied/conflicted/invalid）、幂等重放、写入资格（版本保证）、Along 业务工具注册。
 
@@ -245,30 +245,30 @@ export type ChangeSetResult =
 
 ### 2.4 配对与进程间接口模块（along 仓库）
 
-**职责**：配对会话 → `user_id/device_id` 服务端绑定；所有新端点强制配对鉴权与归属检查；Host→fork 回环接口客户端与 fork 侧服务；新旧链路切换开关。
+**职责**：配对会话 → `user_id/device_id` 服务端绑定；所有新端点强制配对鉴权与归属检查；Host→Along Agent 回环接口客户端与 Along Agent 侧服务；新旧链路切换开关。
 
 **文件所有权**：
 
 - 拥有：`host/along-bridge.mjs`（拟新增：回环客户端——封装 base URL、bridge token、超时、错误语义）
 - 扩展：`host/agent-host.mjs`（配对与 Bearer 校验已在：`agent-host.mjs:25-46` 一次性配对码、pairing.json 0600、`authorized()` at :52-55；扩展为身份绑定 + 新端点）
-- fork 侧接口实现在集成模块装配（`src/along/api.ts` 注册路由）；本模块定义契约（§4.2）
+- Along Agent 侧接口实现在集成模块装配（`src/along/api.ts` 注册路由）；本模块定义契约（§4.2）
 - 测试：along `test/along-bridge.test.mjs`（Node 替身模式，参照 `test/recent-health-context.test.mjs:93` 直接替换上游调用的写法）
 
 **实现要点**：
 
-1. **身份绑定**：`pairing.json` 扩展为 `{hash, user_id, device_id}`——首次 `/pair` 成功时生成 `user_id`（`u_` + 8 hex）与 `device_id`（`d_` + 8 hex）；旧文件（仅 `hash`）启动时幂等升级补齐，配对 token 不变、手机无感。`authorized()` 比较逻辑不动（Bearer 64hex + timingSafeEqual，`agent-host.mjs:52-55`）。D1 单用户：一个 pairing.json 即一个绑定会话；新配对（换设备）覆盖旧绑定，`user_id` 不变（同一用户换手机）。**身份注册**：配对完成后 Host 调回环 `POST /along-source/api/pairing`（§4.2）把 `{user_id, device_id}` 注册进 fork；**旧 pairing.json（仅 hash）启动时幂等升级补齐 `user_id`/`device_id` 后同样调用一次注册**（Host 启动且 fork 可达时，幂等可重试）——否则既有已配对设备在不重新配对的情况下 `user_id` 不在 allowed 名单（`src/sources/along.ts:19-24` 的 allowed 默认为空），其 `user_message` 不成 explicit 请求、静默无工作。fork 侧幂等 upsert `user` 行，并把 `user_id` 幂等加入 DSH Policy `sources.along.allowed`（经 Settings 保存）。
-2. **所有新端点**（手机侧 `POST /events`、`POST /sync`、`POST /sync/ack`——iOS 桥 `agentRequest` 固定 `POST`（`AlongShellView.swift:888`），不改桥语义；Host→fork 侧方法见 §4.2）在 `authorized(req)` 之后统一从 pairing.json 取 `{user_id, device_id}` 注入请求上下文；**请求体自称的 user_id/device_id 一律不信任**（001 §4.2），Body 内若出现这两个字段则拒绝（reason=`identity_in_body`）。
-3. **回环客户端**（`along-bridge.mjs`）：`bridgeCall(path, {method, value})` → `fetch(ALONG_SUPERAGENT_URL + path)`，带 `x-along-bridge: 1`（沿用 `agent-host.mjs:59` 头）与 `x-along-bridge-token: <bridge-token 内容>`；凭证来自 `ALONG_BRIDGE_TOKEN_FILE`（缺失或文件不存在 → 新端点 503「未配置桥接凭证」，旧链路不受影响）；超时与 `HostError` 语义沿用 `superAgentCall`（`agent-host.mjs:56-66`）。15s 超时对 `/events` 不够（含 DSH 投递触发）→ `/events` 用 30s。**存量调用点必须同步带 token**：现状 `superAgentCall`（`agent-host.mjs:215,220,240,246`）与 `superAgentReady` 探测（`agent-host.mjs:70-71`）只发 `x-along-bridge: 1`——fork 契约上线后会对全部 `/along-source/api/*` 校验 token，不改则旧链路一律 401，与 `ALONG_EVENT_INGEST=off`「旧链路照旧」（§2.4.5、BC-09-03）矛盾。改法：Host 进程启动时读一次 `ALONG_BRIDGE_TOKEN_FILE`，`superAgentCall`/`superAgentReady` 统一追加 `x-along-bridge-token` 头（`along-bridge.mjs` 落地后由它承载，存量调用点切到 `bridgeCall`）。现状缺口核实：Host 已调 `/along-source/api/goals|tasks` 但 fork 无任何 `/along-source` 路由（`src/app/http.ts:234` 只注册 `/orchestrator`）——本契约（§4.2）即为补齐目标，两端按同一文档实现并联调，不据现状推定对方已实现（003 §1）。
-4. **回环凭证不复用配对 token**（SD-2）：配对 token 已发 iPhone（`agent-host.mjs:187` /pair 响应），泄露面在手机；fork 接口凭证只允许存在于 Mac 两个进程内存中。文件 0600，进程启动读入，不进日志、不进运行结果、不进 Worker 环境（Worker 环境变量来自 `environmentOf` 白名单，`execution-environment.ts:27-36`，天然不含）。
-5. **新旧切换开关**：Host 环境变量 `ALONG_EVENT_INGEST`（`off` 默认 / `on`）。`on`：新 `/events`、`/sync` 生效，同时 `/super-agent/goals`、`/super-agent/tasks` 的 DSH 分支返回 409「已切换新链路」（旧适配器停止消费用户输入）；`off`：新端点 503，旧链路照旧。回退 = 改回 `off`，fork 业务库与 DSH 状态不清（BC-09-03/04 的机制）。
-6. **信任模型写进实现注释**：fork 信任「持 bridge token 的本机 Host」声明的身份（回环 + 文件凭证 0600）；归属防线在 fork 侧逐请求 `assertGoalOwner`（BC-07-05：用 A 的配对凭证请求 B 的目标 → Host 解析出 user A → fork 查 goal 属 B → **404 不回显内容**，与「不存在」同码防存在性泄露，§4.2）。模型侧防线在工具层（§2.3.6）；两处口径统一为「宿主绑定，模型/手机均不可自报」。
-7. **红线**：Kimi token 与配对 token 不发第三方、不留运行结果（`agent-host.mjs:184-185` 现状保持）；DSH 管理端不暴露给 iPhone——fork `/orchestrator` 前缀保持 loopback + same-origin 校验（`http.ts:234-240`），新 `/along-source` 前缀只服务 bridge 调用，不注册进手机可达路径。
+1. **身份绑定**：`pairing.json` 扩展为 `{hash, user_id, device_id}`——首次 `/pair` 成功时生成 `user_id`（`u_` + 8 hex）与 `device_id`（`d_` + 8 hex）；旧文件（仅 `hash`）启动时幂等升级补齐，配对 token 不变、手机无感。`authorized()` 比较逻辑不动（Bearer 64hex + timingSafeEqual，`agent-host.mjs:52-55`）。D1 单用户：一个 pairing.json 即一个绑定会话；新配对（换设备）覆盖旧绑定，`user_id` 不变（同一用户换手机）。**身份注册**：配对完成后 Host 调回环 `POST /along-source/api/pairing`（§4.2）把 `{user_id, device_id}` 注册进 Along Agent；**旧 pairing.json（仅 hash）启动时幂等升级补齐 `user_id`/`device_id` 后同样调用一次注册**（Host 启动且 Along Agent 可达时，幂等可重试）——否则既有已配对设备在不重新配对的情况下 `user_id` 不在 allowed 名单（`src/sources/along.ts:19-24` 的 allowed 默认为空），其 `user_message` 不成 explicit 请求、静默无工作。Along Agent 侧幂等 upsert `user` 行，并把 `user_id` 幂等加入 DSH Policy `sources.along.allowed`（经 Settings 保存）。
+2. **所有新端点**（手机侧 `POST /events`、`POST /sync`、`POST /sync/ack`——iOS 桥 `agentRequest` 固定 `POST`（`AlongShellView.swift:888`），不改桥语义；Host→Along Agent 侧方法见 §4.2）在 `authorized(req)` 之后统一从 pairing.json 取 `{user_id, device_id}` 注入请求上下文；**请求体自称的 user_id/device_id 一律不信任**（001 §4.2），Body 内若出现这两个字段则拒绝（reason=`identity_in_body`）。
+3. **回环客户端**（`along-bridge.mjs`）：`bridgeCall(path, {method, value})` → `fetch(ALONG_SUPERAGENT_URL + path)`，带 `x-along-bridge: 1`（沿用 `agent-host.mjs:59` 头）与 `x-along-bridge-token: <bridge-token 内容>`；凭证来自 `ALONG_BRIDGE_TOKEN_FILE`（缺失或文件不存在 → 新端点 503「未配置桥接凭证」，旧链路不受影响）；超时与 `HostError` 语义沿用 `superAgentCall`（`agent-host.mjs:56-66`）。15s 超时对 `/events` 不够（含 DSH 投递触发）→ `/events` 用 30s。**存量调用点必须同步带 token**：现状 `superAgentCall`（`agent-host.mjs:215,220,240,246`）与 `superAgentReady` 探测（`agent-host.mjs:70-71`）只发 `x-along-bridge: 1`——Along Agent 契约上线后会对全部 `/along-source/api/*` 校验 token，不改则旧链路一律 401，与 `ALONG_EVENT_INGEST=off`「旧链路照旧」（§2.4.5、BC-09-03）矛盾。改法：Host 进程启动时读一次 `ALONG_BRIDGE_TOKEN_FILE`，`superAgentCall`/`superAgentReady` 统一追加 `x-along-bridge-token` 头（`along-bridge.mjs` 落地后由它承载，存量调用点切到 `bridgeCall`）。现状缺口核实：Host 已调 `/along-source/api/goals|tasks` 但 Along Agent 无任何 `/along-source` 路由（`src/app/http.ts:234` 只注册 `/orchestrator`）——本契约（§4.2）即为补齐目标，两端按同一文档实现并联调，不据现状推定对方已实现（003 §1）。
+4. **回环凭证不复用配对 token**（SD-2）：配对 token 已发 iPhone（`agent-host.mjs:187` /pair 响应），泄露面在手机；Along Agent 接口凭证只允许存在于 Mac 两个进程内存中。文件 0600，进程启动读入，不进日志、不进运行结果、不进 Worker 环境（Worker 环境变量来自 `environmentOf` 白名单，`execution-environment.ts:27-36`，天然不含）。
+5. **新旧切换开关**：Host 环境变量 `ALONG_EVENT_INGEST`（`off` 默认 / `on`）。`on`：新 `/events`、`/sync` 生效，同时 `/super-agent/goals`、`/super-agent/tasks` 的 DSH 分支返回 409「已切换新链路」（旧适配器停止消费用户输入）；`off`：新端点 503，旧链路照旧。回退 = 改回 `off`，Along Agent 业务库与 DSH 状态不清（BC-09-03/04 的机制）。
+6. **信任模型写进实现注释**：Along Agent 信任「持 bridge token 的本机 Host」声明的身份（回环 + 文件凭证 0600）；归属防线在 Along Agent 侧逐请求 `assertGoalOwner`（BC-07-05：用 A 的配对凭证请求 B 的目标 → Host 解析出 user A → Along Agent 查 goal 属 B → **404 不回显内容**，与「不存在」同码防存在性泄露，§4.2）。模型侧防线在工具层（§2.3.6）；两处口径统一为「宿主绑定，模型/手机均不可自报」。
+7. **红线**：Kimi token 与配对 token 不发第三方、不留运行结果（`agent-host.mjs:184-185` 现状保持）；DSH 管理端不暴露给 iPhone——Along Agent `/orchestrator` 前缀保持 loopback + same-origin 校验（`http.ts:234-240`），新 `/along-source` 前缀只服务 bridge 调用，不注册进手机可达路径。
 
-**错误路径**：配对码错/过期 → 403（现状）；token 无效 → 401；身份头缺失/非法 → 403；归属不符 → 404（统一码防存在性泄露，§4.2）；fork 不可达 → 502/503（现状 `superAgentCall` 语义）；`conflict` 回执 → 409 透传给手机。
+**错误路径**：配对码错/过期 → 403（现状）；token 无效 → 401；身份头缺失/非法 → 403；归属不符 → 404（统一码防存在性泄露，§4.2）；Along Agent 不可达 → 502/503（现状 `superAgentCall` 语义）；`conflict` 回执 → 409 透传给手机。
 
-**实现记录（2026-11-15，配对模块）**：① fork 接口层（`src/along/api.ts`）在信封到达 inbox 之前显式拒绝自报身份（`identity_in_body`，接口侧 400）——该路径不落 Inbox rejected 行（落行是 inbox 的 a0，inbox 对直接调用保留同款检查）；② 配对注册的幂等重试=启动既有绑定、/pair 成功、新端点调用时若尚未注册成功则先补注册（不依赖 ALONG_EVENT_INGEST 开关）；③ 桥接凭证随 `x-along-bridge-token` 附着到全部 Host→fork 调用（含情境评估专用 URL 的调用）。
+**实现记录（2026-11-15，配对模块）**：① Along Agent 接口层（`src/along/api.ts`）在信封到达 inbox 之前显式拒绝自报身份（`identity_in_body`，接口侧 400）——该路径不落 Inbox rejected 行（落行是 inbox 的 a0，inbox 对直接调用保留同款检查）；② 配对注册的幂等重试=启动既有绑定、/pair 成功、新端点调用时若尚未注册成功则先补注册（不依赖 ALONG_EVENT_INGEST 开关）；③ 桥接凭证随 `x-along-bridge-token` 附着到全部 Host→Along Agent 调用（含情境评估专用 URL 的调用）。
 
-### 2.5 worklink 模块（fork）
+### 2.5 worklink 模块（Along Agent）
 
 **职责**：业务对象 ↔ Ticket/Assignment 映射；DSH thread 命名；D9 派生事件编号约定；锁定「健康事件不恢复人工停止工单」在 Along 事件下不被破坏。
 
@@ -283,7 +283,7 @@ export type ChangeSetResult =
 
 **实现要点**：
 
-1. **订阅机制**：fork 已有完整域事件（`src/core/ports.ts:86-102` `DomainEvents`）；`Runtime` 构造 Engine 的 `emit` 回调（`runtime.ts:138`）追加分发：`this.store.afterCommit(() => along.onDomainEvent(event))`。**必须在 `afterCommit` 里**：emit 发生在 Engine 事务内，直接写 along.sqlite 会在 Engine 回滚时留下脏行；`store.ts:159-162` 的 `afterCommit` 恰好「事务回滚则丢弃」。RunRecord 模块同样经此入口（§2.6）。
+1. **订阅机制**：Along Agent 已有完整域事件（`src/core/ports.ts:86-102` `DomainEvents`）；`Runtime` 构造 Engine 的 `emit` 回调（`runtime.ts:138`）追加分发：`this.store.afterCommit(() => along.onDomainEvent(event))`。**必须在 `afterCommit` 里**：emit 发生在 Engine 事务内，直接写 along.sqlite 会在 Engine 回滚时留下脏行；`store.ts:159-162` 的 `afterCommit` 恰好「事务回滚则丢弃」。RunRecord 模块同样经此入口（§2.6）。
 2. **映射写入**：`ticket.created` → `recordWorkLink({ticket_id, work_id, goal_id?, thread_key, kind:'ticket', trigger_id, event_id})`；`ticket.resumed` → kind=`resume`（同一 ticket 行更新 work_id/thread）；`assignment.started/ended` → 更新 `assignment_id` 列；`ticket.ended` → 记录 ended（清除在途标记）。`work_id` 服务端生成（`w_` + 12 hex），`thread_key` 唯一（§3 UNIQUE）。`decision.recorded` 暂只记入追踪日志，不建行。
 3. **业务 ID 与执行 ID 独立**（001 §2）：WorkLink 是唯一映射点；goal/task 查询不依赖 DSH Session 存活。goal_id 来源：Trigger meta（`envelopeForTrigger` 按事件绑定的 goal_id；无 goal 的健康事件为 NULL，阶段 C 拆分后逐目标回填）。
 4. **thread 命名**（001 §7.2，`tests/along-phase0.spec.ts:21-25` 的 `goal/exercise/work/<id>` 形态演化）：
@@ -297,7 +297,7 @@ export type ChangeSetResult =
 
 **错误路径**：`recordWorkLink` 抛错只记运行日志与 health entry（`along` kind 声明 `health: ['delivery','records']`），不反噬 DSH 事务（afterCommit 回调错误按 `store.ts:151` 的 report 模式处理，不失败已提交事务）；thread 命名冲突（同 key）→ 断言失败即测试问题，运行时 UNIQUE 约束兜底报错。
 
-### 2.6 记录模块（fork）
+### 2.6 记录模块（Along Agent）
 
 **职责**：Worker 结束时宿主自动登记执行记录（D7：不调用模型）；执行记录幂等；**系统侧执行说明消息（outbound）落行的 owner**（§2.6.2）；复盘不做（阶段 E 定时批量）。
 
@@ -322,17 +322,17 @@ export type ChangeSetResult =
 
 **文件所有权**：
 
-- fork：`src/app/runtime.ts`（装配 AlongStore/门面/域事件分发；`localDeployment` 判定已在 `src/app/setup.ts:16`）、**`src/along/api.ts`（本模块拥有**：`/along-source/api/*` 回环路由注册与 bridge token 校验——§2.4 只定义契约，避免「以为对方实现」）、`src/deployment.ts`（新增**可选**配置键 `alongStateDir`、`alongBridgeTokenFile`，`absolute()` 模式校验）、`src/app/http.ts` 为路由注册模式参照（`http.ts:230-249`）、`scripts/along-backup.mjs`（拟新增）
-- fork 测试：`tests/along-phase0.spec.ts` 扩展为阶段 A 骨架复用、`tests/along-phaseA.spec.ts`（拟新增，端到端）
-- along：`host/server.mjs` 与 `host/agent-host.mjs` 的装配与启停顺序（server.mjs 现仅 30 行静态开发服务器，手机入口是 agent-host）；`docs/` 实现文档落 fork `docs/along/`（按 AGENTS.md §3 先文档后实现，本文为唯一设计源，fork 侧只写实现记录不重定方案）
-- 门禁：fork `pnpm check`（typecheck + vitest + tsdown build，`package.json:52`）；along `npm run check`（`web/`、`host/` 语法检查 + `test/*.test.mjs`，AGENTS.md §3）
+- Along Agent：`src/app/runtime.ts`（装配 AlongStore/门面/域事件分发；`localDeployment` 判定已在 `src/app/setup.ts:16`）、**`src/along/api.ts`（本模块拥有**：`/along-source/api/*` 回环路由注册与 bridge token 校验——§2.4 只定义契约，避免「以为对方实现」）、`src/deployment.ts`（新增**可选**配置键 `alongStateDir`、`alongBridgeTokenFile`，`absolute()` 模式校验）、`src/app/http.ts` 为路由注册模式参照（`http.ts:230-249`）、`scripts/along-backup.mjs`（拟新增）
+- Along Agent 测试：`tests/along-phase0.spec.ts` 扩展为阶段 A 骨架复用、`tests/along-phaseA.spec.ts`（拟新增，端到端）
+- along：`host/server.mjs` 与 `host/agent-host.mjs` 的装配与启停顺序（server.mjs 现仅 30 行静态开发服务器，手机入口是 agent-host）；`docs/` 实现文档落 Along Agent `docs/along/`（按 AGENTS.md §3 先文档后实现，本文为唯一设计源，Along Agent 侧只写实现记录不重定方案）
+- 门禁：Along Agent `pnpm check`（typecheck + vitest + tsdown build，`package.json:52`）；along `npm run check`（`web/`、`host/` 语法检查 + `test/*.test.mjs`，AGENTS.md §3）
 
 **实现要点**：
 
-1. **fork 装配顺序**（`runtime.ts` 构造函数内，Store 之后）：`localDeployment`（along enabled + github disabled，`src/app/setup.ts:16`）成立时——读 `machine.alongStateDir`/`alongBridgeTokenFile`（**可选配置键**，此时缺省即启动失败并给出配置指引；不成立时不读这两个键，现有 GitHub profile 零影响）→ fail-fast 断言不在 `executionRoot` 之下（§1.3）→ `lockSync(alongStateDir)`（Runtime 持锁，§2.1.2）→ `new AlongStore(join(alongStateDir,'along.sqlite'))` → 组合 inbox/changeset 工厂成门面（§2.1）→ 注册回环路由（`ctx.webServer.register({kind:'prefix', path:'/along-source', handler})`，与 `/orchestrator` 并列，webServer 本就强制 loopback `http.ts:235`）→ `ready` 后 `startDeliveryPump`。停机逆序：停泵 → 关 AlongStore → 关 Store → 释放两把目录锁（`runtime.ts:230-253` 模式）。
+1. **Along Agent 装配顺序**（`runtime.ts` 构造函数内，Store 之后）：`localDeployment`（along enabled + github disabled，`src/app/setup.ts:16`）成立时——读 `machine.alongStateDir`/`alongBridgeTokenFile`（**可选配置键**，此时缺省即启动失败并给出配置指引；不成立时不读这两个键，现有 GitHub profile 零影响）→ fail-fast 断言不在 `executionRoot` 之下（§1.3）→ `lockSync(alongStateDir)`（Runtime 持锁，§2.1.2）→ `new AlongStore(join(alongStateDir,'along.sqlite'))` → 组合 inbox/changeset 工厂成门面（§2.1）→ 注册回环路由（`ctx.webServer.register({kind:'prefix', path:'/along-source', handler})`，与 `/orchestrator` 并列，webServer 本就强制 loopback `http.ts:235`）→ `ready` 后 `startDeliveryPump`。停机逆序：停泵 → 关 AlongStore → 关 Store → 释放两把目录锁（`runtime.ts:230-253` 模式）。
 2. **域事件分发**：`runtime.ts:138` `emit` 回调改为先 `this.store.afterCommit(() => along.onDomainEvent(event))` 再执行原 notice 逻辑（顺序不影响 notice）；`quiet` 语义不变。
 3. **E2E 主验收**（`tests/along-phaseA.spec.ts`，复用 `tests/fixtures/host.ts` 的 `startRuntime/acceptedTicket/runTool` 与 `configuredProbe()/trigger()` 模式，`along-phase0.spec.ts:27-39`）：注入信封 → 断言回执与 along.sqlite 三表（Inbox/业务记录/Delivery）同事务落库 → 投递 → 评估（替身 route accept）→ Ticket + WorkLink → `along_changes_commit`（经 `runTool` 注入 Worker 工具调用）→ applied + 版本推进 + sync_outbox → `assignment.ended` → RunRecord → 重启 Runtime（`stop()` 后再 `startRuntime`，seed 由文件库承载）→ 回环查询完整对话/目标/任务（BC-08-11 端到端）。重复事件注入 → `duplicate` 回执 + 工作计数不变（BC-08-03）。**E2E 前须扩展夹具**：`tests/fixtures/host.ts:238` 的 `webServer.register` 只保留最后一个 handler（`/along-source` 会覆盖 `/orchestrator`，`api()` 只打 `/orchestrator/api`），需改为按前缀分发；`tests/fixtures/deployment.ts` 的 `testMachine` 需补 `alongStateDir`/`alongBridgeTokenFile` 字段。**重启能力**：`startRuntime` 每次都 `mkdtempSync` 新建临时目录（`host.ts:136`）、`stop()` 整目录删除（`host.ts:291`），按现状写不出真重启——须给夹具加 `reuseDir` 选项：`startRuntime(seed?, { reuseDir })` 跳过 mkdtemp 直接在固定目录开 Runtime、对应 `stop()` 跳过 `rmSync`；BC-08-11 的重启 E2E 用同一 stateDir 先 `stop()` 再以 `reuseDir` 重开，断言数据来自沿用的 `along.sqlite`/orchestrator.sqlite 文件（禁止用 seed 重新注入后再断言——那是假绿），重启后按回环查询完整对话/目标/任务（003 §2 验收①）。
-4. **迁移备份**（BC-09-01/07）：`scripts/along-backup.mjs` 流程——提示/执行协调停写（Host `ALONG_EVENT_INGEST=off` 且 fork 进程已停止，或经管理端确认 idle）→ 业务库与 orchestrator.sqlite 用 `VACUUM INTO '<备份目录>/…'`（一致性快照，不是文件复制——BC-09-07 明确「不把直接复制写入中的 SQLite 当备份」）→ **DSH stateDir 其余内容一并归档**：工单目录（默认 `<stateDir>/work`，`docs/006-deployment.md:99` 明示「Ticket directories in `work`… Back it up」）与 worker 会话记录（`RunRecord.tool_trace_ref` 引用的 Session 记录属 dsh-session-persistence 持久化，不在 orchestrator.sqlite 内，缺了恢复后轨迹引用悬空、执行现场缺失；**其落盘根目录由 harness 运行时装配，fork 仓与 node_modules 内不可证**——`dsh-session-persistence/lib/index.js` 未暴露存储根路径，实施时须在运行中的 stateDir 实测确认会话记录目录后再按实测路径登记归档，若不在 stateDir 内则把该目录单独加入备份清单）→ Hy-Memory 目录（`~/.along/memory/`，停机时复制）与配置（profile 配置目录、pairing.json、bridge-token 文件）→ 产出清单与各文件 sha256；清单中 BC-09-01 的「Skill 版本」一项显式登记为**阶段 A 不适用**（无 Skill 版本链，prompt 版本已随 orchestrator.sqlite 覆盖），避免验收核对缺项。恢复演练在 BC-09-06（阶段 E），阶段 A 验「备份可用且完整」。
+4. **迁移备份**（BC-09-01/07）：`scripts/along-backup.mjs` 流程——提示/执行协调停写（Host `ALONG_EVENT_INGEST=off` 且 Along Agent 进程已停止，或经管理端确认 idle）→ 业务库与 orchestrator.sqlite 用 `VACUUM INTO '<备份目录>/…'`（一致性快照，不是文件复制——BC-09-07 明确「不把直接复制写入中的 SQLite 当备份」）→ **DSH stateDir 其余内容一并归档**：工单目录（默认 `<stateDir>/work`，`docs/006-deployment.md:99` 明示「Ticket directories in `work`… Back it up」）与 worker 会话记录（`RunRecord.tool_trace_ref` 引用的 Session 记录属 dsh-session-persistence 持久化，不在 orchestrator.sqlite 内，缺了恢复后轨迹引用悬空、执行现场缺失；**其落盘根目录由 harness 运行时装配，Along Agent 仓与 node_modules 内不可证**——`dsh-session-persistence/lib/index.js` 未暴露存储根路径，实施时须在运行中的 stateDir 实测确认会话记录目录后再按实测路径登记归档，若不在 stateDir 内则把该目录单独加入备份清单）→ Hy-Memory 目录（`~/.along/memory/`，停机时复制）与配置（profile 配置目录、pairing.json、bridge-token 文件）→ 产出清单与各文件 sha256；清单中 BC-09-01 的「Skill 版本」一项显式登记为**阶段 A 不适用**（无 Skill 版本链，prompt 版本已随 orchestrator.sqlite 覆盖），避免验收核对缺项。恢复演练在 BC-09-06（阶段 E），阶段 A 验「备份可用且完整」。
 5. **红线回归**（BC-07-01 复检口径）：沿 `along-phase0.spec.ts:120-135` 模式扩展——凭证不进 Worker 的三层保证：① `scrubbedParentEnv` 的**固定敏感名模式**（`/KEY|PASSWORD|SECRET|TOKEN/i` + 剔除 `DSH_` 前缀变量，dsh-subprocess `lib/index.js:32,50-56`，无登记扩展点）自动命中 `ALONG_BRIDGE_TOKEN_FILE` 等 TOKEN 形态变量名——新凭证**按此命名约定命名**即被过滤；② Worker 环境变量只来自 `environmentOf` 白名单（`execution-environment.ts:27-36`），凭证路径/值本就不可达；③ 提示词装配与目录断言沿阶段 0 探针。004 §3.4 的「凭证检查随新增工具与凭证扩展」按此口径理解：扩展的是探针检查覆盖面（加新变量名），不是给依赖包登记名单。`along.sqlite` 与 `~/.along/memory/` 路径断言不在 `executionRoot` 内（BC-07-02 只断言目录不在工作目录内，**不夸大为沙箱**——兄弟目录可读性已被阶段 0 证明）。
 6. **版本号联动**（AGENTS.md §2，仅当 web 文件内容变化时）：`web/event-envelope.mjs` 新增 + `agent-client.mjs` 修改 → `tools/build.mjs:3` files 追加 `event-envelope.mjs`、`web/sw.js:2` FILES 追加、`web/index.html` `?v=56→57`、`web/sw.js` `CACHE along-shell-v56→v57`、`ios/.../AlongShellView.swift:444` `build=56→57`；不重装 App 则不动 `Info.plist CFBundleVersion`。`host/*.mjs` 不进产物包，host-only 改动无需升版本号。
 7. **已知抖动与版本差处置**：`tests/service-script.spec.ts` 并行时偶发 5 秒超时——全量门禁仅它超时而其余全绿时，先单独复跑该文件（`pnpm exec vitest run tests/service-script.spec.ts`）确认再判，不改超时阈值（004 §3:76）；开发依赖 0.2.1-alpha.2 vs 真实 Harness 0.2.2-rc.3 的工具执行 API 差异：以真实 Harness 为准、如实记录（§2.3.8）。**lib/ 产物同步**：typecheck/test 直接跑 `src/*.ts`，安装插件跑 `lib/`——改完 src 必须整跑 `pnpm check`（含 build），不能以 vitest 通过代替。
@@ -664,9 +664,9 @@ export const EventEnvelopeSchema = z.object({
 
 `payloadHash` 输入为信封中**客户端声明的全部字段**（`event_id/schema_version/event_type/kind/goal_id/task_id/occurred_at/timezone/message_id/causation_id/base_revision/payload`，§2.2.8）按 key 排序的稳定 JSON 序列化；同号同 hash → duplicate，异 hash → conflict（仅对 accepted 行，§2.2.1d）。`web/event-envelope.mjs` 为同一 Schema 的 JS 移植，两端以静态用例向量（fixtures JSON，含合法/越界/未知类型/越权/authorization.changed 各若干条）对齐，任一端改协议必须先改向量（SD-1 对齐机制）。
 
-### 4.2 Host↔fork 回环接口（`/along-source/api/*`，SD-2）
+### 4.2 Host↔Along Agent 回环接口（`/along-source/api/*`，SD-2）
 
-认证：`x-along-bridge: 1` + `x-along-bridge-token: <hex>`（timingSafeEqual 常数时间比较）；仅 loopback（webServer 已强制）。**校验覆盖全部 `/along-source/api/*` 路由，含存量旧端点**（`/along-source/api/goals|tasks` 等，Host 侧经 `superAgentCall` 调用）——Host 启动读一次 `ALONG_BRIDGE_TOKEN_FILE` 后统一追加 token 头（§2.4.3），否则旧链路在新契约下 401、破坏「旧链路照旧」。身份：Host 以 header `x-along-user`、`x-along-device` 传入服务端绑定身份，fork 对信封 Body 中出现的身份字段一律拒绝。
+认证：`x-along-bridge: 1` + `x-along-bridge-token: <hex>`（timingSafeEqual 常数时间比较）；仅 loopback（webServer 已强制）。**校验覆盖全部 `/along-source/api/*` 路由，含存量旧端点**（`/along-source/api/goals|tasks` 等，Host 侧经 `superAgentCall` 调用）——Host 启动读一次 `ALONG_BRIDGE_TOKEN_FILE` 后统一追加 token 头（§2.4.3），否则旧链路在新契约下 401、破坏「旧链路照旧」。身份：Host 以 header `x-along-user`、`x-along-device` 传入服务端绑定身份，Along Agent 对信封 Body 中出现的身份字段一律拒绝。
 
 | 端点 | 方法 | 语义 |
 | --- | --- | --- |
@@ -681,7 +681,7 @@ export const EventEnvelopeSchema = z.object({
 | `/along-source/api/sync/ack` | POST | `{seqs:[]}` → 回填 delivered_at |
 | `/along-source/api/goals/along-status-probe` | GET | 现状探测端点落为真实 200（`agent-host.mjs:70` 现容忍 404） |
 
-查询参数中的 `user_id` **必须与绑定身份一致，不一致一律 403**——不采信调用方自报身份（BC-07-05 的接口侧防线）。手机侧端点固定 `POST`（iOS 桥 `agentRequest` 硬编码 `request.httpMethod = 'POST'`，`AlongShellView.swift:888`，不改桥语义）；表内 GET 仅指 Host→fork 回环。
+查询参数中的 `user_id` **必须与绑定身份一致，不一致一律 403**——不采信调用方自报身份（BC-07-05 的接口侧防线）。手机侧端点固定 `POST`（iOS 桥 `agentRequest` 硬编码 `request.httpMethod = 'POST'`，`AlongShellView.swift:888`，不改桥语义）；表内 GET 仅指 Host→Along Agent 回环。
 
 错误语义（统一口径，防存在性泄露）：401 bridge token 缺失/错；403 绑定身份头缺失/非法或 query 身份与绑定不一致；404 **目标/任务不存在与不属于绑定用户同一响应**（§2.1 错误路径与 §6 BC-07-05 同码）；400 Schema/参数与事件 `rejected`（对外 reason 统一 `not_found`/`rejected`，内部 Inbox 行记精确原因供「拒绝原因可查」）；409 conflict（仅 accepted 行，§2.2.1d）；503 ingest 开关关闭或服务未就绪。全部响应不含 Token。旧 `/along-source/api/goals|tasks` 的旧版 POST 形态（Host 现调用的 goal 运行接口）保持兼容到阶段 B 迁移完成，由集成模块联调核对（003 §1）。
 
@@ -807,7 +807,7 @@ const ChangeSetInputSchema = z.object({
 
 | 键/文件 | 位置 | 说明 |
 | --- | --- | --- |
-| `alongStateDir` | fork profile 配置（deployment Config，**可选键**） | 绝对路径；localDeployment 时 fail-fast 必填（§2.7.1），默认建议 `~/.along/along-data`；GitHub profile 不受影响 |
+| `alongStateDir` | Along Agent profile 配置（deployment Config，**可选键**） | 绝对路径；localDeployment 时 fail-fast 必填（§2.7.1），默认建议 `~/.along/along-data`；GitHub profile 不受影响 |
 | `alongBridgeTokenFile` | 同上 | 绝对路径；localDeployment 时 fail-fast 必填；指向 0600 文件 |
 | `ALONG_BRIDGE_TOKEN_FILE` | Host 进程环境 | 指向同一文件；缺失 → 新端点 503 |
 | `ALONG_EVENT_INGEST` | Host 进程环境 | `off`（默认）/`on`，新旧链路单消费开关 |
@@ -818,11 +818,11 @@ const ChangeSetInputSchema = z.object({
 
 | # | 决策 | 选择 | 理由 | 放弃的备选 |
 | --- | --- | --- | --- | --- |
-| SD-1 / SG-1 | ChangeSet 校验共享方式 | **fork 内 TS 重写适用的检查**（长度/范围/custom=null/指派一致性等全部对齐项，§2.3.1）+ 静态用例向量对齐（fixtures JSON，两端同跑） | ① 重叠项少（长度/范围/指派一致性），复制成本低；② along 仓库无打包器（AGENTS.md §2），fork 是 pnpm/TS 仓，跨仓共享需私有包或 submodule，构建耦合违背「简单是第一需求」；③ 加严红线以 fork Schema 为主，web 实现是基准不是依赖——指派一致性（`validateGoalReply` 的 `goal-agent-core.mjs:166-167`）必须同强度落进 fork 校验，不得比现有基线更弱 | 抽共享 npm 包（两仓发布/安装链路都要改）；fork 直接 import along 仓库 `.mjs`（tsdown 打包路径与双运行时约束冲突） |
-| SD-2 / SG-2 | Host↔fork 接口形态 | **沿用 `/along-source/api` 路径族** + 新回环凭证（`x-along-bridge-token`，文件 0600） | Host 侧已按该路径族与 `x-along-bridge:1` 调用（`agent-host.mjs:70,215,220,240,246`），改路径族是无谓破坏；凭证文件先例已有（`ALONG_CONTEXT_REVIEW_TOKEN_FILE`，`agent-host.mjs:46-47`） | 复用手机配对 token（它已发 iPhone，泄露面不同，红线禁止）；Unix socket（绕开 DSH webServer，改动大、无先例） |
+| SD-1 / SG-1 | ChangeSet 校验共享方式 | **Along Agent 内 TS 重写适用的检查**（长度/范围/custom=null/指派一致性等全部对齐项，§2.3.1）+ 静态用例向量对齐（fixtures JSON，两端同跑） | ① 重叠项少（长度/范围/指派一致性），复制成本低；② along 仓库无打包器（AGENTS.md §2），Along Agent 是 pnpm/TS 仓，跨仓共享需私有包或 submodule，构建耦合违背「简单是第一需求」；③ 加严红线以 Along Agent Schema 为主，web 实现是基准不是依赖——指派一致性（`validateGoalReply` 的 `goal-agent-core.mjs:166-167`）必须同强度落进 Along Agent 校验，不得比现有基线更弱 | 抽共享 npm 包（两仓发布/安装链路都要改）；Along Agent 直接 import along 仓库 `.mjs`（tsdown 打包路径与双运行时约束冲突） |
+| SD-2 / SG-2 | Host↔Along Agent 接口形态 | **沿用 `/along-source/api` 路径族** + 新回环凭证（`x-along-bridge-token`，文件 0600） | Host 侧已按该路径族与 `x-along-bridge:1` 调用（`agent-host.mjs:70,215,220,240,246`），改路径族是无谓破坏；凭证文件先例已有（`ALONG_CONTEXT_REVIEW_TOKEN_FILE`，`agent-host.mjs:46-47`） | 复用手机配对 token（它已发 iPhone，泄露面不同，红线禁止）；Unix socket（绕开 DSH webServer，改动大、无先例） |
 | SD-3 / SG-3 | 阶段 A 工具范围 | **5 件**：4 读取 + `along_changes_commit`；记忆工具推迟阶段 D | 004 §4「业务工具按阶段 A 推进」指业务读写基座；记忆检索/撤回依赖 Hy-Memory 与治理召回（D6），阶段 A 无可检索对象，落了也是空壳 | 阶段 A 一并落 `along_memory_search/forget`（无 Hy-Memory 支撑，违反「不为假想需求预留」） |
 | SD-4 / SG-4 | 客户端队列边界 | **队列落 web 层**（localStorage + `agent-client.mjs` 协议层），iOS 只加路径白名单 | web 页面跑在 WKWebView、网络全走 iOS 桥（`agent-client.mjs:10-15`）；队列逻辑在 web 层可用 `test/` 的 dom-stub 模式单测，且页面/UI 零改动；iOS 侧只需白名单+超时参数 | 队列落 iOS 原生（要新增原生存储与桥协议，触碰面大、难测，且阶段 A 无 UI 接线需求） |
-| SD-5 / SG-5 | 业务库与 Hy-Memory 目录 | **`~/.along/along-data/`（业务库+bridge-token）与 `~/.along/memory/`**，经 fork 配置键显式传入并 fail-fast 校验不在 executionRoot 下 | ① 001 §5.2「数据目录放在 Mac 的 Along 状态目录下」，`~/.along` 即该目录（agent-host、verification 已在）；② 本轮不迁移 `~/.along/agent-host/`，平级新目录零迁移；③ 必须整体在 DSH stateDir 外——默认工单目录就是 `<stateDir>/work`（`execution-environment.ts:18`），放 stateDir 内直接违反 BC-07-02，且 stateDir 属 DSH 备份语义（docs/006-deployment.md:99）；④ 单一 `~/.along` 树便于 001 §5.4 统一备份 | 放 DSH stateDir 内（违反红线）；放 fork 仓内（随代码走，非数据）；硬编码路径（拒绝配置校验） |
+| SD-5 / SG-5 | 业务库与 Hy-Memory 目录 | **`~/.along/along-data/`（业务库+bridge-token）与 `~/.along/memory/`**，经 Along Agent 配置键显式传入并 fail-fast 校验不在 executionRoot 下 | ① 001 §5.2「数据目录放在 Mac 的 Along 状态目录下」，`~/.along` 即该目录（agent-host、verification 已在）；② 本轮不迁移 `~/.along/agent-host/`，平级新目录零迁移；③ 必须整体在 DSH stateDir 外——默认工单目录就是 `<stateDir>/work`（`execution-environment.ts:18`），放 stateDir 内直接违反 BC-07-02，且 stateDir 属 DSH 备份语义（docs/006-deployment.md:99）；④ 单一 `~/.along` 树便于 001 §5.4 统一备份 | 放 DSH stateDir 内（违反红线）；放 Along Agent 仓内（随代码走，非数据）；硬编码路径（拒绝配置校验） |
 | SD-6 | `task.completed/feedback` 的 `human` 标记 | 阶段 A 恒 `human=false`、不设 `addressed`，走 admission 推断行；阶段 B 随 Skill 复核 | 任务完成反馈是事实（D4），不应凭它恢复 ended ticket 或获得 explicit 授权；阶段 0 探针已锁定「非人工健康事件不标人工」同款口径 | `human=true`（会通过 followup 语义恢复工单，越过人工停止保护） |
 | SD-7 | 展示布局（adaptive layout） | 不进 ChangeSet 协议；sync 载荷由服务端生成并过 `safeAdaptiveLayout` | 模型输出先过校验再生效（红线）：布局是展示派生物，交给模型提交等于新增一条绕过面；`validateGoalReply`/`safeAdaptiveLayout` 的适用项保留在服务端输出侧 | ChangeSet 携带 layout 字段（扩大校验面，与 D3「校验拒绝坏数据」目标不符） |
 | SD-8 | 投递机制 | **业务库 `delivery` 表 + 进程内计时器泵** | BC-08-01 要求 Inbox+业务记录+待投递同一事务——队列必须在 along.sqlite；DSH receive 幂等使至少一次安全；进程内计时器是阶段 0 选定调度方式 | DSH Effects 队列（在 orchestrator 库，无法与 Inbox 同事务）；收到即投（无持久重试，重启丢工作） |
@@ -831,39 +831,39 @@ const ChangeSetInputSchema = z.object({
 
 ## 6. 测试计划（BC 用例 → 测试方式）
 
-测试落点约定：fork 用 vitest（`tests/*.spec.ts` 自动收集），along 用 node:test（`test/*.test.mjs` 自动收集，`npm run check`）。涉及计数的断言写具体数字（business-test-cases §1.2）。
+测试落点约定：Along Agent 用 vitest（`tests/*.spec.ts` 自动收集），along 用 node:test（`test/*.test.mjs` 自动收集，`npm run check`）。涉及计数的断言写具体数字（business-test-cases §1.2）。
 
 | BC 用例 | 断言要点 | 测试方式与落点 |
 | --- | --- | --- |
-| BC-08-01 | 回执前三表同事务；失败无回执且全回滚 | fork `along-inbox.spec.ts`：`acceptEvent` 半途抛错 → 库内无任何行；成功 → inbox/message/delivery 三行齐；along `test/event-queue.test.mjs`：回执到达才从待同步队列删除 |
-| BC-08-02 | 失败保留、同号重试、成功才删 | along `test/event-queue.test.mjs`（桥替身两次失败一次成功；`400 rejected`/`409 conflict` 属终态处置——删除本地项并记失败状态，`401/404/5xx` 与网络失败保留重试，§2.2.7）；fork 侧重试同 `event_id` → duplicate |
-| BC-08-03 | 重复事件不重复工作、重复回执 | fork `along-phaseA.spec.ts` E2E：同信封两次注入 → Ticket/Assignment 计数 1、`{status:'duplicate'}`；`along-worklink.spec.ts` 锁定 WorkLink 行数 1 |
-| BC-08-04 | 旧 base_revision → conflicted、状态不变 | fork `along-changeset.spec.ts`：先 commit 推进版本，再旧版本提交 → `conflicted`，goal/task 行内容与 revision 不变 |
-| BC-08-05 | 新聊天提升输入版本，旧输入不能提交 | fork `along-changeset.spec.ts`：commit 后 `raiseInputVersion`，再用旧 input_version 提交 → `conflicted_input`（不靠提示词，纯服务层断言） |
-| BC-08-06 | 同一目标两个工作不重复处理同一句话 | fork `along-worklink.spec.ts`：按**结果断言**、覆盖两条路径（§2.5.4 线程设计）——① 两个在途工作 + 全新消息：走独立请求线程（无订阅者，`intake.ts:49-58` fanout=0 → Eval 单判），最终只产生一个新 Ticket/一条 Decision→Ticket 链，既有两个工作都不处理该句；② 回复按服务端关联进入在途工作线程（fanout=1）：仅该工作处理，另一工作不重复处理。两路径下该目标的任务数与 ChangeSet 数均不变 |
-| BC-08-07 | 补传不按客户端时间重排 | fork `along-store.spec.ts`：两条消息 A(早 occurred_at)、B，按服务端顺序入；补传 A（occurred_at 更早）→ A.seq > B.seq，按目标查询顺序为 B、A；`occurred_at` 仅展示字段 |
-| BC-08-08 | 一消息多目标不复制正文 | fork `along-store.spec.ts`：`linkMessageToGoals` 两目标 → message 行 1 条、link 行 2 条、两处查询正文一致 |
-| BC-08-09 | 同一目标并发第二次写入被拒 | fork `along-changeset.spec.ts`：同 input_version 两次 commit（串行进程内模拟并发）→ 第二次 `conflicted`；版本计数只 +1 |
-| BC-08-11 | 完整对话跨重启可查、含版本基元 | fork `along-phaseA.spec.ts` E2E：`stop()` → 重启 → 回环 `messages`/`goals`/`tasks` 查询内容一致；无模型隐藏推理字段。阶段 A 断言口径：对话=inbound 用户消息 + 记录模块落行的 outbound 执行说明（§2.6.2）；模型聊天答复的直接落行随阶段 B 接线，验收记录写明该口径 |
-| BC-07-01 | 三类凭证不进 Worker 环境/目录/提示词 | fork `along-phaseA.spec.ts` 扩展 `along-phase0.spec.ts:120-135` 模式：KIMI/配对/DSH 管理 + bridge token 合成值，断言 Worker env、cwd、prompt 装配均不含（三层保证：scrubbedParentEnv 固定敏感名模式 + environmentOf 白名单 + 探针断言，§2.7.5） |
-| BC-07-02 | 业务库/记忆目录不在 Worker 工作目录内 | fork `along-store.spec.ts`：构造 settings 使 executionRoot 为 `<tmp>/work`、alongStateDir 为 `<tmp>/along-data` → 启动成功；反转（inside）→ 启动抛错；只断言路径包含关系，不夸大为沙箱。**判定口径收窄**：business-test-cases 原文「Worker 不能直接改写业务库文件」按「目录放置 + 唯一写入通道」实现口径解释并登记（§7 风险 4） |
-| BC-07-03 | 业务状态只认 Along 工具提交 | fork `along-phaseA.spec.ts`：Worker 场景绕过 Along 工具的写入尝试（如对无关路径写文件、经 shell 造行）后断言业务行不变；`along_changes_commit` 通过校验 → 变化。**判定口径收窄**：不按 business-test-cases 原文「对 along.sqlite 直接执行 SQL」构造（Worker 与库同账号同权限，文件系统层面不可满足），按「唯一写入通道 + 版本校验」口径断言并登记（§7 风险 4） |
-| BC-07-04 | 模型不能指定身份与目标 | fork `along-changeset.spec.ts`：scope.allowedGoalId=A 时提交 goal B → `invalid_relation`；带 `user_id` 字段 → `rejected(identity_in_body)`；fork `along-inbox.spec.ts`：信封带 user_id → 同 reason（显式判定先于 zod，§2.2.1a0） |
-| BC-07-05 | A 的凭证请求 B 的目标被拒不泄露 | along `test/along-bridge.test.mjs`：替身 Host 构造 user A 会话请求 B 的 goal → **404**（与「不存在」同码防存在性泄露，§4.2）且响应体无 B 的任何字段；fork `along-inbox.spec.ts` 同断言（OwnershipError → not_found 路径） |
-| BC-07-08 | Worker 保留外部能力、副作用受 Mandate/Policy | fork `along-phaseA.spec.ts`：沿用 `along-phase0.spec.ts:137-159`（WORK_TOOLS 与 Along 工具共存、restrict/guard 生效）；未授权外部操作沿 DSH 既有 Mandate 断言（阶段 0 已验，不重复造） |
-| BC-09-01 | 迁移前完整备份 | fork `scripts/along-backup.mjs` 冒烟（集成模块联测时人工执行并记录）：VACUUM INTO 产物可打开、表计数与源一致、含 DSH stateDir 其余内容（工单目录；worker 会话记录按运行中 stateDir 实测路径登记，§2.7.4）、Hy-Memory 目录与配置清单；「Skill 版本」项登记为阶段 A 不适用（§2.7.4） |
-| BC-09-02 | 稳定 ID 幂等导入并核对 | fork `along-store.spec.ts`：合成旧导出 JSON 两次 `importLegacy` → 目标/任务/消息计数不变、内容 hash 一致、核对报告字段齐 |
+| BC-08-01 | 回执前三表同事务；失败无回执且全回滚 | Along Agent `along-inbox.spec.ts`：`acceptEvent` 半途抛错 → 库内无任何行；成功 → inbox/message/delivery 三行齐；along `test/event-queue.test.mjs`：回执到达才从待同步队列删除 |
+| BC-08-02 | 失败保留、同号重试、成功才删 | along `test/event-queue.test.mjs`（桥替身两次失败一次成功；`400 rejected`/`409 conflict` 属终态处置——删除本地项并记失败状态，`401/404/5xx` 与网络失败保留重试，§2.2.7）；Along Agent 侧重试同 `event_id` → duplicate |
+| BC-08-03 | 重复事件不重复工作、重复回执 | Along Agent `along-phaseA.spec.ts` E2E：同信封两次注入 → Ticket/Assignment 计数 1、`{status:'duplicate'}`；`along-worklink.spec.ts` 锁定 WorkLink 行数 1 |
+| BC-08-04 | 旧 base_revision → conflicted、状态不变 | Along Agent `along-changeset.spec.ts`：先 commit 推进版本，再旧版本提交 → `conflicted`，goal/task 行内容与 revision 不变 |
+| BC-08-05 | 新聊天提升输入版本，旧输入不能提交 | Along Agent `along-changeset.spec.ts`：commit 后 `raiseInputVersion`，再用旧 input_version 提交 → `conflicted_input`（不靠提示词，纯服务层断言） |
+| BC-08-06 | 同一目标两个工作不重复处理同一句话 | Along Agent `along-worklink.spec.ts`：按**结果断言**、覆盖两条路径（§2.5.4 线程设计）——① 两个在途工作 + 全新消息：走独立请求线程（无订阅者，`intake.ts:49-58` fanout=0 → Eval 单判），最终只产生一个新 Ticket/一条 Decision→Ticket 链，既有两个工作都不处理该句；② 回复按服务端关联进入在途工作线程（fanout=1）：仅该工作处理，另一工作不重复处理。两路径下该目标的任务数与 ChangeSet 数均不变 |
+| BC-08-07 | 补传不按客户端时间重排 | Along Agent `along-store.spec.ts`：两条消息 A(早 occurred_at)、B，按服务端顺序入；补传 A（occurred_at 更早）→ A.seq > B.seq，按目标查询顺序为 B、A；`occurred_at` 仅展示字段 |
+| BC-08-08 | 一消息多目标不复制正文 | Along Agent `along-store.spec.ts`：`linkMessageToGoals` 两目标 → message 行 1 条、link 行 2 条、两处查询正文一致 |
+| BC-08-09 | 同一目标并发第二次写入被拒 | Along Agent `along-changeset.spec.ts`：同 input_version 两次 commit（串行进程内模拟并发）→ 第二次 `conflicted`；版本计数只 +1 |
+| BC-08-11 | 完整对话跨重启可查、含版本基元 | Along Agent `along-phaseA.spec.ts` E2E：`stop()` → 重启 → 回环 `messages`/`goals`/`tasks` 查询内容一致；无模型隐藏推理字段。阶段 A 断言口径：对话=inbound 用户消息 + 记录模块落行的 outbound 执行说明（§2.6.2）；模型聊天答复的直接落行随阶段 B 接线，验收记录写明该口径 |
+| BC-07-01 | 三类凭证不进 Worker 环境/目录/提示词 | Along Agent `along-phaseA.spec.ts` 扩展 `along-phase0.spec.ts:120-135` 模式：KIMI/配对/DSH 管理 + bridge token 合成值，断言 Worker env、cwd、prompt 装配均不含（三层保证：scrubbedParentEnv 固定敏感名模式 + environmentOf 白名单 + 探针断言，§2.7.5） |
+| BC-07-02 | 业务库/记忆目录不在 Worker 工作目录内 | Along Agent `along-store.spec.ts`：构造 settings 使 executionRoot 为 `<tmp>/work`、alongStateDir 为 `<tmp>/along-data` → 启动成功；反转（inside）→ 启动抛错；只断言路径包含关系，不夸大为沙箱。**判定口径收窄**：business-test-cases 原文「Worker 不能直接改写业务库文件」按「目录放置 + 唯一写入通道」实现口径解释并登记（§7 风险 4） |
+| BC-07-03 | 业务状态只认 Along 工具提交 | Along Agent `along-phaseA.spec.ts`：Worker 场景绕过 Along 工具的写入尝试（如对无关路径写文件、经 shell 造行）后断言业务行不变；`along_changes_commit` 通过校验 → 变化。**判定口径收窄**：不按 business-test-cases 原文「对 along.sqlite 直接执行 SQL」构造（Worker 与库同账号同权限，文件系统层面不可满足），按「唯一写入通道 + 版本校验」口径断言并登记（§7 风险 4） |
+| BC-07-04 | 模型不能指定身份与目标 | Along Agent `along-changeset.spec.ts`：scope.allowedGoalId=A 时提交 goal B → `invalid_relation`；带 `user_id` 字段 → `rejected(identity_in_body)`；Along Agent `along-inbox.spec.ts`：信封带 user_id → 同 reason（显式判定先于 zod，§2.2.1a0） |
+| BC-07-05 | A 的凭证请求 B 的目标被拒不泄露 | along `test/along-bridge.test.mjs`：替身 Host 构造 user A 会话请求 B 的 goal → **404**（与「不存在」同码防存在性泄露，§4.2）且响应体无 B 的任何字段；Along Agent `along-inbox.spec.ts` 同断言（OwnershipError → not_found 路径） |
+| BC-07-08 | Worker 保留外部能力、副作用受 Mandate/Policy | Along Agent `along-phaseA.spec.ts`：沿用 `along-phase0.spec.ts:137-159`（WORK_TOOLS 与 Along 工具共存、restrict/guard 生效）；未授权外部操作沿 DSH 既有 Mandate 断言（阶段 0 已验，不重复造） |
+| BC-09-01 | 迁移前完整备份 | Along Agent `scripts/along-backup.mjs` 冒烟（集成模块联测时人工执行并记录）：VACUUM INTO 产物可打开、表计数与源一致、含 DSH stateDir 其余内容（工单目录；worker 会话记录按运行中 stateDir 实测路径登记，§2.7.4）、Hy-Memory 目录与配置清单；「Skill 版本」项登记为阶段 A 不适用（§2.7.4） |
+| BC-09-02 | 稳定 ID 幂等导入并核对 | Along Agent `along-store.spec.ts`：合成旧导出 JSON 两次 `importLegacy` → 目标/任务/消息计数不变、内容 hash 一致、核对报告字段齐 |
 | BC-09-03 | 新旧适配器不同时消费 | along `test/along-bridge.test.mjs`：`ALONG_EVENT_INGEST=on` 时旧 `/super-agent/goals` DSH 分支 409、新端点通；`off` 时反向 |
-| BC-09-04 | 回退不删库 | 同上 + fork：切回 off 后 delivery/along.sqlite 行保留、无清库路径（代码审查断言 + 测试确认服务重启数据在） |
+| BC-09-04 | 回退不删库 | 同上 + Along Agent：切回 off 后 delivery/along.sqlite 行保留、无清库路径（代码审查断言 + 测试确认服务重启数据在） |
 | BC-09-07 | 不把热复制当备份 | 集成联测记录：对运行中库执行文件复制并尝试打开（演示失败/校验不通过），备份脚本用 VACUUM INTO 并校验；写在 `docs/along` 实现记录 |
-| BC-00-05 | 离线期间变更生效、重连取回 | fork `along-phaseA.spec.ts`：不拉 sync 的场景下 commit → applied；再 `syncPage` → 变更与说明在列；ack 后 delivered_at 回填。真机复验随阶段 B 接线 |
-| 回归：健康事件不恢复人工停止工单 | intake 语义在 Along 事件下不破坏 | fork `along-worklink.spec.ts`：human-stopped ticket + 健康事件注入 → ticket 不恢复、暂停不解除（`intake.ts:41-47`） |
-| 003 §2 验收：Worker 结束有记录且未调模型 | 模型调用计数硬判定 | fork `along-runrecord.spec.ts`：`assignment.ended` 前后 `controller.create` 计数差 0 + 无新增 relay/prompt 投递（**代理口径**，§2.6.3——business-test-cases §1.2 要求的 DSH 真实模型调用计数在阶段 E 复盘接线时换真计数复核）；RunRecord 行内容齐（prompt_revisions/轨迹引用/ChangeSet 关联） |
-| 003 §3 追踪 | 事件→筛选理由→Decision→输入版本→ChangeSet→同步 | fork `along-phaseA.spec.ts` E2E 断言链路各表行存在且互链（inbox.trigger_id → disposition → decision → changeset.trigger_event_id → sync_outbox）；日志无 Token 断言复用凭证探针 |
+| BC-00-05 | 离线期间变更生效、重连取回 | Along Agent `along-phaseA.spec.ts`：不拉 sync 的场景下 commit → applied；再 `syncPage` → 变更与说明在列；ack 后 delivered_at 回填。真机复验随阶段 B 接线 |
+| 回归：健康事件不恢复人工停止工单 | intake 语义在 Along 事件下不破坏 | Along Agent `along-worklink.spec.ts`：human-stopped ticket + 健康事件注入 → ticket 不恢复、暂停不解除（`intake.ts:41-47`） |
+| 003 §2 验收：Worker 结束有记录且未调模型 | 模型调用计数硬判定 | Along Agent `along-runrecord.spec.ts`：`assignment.ended` 前后 `controller.create` 计数差 0 + 无新增 relay/prompt 投递（**代理口径**，§2.6.3——business-test-cases §1.2 要求的 DSH 真实模型调用计数在阶段 E 复盘接线时换真计数复核）；RunRecord 行内容齐（prompt_revisions/轨迹引用/ChangeSet 关联） |
+| 003 §3 追踪 | 事件→筛选理由→Decision→输入版本→ChangeSet→同步 | Along Agent `along-phaseA.spec.ts` E2E 断言链路各表行存在且互链（inbox.trigger_id → disposition → decision → changeset.trigger_event_id → sync_outbox）；日志无 Token 断言复用凭证探针 |
 
 ## 7. 验收对照与风险
 
-**对照 003 §2 阶段 A 验收**：① 重启后能查目标、任务和完整对话 → BC-08-11（fork E2E + 回环查询）；② 重复事件不产生重复工作 → BC-08-03（Inbox 去重 + Trigger id 去重 + WorkLink 唯一映射三层）；③ 每次 Worker 结束都有执行记录且未调用模型 → 记录模块计数断言。阶段 A 全部 P1 用例见 §6 映射；P2（BC-08-07/08、BC-09-03/04/07）同阶段执行不豁免。
+**对照 003 §2 阶段 A 验收**：① 重启后能查目标、任务和完整对话 → BC-08-11（Along Agent E2E + 回环查询）；② 重复事件不产生重复工作 → BC-08-03（Inbox 去重 + Trigger id 去重 + WorkLink 唯一映射三层）；③ 每次 Worker 结束都有执行记录且未调用模型 → 记录模块计数断言。阶段 A 全部 P1 用例见 §6 映射；P2（BC-08-07/08、BC-09-03/04/07）同阶段执行不豁免。
 
 **风险与已知边界**（实施中如实记录，不硬绕）：
 
@@ -872,4 +872,4 @@ const ChangeSetInputSchema = z.object({
 3. **lib/ 产物同步**：单独 vitest 通过 ≠ 已安装插件更新；交付前必须整跑 `pnpm check`（含 tsdown build）。
 4. **目录隔离不是沙箱**：红线靠放置位置 + Along 工具唯一写通道 + 校验实现。business-test-cases.md BC-07-02/03 的原文措辞（「Worker 不能直接改写业务库文件」「通用写入不改变目标与任务状态」）在文件系统层面不可满足——Worker 与库同用户同权限（0600 挡不住同账号写，阶段 0 已实证兄弟目录可读）。**阶段 A 交付记录必须显式登记这两条的判定口径收窄**：目录不在工作目录内（路径断言）+ 业务写入只认 Along 工具（绕过工具的写入路径业务行不变，由服务层与版本校验保证）+ 版本检查；并建议阶段 B 更新 business-test-cases.md 的措辞对齐实现口径，避免验收时按原文判失败。
 5. **旧链路兼容**：阶段 A 保留旧 `/super-agent/goals|tasks` 链路与输出校验（`agent-host.mjs:146-175`）不动；新旧单消费由 `ALONG_EVENT_INGEST` 保证；阶段 B 迁移 UI 后旧端点下线。
-6. **本设计未验证项**：本文为方案，所有断言以 §6 测试执行为准；`node:sqlite` 在 Node 22 的 backup API 可用性未核（SD-10 已给等价替代）；fork 侧 `/along-source` 路由与 Host 新端点的真实联调（真机 HTTPS + 配对）在集成模块执行时完成，本阶段交付物为 fork/along 测试全绿 + 联测记录。
+6. **本设计未验证项**：本文为方案，所有断言以 §6 测试执行为准；`node:sqlite` 在 Node 22 的 backup API 可用性未核（SD-10 已给等价替代）；Along Agent 侧 `/along-source` 路由与 Host 新端点的真实联调（真机 HTTPS + 配对）在集成模块执行时完成，本阶段交付物为 Along Agent/along 测试全绿 + 联测记录。

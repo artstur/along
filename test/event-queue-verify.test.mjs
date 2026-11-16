@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 
 // inbox 模块 along 侧（web/event-envelope.mjs + web/agent-client.mjs 事件队列）的独立验证
 // （docs/stage-a-tech-design.md §2.2.7/§4.1，验收锚点 BC-08-01/02/03 的客户端断言）。
-// 与 fork 侧 tests/along-inbox-verify.spec.ts 的关系：底部 VERIFY_VECTOR_CASES 是本轮验证自己的
-// 两端静态向量表——同一张表在 fork 用 zod 判、在这里用 validateEnvelope 判，两端必须同判（SD-1/SG-1）；
+// 与 Along Agent 侧 tests/along-inbox-verify.spec.ts 的关系：底部 VERIFY_VECTOR_CASES 是本轮验证自己的
+// 两端静态向量表——同一张表在 Along Agent 用 zod 判、在这里用 validateEnvelope 判，两端必须同判（SD-1/SG-1）；
 // 队列部分补既有 test/event-queue.test.mjs 之外的边界：不可识别回执、终态连投、终态删除后同号重发、
 // 失败状态上限、坏信封不入队不发网。
 
@@ -36,7 +36,7 @@ const USER_MESSAGE = () => ({
   payload: {event_type: 'along.user_message', text: '帮我把目标改成 180 分钟'},
 });
 
-// ---- 两端静态向量（与 fork tests/along-inbox-verify.spec.ts 同一张表，逐字对齐）-------------------------
+// ---- 两端静态向量（与 Along Agent tests/along-inbox-verify.spec.ts 同一张表，逐字对齐）-------------------------
 
 const TASK = 't_verify00001';
 const BASE = {
@@ -82,7 +82,7 @@ const VERIFY_VECTOR_CASES = [
 
 test('SD-1/SG-1：独立向量表两端同判（本文件为 web 端）', () => {
   for (const [name, envelope, expected] of VERIFY_VECTOR_CASES) {
-    assert.equal(validateEnvelope(envelope) === null, expected, `向量「${name}」的 web 判定与 fork 端不一致`);
+    assert.equal(validateEnvelope(envelope) === null, expected, `向量「${name}」的 web 判定与 Along Agent 端不一致`);
   }
 });
 

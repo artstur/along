@@ -2,7 +2,7 @@
 
 > 2026-11-15 更新，已同步 D14–D17。对应本仓库 [Along 新架构入口](agent-architecture.md)，规格在相邻仓库：[决策记录](https://github.com/artstur/along-superagent/blob/feature/along-phase0/docs/along/000-decisions.md)、[系统架构](https://github.com/artstur/along-superagent/blob/feature/along-phase0/docs/along/001-architecture.md)、[记忆与技能](https://github.com/artstur/along-superagent/blob/feature/along-phase0/docs/along/002-memory-and-skills.md)、[实施与验收](https://github.com/artstur/along-superagent/blob/feature/along-phase0/docs/along/003-implementation.md)、[阶段 0 技术验证](https://github.com/artstur/along-superagent/blob/feature/along-phase0/docs/along/004-phase0-validation.md)。
 >
-> **状态：这是验收标准，不是已执行结果。** 新架构尚未实现，本文件先固定「做到什么样算通过」，随阶段 A–E 推进逐条执行。
+> **状态：这是验收标准，不是已执行结果。** 阶段 A/B、健康跟进与记忆维护已有实现；本文件固定「做到什么样算通过」，按阶段逐条登记证据，未执行项不能据此算通过。
 
 ## 1. 范围与口径
 
@@ -24,7 +24,7 @@
 
 ### 1.4 执行环境与造数
 
-- **Mac**：Along Host、DSH fork（`along` Source 走 `auto` 规则）、`along.sqlite`；批次作业按阶段 0 选定的调度方式配置。
+- **Mac**：Along Host、Along Agent（`along` Source 走 `auto` 规则）、`along.sqlite`；批次作业按阶段 0 选定的调度方式配置。
 - **iPhone**：已配对；健康摘要一律用合成数据，不接真实 HealthKit 原始样本；理财用演示数据。
 - **造数入口**：合成摘要与事件统一从服务端事件入口注入并记录 `event_id`，不绕过接收校验直接改库，避免造出真实链路不会出现的状态。
 - **账号**：首期单用户（D1）。涉及归属检查的用例需要第二个 `user_id` 的构造数据，由测试数据脚本直写，不开放注册。
@@ -197,7 +197,7 @@
 | 决策 | 覆盖场景 |
 | --- | --- |
 | D1 本地单用户优先 | BC-07-05、BC-08-11 |
-| D2 DSH fork 扩展 | 阶段 0 前提（004 文档），业务行为由 BC-00-01 的追踪链路覆盖 |
+| D2 Along Agent 扩展 | 阶段 0 前提（004 文档），业务行为由 BC-00-01 的追踪链路覆盖 |
 | D3 校验后自动生效 | BC-00-01、BC-00-02、BC-02-01、BC-02-02、BC-02-03、BC-02-04、BC-09-05 |
 | D4 目标只能通过聊天改变 | BC-01-05、BC-01-06、BC-02-06、BC-09-05 |
 | D5 健康首期 7 类 | BC-03-01、BC-03-02、BC-03-03、BC-03-04、BC-03-05、BC-07-06 |

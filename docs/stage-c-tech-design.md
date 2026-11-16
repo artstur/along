@@ -23,11 +23,11 @@
 - 两个目标独立跟进，一个冲突不回滚另一个；未知关联经模型登记，空关联不反复唤醒，聊天修改后重新判断。
 - 小变化累计、持续输入合并、在途输入保留、用户纠正覆盖旧结果、暂停/停止/移出名单、重启恢复、无关健康类型与无目标不建单。
 - 原生 outbox 在网络失败/回执不匹配/写失败时不丢；同号重试；更换配对不串数据。前台与后台共用；旧 Host 兼容流程保留。
-- Along npm run check、fork VITEST_MAX_WORKERS=4 pnpm check、前端构建及产物一致、Xcode 无签名构建；真实模型仅用合成数据。真机健康变化、HTTPS 配对和后台唤醒单列，不能用替身测试替代。
+- Along npm run check、Along Agent VITEST_MAX_WORKERS=4 pnpm check、前端构建及产物一致、Xcode 无签名构建；真实模型仅用合成数据。真机健康变化、HTTPS 配对和后台唤醒单列，不能用替身测试替代。
 
 ## 实施与验证记录
 
-实现落点：原生 `HealthSummary.eventSummaries` 与 `HealthEventDelivery`；网页复用连接卡并调用原生事件接线；fork 的 `health.ts`、`health-store.ts`、`health-schema.ts` 及 Runtime/工具/ChangeSet 接线。`along.sqlite` 从 schema 3 事务升级到 4，新增评估基线与派工 outbox 两张表，不改写既有业务历史。
+实现落点：原生 `HealthSummary.eventSummaries` 与 `HealthEventDelivery`；网页复用连接卡并调用原生事件接线；Along Agent 的 `health.ts`、`health-store.ts`、`health-schema.ts` 及 Runtime/工具/ChangeSet 接线。`along.sqlite` 从 schema 3 事务升级到 4，新增评估基线与派工 outbox 两张表，不改写既有业务历史。
 
 - 原生统一负责健康事件生产和上传，网页只上传聊天。未获持久回执或回执事件号不符时保留待发送项；换配对时旧队列隔离保留，已不在当前选择范围内的旧事件留在本机 held，不转发。旧 Host 继续走原路径。
 - 新协议采用标量摘要，严格拒绝对象/数组值。阶段 A 的 `{total: ...}` 测试向量同步改成数值；此前手机并未生产这类健康事件。本次收紧不会把旧数据库里的历史摘要伪装成新摘要。
@@ -39,13 +39,13 @@
 ### 自动检查与构建
 
 - Along `npm run check`：292 项全部通过，含从真实 Swift 源码编译执行的原生队列测试，以及真实 App 处理器的连接/导入测试。
-- fork `VITEST_MAX_WORKERS=4 pnpm check`：80 个文件、1532 项通过，类型检查和构建通过；其中阶段 C 的 14 项实际 Runtime/Engine/SQLite/注册工具验收覆盖独立派工、任务生效、去重、累计基线、读后更新、迟到数据、未知与零、聊天抢先、双目标隔离、只读协调、无关类型、停止/权限/暂停、重启、失败退避、等待回答不阻塞、完成报告恢复、目标达成小变化和新连接类型重新判断。
+- Along Agent `VITEST_MAX_WORKERS=4 pnpm check`：80 个文件、1532 项通过，类型检查和构建通过；其中阶段 C 的 14 项实际 Runtime/Engine/SQLite/注册工具验收覆盖独立派工、任务生效、去重、累计基线、读后更新、迟到数据、未知与零、聊天抢先、双目标隔离、只读协调、无关类型、停止/权限/暂停、重启、失败退避、等待回答不阻塞、完成报告恢复、目标达成小变化和新连接类型重新判断。
 - `npm run build` 后 18 份源码与 dist / iOS 内置资源逐字节一致。资源版本 59，Bundle 52。
 - Xcode 27.2 generic iOS 无签名构建成功；产物位于验证用 DerivedData，不等于已签名安装。
 - Playwright 390×844（原生桥与服务器响应为替身）：健康连接卡导入后变为管理，无横向溢出（scrollWidth=390），控制台无错误/警告；截图 `output/playwright/stage-c-health.png`。
 
 ### 真实模型与部署边界
 
-隔离验证 profile 使用 Harness 0.2.2-rc.3 / MiniMax-M3.1-Flash，只输入合成目标、任务与健康摘要，不接触真实健康数据。只有既有目标和健康事件，没有新用户聊天：真实 Worker 读取运动汇总，校验后移除过时的“本周还需运动45分钟”安排，保留原目标，并持久登记评估基线。初次与复测证明分别在 fork 忽略目录 `.artifacts/along-health-runtime/proof.json`、`.artifacts/along-health-runtime-final/proof.json`，均 `ok:true`、5 条断言通过、0 次工具错误。最终交付构建的复测 `.artifacts/along-health-runtime-delivery/proof.json` 同样 `ok:true`，5 条断言通过、0 次工具错误；各隔离验证进程均已停止。
+隔离验证 profile 使用 Harness 0.2.2-rc.3 / MiniMax-M3.1-Flash，只输入合成目标、任务与健康摘要，不接触真实健康数据。只有既有目标和健康事件，没有新用户聊天：真实 Worker 读取运动汇总，校验后移除过时的“本周还需运动45分钟”安排，保留原目标，并持久登记评估基线。初次与复测证明分别在 Along Agent 忽略目录 `.artifacts/along-health-runtime/proof.json`、`.artifacts/along-health-runtime-final/proof.json`，均 `ok:true`、5 条断言通过、0 次工具错误。最终交付构建的复测 `.artifacts/along-health-runtime-delivery/proof.json` 同样 `ok:true`，5 条断言通过、0 次工具错误；各隔离验证进程均已停止。
 
 本轮通过当前功能分支交付代码、文档与生成资源；未切换正式 DSH profile 或手机数据，也未在实际 iPhone 安装、配对或触发 HealthKit 后台事件。真机 HTTPS/断网重连/锁屏与系统唤醒机会、长期模型语义稳定性仍需验收；模型样例成功不能替代这些证据。使用时需启动同一套新协议 Host/profile、现有主动模式为 auto，并重新安装 App，在既有 Apple Health 卡片中导入允许使用的类型。

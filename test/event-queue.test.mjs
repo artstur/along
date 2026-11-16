@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 // 事件待同步队列（docs/stage-a-tech-design.md §2.2.7，SD-4：队列落 web 层、协议层组件）。
 // BC-08-01：收到持久回执才从待同步队列删除；BC-08-02：失败本地保留、同一份信封同号重试、成功才删，
 // rejected/conflict 是终态（删除并记失败状态，重发不会变成 accepted / 只会继续冲突）。
-// 信封校验与 fork（along-superagent）tests/along-inbox.spec.ts 共用同一组静态向量（SD-1/SG-1）：
+// 信封校验与 Along Agent（along-superagent）tests/along-inbox.spec.ts 共用同一组静态向量（SD-1/SG-1）：
 // 两端对每个向量必须给出相同的接受/拒绝结论；改协议先改两处向量。
 
 // web 模块按浏览器语义引用 window/localStorage：在导入前植入替身（node --test 每个文件独立进程）。
@@ -37,7 +37,7 @@ const USER_MESSAGE = () => ({
   payload: {event_type: 'along.user_message', text: '帮我把目标改成 180 分钟'},
 });
 
-// ---- 静态用例向量（与 fork tests/along-inbox.spec.ts 同一组：[名字, 信封, 是否合法]）--------------------
+// ---- 静态用例向量（与 Along Agent tests/along-inbox.spec.ts 同一组：[名字, 信封, 是否合法]）--------------------
 
 const VECTOR = {
   event_id: 'evt-vector-0001', schema_version: '1', event_type: 'along.user_message',
@@ -82,9 +82,9 @@ const VECTOR_CASES = [
   ['payload.event_type 与顶层错配拒绝', {...VECTOR, event_type: 'along.health_summary_updated'}, false],
 ];
 
-test('SD-1/SG-1：向量两端同判，范围常量与 fork 一致', () => {
+test('SD-1/SG-1：向量两端同判，范围常量与 Along Agent 一致', () => {
   for (const [name, envelope, expected] of VECTOR_CASES) {
-    assert.equal(validateEnvelope(envelope) === null, expected, `向量「${name}」的判定与 fork 端不一致`);
+    assert.equal(validateEnvelope(envelope) === null, expected, `向量「${name}」的判定与 Along Agent 端不一致`);
   }
   assert.equal(EVENT_SCHEMA_VERSION, '1');
   assert.deepEqual(EVENT_TYPES, ['along.user_message', 'along.health_summary_updated', 'along.message']);

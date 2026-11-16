@@ -59,7 +59,7 @@ const superAgentURL = (process.env.ALONG_SUPERAGENT_URL || 'http://127.0.0.1:308
 const contextReviewURL=(process.env.ALONG_CONTEXT_REVIEW_URL||superAgentURL).replace(/\/$/,'');
 if (process.env.ALONG_CONTEXT_REVIEW_TOKEN_FILE&&!['localhost','127.0.0.1','[::1]'].includes(new URL(contextReviewURL).hostname)) throw Error('专用情境评估凭据只能发送到本机 DSH');
 const contextToken=process.env.ALONG_CONTEXT_REVIEW_TOKEN_FILE?readFileSync(process.env.ALONG_CONTEXT_REVIEW_TOKEN_FILE,'utf8').trim():null;
-// Host→fork 回环凭证（stage-a-tech-design.md §2.4.3，SD-2）：启动读一次，只在两个 Mac 本机进程内存里走，
+// Host→Along Agent 回环凭证（stage-a-tech-design.md §2.4.3，SD-2）：启动读一次，只在两个 Mac 本机进程内存里走，
 // 不发 iPhone、不写运行结果；缺失时旧链路不带 token 照发，新端点按「未配置桥接凭证」503。
 const bridgeToken=readBridgeToken();
 const bridge=createBridge({url:superAgentURL,token:bridgeToken});
@@ -142,7 +142,7 @@ async function runExclusive(operation) {
 }
 // ---- 阶段 A 新链路（docs/stage-a-tech-design.md §2.4/§4.2）----
 // 新旧单消费开关：off（默认）= 新端点 503、旧链路照旧；on = 新端点生效、旧 /super-agent/goals|tasks
-// 的 DSH 分支 409「已切换新链路」。回退 = 改回 off，fork 业务库与 DSH 状态不清（BC-09-03/04）。
+// 的 DSH 分支 409「已切换新链路」。回退 = 改回 off，Along Agent 业务库与 DSH 状态不清（BC-09-03/04）。
 const eventIngest = process.env.ALONG_EVENT_INGEST === 'on';
 const newLinkPaths = new Set(['/events', '/sync', '/sync/ack']);
 let pairingRegistered = false;
@@ -161,19 +161,19 @@ function claimedIdentityField(input) {
   if (input===null||typeof input!=='object'||Array.isArray(input)) return null;
   return 'user_id' in input ? 'user_id' : ('device_id' in input ? 'device_id' : null);
 }
-// 配对身份注册进 fork（幂等可重试，§2.4.1）：fork 幂等 upsert user 行并把 user_id 加入 sources.along.allowed；
-// fork 暂不可达时下一次新端点调用会再试。
+// 配对身份注册进 Along Agent（幂等可重试，§2.4.1）：Along Agent 幂等 upsert user 行并把 user_id 加入 sources.along.allowed；
+// Along Agent 暂不可达时下一次新端点调用会再试。
 async function ensurePairingRegistered() {
   if (pairingRegistered || !identity || !bridgeToken) return;
   try {
-    // fork 契约要求全部 /along-source/api/* 用头传绑定身份（缺头 403 invalid_identity），
+    // Along Agent 契约要求全部 /along-source/api/* 用头传绑定身份（缺头 403 invalid_identity），
     // 注册调用与其他回环调用一样带上 identity，body 与头来自同一个绑定对象。
     await bridge.call('/along-source/api/pairing',{value:{user_id:identity.userId,device_id:identity.deviceId},identity,timeout:5_000});
     pairingRegistered = true;
   } catch (error) { console.warn('Along 未能把配对身份注册到 Along Source（稍后自动重试）：',error.message); }
 }
 ensurePairingRegistered();
-// 新端点全部 POST（iOS 桥 agentRequest 固定 POST，不改桥语义）：/events 事件接收（回执按 fork 原状态码
+// 新端点全部 POST（iOS 桥 agentRequest 固定 POST，不改桥语义）：/events 事件接收（回执按 Along Agent 原状态码
 // 透传：200 accepted/duplicate、400 rejected、409 conflict），/sync 同步拉取，/sync/ack 确认。
 async function handleAlongNewLink(req,res,path) {
   requireEventIngest();
@@ -189,7 +189,7 @@ async function handleAlongNewLink(req,res,path) {
   await ensurePairingRegistered();
   if (!pairingRegistered) throw new HostError('配对身份尚未登记到 Along，请稍后重试',503);
   if (path==='/events') {
-    // /events 在 fork 侧含 DSH 投递触发，15s 不够 → 30s（§2.4.3）。
+    // /events 在 Along Agent 侧含 DSH 投递触发，15s 不够 → 30s（§2.4.3）。
     const {status,result}=await upstream(()=>bridge.receipt('/along-source/api/events',{value:input,identity:who,timeout:30_000}));
     return respond(res,status,result);
   }

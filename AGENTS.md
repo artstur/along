@@ -30,6 +30,8 @@
 
 ## 4. 运行时
 
+- Agent 工程统一称为 **Along Agent**；本地目录沿用 `../along-superagent/`，包名与插件 ID 沿用 `dsh-superagent`。
+
 - Agent 有两种运行时，在 `web/super-agent.mjs` 里定义：`dsh-superagent` 和 `kimi-code-swarm`。用户没选过时，前端默认用 Kimi。Host 的路由在 `host/agent-host.mjs`。
 - Mac 本地状态存在 `~/.along/agent-host/`，环境变量见 `README.md`。
 - 目标方向是全链路自动化：Agent 结果校验后自动生效，目标只能通过聊天改变。现有代码里的「采用」流程、待采用提案和目标编辑入口是待迁移的旧行为；方案见 `../along-superagent/docs/along/`。改到相关代码时按第 5 节迁移，不要再新增采用、确认或审批环节。

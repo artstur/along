@@ -28,7 +28,7 @@ iPhone 的原话通过阶段 A 事件队列进入 Mac；Worker 读取服务端�
 
 ## 实施与验证记录
 
-代码落点：Along `web/event-workspace.mjs`（协议与缓存）、`web/app.mjs`（既有入口接线）、`host/agent-host.mjs`（能力协商与配对登记门）；fork 的 `tools.ts`、`inbox.ts`、`store.ts`、`changeset.ts`、`worklink.ts` 与内置 Along 目标/任务 Skill。
+代码落点：Along `web/event-workspace.mjs`（协议与缓存）、`web/app.mjs`（既有入口接线）、`host/agent-host.mjs`（能力协商与配对登记门）；Along Agent 的 `tools.ts`、`inbox.ts`、`store.ts`、`changeset.ts`、`worklink.ts` 与内置 Along 目标/任务 Skill。
 
 - 创建工单最初没有目标；首个有效 ChangeSet 创建目标后，后续工具调用由宿主自动绑定到同一目标。客户端和 Worker 都不能自行换目标 ID。
 - 业务 ChangeSet 的完整校验保持不变。工具层把 `goal.create` 分为 custom 与数值域两种参数形状：custom 的 metric 只能省略或为 null，由宿主固定补 null；health/finance 必须给完整 metric。这样去掉定性目标的冗余参数；`{}` 或自定义 metric 仍被拒绝，不做宽松转换。
@@ -39,13 +39,23 @@ iPhone 的原话通过阶段 A 事件队列进入 Mac；Worker 读取服务端�
 ### 2026-11-16 收尾核对
 
 - Along：`npm run check` 290 项通过；构建后 18 个源码文件与两份产物逐字节一致。
-- fork：`VITEST_MAX_WORKERS=4 pnpm check` 77 个文件、1484 项通过，类型检查与构建通过。限制测试并行数，不修改超时阈值或断言。
+- Along Agent：`VITEST_MAX_WORKERS=4 pnpm check` 77 个文件、1484 项通过，类型检查与构建通过。限制测试并行数，不修改超时阈值或断言。
 - 独立只读核实通过：lossless JSON、严格参数、同 work 创建后绑定、不能用无效 stop 变相忽略聊天。
-- 真实 Harness 0.2.2-rc.3 / MiniMax-M3.1-Flash 合成验证通过：现象先回应不建目标；明确意图建立 custom 目标且没有数值指标；聊天纠正更新任务；3 条答复落库且工单结束。证明在 fork 忽略目录 `.artifacts/along-phaseb-chat-ready/proof.json`；失败的早期探针没有计作通过。验证进程已停止。
+- 真实 Harness 0.2.2-rc.3 / MiniMax-M3.1-Flash 合成验证通过：现象先回应不建目标；明确意图建立 custom 目标且没有数值指标；聊天纠正更新任务；3 条答复落库且工单结束。证明在 Along Agent 忽略目录 `.artifacts/along-phaseb-chat-ready/proof.json`；失败的早期探针没有计作通过。验证进程已停止。
 - Playwright 390×844（原生桥/响应替身）：目标和任务自动展示，草稿及焦点跨空轮询保持，没有横向溢出、旧接口请求或控制台错误。
-- Xcode 27.2 对 generic iOS 目标的无签名构建成功；尚未在实际 iPhone 上安装、配对或验证离线重连。健康新协议已在后续阶段 C 实现，见 [阶段 C](stage-c-tech-design.md)；完整迁移恢复仍待后续验收。记忆宿主接线已于后续实现，见 `../along-superagent/docs/along/006-memory-implementation.md` §5；定时提取仍属阶段 E。
+- Xcode 27.2 对 generic iOS 目标的无签名构建成功；尚未在实际 iPhone 上安装、配对或验证离线重连。健康新协议已在后续阶段 C 实现，见 [阶段 C](stage-c-tech-design.md)；完整迁移恢复仍待后续验收。记忆宿主接线已于后续实现，见 `../along-superagent/docs/along/006-memory-implementation.md` §5；定时记忆维护后续已实现，见相邻工程 `docs/along/008-scheduled-maintenance.md`，完整复盘和 Skill 作业仍待实现。
 
 ## 本地验证与手机连接
+
+### 一条命令激活本机服务（2026-11-16）
+
+目标：真机首次连接不再要求手动创建 profile、编辑 YAML、初始化 Source 或设置 Host 环境变量。在 Along 根目录执行 `npm run activate`，启动前台运行的 DSH 和 Along Host。
+
+范围与实现：启动器位于 `tools/activate.mjs`，使用相邻的 `../along-superagent` 开发仓库；检查依赖并构建 Along Agent 和手机内置资源。首次创建专用 `along-phone` profile，数据存在 `~/.along/phone-test/`，不接管旧手机库。首次从同一 DSH_HOME 的 desktop profile 复制模型供应商和默认模型两个配置项，凭证不打印，生成文件为 0600；不复制其他桌面插件、会话或探针。没有可复用模型配置时在终端询问接口地址、模型和 API 类型；默认模型缺少 API Key 时隐藏输入并原子保存为本机 0600 凭证文件，通过 DSH 原生 credentials-local 读取，不把 Key 写进命令参数或导入 Host/Worker 环境；后续免输。已有 DSH 凭证和环境凭证可直接复用。非交互环境缺凭证时明确报错，不挂起或伪装就绪。新库经 Along Agent 自己的 Store 初始化 Along enabled、GitHub disabled 和 auto；重跑不改既有库、模型、暂停或授权设置。已有非启动器管理的同名 profile 拒绝覆盖。启动器串行检查 DSH 健康和 Along Bridge 后启动 Host，终端直接显示手机配对信息；端口占用或并发启动明确退出。Ctrl+C/子进程异常时优雅关闭本次创建的子进程，不停止其他 DSH profile。不会自动安装 App、授予健康权限或配置 Hy-Memory。
+
+验收：首次运行完成 profile、Source 与资源准备，DSH 与 Bridge 就绪后打印 Host 配对信息；重跑沿用目标、对话、配对和用户配置；并发启动、端口占用及未知同名 profile 不覆盖文件或重复启动；启动失败和 Ctrl+C 清理本次子进程。自动测试覆盖配置复制边界、重复初始化和失败清理，运行 `npm run check`，本机真实启动/关闭验证不发送模型请求或健康数据。手机安装、配对与 HealthKit 仍按下述真机流程验收。
+
+实施记录（2026-11-16）：`npm run activate` 已接通，`npm run check` 302 项通过，其中新增启动器测试 10 项。真实 DSH/Host 已验证本机桌面模型复用、首次初始化、Bridge 就绪、配对信息输出、重复启动拒绝、Host 退出联动关闭 DSH 及 Ctrl+C 清理。另在隔离 DSH_HOME 中用合成 Key 完成终端隐藏输入、0600 持久保存、原生 credentials-local 装载及第二次免输启动；未向模型发送请求，因此不代表合成 Key 通过供应商认证。未知同名 profile 保留、实际监听地址的端口冲突检测及不停止无关服务均已复验。Key 缺省保存路径为 `~/.along/phone-test/model-credentials.yaml`，不会写入仓库；临时验证服务均已停止，手机验收尚未执行。
 
 不需要 iPhone 的验证：
 
@@ -58,7 +68,7 @@ npm run check
 npm run build
 ```
 
-手机连接新链路需要一个已配置可用模型的**独立 Along DSH profile**。按 fork 的 `docs/006-deployment.md` 安装本地 bundle、启用 `dsh-superagent-along` 并关闭 GitHub 插件。给该 profile 的配置加入绝对路径，例如新建本地测试数据：
+手机连接新链路需要一个已配置可用模型的**独立 Along DSH profile**。按 Along Agent 的 `docs/006-deployment.md` 安装本地 bundle、启用 `dsh-superagent-along` 并关闭 GitHub 插件。给该 profile 的配置加入绝对路径，例如新建本地测试数据：
 
 ```yaml
 - id: dsh-superagent
@@ -72,7 +82,7 @@ npm run build
   disabled: false
 ```
 
-这个 profile 的持久 Source 设置必须同时为 Along enabled、GitHub disabled（只关闭插件不足以选择本地部署）。对**新建且尚未启动的测试目录**，可在 fork 根目录初始化；已有正式数据按迁移/备份流程处理，不用此步骤替代迁移：
+这个 profile 的持久 Source 设置必须同时为 Along enabled、GitHub disabled（只关闭插件不足以选择本地部署）。对**新建且尚未启动的测试目录**，可在 Along Agent 根目录初始化；已有正式数据按迁移/备份流程处理，不用此步骤替代迁移：
 
 ```sh
 node --experimental-transform-types --input-type=module <<'JS'

@@ -8,17 +8,17 @@ import vm from 'node:vm';
 import {createBridge, readBridgeToken} from '../host/along-bridge.mjs';
 import {HostError} from '../host/host-error.mjs';
 
-// Host↔fork 回环接口（docs/stage-a-tech-design.md §2.4/§4.2）。fork 侧契约（含归属 404 不泄露）由
+// Host↔Along Agent 回环接口（docs/stage-a-tech-design.md §2.4/§4.2）。Along Agent 侧契约（含归属 404 不泄露）由
 // along-superagent 仓库的 tests/along-bridge.spec.ts 锁定；这里锁 Host 侧：桥接凭证只在本机进程之间走、
-// 身份只来自服务端绑定的配对会话、回执按 fork 原状态码透传、新旧单消费开关（BC-07-04/05、BC-09-03/04）。
+// 身份只来自服务端绑定的配对会话、回执按 Along Agent 原状态码透传、新旧单消费开关（BC-07-04/05、BC-09-03/04）。
 
 const TOKEN='a'.repeat(64);
 const USER_A='u_aaaa1111';
 const DEVICE_A='d_aaaa1111';
 
-// ---- 桥接客户端：真实 HTTP 替身 fork ------------------------------------------------------------------------------
+// ---- 桥接客户端：真实 HTTP 替身 Along Agent ------------------------------------------------------------------------------
 
-async function stubFork(handler) {
+async function stubAlongAgent(handler) {
   const seen=[];
   const server=createServer(async (req,res)=>{
     let body='';
@@ -46,7 +46,7 @@ test('readBridgeToken 只认 0600 hex 文件：缺失、不存在、内容不对
 });
 
 test('bridge 调用带 x-along-bridge、桥接 token 与绑定身份头，且不发第二份凭证',async()=>{
-  const fork=await stubFork(({headers,body})=>{
+  const agent=await stubAlongAgent(({headers,body})=>{
     assert.equal(headers['x-along-bridge'],'1');
     assert.equal(headers['x-along-bridge-token'],TOKEN);
     assert.equal(headers['x-along-user'],USER_A);
@@ -55,41 +55,41 @@ test('bridge 调用带 x-along-bridge、桥接 token 与绑定身份头，且不
     return {status:200,body:{echo:JSON.parse(body)}};
   });
   try {
-    const bridge=createBridge({url:fork.url,token:TOKEN});
+    const bridge=createBridge({url:agent.url,token:TOKEN});
     const result=await bridge.call('/along-source/api/tasks',{value:{goal:'健康'},identity:{userId:USER_A,deviceId:DEVICE_A}});
     assert.deepEqual(result,{echo:{goal:'健康'}});
-    assert.deepEqual(fork.seen,[]);
-  } finally { await fork.close(); }
+    assert.deepEqual(agent.seen,[]);
+  } finally { await agent.close(); }
 });
 
 test('bridge.call 把上游非 2xx 一律答成上游故障（502），401 给出凭证提示',async()=>{
-  const fork=await stubFork(({path})=>path==='/denied'?{status:401,body:{}}:{status:404,body:{}});
+  const agent=await stubAlongAgent(({path})=>path==='/denied'?{status:401,body:{}}:{status:404,body:{}});
   try {
-    const bridge=createBridge({url:fork.url,token:TOKEN});
+    const bridge=createBridge({url:agent.url,token:TOKEN});
     await assert.rejects(()=>bridge.call('/missing'),error=>error instanceof HostError&&error.status===502&&/404/.test(error.message),'无 error 字段时回退到状态码文案');
     await assert.rejects(()=>bridge.call('/denied'),error=>error instanceof HostError&&error.status===502&&/凭证/.test(error.message));
-  } finally { await fork.close(); }
+  } finally { await agent.close(); }
 });
 
 test('bridge.receipt 透传 200/400/409 回执，其余状态仍按上游故障抛 502',async()=>{
-  const fork=await stubFork(({body})=>({status:JSON.parse(body).expect,body:{status:'rejected',reason:'not_found'}}));
+  const agent=await stubAlongAgent(({body})=>({status:JSON.parse(body).expect,body:{status:'rejected',reason:'not_found'}}));
   try {
-    const bridge=createBridge({url:fork.url,token:TOKEN});
+    const bridge=createBridge({url:agent.url,token:TOKEN});
     for (const expect of [200,400,409]) {
       const {status,result}=await bridge.receipt('/along-source/api/events',{value:{expect}});
       assert.equal(status,expect);
       assert.deepEqual(result,{status:'rejected',reason:'not_found'});
     }
     await assert.rejects(()=>bridge.receipt('/along-source/api/events',{value:{expect:503}}),error=>error.status===502);
-  } finally { await fork.close(); }
+  } finally { await agent.close(); }
 });
 
-test('bridge.ready 容忍旧版 fork 的 404，其余非 2xx 按 503 未就绪处理；网络不通也是 503',async()=>{
-  const fork=await stubFork(()=>({status:404,body:{}}));
+test('bridge.ready 容忍旧版 Along Agent 的 404，其余非 2xx 按 503 未就绪处理；网络不通也是 503',async()=>{
+  const agent=await stubAlongAgent(()=>({status:404,body:{}}));
   try {
-    assert.equal(await createBridge({url:fork.url,token:TOKEN}).ready(),true);
-  } finally { await fork.close(); }
-  const broken=await stubFork(()=>({status:500,body:{}}));
+    assert.equal(await createBridge({url:agent.url,token:TOKEN}).ready(),true);
+  } finally { await agent.close(); }
+  const broken=await stubAlongAgent(()=>({status:500,body:{}}));
   try {
     await assert.rejects(()=>createBridge({url:broken.url,token:TOKEN}).ready(),error=>error instanceof HostError&&error.status===503);
   } finally { await broken.close(); }
@@ -167,7 +167,7 @@ test('BC-07-04：请求体自称 user_id/device_id 直接按 rejected 拒绝，�
   assert.equal(link.calls.filter(item=>item.path.includes('/events')).length,0,'自报身份的请求不进回环');
 });
 
-test('BC-07-05（Host 侧）：fork 的归属拒绝按原状态码透传，不二次包装、不泄露对方字段',async()=>{
+test('BC-07-05（Host 侧）：Along Agent 的归属拒绝按原状态码透传，不二次包装、不泄露对方字段',async()=>{
   const link=newLinkContext({env:{ALONG_EVENT_INGEST:'on'},
     bridgeReceipt:()=>({status:400,result:{status:'rejected',reason:'not_found'}})});
   const outcome=await link.run('/events',{event_id:'evt-3',goal_id:'g_bbb000000002',payload:{event_type:'along.user_message',text:'看别人的目标'}});
@@ -187,8 +187,8 @@ test('配对身份幂等注册：启动/首次调用都会把 {user_id,device_id
   await new Promise(resolve=>setImmediate(resolve));
   assert.deepEqual(link.calls[0],{path:'/along-source/api/pairing',
     options:{value:{user_id:USER_A,device_id:DEVICE_A},identity:{userId:USER_A,deviceId:DEVICE_A},timeout:5_000}},
-    '模块加载即注册既有绑定，且带绑定身份头（fork 对 /along-source/api/* 一律要求 x-along-user/x-along-device）');
-  // fork 不可达时注册失败要静默重试：下一次新端点调用先补注册再转发。
+    '模块加载即注册既有绑定，且带绑定身份头（Along Agent 对 /along-source/api/* 一律要求 x-along-user/x-along-device）');
+  // Along Agent 不可达时注册失败要静默重试：下一次新端点调用先补注册再转发。
   const retry=newLinkContext({env:{ALONG_EVENT_INGEST:'on'},
     bridgeCall:(path)=>{ if (path.includes('/pairing')&&retry.calls.filter(item=>item.path.includes('/pairing')).length===1) throw new HostError('Along 服务暂不可用：down',502); return {items:[]}; }});
   await new Promise(resolve=>setImmediate(resolve));

@@ -1,8 +1,8 @@
-// Host→fork 本机回环调用（docs/stage-a-tech-design.md §2.4.3/§4.2，SD-2）。
+// Host→Along Agent 本机回环调用（docs/stage-a-tech-design.md §2.4.3/§4.2，SD-2）。
 //
-// 凭证：ALONG_BRIDGE_TOKEN_FILE 指向 0600 的 32B hex 文件（fork 首次启动生成），Host 启动读一次，
+// 凭证：ALONG_BRIDGE_TOKEN_FILE 指向 0600 的 32B hex 文件（Along Agent 首次启动生成），Host 启动读一次，
 // 之后只在两个 Mac 本机进程之间传递——不发 iPhone、不写日志与运行结果、不进 Worker 环境（AGENTS.md §5）。
-// 文件缺失或读不到 → readBridgeToken 返回 null：旧链路不带 token 照发（对旧版 fork 兼容），
+// 文件缺失或读不到 → readBridgeToken 返回 null：旧链路不带 token 照发（对旧版 Along Agent 兼容），
 // 新端点由 agent-host 先行 503「未配置桥接凭证」。
 //
 // 语义沿用原 superAgentCall：上游故障一律 HostError 502，错误文案取上游 error 字段。
@@ -27,7 +27,7 @@ export function createBridge({url,token=null}) {
     return {'x-along-bridge':'1',
       ...(token?{'x-along-bridge-token':token}:{}),
       ...(contextToken?{'x-along-context-token':contextToken}:{}),
-      // 身份只来自服务端绑定的配对会话（001 §4.2）：回环调用把绑定身份带在头上，fork 不收请求体自称。
+      // 身份只来自服务端绑定的配对会话（001 §4.2）：回环调用把绑定身份带在头上，Along Agent 不收请求体自称。
       ...(identity?{'x-along-user':identity.userId,'x-along-device':identity.deviceId}:{})};
   }
   async function send(path,{method='POST',value,identity=null,contextToken=null,timeout=DEFAULT_TIMEOUT}) {
@@ -55,7 +55,7 @@ export function createBridge({url,token=null}) {
       if (status!==200&&status!==400&&status!==409) throw upstreamFailure(status,result);
       return {status,result};
     },
-    // 存量探测（原 superAgentReady）：旧版 fork 没有该路由时容忍 404。
+    // 存量探测（原 superAgentReady）：旧版 Along Agent 没有该路由时容忍 404。
     async ready(path='/along-source/api/goals/along-status-probe') {
       let response;
       try {
