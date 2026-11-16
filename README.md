@@ -58,7 +58,7 @@ Along 把一个目标拆成三样东西，并让它们保持联动：
 
 本轮方案与验证记录保存在 `along-superagent` 的 `feature/along-phase0` 分支，上述链接指向该分支。
 
-**上述是待实现方案。** 当前代码仍有双运行时、采用流程和目标编辑入口；首次自定义目标在结果完整时可自动创建，已有目标的后续调整通常仍待采用。下文体验、连接与配置说明描述当前实现，不代表新架构已上线。阶段与验收见 [实施与验收](https://github.com/artstur/along-superagent/blob/feature/along-phase0/docs/along/003-implementation.md)。
+**阶段 A 基座与阶段 B 最小聊天闭环已有实现，尚未完成真机验收。** Host 开启新事件链路后，App 自动协商使用 DSH：原话可靠入队，目标和任务在校验后自动生效，页面同步展示，你通过聊天纠正。这条链路没有采用、直接编辑或删除入口。健康新协议、长期记忆宿主接线及批量复盘仍待实现。旧 Host 兼容路径继续使用下文描述的双运行时和采用流程；旧手机数据保留，本轮不自动导入新库。范围、配置和验收见 [阶段 B 设计](docs/stage-b-tech-design.md) 与 [实施与验收](https://github.com/artstur/along-superagent/blob/feature/along-phase0/docs/along/003-implementation.md)。
 
 ## 能体验什么
 
@@ -175,6 +175,8 @@ iPhone App 的签名、安装与 HealthKit 读取口径见 [ios/README.md](ios/R
 | `ALONG_AGENT_PORT` | `4176` | Agent Host 的 HTTPS 端口 |
 | `ALONG_AGENT_HOST` | `en0` 的 IPv4，取不到时为 `127.0.0.1` | Agent Host 绑定地址 |
 | `ALONG_SUPERAGENT_URL` | `http://127.0.0.1:3082` | DSH Super Agent 地址 |
+| `ALONG_EVENT_INGEST` | `off` | `on` 启用新聊天链路；App 自动协商，停止旧 DSH 写入 |
+| `ALONG_BRIDGE_TOKEN_FILE` | 未设置 | fork 的 `alongBridgeTokenFile` 对应文件绝对路径；凭证只在 Mac 两个进程间传递 |
 | `ALONG_KIMI_CODE_URL` | `http://127.0.0.1:58627` | Kimi Code Web Server 地址 |
 | `ALONG_KIMI_CODE_TOKEN` | 读取 `~/.kimi-code/server.token` | 覆盖 Kimi token |
 | `ALONG_KIMI_CODE_MODEL` | `kimi-code/kimi-for-coding` | Kimi 模型 |

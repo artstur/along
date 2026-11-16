@@ -1,6 +1,10 @@
 # Along 技术链路：从一句目标到下一步行动
 
-> 按 2026-11-14 的仓库源码整理。重点解释用户设置目标后，Along 怎样调用 Agent、接收结果，以及继续调整计划。本文描述代码中的实现，未代表真实设备和 Agent 服务已经完成端到端验收。
+> 2026-11-15 更新。新链路见下段；其余章节保留旧 Host 兼容路径说明，不能把其中的采用流程当作新架构行为。真实设备与 Agent 全链路验收仍须单独记录。
+
+Host 配置 `ALONG_EVENT_INGEST=on` 且配置本机桥接凭证后，`/connection/status` 返回 `eventProtocol:1` 与绑定用户。App 切换到服务端拥有的目标空间：`agent-form` → `event-workspace.mjs` → 按用户隔离的持久事件队列 → Host `/events` → fork Inbox → DSH 路由和 Along Worker 工具 → 校验后自动提交 → `/sync` 快照与持久对话 → 客户端整页校验、缓存提交 → `/sync/ack`。网络失败保留原事件号，ack 失败跨重启重试。目标只能通过聊天改变。
+
+Worker 通过 `along_conversation_read` 读取库内原话，无目标的连续聊天也可读；现象描述调用 `along_chat_reply` 回应而不建目标，明确行动意图调用 `along_changes_commit` 创建目标与任务，再保存答复。纠正立即提升输入版本，服务端同时检查触发消息是否已经被后续原话取代，旧工作不能仅换成最新版本号继续提交。普通同步不触发系统通知。新链路不运行旧健康复评和采用处理器；健康持续跟进、记忆接线与批量调度另行实现。设计和验收见 [阶段 B](stage-b-tech-design.md)。
 
 ## 1. 先看全貌
 

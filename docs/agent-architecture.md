@@ -1,6 +1,6 @@
 # Along 新架构入口
 
-> 2026-11-15 更新。当前有效方案在相邻的 `along-superagent` 仓库 `feature/along-phase0` 分支；本页替代 2026-11-14 的云端、多用户与逐次复盘草案。方案尚未实现，不代表当前 App 能力。
+> 2026-11-15 更新。当前有效方案在相邻的 `along-superagent` 仓库 `feature/along-phase0` 分支；本页替代 2026-11-14 的云端、多用户与逐次复盘草案。阶段 A 基座与 B 最小聊天闭环已有实现，记忆模块可独立验证；完整架构尚未完成，见 [阶段 B 实施范围](stage-b-tech-design.md)。
 
 远端文档见以下链接；本地开发时，对应文件位于相邻的 `along-superagent/docs/along/`：
 

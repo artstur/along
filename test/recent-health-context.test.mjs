@@ -88,6 +88,8 @@ test('both runtime dispatches receive the window guidance, metric semantics and 
   const received=[];
   const send=vm.runInNewContext('(async(req,res,path)=>{'+dispatch+'})',{
     body:async req=>req.input,requestedRuntime:r=>r,cleanGoal,cleanSnapshot,clientText:s=>s,requestId:s=>s,KIMI_RUNTIME:'kimi-code-swarm',
+    // 新链路开关与 DSH 运行时名：路由里的旧链路 409 守卫要能在这里解析（开关关闭=旧行为不变）。
+    DSH_RUNTIME:'dsh-superagent',eventIngest:false,
     respond:(_res,_status,rest)=>rest,upstream:fn=>fn(),normalizeGoalRun:r=>r,
     kimiAgent:{startGoal:async input=>{received.push(input);return {}}},
     superAgentCall:async (path,{value,contextReview})=>{assert.equal(path,'/along-source/api/goals');assert.equal(contextReview,true);received.push(value);return {}},

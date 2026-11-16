@@ -441,7 +441,7 @@ enum AlongConnectionStore {
 
 struct AlongWebView: UIViewRepresentable {
     @ObservedObject var bridge: AlongBridgeModel
-    private let site = URL(string: "along://app/index.html?build=56")!
+    private let site = URL(string: "along://app/index.html?build=58")!
 
     func makeCoordinator() -> Coordinator { Coordinator(bridge: bridge) }
 
@@ -514,7 +514,7 @@ struct AlongWebView: UIViewRepresentable {
         const item = agentPending.get(id); if (!item) return;
         agentPending.delete(id);
         if (result.ok) item.resolve(result.value);
-        else item.reject(new Error(result.error || 'Along 请求失败'));
+        else item.reject(Object.assign(new Error(result.error || 'Along 请求失败'), result.receipt ? {receipt: result.receipt} : {}));
       };
       window.AlongAgentBridge = {
         request: ({baseURL, fingerprint, path, token, body}) => new Promise((resolve, reject) => {
@@ -629,9 +629,13 @@ struct AlongWebView: UIViewRepresentable {
                     return
                 }
                 Task {
-                    let result: [String: Any]
+                    var result: [String: Any]
                     do { result = ["ok": true, "value": try await Self.agentRequest(body)] }
-                    catch { result = ["ok": false, "error": error.localizedDescription] }
+                    catch {
+                        result = ["ok": false, "error": error.localizedDescription]
+                        // 回执透传（§4.2）：只有事件回执挂在错误上，其余错误形状不变。
+                        if case let AgentBridgeError.receipt(receipt) = error { result["receipt"] = receipt }
+                    }
                     await MainActor.run { Self.deliverAlongResult(id: id, result: result, webView: webView) }
                 }
             }
@@ -880,8 +884,9 @@ struct AlongWebView: UIViewRepresentable {
                   let fingerprint = input["fingerprint"] as? String,
                   fingerprint.count == 64, fingerprint.allSatisfy(\.isHexDigit),
                   let path = input["path"] as? String,
+                  // 新链路端点（docs/stage-a-tech-design.md §2.4.2）：全部 POST，语义与旧路径一致——仅网络转发。
                   ["/pair", "/connection/verify", "/connection/status", "/goal/event", "/super-agent/tasks", "/super-agent/tasks/status", "/super-agent/daily-delegation",
-                   "/super-agent/goals", "/super-agent/goals/status"].contains(path),
+                   "/super-agent/goals", "/super-agent/goals/status", "/events", "/sync", "/sync/ack"].contains(path),
                   let body = input["body"] as? [String: Any],
                   let url = URL(string: base + path) else { throw AgentBridgeError.invalidConfiguration }
             var request = URLRequest(url: url)
@@ -914,6 +919,11 @@ struct AlongWebView: UIViewRepresentable {
             }
             guard let result = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw AgentBridgeError.invalidResponse }
             guard let response = response as? HTTPURLResponse, (200...299).contains(response.statusCode) else {
+                // 事件回执（/events 400 rejected / 409 conflict，docs/stage-a-tech-design.md §4.2）：回执体
+                // 挂在错误上原样交还 web 层，由它按处置口径删本地待同步项或保留重试；纯协议透传，不改交互。
+                if let status = result["status"] as? String, ["rejected", "conflict", "accepted", "duplicate"].contains(status) {
+                    throw AgentBridgeError.receipt(result)
+                }
                 throw AgentBridgeError.server(result["error"] as? String ?? "Along 请求失败")
             }
             return result
@@ -1064,6 +1074,8 @@ final class BundledWebSchemeHandler: NSObject, WKURLSchemeHandler {
 
 enum AgentBridgeError: LocalizedError {
     case invalidConfiguration, invalidResponse, notificationUnavailable, server(String)
+    // 事件回执（/events 200/400/409 的回执体）：仅承载给 web 层做处置，不影响用户可见文案。
+    case receipt([String: Any])
 
     static func transportMessage(_ error: Error) -> String? {
         let cause = error as NSError
@@ -1091,6 +1103,7 @@ enum AgentBridgeError: LocalizedError {
         case .invalidResponse: "Along 返回格式不正确"
         case .notificationUnavailable: "请在系统设置中允许 Along 通知"
         case .server(let message): message
+        case .receipt(let body): body["reason"] as? String ?? body["error"] as? String ?? "Along 请求失败"
         }
     }
 }
