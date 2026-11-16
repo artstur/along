@@ -53,3 +53,9 @@ test('retrieval labels use the actual source receipt time rather than later reco
   const stamp=new Date(r.sources[0].retrievedAt).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',year:'numeric',month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit',hourCycle:'h23'});
   assert.ok(html.includes(stamp+' 检索'));assert.ok(html.includes('检索于 '+stamp));
 });
+
+test('provider date metadata is visibly unverified rather than asserted publication time',()=>{
+  const r=recommendation();r.sources[0].publishedAt='2098-12-30T00:00:00Z';
+  const html=recommendationCard(r);
+  assert.match(html,/日期线索（待核实）/);assert.doesNotMatch(html,/发布于/);
+});
