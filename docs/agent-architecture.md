@@ -52,7 +52,7 @@
 
 ## Agent 提醒计划与统一通知通道（2026-11-16）
 
-主分类 agent / client，依赖 [Along Agent PR #5](https://github.com/artstur/along-superagent/pull/5) 的 reminder-plan 协议（最终合并后补完整 SHA），主仓独立分支负责消费、系统排程和回执。验收条件：用户用自然语言说明行动与节奏后，Agent 同时安排未来提醒、时区与重复规则；原任务上可读其安排及理由，iPhone 系统待发与原任务身份一致。
+主分类 agent / client，依赖 [Along Agent PR #5](https://github.com/artstur/along-superagent/pull/5) 的 reminder-plan 协议和 [PR #6](https://github.com/artstur/along-superagent/pull/6) 的预约日校验，固定 Agent 主线为 [`8313b48f3033e1c3503e3c578e2ceb7656c3235b`](https://github.com/artstur/along-superagent/commit/8313b48f3033e1c3503e3c578e2ceb7656c3235b)（schema 6），主仓独立分支负责消费、系统排程和回执。验收条件：用户用自然语言说明行动与节奏后，Agent 同时安排未来提醒、时区与重复规则；原任务上可读其安排及理由，iPhone 系统待发与原任务身份一致。
 
 现有职责无需新建独立 Notification 服务：Along Agent 负责语义编排与合法 ChangeSet；任务调度负责到期工单、复查和沿既有委托续排；host/task-notifications.mjs、web/event-workspace.mjs 与 EventTaskNotifications.swift 组成统一投递模块，负责持久路由意图、幂等、重试、改期/撤销、系统回读和深链。keep 不产生额外即时通知。此次不为模块命名搬迁已有代码。
 
@@ -66,3 +66,5 @@ Host 排程回执沿用原 expectedUserId 与 reminders，每行含 goalId/taskI
 
 
 本次源码验证：完整 check 371 项通过，18 个 Web 资源由 build 同步到 dist 与 iOS。固定 c019515 的独立复核 50 项和 7 项原生回读条件通过，generic iOS 无签名编译通过。回归发现并修复了首次迟到登记误抑制、DST 跳时/重复钟点、系统秒精度、矛盾 wallTime、过期锚点误标下次，以及重复请求未实际入系统仍确认的缺陷。真机与正式 Agent 结果在工作区发版台账另行记录；这些源码检查不代替系统 pending、实际送达或用户点击。
+
+Agent 依赖已在独立固定快照完成类型检查、1555 项测试、构建与预约日/课程日/否定授权/自动改期的独立复核。公开任务快照与本仓消费者的跨仓合成实跑保留同一 task ID、scheduledAt、repeat、weekday、timezone 与 wallTime。客户端隔离模拟器九项实际系统队列验收通过，覆盖 once/daily/weekly、重复同步/冷启动、改期、完成/取消、过期锚点、推迟开始和清空重启；不将合成快照供应器视为真实 Agent 语义或真机横幅证据。
