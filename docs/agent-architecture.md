@@ -1,6 +1,8 @@
 # Along 新架构入口
 
-> 2026-11-15 更新。当前有效方案在相邻的 `along-superagent` 仓库 `feature/along-phase0` 分支；本页替代 2026-11-14 的云端、多用户与逐次复盘草案。阶段 A 基座与 B 最小聊天闭环已有实现，记忆模块可独立验证；完整架构尚未完成，见 [阶段 B 实施范围](stage-b-tech-design.md)。
+2026-11-16：已实现记忆定时维护的 DSH 工单闭环，支持在 Superagent 的 Deployment / Plugin Manager 配置中设置 `alongMaintenanceTime`（Mac 本地时间，默认 `03:00`，保存后生效）。[设计与验收记录](https://github.com/artstur/along-superagent/blob/feature/along-phase0/docs/along/008-scheduled-maintenance.md)位于相邻仓库；不涉及手机页面或资源版本变更。
+
+> 2026-11-16 更新。当前有效方案在相邻的 `along-superagent` 仓库 `feature/along-phase0` 分支；本页替代 2026-11-14 的云端、多用户与逐次复盘草案。阶段 A 基座与 B 最小聊天闭环已有实现，记忆已接入 Runtime 和定时维护；完整架构尚未完成，见 [阶段 B 实施范围](stage-b-tech-design.md)。
 
 远端文档见以下链接；本地开发时，对应文件位于相邻的 `along-superagent/docs/along/`：
 
