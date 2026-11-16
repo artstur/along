@@ -12,7 +12,8 @@ function relevant(route,detail) {
   if (detail?.goal?.id!==route.goalId||detail.goal.status!=='active') return false;
   const task=route.taskId&&detail.tasks?.find(t=>t.id===route.taskId&&t.goalId===route.goalId);
   if (route.taskId&&(!task||task.status==='cancelled')) return false;
-  if (route.kind==='reminder_due') return task?.status==='open';
+  if (route.kind==='reminder_due') return task?.status==='open'&&
+    [task.scheduledAt,task.previousDailyOccurrence].some(at=>Date.parse(at)===Date.parse(route.scheduledAt));
   if (route.kind!=='recommendation_ready') return true;
   return (!task||task.status==='open')&&(task||detail.goal).currentRevision===route.revision;
 }
