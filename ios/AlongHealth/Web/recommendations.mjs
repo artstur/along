@@ -24,11 +24,11 @@ export function safeRecommendation(value) {
     if (!record(value)||value.version!==1||!['hiking','general'].includes(value.kind)||
         !['ready','partial','unavailable'].includes(value.status)||!text(value.title,120)||!text(value.summary,1200)||
         value.timeWindow!==undefined&&!text(value.timeWindow,240)||!strings(value.constraints,300,12)||!text(value.nextStep,600)||
-        !instant(value.retrievedAt)||!instant(value.validUntil)||Date.parse(value.validUntil)<Date.parse(value.retrievedAt)||
+        !instant(value.retrievedAt)||!instant(value.validUntil)||
         !Array.isArray(value.sources)||value.sources.length>30||!Array.isArray(value.options)||value.options.length>3) return null;
     const seen=new Set(),sources=value.sources.map(s=>{
       if (!record(s)||!id(s.id)||seen.has(s.id)||!text(s.title,300)||!publicSourceURL(s.url)||
-          !instant(s.retrievedAt)||!instant(s.expiresAt)||Date.parse(s.expiresAt)<Date.parse(s.retrievedAt)||
+          !instant(s.retrievedAt)||!instant(s.expiresAt)||
           s.publishedAt!==undefined&&!instant(s.publishedAt)) throw Error();
       seen.add(s.id);
       return {id:s.id,title:s.title,url:publicSourceURL(s.url),retrievedAt:s.retrievedAt,expiresAt:s.expiresAt,

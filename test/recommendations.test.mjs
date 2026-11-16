@@ -32,3 +32,10 @@ test('cards expose comparable evidence and unknowns while escaping every externa
   assert.match(html,/href="https:\/\/www.gz.gov.cn\/route" target="_blank" rel="noopener noreferrer"/);
   assert.match(html,/data-event-id="reply_one"/);assert.doesNotMatch(html,/采用|tool|Worker/);
 });
+
+test('a newly published partial result retains already-expired evidence as visibly stale',()=>{
+  const r=recommendation();r.retrievedAt='2099-01-02T00:00:00Z';r.status='partial';
+  assert.ok(safeRecommendation(r));
+  const html=recommendationCard(r,{now:Date.parse(r.retrievedAt)});
+  assert.match(html,/资料已过期/);assert.match(html,/尚待确认/);assert.match(html,/公园官方路线/);
+});

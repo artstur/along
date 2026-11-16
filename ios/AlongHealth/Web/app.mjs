@@ -50,6 +50,7 @@ let agentConnection = {status:agentConfig.token?'checking':'unconfigured',error:
 let eventWorkspace=null,eventWorkspaceBinding='';
 let localSelection=null,waitingForSavedGoal=false;
 let lastNotificationProjection='',lastNotificationCheck=0;
+let renderedRecommendationValidity='';
 const EVENT_CONNECTION_KEY='along.event-connection.v1';
 function eventConnection(config=agentConfig) {
   const saved=readStored(EVENT_CONNECTION_KEY,null);
@@ -1234,8 +1235,17 @@ function taskReminderLine(task) {
   const timing=future?`下次 ${next} · ${frequency}`:plan.repeat==='once'?`计划于 ${next}`:`${frequency} ${clock}`;
   return `<p>${plan.source==='agent'?'Agent 安排':'你指定的提醒'} · ${timing}</p><p>${esc(plan.explanation)}</p>`;
 }
+function recommendationValidity(view) {
+  const now=Date.now();
+  return view.messages.filter(m=>m.goalId===view.activeGoalId&&m.recommendation).map(m=>
+    `${m.eventId}:${Date.parse(m.recommendation.validUntil)<=now||m.recommendation.sources.some(s=>Date.parse(s.expiresAt)<=now)}`).join('|');
+}
+function refreshRecommendationValidity() {
+  if (eventWorkspace&&recommendationValidity(eventWorkspace.view())!==renderedRecommendationValidity) renderEventUpdate();
+}
 function eventWorkspacePage() {
   const view=eventWorkspace.view();
+  renderedRecommendationValidity=recommendationValidity(view);
   const goals=Object.values(view.goals).filter(goal=>goal.status==='active');
   const goal=view.goals[view.activeGoalId];
   const chat=screen==='agent'||Boolean(goal&&goal.status!=='active');
@@ -2547,7 +2557,7 @@ async function refreshFromNative(force=false) {
 void refreshFromNative();
 function resumeNativeHealth() {
   lastNotificationCheck=0;
-  if (eventWorkspace) void eventWorkspace.sync();
+  if (eventWorkspace) {refreshRecommendationValidity();void eventWorkspace.sync();}
   if (window.AlongHealthBridge?.backgroundReview&&window.AlongHealthBridge.refresh) {
     nativeObservationSeen=false;
     nativeHealthStatus='checking';
@@ -2575,7 +2585,7 @@ setInterval(() => {
 },4_000);
 setInterval(() => {
   if (document.visibilityState==='hidden') return;
-  if (eventWorkspace) {void eventWorkspace.sync();return;}
+  if (eventWorkspace) {refreshRecommendationValidity();void eventWorkspace.sync();return;}
   for (const key of healthGoalKeys()) void reviewFor(key).refreshHealthReview();
   if (screen==='agent') void refreshSuperAgentGoal(activeGoal);
 },3_000);

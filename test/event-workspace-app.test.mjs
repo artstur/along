@@ -507,3 +507,23 @@ test('a recommendation is visible in its original goal and its notification open
   const sent=requests.find(r=>r.path==='/events').body;
   assert.equal(sent.goal_id,goal.id);assert.equal(sent.task_id,'t_source_ui');assert.equal(sent.event_type,'along.user_message');
 });
+
+test('visible and resumed recommendation cards re-evaluate expiry even when sync is empty or offline',async()=>{
+  const realNow=Date.now;let now=realNow();Date.now=()=>now;
+  try {
+    const goal={id:'g_expiry',domain:'custom',status:'active',revision:1,title:'原目标',metric:null,context:[],tasks:[]};
+    const r=recommendation();r.retrievedAt=new Date(now-1000).toISOString();r.validUntil=new Date(now+1000).toISOString();
+    r.sources=r.sources.map(s=>({...s,retrievedAt:r.retrievedAt,expiresAt:r.validUntil}));
+    const m={eventId:'reply_expiry',role:'assistant',text:'结果',goalId:goal.id,status:'received',recommendation:r};
+    const saved={version:1,userId:'u_app_b',cursor:1,activeGoalId:goal.id,conversationId:null,goals:{[goal.id]:goal},messages:{[m.eventId]:m},drafts:{'goal:g_expiry':'保留未发送的补充'}};
+    const dom=installDomStub({storage:{'along.agent.v1':JSON.stringify(config),'along.event-workspace.v1:u_app_b':JSON.stringify(saved)}});
+    document.visibilityState='visible';installEventBridge();
+    await import(`../web/app.mjs?recommendation-expiry=${realNow()}`);await settle();assert.match(dom.app.innerHTML,/推荐已就绪/);
+    now+=2000;await dom.tick(3000);await settle();assert.match(dom.app.innerHTML,/资料已过期/);
+    assert.doesNotMatch(dom.app.innerHTML,/>适合考虑</);
+    now-=2000;await dom.tick(3000);await settle();assert.match(dom.app.innerHTML,/推荐已就绪/);
+    now+=2000;window.AlongAgentBridge.request=async()=>{throw Error('offline');};
+    await dom.fireWindow('pageshow');await settle();assert.match(dom.app.innerHTML,/资料已过期/);
+    assert.equal(JSON.parse(localStorage.getItem('along.event-workspace.v1:u_app_b')).drafts['goal:g_expiry'],'保留未发送的补充');
+  } finally {Date.now=realNow;}
+});
