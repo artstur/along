@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {installDomStub} from './dom-stub.mjs';
-import {createEventWorkspace} from '../web/event-workspace.mjs';
+import {createEventWorkspace,safeWorkspaceGoal} from '../web/event-workspace.mjs';
 import {pendingEvents} from '../web/agent-client.mjs';
 
 const config={userId:'u_workspace',baseURL:'https://localhost:4176',fingerprint:'a'.repeat(64),token:'b'.repeat(64)};
@@ -14,6 +14,22 @@ function setup(handler) {
   window.AlongAgentBridge={request:async input=>{calls.push(input);return handler(input,calls);}};
   return {dom,calls,workspace:createEventWorkspace({config})};
 }
+
+test('invalid task reminder plans never invent or schedule a time and preserve the rest of the goal',()=>{
+  const when='2099-03-01T12:15:00+08:00',valid={state:'scheduled',source:'agent',repeat:'weekly',weekday:1,explanation:'提前准备'};
+  const clean=(plan,scheduledAt)=>{
+    const wire=snapshot();Object.assign(wire.tasks[0],{reminderPlan:plan,scheduledAt});
+    return safeWorkspaceGoal(wire).tasks[0];
+  };
+  for (const [plan,at] of [[{...valid,weekday:8},when],[{...valid,weekday:undefined},when],[{...valid,repeat:'daily'},when],
+    [{...valid,source:'guess'},when],[{...valid,explanation:' '},when],[{...valid,explanation:'字'.repeat(241)},when],
+    [{state:'needs_time',question:'什么时候？'},when],[{state:'off',reason:'untimed'},when],[{state:'needs_time',question:'?'},undefined],
+    [{state:'off',reason:'unknown'},undefined],[valid,undefined],[valid,'2099-02-30T12:15:00Z'],[valid,'2099-03-01T12:15:00'],[null,when]]) {
+    const task=clean(plan,at);
+    assert.equal(task.content,'睡前放下手机');assert.equal(task.reminderPlan,undefined);assert.equal(task.scheduledAt,undefined);
+  }
+  assert.deepEqual(clean({...valid,explanation:'  提前准备  ',extra:'忽略'},when).reminderPlan,valid);
+});
 
 const receiptId='out:ticket_one:assignment_one';
 const receiptMessage={id:'msg_result',eventId:receiptId,role:'assistant',direction:'outbound',text:'已完成这次执行',seq:2};
