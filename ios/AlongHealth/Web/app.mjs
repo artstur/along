@@ -1,5 +1,5 @@
 import {KEY, loadState, setSnapshot} from './health.mjs';
-import {ACTIVE_GOAL_KEY, FINANCE_KEY, ensureHealthGoal, loadFinance, connectFinanceDemo, addFinanceDemoRecord, healthView, financeView} from './workspace.mjs';
+import {ACTIVE_GOAL_KEY, FINANCE_KEY, ensureHealthGoal, withoutDefaultHealthGoal, loadFinance, connectFinanceDemo, addFinanceDemoRecord, healthView, financeView} from './workspace.mjs';
 import {EXPERIMENT, startExperiment, routeHealthEvent, acceptAgentSuggestion, agentRequestPayload} from './loop.mjs';
 import {goalChangeText} from './goal-agent-core.mjs';
 import {createEventWorkspace} from './event-workspace.mjs';
@@ -23,15 +23,15 @@ if ('serviceWorker' in navigator) {
   try { void navigator.serviceWorker.register('./sw.js').catch(()=>{}); }
   catch { /* 注册失败不影响正常使用。 */ }
 }
-let state = ensureHealthGoal(loadState(localStorage.getItem(KEY)));
+let state = loadState(localStorage.getItem(KEY));
 // 实验是个沙盒：App 重启后不该还停在演示数据上、把用户真实的健康摘要顶掉。
 // 实验室页的「返回目标」退出实验时也是这么做的，这里是重启时的同一件事。
 // 备份本身也可能被写坏：形状不对就用初始状态，别让整个 App 起不来。
-if (state.loop?.experiment === EXPERIMENT) {
+const restoringExperiment=state.loop?.experiment===EXPERIMENT;
+if (restoringExperiment) {
   const backup=state.loop.previousState;
   const restored=backup && typeof backup==='object' && Array.isArray(backup.goals) ? backup : loadState(null);
-  state = ensureHealthGoal(restored);
-  localStorage.setItem(KEY, JSON.stringify(state));
+  state = restored;
 }
 let finance = loadFinance(localStorage.getItem(FINANCE_KEY));
 const storedActiveGoal=localStorage.getItem(ACTIVE_GOAL_KEY);
@@ -65,6 +65,8 @@ function connectEventWorkspace(userId) {
     eventWorkspace=createEventWorkspace({config:{...agentConfig,userId},onChange:()=>renderEventUpdate(),
       onNotifications:window.AlongAgentBridge?.notification?value=>syncEventNotifications(value,bindingKey):undefined});
     eventWorkspaceBinding=bindingKey;
+    const health=healthStateForWorkspace(state);
+    if (health!==state) persistHealthState(health);
     const view=eventWorkspace.view();
     waitingForSavedGoal=!view.activeGoalId&&!view.composing;
     if (!localSelection&&waitingForSavedGoal) {
@@ -208,7 +210,7 @@ function syncAgentViewportHeight() {
 syncAgentViewportHeight();
 window.visualViewport?.addEventListener('resize',syncAgentViewportHeight);
 window.addEventListener('resize',syncAgentViewportHeight);
-if (!eventConnection()) localStorage.setItem(KEY, JSON.stringify(state));
+if (!eventConnection()||restoringExperiment) persistHealthState(state);
 
 const esc = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
 // 仓库外的 Agent 服务给出的字段不保证是字符串：不能直接对它调用 .slice()，
@@ -458,6 +460,14 @@ async function refreshAgentConnection({healthOnly=false}={}) {
   if (eventWorkspace) renderEventUpdate();
   else if (screen==='agent') renderAgentUpdate();
 }
+function healthStateForWorkspace(next) {
+  if ((eventWorkspace||eventConnection())&&!localGoalEntries().some(entry=>entry.key==='health')) return withoutDefaultHealthGoal(next);
+  return ensureHealthGoal(next);
+}
+function persistHealthState(next) {
+  state=healthStateForWorkspace(next);
+  localStorage.setItem(KEY,JSON.stringify(state));
+}
 function saveHealth(next) {
   const source=state.loop?.experiment===EXPERIMENT?state.loop.previousState:state;
   const previous=source?.source==='healthkit'?source.snapshot:null;
@@ -478,8 +488,7 @@ function saveHealth(next) {
       }
     }
   }
-  state = ensureHealthGoal(next);
-  localStorage.setItem(KEY, JSON.stringify(state));
+  persistHealthState(next);
   if (screen !== 'agent') render();
 }
 function saveFinance(next) {
@@ -1209,6 +1218,16 @@ function localRecordPage(choice,title,picker,connection) {
       <section class="task-section"><div class="section-heading"><h2>本机任务</h2></div><div class="task-list">${tasks.map(t=>`<button class="generated-task generated-task-button" data-action="local-task" data-task-id="${esc(t.id)}"><strong>${esc(t.title)}</strong><p>${esc(t.detail)}</p></button>`).join('')||'<p class="agent-empty">这个目标没有已保存的任务。</p>'}</div></section>`;
   return `<div class="app-shell"><header class="topbar"><div class="topbar-inner">${brand()}</div></header><main class="content">${picker}${connection}${card}</main></div>`;
 }
+function taskReminderLine(task) {
+  const plan=task.reminderPlan;
+  const next=task.scheduledAt?esc(new Date(task.scheduledAt).toLocaleString('zh-CN')):'';
+  if (!plan) return next?`<p>${next}</p>`:'';
+  if (task.status!=='open') return '';
+  if (plan.state==='needs_time') return `<p>提醒时间待补 · ${esc(plan.question)}</p>`;
+  if (plan.state==='off') return plan.reason==='opt_out'?'<p>已关闭提醒</p>':'';
+  const frequency=plan.repeat==='weekly'?'每周'+'一二三四五六日'[plan.weekday-1]:plan.repeat==='daily'?'每天':'一次';
+  return `<p>${plan.source==='agent'?'Agent 安排':'你指定的提醒'} · 下次 ${next} · ${frequency}</p><p>${esc(plan.explanation)}</p>`;
+}
 function eventWorkspacePage() {
   const view=eventWorkspace.view();
   const goals=Object.values(view.goals).filter(goal=>goal.status==='active');
@@ -1226,7 +1245,7 @@ function eventWorkspacePage() {
   if (selectedLocal) return localRecordPage(localSelection,selectedLocal.title,goalPicker,connection);
   const history=messages.map(message=>`<div ${message.notificationEventId?`id="event-message-${esc(message.notificationEventId)}"`: ''} class="agent-message ${message.role==='user'?'user':'assistant'}"><p>${esc(message.text)}</p>${message.status==='pending'?'<p class="agent-disclaimer">待同步</p>':message.status==='rejected'||message.status==='failed'?'<p class="agent-disclaimer">发送未完成，请通过聊天重新说明。</p>':''}</div>`).join('');
   const content=chat?`${backButton('agent-back','返回目标')}<div class="agent-title"><h1>${esc(goal?.title||'说说你想做什么')}</h1></div>${connection}<div class="agent-messages" role="log" aria-live="polite">${history||'<p class="agent-empty">说说你的想法，Along 会和你一起理清下一步。</p>'}</div>`
-    :goal?`${connection}<section class="goal-card"><h1>${esc(goal.title)}</h1>${goal.metric?`<p class="goal-note">${esc(goal.metric.target)} ${esc(goal.metric.unit)} · ${esc(goal.metric.period)}</p>`:''}${goal.context.length?`<p class="goal-note">${goal.context.map(item=>esc(typeof item==='string'?item:item.text)).join('；')}</p>`:''}<div class="card-actions"><button class="agent-action" data-action="event-chat">聊聊这个目标</button></div></section>${eventHealthConnection(goal)}<section class="task-section"><div class="section-heading"><h2>动态任务</h2></div><div class="task-list">${goal.tasks.filter(task=>task.status!=='cancelled').map(task=>`<div class="task-row" tabindex="-1" id="event-task-${esc(task.id)}"><div><strong>${esc(task.content)}</strong>${task.scheduledAt?`<p>${esc(new Date(task.scheduledAt).toLocaleString('zh-CN'))}</p>`:''}</div><span class="task-row-status">${task.status==='done'?'已完成':'待完成'}</span></div>`).join('')||'<p class="agent-empty">通过聊天安排下一步。</p>'}</div></section>`:'';
+    :goal?`${connection}<section class="goal-card"><h1>${esc(goal.title)}</h1>${goal.metric?`<p class="goal-note">${esc(goal.metric.target)} ${esc(goal.metric.unit)} · ${esc(goal.metric.period)}</p>`:''}${goal.context.length?`<p class="goal-note">${goal.context.map(item=>esc(typeof item==='string'?item:item.text)).join('；')}</p>`:''}<div class="card-actions"><button class="agent-action" data-action="event-chat">聊聊这个目标</button></div></section>${eventHealthConnection(goal)}<section class="task-section"><div class="section-heading"><h2>动态任务</h2></div><div class="task-list">${goal.tasks.filter(task=>task.status!=='cancelled').map(task=>`<div class="task-row" tabindex="-1" id="event-task-${esc(task.id)}"><div><strong>${esc(task.content)}</strong>${taskReminderLine(task)}</div><span class="task-row-status">${task.status==='done'?'已完成':'待完成'}</span></div>`).join('')||'<p class="agent-empty">通过聊天安排下一步。</p>'}</div></section>`:'';
   return `<div class="app-shell ${chat?'agent-shell':''}"><header class="topbar"><div class="topbar-inner">${brand()}</div></header><main class="content ${chat?'agent-page':''}"><div class="${chat?'agent-scroll':''}">${goalPicker}${content}</div>${chat?`<div class="agent-composer-dock"><form id="agent-form" class="agent-composer"><textarea name="message" rows="1" placeholder="说说你的想法" maxlength="800" data-draft-scope="${esc(view.draftScope)}" required>${esc(eventWorkspace.draft())}</textarea><button class="agent-send" aria-label="发送" ${agentBusy?'disabled':''}>↑</button></form><p class="agent-disclaimer">Along · 一起，慢慢向前</p></div>`:''}</main></div>`;
 }
 function renderEventUpdate() {
@@ -1277,7 +1296,7 @@ async function connectHealth(goalKey=activeGoal) {
     try {
       if (!window.AlongHealthBridge.healthEvents) throw Error('请重新安装新版 Along App 以启用健康自动跟进');
       const snapshot=await window.AlongHealthBridge.connect({types:['steps','weight','workout','sleep']});
-      state=setSnapshot(state,snapshot,'healthkit'); localStorage.setItem(KEY,JSON.stringify(state));
+      persistHealthState(setSnapshot(state,snapshot,'healthkit'));
       await window.AlongHealthBridge.healthEvents();
       renderEventUpdate();notice('所选健康摘要变化后将自动跟进');
     } catch(error) {notice(error?.message||'健康连接未完成');}

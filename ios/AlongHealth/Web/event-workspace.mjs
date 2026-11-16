@@ -20,6 +20,35 @@ function conversationGoal(value, conversationId = value.conversationId) {
     message.conversationId === conversationId && message.goalId)?.goalId ?? null;
 }
 
+function absoluteReminderTime(value) {
+  if (!time(value)||!/^\d{4}-\d\d-\d\dT(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)$/.test(value)) return false;
+  const day=value.slice(0,10),utc=Date.parse(day+'T00:00:00Z');
+  return Number.isFinite(utc)&&new Date(utc).toISOString().slice(0,10)===day;
+}
+function cleanTaskReminder(task) {
+  const {reminderPlan:plan,scheduledAt}=task;
+  if (plan===undefined) {
+    if (scheduledAt!==undefined&&!time(scheduledAt)) throw Error('任务同步格式不正确');
+    return {scheduledAt:absoluteReminderTime(scheduledAt)?scheduledAt:undefined};
+  }
+  if (!record(plan)) return {};
+  if (plan.state==='scheduled'&&absoluteReminderTime(scheduledAt)&&['user','agent'].includes(plan.source)&&
+      ['once','daily','weekly'].includes(plan.repeat)) {
+    const explanation=typeof plan.explanation==='string'?plan.explanation.trim():'';
+    const weekly=plan.repeat==='weekly';
+    if (explanation.length<2||explanation.length>240||
+        (weekly?!(Number.isInteger(plan.weekday)&&plan.weekday>=1&&plan.weekday<=7):plan.weekday!==undefined)) return {};
+    return {scheduledAt,reminderPlan:{state:'scheduled',source:plan.source,explanation,repeat:plan.repeat,...(weekly?{weekday:plan.weekday}:{})}};
+  }
+  if (scheduledAt!==undefined) return {};
+  if (plan.state==='off'&&['opt_out','untimed'].includes(plan.reason)) return {reminderPlan:{state:'off',reason:plan.reason}};
+  if (plan.state==='needs_time'&&typeof plan.question==='string') {
+    const question=plan.question.trim();
+    if (question.length>=2&&question.length<=240) return {reminderPlan:{state:'needs_time',question}};
+  }
+  return {};
+}
+
 // Wire snapshots are validated before entering the cache; layouts are deterministic projections, not model HTML.
 export function safeWorkspaceGoal(snapshot) {
   if (!record(snapshot)||!record(snapshot.goal)||!record(snapshot.revision)||!Array.isArray(snapshot.tasks)) throw Error('目标同步格式不正确');
@@ -34,9 +63,9 @@ export function safeWorkspaceGoal(snapshot) {
   const seen=new Set();
   const cleanTasks=tasks.map(task=>{
     if (!record(task)||!id(task.id)||seen.has(task.id)||task.goalId!==goal.id||!text(task.content,120)||!version(task.currentRevision)||
-        !['open','done','cancelled'].includes(task.status)||(task.scheduledAt!==undefined&&!time(task.scheduledAt))) throw Error('任务同步格式不正确');
+        !['open','done','cancelled'].includes(task.status)) throw Error('任务同步格式不正确');
     seen.add(task.id);
-    return {id:task.id,goalId:goal.id,content:task.content,status:task.status,revision:task.currentRevision,scheduledAt:task.scheduledAt};
+    return {id:task.id,goalId:goal.id,content:task.content,status:task.status,revision:task.currentRevision,...cleanTaskReminder(task)};
   });
   validateGoalReply({reply:'目标已同步',proposal:{title:revision.title,target:metric?.target??null,
     task:cleanTasks[0]?.content||'通过聊天安排下一步',reason:'已校验的目标状态'}},goal.domain,'');

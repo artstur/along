@@ -29,6 +29,8 @@ test('invalid task reminder plans never invent or schedule a time and preserve t
     assert.equal(task.content,'睡前放下手机');assert.equal(task.reminderPlan,undefined);assert.equal(task.scheduledAt,undefined);
   }
   assert.deepEqual(clean({...valid,explanation:'  提前准备  ',extra:'忽略'},when).reminderPlan,valid);
+  assert.equal(clean(undefined,'2099-03-01').scheduledAt,undefined);
+  assert.equal(clean(undefined,when).scheduledAt,when);
 });
 
 const receiptId='out:ticket_one:assignment_one';
