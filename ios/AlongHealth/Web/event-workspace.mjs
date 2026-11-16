@@ -193,7 +193,7 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
       if (!record(page)||!Array.isArray(page.items)||page.items.length>50) throw Error('同步响应格式不正确');
       const next=recoverPending(),seqs=[];
       const fallbacks=onNotifications?page.notificationFallback??[]:[];
-      if (!Array.isArray(fallbacks)||fallbacks.length>50||fallbacks.some(r=>!validResult(r))) throw Error('通知补投格式不正确');
+      if (!Array.isArray(fallbacks)||fallbacks.length>50||fallbacks.some(r=>!validResult(r)||r.userId!==config.userId)) throw Error('通知补投格式不正确');
       if (fallbacks.length) {
         const pending=new Map((next.notificationResults??[]).map(r=>[r.eventId,r]));
         for (const r of fallbacks) pending.set(r.eventId,{eventId:r.eventId,kind:r.kind,goalId:r.goalId,taskId:r.taskId??undefined,
@@ -246,7 +246,7 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
       // Reconcile only a complete sync. A torn page, stale connection or offline cache must never withdraw other tasks.
       const active=Object.values(state.goals).filter(g=>g.status==='active');
       const reminders=active.flatMap(g=>g.tasks.filter(t=>t.status==='open'&&Date.parse(t.scheduledAt)>Date.now())
-        .map(t=>({goalId:g.id,taskId:t.id,revision:t.revision,scheduledAt:t.scheduledAt,body:t.content})));
+        .map(t=>({goalId:g.id,taskId:t.id,revision:t.revision,scheduledAt:new Date(t.scheduledAt).toISOString(),body:t.content})));
       const activeTasks=active.flatMap(g=>g.tasks.filter(t=>t.status==='open').map(t=>({goalId:g.id,taskId:t.id,revision:t.revision})));
       const queued=state.notificationResults??[];
       const results=queued.filter(r=>applicableResult(r,state.goals));

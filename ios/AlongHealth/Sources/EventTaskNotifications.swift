@@ -130,13 +130,11 @@ import UserNotifications
         for row in activeTasks {
             guard let goal=row["goalId"] as? String,valid(goal),let task=row["taskId"] as? String,valid(task),
                   let revision=row["revision"] as? Int else { throw AgentBridgeError.invalidConfiguration }
-            activeRevisions[requestID(scope:scope,goal:goal,task:task)] = revision
+            activeRevisions[goal+":"+task] = revision
         }
         let withdrawn = delivered.filter { note in
             guard let route=note.request.content.userInfo["along"] as? [String:Any] else { return false }
-            if !allowed || route["userId"] as? String != user { return true }
-            guard route["kind"] as? String == "reminder" else { return false }
-            return activeRevisions[note.request.identifier] != route["revision"] as? Int
+            return Self.withdrawn(route,user:user,allowed:allowed,openTasks:activeRevisions)
         }
         if !withdrawn.isEmpty { center.removeDeliveredNotifications(withIdentifiers:withdrawn.map { $0.request.identifier }) }
         let existing = Dictionary(uniqueKeysWithValues:pending.map { ($0.identifier,$0) })
@@ -219,6 +217,14 @@ import UserNotifications
         }
     }
 
+    static func withdrawn(_ route: [String:Any], user: String, allowed: Bool, openTasks: [String:Int]) -> Bool {
+        if !allowed || route["userId"] as? String != user { return true }
+        guard let kind=route["kind"] as? String, ["reminder","reminder_due"].contains(kind) else { return false }
+        guard let goal=route["goalId"] as? String, let task=route["taskId"] as? String,
+              let revision=route["revision"] as? Int else { return true }
+        return openTasks[goal+":"+task] != revision
+    }
+
     private func sameRequest(_ a: UNNotificationRequest, _ b: UNNotificationRequest) -> Bool {
         guard let x=a.trigger as? UNCalendarNotificationTrigger, let y=b.trigger as? UNCalendarNotificationTrigger,
               !x.repeats, !y.repeats, let at=x.dateComponents.date, let bt=y.dateComponents.date else { return false }
@@ -294,12 +300,18 @@ import UserNotifications
 
     private func updateProbe(_ task: String, _ values: [String:String]) {
 #if DEBUG
-        guard let probe = ProcessInfo.processInfo.environment["ALONG_NOTIFICATION_PROBE_TASK"], valid(probe), probe == task,
-              let cache = FileManager.default.urls(for:.cachesDirectory,in:.userDomainMask).first else { return }
+        guard valid(task), let cache = FileManager.default.urls(for:.cachesDirectory,in:.userDomainMask).first else { return }
         let url = cache.appendingPathComponent("AlongNotificationProbe.json")
         var state = (try? Data(contentsOf:url)).flatMap { try? JSONSerialization.jsonObject(with:$0) as? [String:String] } ?? [:]
-        let marker = DailyReminderScope.hash(probe)
-        if state["probe"] != marker { state = ["probe":marker] }
+        let marker = DailyReminderScope.hash(task)
+        if let probe = ProcessInfo.processInfo.environment["ALONG_NOTIFICATION_PROBE_TASK"] {
+            guard probe == task else { return }
+            if state["probe"] != marker { state = ["probe":marker] }
+            state["probeExpiresAt"] = ISO8601DateFormatter().string(from:Date().addingTimeInterval(1800))
+        } else {
+            // A cold notification tap may relaunch without the debug environment.
+            guard state["probe"] == marker, let until=DailyReminderScope.date(state["probeExpiresAt"]), Date()<until else { return }
+        }
         state.merge(values) { _,new in new }
         try? JSONSerialization.data(withJSONObject:state).write(to:url,options:[.atomic,.completeFileProtection])
 #endif

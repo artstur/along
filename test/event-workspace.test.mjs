@@ -204,7 +204,7 @@ test('a rejected APNs alert is handed back on an empty page after sync ack, surv
   const at=new Date().toISOString(), initial=change(1,'测试');
   initial.createdAt=at;initial.remoteNotifications=true;
   initial.payload.notification={kind:'recommendation_ready',event_id:'handoff',revision:1};
-  const fallback={kind:'recommendation_ready',eventId:'handoff',goalId:'g_sleep',revision:1,createdAt:at};
+  const fallback={userId:config.userId,kind:'recommendation_ready',eventId:'handoff',goalId:'g_sleep',revision:1,createdAt:at};
   let stage='remote';const calls=[],delivered=[];
   setup(input=>{
     if(input.path==='/sync/ack')return {};
@@ -237,7 +237,21 @@ test('a completed or revised recommendation is suppressed while a completed task
     {kind:'recommendation_ready',eventId:'old_task',goalId:'g_sleep',taskId:'t_sleep',revision:1,createdAt:at},
     {kind:'recommendation_ready',eventId:'done_task',goalId:'g_sleep',taskId:'t_sleep',revision:2,createdAt:at},
     {kind:'task_result',eventId:'done_result',goalId:'g_sleep',taskId:'t_sleep',revision:2,createdAt:at}];
-  const batches=[];setup(input=>input.path==='/sync/ack'?{}:{items:page.filter(i=>i.seq>input.body.after_seq),notificationFallback:fallback});
+  const batches=[];setup(input=>input.path==='/sync/ack'?{}:{items:page.filter(i=>i.seq>input.body.after_seq),notificationFallback:fallback.map(r=>({...r,userId:config.userId}))});
   const ws=createEventWorkspace({config,onNotifications:async b=>batches.push(b)});
   await ws.sync();assert.deepEqual(batches[0].results.map(r=>r.eventId),['done_result']);
+});
+
+test('foreign fallback alerts and receipts never cross into the paired workspace',async()=>{
+  const batches=[],incoming={userId:'someone_else',kind:'task_result',eventId:'foreign',goalId:'g_sleep',revision:1,createdAt:new Date().toISOString()};
+  setup(()=>({items:[],notificationFallback:[incoming]}));
+  const ws=createEventWorkspace({config,onNotifications:async b=>batches.push(b)});
+  await ws.sync();assert.equal(batches.length,0);assert.ok(ws.view().error);
+  assert.equal(localStorage.getItem('along.event-workspace.v1:'+config.userId),null);
+});
+test('previously accepted local timestamps become dated iOS instants',async()=>{
+  const sample=change(1,'历史任务');sample.payload.snapshot.tasks[0].scheduledAt='2099-01-01T20:00';
+  const batches=[];setup(input=>input.path==='/sync/ack'?{}:{items:[sample]});
+  await createEventWorkspace({config,onNotifications:async b=>batches.push(b)}).sync();
+  assert.equal(batches[0].reminders[0].scheduledAt,new Date('2099-01-01T20:00').toISOString());
 });
