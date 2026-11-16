@@ -296,3 +296,5 @@ iPhone 在已同步的任务到点时提醒。Mac 上的 Agent 得出需要告�
 已取得的 iOS 系统排程回执通过 `POST /notifications/scheduled` 回传。Agent 为到点的任务产生 `reminder_due`，Host 遇到同一目标、任务和触发时刻已有本地回执时抑制远程副本。用户一直未打开 App 时，Mac 次日才生成的安排可在到点走 APNs。手机完全离线期间，系统仍可能展示断线前已经预约的旧时刻，重连后按当前任务校准。
 
 Host 逐事件保存待发记录。APNs 拒收或短时失败后，已授权 iPhone 下次拉取同步页也能接手近期推荐，即使业务游标已经前进；原生处理后返回回执。到期提醒的远程补送及结果交接只在十分钟有效期内重试。提供方接受请求和设备确实展示分别验收。
+
+本次配套的 Along Agent 发布源码固定为 `b79fccc93f63dd9cdcd219401a4a1b654d6a5152`（[Agent PR #3](https://github.com/artstur/along-superagent/pull/3)，依赖 [#2](https://github.com/artstur/along-superagent/pull/2)）。从该提交单独构建并安装到 along-phone profile。业务库由 Schema 4 原位升级至 5，切换前停写备份。旧版无法打开新版库，已有新写入时应先保全数据再评估回退。
