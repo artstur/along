@@ -10,6 +10,27 @@ const version = value => Number.isSafeInteger(value) && value>=0;
 const time = value => typeof value==='string' && Number.isFinite(Date.parse(value));
 const empty = userId => ({version:1,userId,cursor:0,goals:{},messages:{},drafts:{},activeGoalId:null,conversationId:null,returnGoalId:null});
 
+function isActiveGoal(value, goalId) {
+  return goalId != null && value.goals[goalId]?.status === 'active';
+}
+
+function conversationGoal(value) {
+  if (!value.conversationId) return null;
+  return Object.values(value.messages).find(message =>
+    message.conversationId === value.conversationId && message.goalId)?.goalId ?? null;
+}
+
+// Apply the same navigation invariant to restored caches and every state transition. Keep
+// history and drafts intact; only detach a conversation bound to the goal being removed.
+function reconcileSelection(value) {
+  const activeGoalId = isActiveGoal(value, value.activeGoalId) ? value.activeGoalId : null;
+  const lostSelection = value.activeGoalId != null && activeGoalId === null;
+  const detachConversation = lostSelection && conversationGoal(value) === value.activeGoalId;
+  return {...value, activeGoalId,
+    returnGoalId: isActiveGoal(value, value.returnGoalId) ? value.returnGoalId : null,
+    conversationId: detachConversation ? null : value.conversationId};
+}
+
 // Wire snapshots are validated before entering the cache; layouts are deterministic projections, not model HTML.
 export function safeWorkspaceGoal(snapshot) {
   if (!record(snapshot)||!record(snapshot.goal)||!record(snapshot.revision)||!Array.isArray(snapshot.tasks)) throw Error('目标同步格式不正确');
@@ -74,10 +95,15 @@ export function createEventWorkspace({config,onChange=()=>{}}) {
           saved.pendingAck!==undefined&&(!Array.isArray(saved.pendingAck)||saved.pendingAck.some(seq=>!version(seq)||seq<1||seq>saved.cursor))) throw Error('bad cache');
       saved.drafts=saved.drafts??{};
       saved.returnGoalId=saved.returnGoalId??null;
-      state=saved;
+      state=reconcileSelection(saved);
     }
   } catch { /* A damaged cache is rebuilt from the durable server outbox. */ }
-  function save(next) { if(disposed) throw Error('连接已切换');localStorage.setItem(key,JSON.stringify(next));state=next; }
+  function save(next) {
+    if (disposed) throw Error('连接已切换');
+    const reconciled = reconcileSelection(next);
+    localStorage.setItem(key, JSON.stringify(reconciled));
+    state = reconciled;
+  }
   function recoverPending() {
     const next=structuredClone(state);
     for (const {envelope} of pendingEvents(config)) {
@@ -101,24 +127,19 @@ export function createEventWorkspace({config,onChange=()=>{}}) {
     else delete drafts[draftScope()];
     save({...state,drafts});
   }
-  function conversationGoal(value=state) {
-    if (!value.conversationId) return null;
-    return Object.values(value.messages).find(message=>
-      message.conversationId===value.conversationId&&message.goalId)?.goalId??null;
-  }
   function select(goalId) {
-    if (goalId!==null&&!state.goals[goalId]) return;
+    if (goalId!==null&&!isActiveGoal(state,goalId)) return;
     const returnGoalId=goalId===null
-      ? (state.goals[state.activeGoalId]?.status==='active'?state.activeGoalId:state.returnGoalId)
+      ? (isActiveGoal(state,state.activeGoalId)?state.activeGoalId:state.returnGoalId)
       : goalId;
     // Reopening "new goal" resumes an unbound conversation. This preserves both its durable
     // messages and any follow-up draft written after the first send. Once the server binds that
     // conversation to a goal, the next "new goal" starts from a clean conversation instead.
-    const conversationId=goalId===null&&conversationGoal()?null:state.conversationId;
+    const conversationId=goalId===null&&conversationGoal(state)?null:state.conversationId;
     save({...state,activeGoalId:goalId,conversationId,returnGoalId});onChange();
   }
   function leaveConversation() {
-    const returnGoalId=state.goals[state.returnGoalId]?.status==='active'?state.returnGoalId:null;
+    const returnGoalId=isActiveGoal(state,state.returnGoalId)?state.returnGoalId:null;
     // Keep conversationId and its durable outbox intact. A late Agent result must stay bound to
     // this conversation, while the goal the user returned to remains the visible selection.
     save({...state,activeGoalId:returnGoalId,returnGoalId});onChange();
