@@ -1,6 +1,6 @@
 # Along 新架构业务测试用例
 
-> 2026-11-15 更新，已同步 D14–D17。对应本仓库 [Along 新架构入口](agent-architecture.md)，规格在相邻仓库：[决策记录](https://github.com/artstur/along-superagent/blob/feature/along-phase0/docs/along/000-decisions.md)、[系统架构](https://github.com/artstur/along-superagent/blob/feature/along-phase0/docs/along/001-architecture.md)、[记忆与技能](https://github.com/artstur/along-superagent/blob/feature/along-phase0/docs/along/002-memory-and-skills.md)、[实施与验收](https://github.com/artstur/along-superagent/blob/feature/along-phase0/docs/along/003-implementation.md)、[阶段 0 技术验证](https://github.com/artstur/along-superagent/blob/feature/along-phase0/docs/along/004-phase0-validation.md)。
+> 2026-11-15 更新，已同步 D14–D17。对应本仓库 [Along 新架构入口](agent-architecture.md)，规格在相邻仓库：[决策记录](https://github.com/artstur/along-superagent/blob/main/docs/along/000-decisions.md)、[系统架构](https://github.com/artstur/along-superagent/blob/main/docs/along/001-architecture.md)、[记忆与技能](https://github.com/artstur/along-superagent/blob/main/docs/along/002-memory-and-skills.md)、[实施与验收](https://github.com/artstur/along-superagent/blob/main/docs/along/003-implementation.md)、[阶段 0 技术验证](https://github.com/artstur/along-superagent/blob/main/docs/along/004-phase0-validation.md)。
 >
 > **状态：这是验收标准，不是已执行结果。** 阶段 A/B、健康跟进与记忆维护已有实现；本文件固定「做到什么样算通过」，按阶段逐条登记证据，未执行项不能据此算通过。
 
@@ -9,7 +9,7 @@
 ### 1.1 覆盖范围
 
 - 阶段 A–E 的业务可观察行为，加上 D1–D17 决策边界的可判定断言。
-- **不覆盖**：模型内部策略与提示词效果、DSH 核心机制内部实现、Hy-Memory 检索算法内部逻辑、视觉稿级 UI 细节、阶段 0 的技术探针（见 [阶段 0 技术验证](https://github.com/artstur/along-superagent/blob/feature/along-phase0/docs/along/004-phase0-validation.md)）。
+- **不覆盖**：模型内部策略与提示词效果、DSH 核心机制内部实现、Hy-Memory 检索算法内部逻辑、视觉稿级 UI 细节、阶段 0 的技术探针（见 [阶段 0 技术验证](https://github.com/artstur/along-superagent/blob/main/docs/along/004-phase0-validation.md)）。
 - 只在特定阶段才存在的用例，在该阶段到达前记「不适用（阶段未到）」，不按失败计。
 
 ### 1.2 硬判定口径
