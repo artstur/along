@@ -15,6 +15,23 @@ function absoluteReminderTime(value) {
   const day=value.slice(0,10),utc=Date.parse(day+'T00:00:00Z');
   return Number.isFinite(utc)&&new Date(utc).toISOString().slice(0,10)===day;
 }
+function matchesReminderClock(scheduledAt,wallTime,timezone) {
+  const day=86400_000;
+  const civil=instant=>{
+    const fields=Object.fromEntries(new Intl.DateTimeFormat('en-GB',{timeZone:timezone,hourCycle:'h23',
+      year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'})
+      .formatToParts(new Date(instant)).map(part=>[part.type,part.value]));
+    return Date.UTC(+fields.year,+fields.month-1,+fields.day,+fields.hour,+fields.minute,+fields.second);
+  };
+  const scheduled=Date.parse(scheduledAt),local=civil(scheduled),clock=civil(Date.parse(wallTime))%day;
+  if (local%day===clock) return true;
+  // A shifted clock is valid only for the exact civil-time gap on this occurrence's date.
+  const target=Math.floor(local/day)*day+clock;
+  const offsets=[-day,day].map(delta=>civil(target+delta)-(target+delta));
+  const next=[...new Set(offsets)].map(offset=>target-offset).filter(at=>civil(at)>=target)
+    .sort((a,b)=>civil(a)-civil(b)||a-b)[0];
+  return next===Math.floor(scheduled/1000)*1000;
+}
 function cleanTaskReminder(task) {
   const {reminderPlan:plan,scheduledAt}=task;
   if (plan===undefined) {
@@ -35,7 +52,8 @@ function cleanTaskReminder(task) {
         if (weekly&&['Mon','Tue','Wed','Thu','Fri','Sat','Sun'].indexOf(day)+1!==plan.weekday) return {};
       } catch { return {}; }
     }
-    if (plan.wallTime!==undefined&&!absoluteReminderTime(plan.wallTime)) return {};
+    if (plan.wallTime!==undefined&&(!absoluteReminderTime(plan.wallTime)||!plan.timezone||
+        !matchesReminderClock(scheduledAt,plan.wallTime,plan.timezone))) return {};
     return {scheduledAt,reminderPlan:{state:'scheduled',source:plan.source,explanation,repeat:plan.repeat,
       ...(weekly?{weekday:plan.weekday}:{}),...(plan.timezone===undefined?{}:{timezone:plan.timezone}),
       ...(plan.wallTime===undefined?{}:{wallTime:plan.wallTime})}};
