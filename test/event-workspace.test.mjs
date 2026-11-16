@@ -325,3 +325,35 @@ test('archiving after switching goals detaches any previously bound conversation
   assert.equal(envelope.goal_id,undefined);
   assert.equal(envelope.causation_id,undefined);
 });
+
+test('a conversation draft stays reachable after goal binding without overwriting an existing goal draft',async()=>{
+  for (const existingDraft of ['', 'An earlier draft for this goal']) {
+    let items=[change(1,'已存目标')];
+    const {workspace}=setup(input=>{
+      if(input.path==='/events')return {status:'accepted',event_id:input.body.event_id};
+      if(input.path==='/sync/ack')return {acked:input.body.seqs.length};
+      return {items:items.filter(item=>item.seq>input.body.after_seq)};
+    });
+    await workspace.sync();workspace.select('g_sleep');
+    if (existingDraft) workspace.setDraft(existingDraft);
+    workspace.select(null);
+    const root=await workspace.submit('Start a synthetic conversation');
+    workspace.setDraft('The unsent second sentence');
+    items=[{seq:2,userId:config.userId,kind:'message',goalId:'g_sleep',payload:{snapshot:snapshot(),conversation_id:root,
+      message:{id:'msg_binding',eventId:'evt_binding',role:'assistant',direction:'outbound',text:'已关联目标',seq:2,causationId:root}}}];
+    await workspace.sync();
+    assert.equal(workspace.view().activeGoalId,'g_sleep');
+    assert.equal(workspace.draft(),'The unsent second sentence');
+    assert.equal(workspace.view().draftScope,`conversation:${root}`);
+    const reopened=createEventWorkspace({config});
+    assert.equal(reopened.draft(),'The unsent second sentence');
+    // Losing the current root while visiting another conversation must not orphan the bound draft.
+    reopened.select(null);reopened.select('g_sleep');
+    assert.equal(reopened.draft(),'The unsent second sentence');
+    const next=await reopened.submit(reopened.draft());
+    const queued=pendingEvents(config).find(item=>item.event_id===next).envelope;
+    assert.equal(queued.goal_id,'g_sleep');
+    assert.equal(queued.payload.text,'The unsent second sentence');
+    assert.equal(reopened.draft(),existingDraft,'an older goal draft stays separate until the newer conversation draft is sent');
+  }
+});

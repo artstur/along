@@ -193,3 +193,27 @@ test('a draft in the real composing element never migrates from an archived goal
   assert.equal(sent.payload.text,'A fresh synthetic goal');
   assert.equal(sent.goal_id,undefined);assert.equal(sent.causation_id,undefined);
 });
+
+test('binding a live conversation to a goal preserves the unsent follow-up through return and reopening',async()=>{
+  const dom=installDomStub({storage:{'along.agent.v1':JSON.stringify(config)}});
+  const composing=trackComposingTextarea(dom);
+  document.visibilityState='visible';
+  const bridge={syncItems:[]};
+  const requests=installEventBridge(bridge);
+  await import(`../web/app.mjs?event-bound-draft=${Date.now()}`);await settle();
+  composing().value='Start a synthetic goal';
+  await dom.app.dispatch('submit',{target:{id:'agent-form',fields:{message:composing().value},querySelector:()=>composing(),reset(){},setAttribute(){}},preventDefault(){}});
+  await settle();
+  const root=requests.find(item=>item.path==='/events').body.event_id;
+  composing().value='Second sentence intended for the same conversation';
+  await dom.app.dispatch('input',{target:composing()});
+  const snapshot={goal:{id:'g_bound',domain:'custom',status:'active',currentRevision:1},
+    revision:{goalId:'g_bound',revision:1,title:'Bound synthetic goal',status:'active'},tasks:[]};
+  bridge.syncItems.push({seq:1,userId:'u_app_b',kind:'message',goalId:'g_bound',payload:{snapshot,conversation_id:root,
+    message:{id:'msg_bound',eventId:'evt_bound',role:'assistant',direction:'outbound',text:'已建立合成目标',seq:1,causationId:root}}});
+  await dom.tick(3000);await settle();
+  assert.equal(composing().value,'Second sentence intended for the same conversation');
+  assert.equal(composing().dataset.draftScope,`conversation:${root}`);
+  await dom.click({action:'agent-back'});await dom.click({action:'event-chat'});
+  assert.equal(composing().value,'Second sentence intended for the same conversation');
+});

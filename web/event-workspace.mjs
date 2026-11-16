@@ -14,10 +14,10 @@ function isActiveGoal(value, goalId) {
   return goalId != null && value.goals[goalId]?.status === 'active';
 }
 
-function conversationGoal(value) {
-  if (!value.conversationId) return null;
+function conversationGoal(value, conversationId = value.conversationId) {
+  if (!conversationId) return null;
   return Object.values(value.messages).find(message =>
-    message.conversationId === value.conversationId && message.goalId)?.goalId ?? null;
+    message.conversationId === conversationId && message.goalId)?.goalId ?? null;
 }
 
 // Apply the same navigation invariant to restored caches and every state transition. Keep
@@ -151,7 +151,17 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
     return {...next,draftScope:draftScope(next),error:lastError,messages:Object.values(next.messages).map(message=>({...message,
       status:failures.some(item=>item.event_id===message.eventId)?'rejected':pending.has(message.eventId)?'pending':message.status}))};
   }
-  function draftScope(value=state) { return value.activeGoalId?`goal:${value.activeGoalId}`:`conversation:${value.conversationId??'new'}`; }
+  function draftScope(value=state) {
+    const conversationScope = `conversation:${value.conversationId??'new'}`;
+    if (!value.activeGoalId) return conversationScope;
+    // A follow-up typed before binding still belongs to that conversation. Resolve it through
+    // persisted messages even after navigating away; keep an older goal draft separate.
+    const drafts = value.drafts??{};
+    const boundScope = [conversationScope, ...Object.keys(drafts).reverse()].find(scope =>
+      scope.startsWith('conversation:') && drafts[scope] &&
+      conversationGoal(value, scope.slice('conversation:'.length)) === value.activeGoalId);
+    return boundScope??`goal:${value.activeGoalId}`;
+  }
   function draft() { return state.drafts?.[draftScope()]??''; }
   function setDraft(value) {
     const clean=typeof value==='string'?value.slice(0,800):'';
