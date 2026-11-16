@@ -48,3 +48,18 @@
 - 更新两工程 README、实现状态与历史方案标记；本地文档链接目标均存在（提示词中的 `actual link` 是写法示例）。
 - Along `npm run check`：302 项通过；Along Agent `VITEST_MAX_WORKERS=4 pnpm check`：80 个文件、1532 项通过，类型检查与构建通过。
 - Along `npm run build`：18 个文件与 `dist/`、iOS 内置资源逐字节一致；两仓库 `git diff --check` 通过。本次未部署或进行真机验收。
+
+
+## Agent 提醒计划与统一通知通道（2026-11-16）
+
+主分类 agent / client，依赖 Along Agent 的 reminder-plan 协议 PR（合并后补完整 SHA），主仓独立分支负责消费、系统排程和回执。验收条件：用户用自然语言说明行动与节奏后，Agent 同时安排未来提醒、时区与重复规则；原任务上可读其安排及理由，iPhone 系统待发与原任务身份一致。
+
+现有职责无需新建独立 Notification 服务：Along Agent 负责语义编排与合法 ChangeSet；任务调度负责到期工单、复查和沿既有委托续排；host/task-notifications.mjs、web/event-workspace.mjs 与 EventTaskNotifications.swift 组成统一投递模块，负责持久路由意图、幂等、重试、改期/撤销、系统回读和深链。keep 不产生额外即时通知。此次不为模块命名搬迁已有代码。
+
+合同：任务沿用 scheduledAt 作为首个/当前 occurrence，可选 reminderPlan 为 scheduled（source:user/agent、explanation、repeat:once/daily/weekly、timezone:IANA、weekly 时 weekday:ISO1–7）、needs_time（question）或 off（reason:opt_out/untimed）。缺少计划或时区的旧快照仍按原一次性 scheduledAt 处理，不推断重复。计划数据由 Agent 校验后提供，Web 再验证并保留离线缓存。对现有任务补排经真实用户消息/Agent 工单和合法 task.update，保留原任务身份及正文；禁止直接写正式 SQLite。
+
+Web 将计划传至已有原生桥。iOS 在首个时刻与系统下一次重复触发相符时，按原时区创建每日/每周 calendar trigger，App 不打开也保留重复。首个时刻更晚时先一次排程，避免提前触发；系统真实触发时间及 repeats 均独立回读。一次/每日/每周、跨午夜/时区、首时刻过去、重启、改期/取消和完成均需覆盖。完成/取消/关闭提醒撤回系统队列，同步重放不重复增加。通知点击仍定位原 goal/task。
+
+Host 排程回执沿用原 expectedUserId 与 reminders，每行含 goalId/taskId/revision/scheduledAt；可选 repeat（daily/weekly）、timezone、weekly 的 weekday 和 firstScheduledAt。scheduledAt 必须来自系统实际 nextTriggerDate，firstScheduledAt 是有效开始锚点。Host 仅在时区、民用钟点、周几与锚点一致时据此抑制后续已在手机排程的同 occurrence，不将 Agent 计划等同系统排程。accepted/pending、delivered 和 opened 分开记证。
+
+交付验证使用隔离合成数据，不回灌旧目标或演示内容。正式验证只补用户授权的现有两任务，并分别读取 Agent 原工单、合法 ChangeSet、系统 pending/下次时刻/重复规则。近未来验收通知只证明通道及点击，不替代真实任务排程。APNs 签名与服务凭据仍缺时，如实保留远程新决策即时送达待验。公开 Web、Host、iPhone 源版本、构建/部署/安装/启动和实际用户观察分别登记到工作区发版台账。
