@@ -2,8 +2,63 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {installDomStub} from './dom-stub.mjs';
 
+const config={baseURL:'https://localhost:4176',fingerprint:'A'.repeat(64),token:'b'.repeat(64)};
+
+function installEventBridge(state={syncItems:[]}) {
+  const requests=[];
+  window.AlongAgentBridge={request:async input=>{
+    requests.push(input);
+    if(input.path==='/connection/status')return {along:true,ready:true,runtime:'dsh-superagent',eventProtocol:1,userId:'u_app_b'};
+    if(input.path==='/events')return {status:'accepted',event_id:input.body.event_id};
+    if(input.path==='/sync')return {items:state.syncItems.filter(item=>item.seq>input.body.after_seq)};
+    if(input.path==='/sync/ack')return {acked:input.body.seqs.length};
+    throw Error(`Unexpected old endpoint: ${input.path}`);
+  }};
+  return requests;
+}
+
+const settle=()=>new Promise(resolve=>setTimeout(resolve,30));
+
+test('a new-goal conversation always has a standard way back',async()=>{
+  const dom=installDomStub({storage:{'along.agent.v1':JSON.stringify(config)}});
+  document.visibilityState='visible';
+  const bridge={syncItems:[]};
+  const requests=installEventBridge(bridge);
+  await import(`../web/app.mjs?event-back=${Date.now()}`);
+  await settle();
+  assert.match(dom.app.innerHTML,/data-action="agent-back"/,'空白新对话也必须有返回入口');
+  assert.match(dom.app.innerHTML,/class="back-button icon-only"/,'要复用全局的标准返回组件');
+  await dom.app.dispatch('input',{target:{matches:selector=>selector==='#agent-form textarea',value:'一条未发送的合成草稿',style:{},scrollHeight:48}});
+  assert.match(dom.app.innerHTML,/data-action="agent-back"/,'输入草稿时返回入口不得消失');
+  await dom.click({action:'agent-back'});
+  assert.doesNotMatch(dom.app.innerHTML,/agent-composer/,'没有已存目标时要回到简洁首页，不能留在同一个对话页');
+  await dom.click({action:'new-goal'});
+  assert.match(dom.app.innerHTML,/一条未发送的合成草稿/,'返回再重开新对话时，未发送文字必须恢复');
+  const submit=message=>dom.app.dispatch('submit',{target:{id:'agent-form',fields:{message},querySelector:()=>null,reset(){},setAttribute(){}},preventDefault(){}});
+  await submit('一条合成目标');await settle();
+  const eventId=requests.find(item=>item.path==='/events').body.event_id;
+  assert.match(dom.app.innerHTML,/data-action="agent-back"/,'本地队列已保存时返回入口不得消失');
+  await dom.app.dispatch('input',{target:{matches:selector=>selector==='#agent-form textarea',value:'首句发送后的合成补充',style:{},scrollHeight:48}});
+  await dom.click({action:'agent-back'});
+  assert.doesNotMatch(dom.app.innerHTML,/agent-composer/);
+  await dom.click({action:'new-goal'});
+  assert.match(dom.app.innerHTML,/一条合成目标/,'重开时要恢复已发送的原会话');
+  assert.match(dom.app.innerHTML,/首句发送后的合成补充/,'重开时要恢复首句后的未发送补充');
+  bridge.syncItems=[{seq:1,userId:'u_app_b',kind:'delivery_failed',payload:{event_id:eventId}}];
+  await dom.tick(3000);await settle();
+  assert.match(dom.app.innerHTML,/发送未完成/);
+  assert.match(dom.app.innerHTML,/data-action="agent-back"/,'发送失败时返回入口不得消失');
+  bridge.syncItems.push({seq:2,userId:'u_app_b',kind:'message',payload:{conversation_id:eventId,
+    message:{id:'msg_reply',eventId:'evt_reply',role:'assistant',direction:'outbound',text:'这是脱敏的合成回复',seq:2,causationId:eventId}}});
+  await dom.tick(3000);await settle();
+  assert.match(dom.app.innerHTML,/这是脱敏的合成回复/);
+  assert.match(dom.app.innerHTML,/data-action="agent-back"/,'已有回复时返回入口不得消失');
+  await dom.click({action:'agent-back'});
+  assert.doesNotMatch(dom.app.innerHTML,/agent-composer/);
+  assert.match(dom.app.innerHTML,/当前目标/);
+});
+
 test('the real app discovers the new protocol, uses events during ongoing work, and renders synced goals without adoption or direct mutation',async()=>{
-  const config={baseURL:'https://localhost:4176',fingerprint:'A'.repeat(64),token:'b'.repeat(64)};
   const dom=installDomStub({storage:{'along.agent.v1':JSON.stringify(config)}});
   document.visibilityState='visible';
   let current=[],seq=0;
@@ -21,7 +76,6 @@ test('the real app discovers the new protocol, uses events during ongoing work, 
     throw Error(`Unexpected old endpoint: ${input.path}`);
   }};
   await import(`../web/app.mjs?event-app=${Date.now()}`);
-  const settle=()=>new Promise(resolve=>setTimeout(resolve,30));
   await settle();
   assert.match(dom.app.innerHTML,/说说你想做什么/);
   const submit=message=>dom.app.dispatch('submit',{target:{id:'agent-form',fields:{message},querySelector:()=>null,reset(){},setAttribute(){}},preventDefault(){}});

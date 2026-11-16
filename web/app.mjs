@@ -1136,7 +1136,7 @@ function eventWorkspacePage() {
   const view=eventWorkspace.view();
   const goals=Object.values(view.goals).filter(goal=>goal.status==='active');
   const goal=view.goals[view.activeGoalId];
-  const chat=screen==='agent'||!goal||goal.status!=='active';
+  const chat=screen==='agent'||Boolean(goal&&goal.status!=='active');
   const options=goals.map(item=>`<option value="${esc(item.id)}" ${item.id===view.activeGoalId?'selected':''}>${esc(item.title)}</option>`).join('');
   const messages=view.messages.filter(message=>message.presentation!=='execution'&&(view.activeGoalId
     ?message.goalId===view.activeGoalId:message.conversationId===view.conversationId));
@@ -1144,9 +1144,9 @@ function eventWorkspacePage() {
   const connection=connectionError?`<details class="agent-setup"><summary>连接需处理 · ${esc(connectionError)}</summary><form id="host-address-form"><label>Along 服务地址<input name="baseURL" type="url" value="${esc(agentConfig.baseURL||'')}" required></label><button class="button">验证并更新</button></form></details>`:'';
   const goalPicker=`<div class="goal-switch"><label for="event-goal-select">当前目标</label><div class="goal-switch-actions"><div class="select-wrap"><select id="event-goal-select" aria-label="切换目标"><option value="" ${!view.activeGoalId?'selected':''}>新对话</option>${options}</select></div><button class="goal-add-button" data-action="new-goal">新建</button></div></div>`;
   const history=messages.map(message=>`<div class="agent-message ${message.role==='user'?'user':'assistant'}"><p>${esc(message.text)}</p>${message.status==='pending'?'<p class="agent-disclaimer">待同步</p>':message.status==='rejected'||message.status==='failed'?'<p class="agent-disclaimer">发送未完成，请通过聊天重新说明。</p>':''}</div>`).join('');
-  const content=chat?`${goal?backButton('agent-back','返回目标'):''}<div class="agent-title"><h1>${esc(goal?.title||'说说你想做什么')}</h1></div>${connection}<div class="agent-messages" role="log" aria-live="polite">${history||'<p class="agent-empty">说说你的想法，Along 会和你一起理清下一步。</p>'}</div>`
-    :`${connection}<section class="goal-card"><h1>${esc(goal.title)}</h1>${goal.metric?`<p class="goal-note">${esc(goal.metric.target)} ${esc(goal.metric.unit)} · ${esc(goal.metric.period)}</p>`:''}${goal.context.length?`<p class="goal-note">${goal.context.map(item=>esc(typeof item==='string'?item:item.text)).join('；')}</p>`:''}<div class="card-actions"><button class="agent-action" data-action="event-chat">聊聊这个目标</button></div></section>${eventHealthConnection(goal)}<section class="task-section"><div class="section-heading"><h2>动态任务</h2></div><div class="task-list">${goal.tasks.filter(task=>task.status!=='cancelled').map(task=>`<div class="task-row"><div><strong>${esc(task.content)}</strong>${task.scheduledAt?`<p>${esc(new Date(task.scheduledAt).toLocaleString('zh-CN'))}</p>`:''}</div><span class="task-row-status">${task.status==='done'?'已完成':'待完成'}</span></div>`).join('')||'<p class="agent-empty">通过聊天安排下一步。</p>'}</div></section>`;
-  return `<div class="app-shell ${chat?'agent-shell':''}"><header class="topbar"><div class="topbar-inner">${brand()}</div></header><main class="content ${chat?'agent-page':''}"><div class="${chat?'agent-scroll':''}">${goalPicker}${content}</div>${chat?`<div class="agent-composer-dock"><form id="agent-form" class="agent-composer"><textarea name="message" rows="1" placeholder="说说你的想法" maxlength="800" required></textarea><button class="agent-send" aria-label="发送" ${agentBusy?'disabled':''}>↑</button></form><p class="agent-disclaimer">Along · 一起，慢慢向前</p></div>`:''}</main></div>`;
+  const content=chat?`${backButton('agent-back','返回目标')}<div class="agent-title"><h1>${esc(goal?.title||'说说你想做什么')}</h1></div>${connection}<div class="agent-messages" role="log" aria-live="polite">${history||'<p class="agent-empty">说说你的想法，Along 会和你一起理清下一步。</p>'}</div>`
+    :goal?`${connection}<section class="goal-card"><h1>${esc(goal.title)}</h1>${goal.metric?`<p class="goal-note">${esc(goal.metric.target)} ${esc(goal.metric.unit)} · ${esc(goal.metric.period)}</p>`:''}${goal.context.length?`<p class="goal-note">${goal.context.map(item=>esc(typeof item==='string'?item:item.text)).join('；')}</p>`:''}<div class="card-actions"><button class="agent-action" data-action="event-chat">聊聊这个目标</button></div></section>${eventHealthConnection(goal)}<section class="task-section"><div class="section-heading"><h2>动态任务</h2></div><div class="task-list">${goal.tasks.filter(task=>task.status!=='cancelled').map(task=>`<div class="task-row"><div><strong>${esc(task.content)}</strong>${task.scheduledAt?`<p>${esc(new Date(task.scheduledAt).toLocaleString('zh-CN'))}</p>`:''}</div><span class="task-row-status">${task.status==='done'?'已完成':'待完成'}</span></div>`).join('')||'<p class="agent-empty">通过聊天安排下一步。</p>'}</div></section>`:'';
+  return `<div class="app-shell ${chat?'agent-shell':''}"><header class="topbar"><div class="topbar-inner">${brand()}</div></header><main class="content ${chat?'agent-page':''}"><div class="${chat?'agent-scroll':''}">${goalPicker}${content}</div>${chat?`<div class="agent-composer-dock"><form id="agent-form" class="agent-composer"><textarea name="message" rows="1" placeholder="说说你的想法" maxlength="800" required>${esc(eventWorkspace.draft())}</textarea><button class="agent-send" aria-label="发送" ${agentBusy?'disabled':''}>↑</button></form><p class="agent-disclaimer">Along · 一起，慢慢向前</p></div>`:''}</main></div>`;
 }
 function renderEventUpdate() {
   if (!eventWorkspace) return;
@@ -1316,6 +1316,7 @@ app.addEventListener('change', event => {
 });
 app.addEventListener('input', event => {
   if (!event.target.matches('#agent-form textarea')) return;
+  if (eventWorkspace) eventWorkspace.setDraft(event.target.value);
   event.target.style.height='auto';
   event.target.style.height=`${Math.min(event.target.scrollHeight,120)}px`;
 });
@@ -1327,7 +1328,10 @@ app.addEventListener('click', event => {
     if (action==='new-goal') beginNewGoal();
     else if (action==='event-chat') {screen='agent';render();}
     else if (action==='event-health-connect') {void connectHealth();}
-    else if (action==='agent-back') {screen='home';render();}
+    else if (action==='agent-back') {
+      if (!eventWorkspace.view().activeGoalId) eventWorkspace.leaveConversation();
+      screen='home';render();
+    }
     return;
   }
   if (action === 'connection-detail') {

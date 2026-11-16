@@ -106,3 +106,38 @@ test('idle polls do not replace the composing form, and retired connections cann
   assert.equal(createEventWorkspace({config}).view().cursor,0);
   assert.equal(changes,0);assert.ok(calls.length>=2);
 });
+
+test('leaving a new-goal conversation returns to the prior goal without rebinding its durable result',async()=>{
+  let items=[];
+  const {workspace,calls}=setup(input=>{
+    if(input.path==='/events')return {status:'accepted',event_id:input.body.event_id};
+    if(input.path==='/sync/ack')return {acked:input.body.seqs.length};
+    return {items:items.filter(item=>item.seq>input.body.after_seq)};
+  });
+  items=[change(1,'原目标')];
+  await workspace.sync();
+  workspace.select('g_sleep');
+  workspace.select(null);
+  workspace.setDraft('一条未发送草稿');
+  assert.equal(createEventWorkspace({config}).draft(),'一条未发送草稿','重开后要恢复新对话的未发送文字');
+  const eventId=await workspace.submit('新目标的原话');
+  assert.equal(workspace.draft(),'','发送成功落队列后才清掉对应草稿');
+  const conversationId=workspace.view().conversationId;
+  workspace.setDraft('首句发送后的未发送补充');
+  assert.equal(workspace.leaveConversation(),'g_sleep');
+  assert.equal(workspace.view().activeGoalId,'g_sleep');
+  assert.equal(workspace.view().conversationId,conversationId,'返回不能丢掉待同步对话的关联号');
+  workspace.select(null);
+  assert.equal(workspace.view().conversationId,conversationId,'重开未完成的新目标时要恢复原会话');
+  assert.equal(workspace.draft(),'首句发送后的未发送补充','首句已发送后输入的第二句草稿也必须恢复');
+  workspace.leaveConversation();
+  const pending=pendingEvents(config).find(item=>item.event_id===eventId);
+  assert.equal(pending.causation_id,undefined,'新对话的首条消息仍是原对话根');
+  items=[change(2,'新目标'),{seq:3,userId:config.userId,kind:'message',goalId:'g_new',payload:{
+    snapshot:{goal:{id:'g_new',domain:'custom',status:'active',currentRevision:1},revision:{goalId:'g_new',revision:1,title:'新目标',status:'active'},tasks:[]},
+    conversation_id:conversationId,message:{id:'msg_new',eventId:'evt_new',role:'assistant',direction:'outbound',text:'已整理好',seq:3,causationId:eventId}}}];
+  await workspace.sync();
+  assert.equal(workspace.view().activeGoalId,'g_sleep','迟到的新目标结果不能抢走用户已返回的原目标');
+  assert.equal(workspace.view().messages.find(message=>message.eventId==='evt_new').goalId,'g_new');
+  assert.ok(calls.some(call=>call.path==='/events'));
+});
