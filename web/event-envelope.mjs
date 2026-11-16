@@ -24,6 +24,19 @@ const isTime = value => typeof value === 'string' && Number.isFinite(Date.parse(
 const isRecord = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const textBetween = (value, min, max) => typeof value === 'string' && value.length >= min && value.length <= max;
 
+// Validate the container before any adapter-specific field access. Both browser callers and
+// the durable queue expect invalid JSON input to produce a reason, never a TypeError.
+function summaryWindowReason(window) {
+  if (window === undefined) return null;
+  if (!isRecord(window)) return '摘要窗口无效';
+  const keys = Object.keys(window).sort();
+  const interval = keys.length === 2 && keys[0] === 'end' && keys[1] === 'start';
+  const night = keys.length === 1 && keys[0] === 'night';
+  if (!interval && !night) return '摘要窗口形状无效';
+  if (interval ? !isTime(window.start) || !isTime(window.end) : !isTime(window.night)) return '摘要窗口时间无效';
+  return null;
+}
+
 function summaryReason(summary) {
   if (!isRecord(summary)) return 'summary 不是对象';
   const keys = Object.keys(summary).sort();
@@ -36,20 +49,15 @@ function summaryReason(summary) {
   if (!textBetween(summary.summarizer_version, 1, 64)) return '摘要器版本无效';
   if (!AVAILABILITIES.includes(summary.availability)) return '摘要可用性无效';
   if (summary.value!==undefined&&summary.value!==null&&(typeof summary.value!=='number'||!Number.isFinite(summary.value))) return '摘要只能包含有限数值';
+  const windowReason = summaryWindowReason(summary.window);
+  if (windowReason) return windowReason;
   if (summary.summarizer_version==='along-health-v1'&&HEALTH_SUMMARY_TYPES.includes(summary.type)) {
     const units={steps:'count',workout:'min',active_energy:'kcal',weight:'kg',resting_heart_rate:'bpm',wrist_temperature:'degC',sleep:'min'};
     if (summary.unit!==units[summary.type]) return '摘要单位不符';
-    if (!summary.window||!('start' in summary.window)||!isTime(summary.window.start)||!isTime(summary.window.end)||Date.parse(summary.window.start)>Date.parse(summary.window.end)) return '摘要观测窗口无效';
+    if (!summary.window||!isTime(summary.window.start)||!isTime(summary.window.end)||Date.parse(summary.window.start)>Date.parse(summary.window.end)) return '摘要观测窗口无效';
     if (!isTime(summary.metric_version)) return '摘要读取版本无效';
     if (summary.availability==='ok'&&typeof summary.value!=='number') return '有效摘要缺少数值';
     if (summary.availability!=='ok'&&summary.value!==null&&summary.value!==undefined) return '不可用摘要带有数值';
-  }
-  if (summary.window !== undefined) {
-    if (!isRecord(summary.window)) return '摘要窗口无效';
-    const windowKeys = Object.keys(summary.window).sort();
-    if (JSON.stringify(windowKeys) !== JSON.stringify(['end', 'start']) && JSON.stringify(windowKeys) !== JSON.stringify(['night'])) return '摘要窗口形状无效';
-    if (('start' in summary.window && !isTime(summary.window.start)) || ('end' in summary.window && !isTime(summary.window.end))
-      || ('night' in summary.window && !isTime(summary.window.night))) return '摘要窗口时间无效';
   }
   return null;
 }

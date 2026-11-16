@@ -45,7 +45,7 @@ Along 把一个目标拆成三样东西，并让它们保持联动：
 
 阶段 C 已接入健康事件自动跟进：在新协议目标页复用 Apple Health 连接卡，导入并允许 Agent 使用所选摘要后，手机在前台及系统允许的后台机会自动补传；Mac 按目标筛选变化并自动建评估工单，经校验调整任务。无须再发聊天，也无采用步骤。原始样本仍留在手机。设计、验证与真机边界见 [阶段 C](docs/stage-c-tech-design.md)。
 
-新方案以 [Along 本地 Agent 系统架构](https://github.com/artstur/along-superagent/blob/feature/along-phase0/docs/along/001-architecture.md) 为准：首期自用，Mac 上运行 Along Host、Along Agent（基于 DSH Super Agent）与可选的 Hy-Memory，iPhone 提供聊天和授权健康摘要。Mac 保存业务状态，手机保留离线缓存与待同步事件。记忆提取已接入定时维护；完整复盘与 Skill 自动整理仍待实现。
+新方案以 [Along 本地 Agent 系统架构](https://github.com/artstur/along-superagent/blob/main/docs/along/001-architecture.md) 为准：首期自用，Mac 上运行 Along Host、Along Agent（基于 DSH Super Agent）与可选的 Hy-Memory，iPhone 提供聊天和授权健康摘要。Mac 保存业务状态，手机保留离线缓存与待同步事件。记忆提取已接入定时维护；完整复盘与 Skill 自动整理仍待实现。
 
 已确定的交互边界：
 
@@ -58,9 +58,9 @@ Along 把一个目标拆成三样东西，并让它们保持联动：
 - **首期按本人自用简化**。不做额外的健康授权撤回及关联历史数据清理流程，系统数据不可用时仍正常处理。
 - **不设应用侧模型用量上限**。不设每日预算或累计调用额度；批量作业、超时和失败重试仍按技术方案运行。
 
-Along Agent 的本地工程目录为 `../along-superagent/`，包名与插件 ID 保留 `dsh-superagent`。方案与验证记录位于该仓库的 `feature/along-phase0` 分支，上述链接沿用现有远端地址。
+Along Agent 的本地工程目录为 `../along-superagent/`，包名与插件 ID 保留 `dsh-superagent`。当前源码、方案与验证记录已进入该仓库的 `main`；历史记录中的分支名和测试条数只对应当时快照。
 
-**阶段 A 基座与阶段 B 最小聊天闭环已有实现，尚未完成真机验收。** Host 开启新事件链路后，App 自动协商使用 DSH：原话可靠入队，目标和任务在校验后自动生效，页面同步展示，你通过聊天纠正。这条链路没有采用、直接编辑或删除入口。健康新协议、长期记忆 Runtime 接线与定时记忆维护已在后续实现；完整复盘、Skill 自动发布与回退、记忆长期质量及迁移恢复仍待完成或验收。旧 Host 兼容路径继续使用下文描述的双运行时和采用流程；旧手机数据保留，本轮不自动导入新库。范围、配置和验收见 [阶段 B 设计](docs/stage-b-tech-design.md) 与 [实施与验收](https://github.com/artstur/along-superagent/blob/feature/along-phase0/docs/along/003-implementation.md)。
+**阶段 A 基座与阶段 B 最小聊天闭环已有实现，尚未完成真机验收。** Host 开启新事件链路后，App 自动协商使用 DSH：原话可靠入队，目标和任务在校验后自动生效，页面同步展示，你通过聊天纠正。这条链路没有采用、直接编辑或删除入口。健康新协议、长期记忆 Runtime 接线与定时记忆维护已在后续实现；完整复盘、Skill 自动发布与回退、记忆长期质量及迁移恢复仍待完成或验收。旧 Host 兼容路径继续使用下文描述的双运行时和采用流程；旧手机数据保留，本轮不自动导入新库。范围、配置和验收见 [阶段 B 设计](docs/stage-b-tech-design.md) 与 [实施与验收](https://github.com/artstur/along-superagent/blob/main/docs/along/003-implementation.md)。
 
 ## 能体验什么
 
@@ -262,29 +262,7 @@ npm run build   # 产出 dist/（GitHub Pages）与 ios/AlongHealth/Web/（App �
 - GitHub Pages：手动触发工作流（GitHub Actions → Deploy GitHub Pages → Run workflow，或 `gh workflow run pages.yml --ref main`），依次执行 `npm ci`、`npm run check`、`npm run build` 并发布 `dist/`。
 - iPhone：先 `npm run build`，再在 Xcode 里重新构建并安装。
 
-## 当前边界
-
-坦白说，这还是一个 Demo，下面这些是有意为之或尚未完成的：
-
-- **健康更新按授权触发**。默认在前台和重新打开时检查。用户可在 Apple Health 管理页单独允许当前目标的后台评估。iOS 唤起 Along、健康摘要可读且配对 Mac 可达时，DSH 可以收到后台复评；回到前台会核对最新数据并取回结果。
-- **通知由 iOS 处理**。App 在前台读到需要用户处理的 Agent 结果后可发系统通知。采用后的定时提醒由 iOS 按通知设置送达。App 挂起期间的新决策在下次前台同步后可见。
-- **Agent 依赖 Mac**。Mac 关闭或网络断开时，首页确定性进度照常更新，Agent 问答和任务提案显示不可用；GitHub Pages 是静态站，无法常驻生成进程。
-- **理财只是演示**。不接真实账户，不转账，不交易。
-- **个人团队签名**。Xcode 个人团队的配置文件通常 7 天后到期，需要重新构建安装。
-
-## 相关文档
-
-- [架构与开发入口](docs/agent-architecture.md)：两工程分工、当前实现状态和文档导航；Along Agent 位于相邻 `along-superagent` 仓库
-- [决策记录](https://github.com/artstur/along-superagent/blob/feature/along-phase0/docs/along/000-decisions.md)：已定边界及其原因
-- [本地 Agent 系统架构](https://github.com/artstur/along-superagent/blob/feature/along-phase0/docs/along/001-architecture.md)：Mac 与 iPhone 分工、可靠事件、目标与任务自动维护
-- [记忆与技能](https://github.com/artstur/along-superagent/blob/feature/along-phase0/docs/along/002-memory-and-skills.md)：Hy-Memory、记忆撤回、批量复盘与 Skill 自动发布
-- [实施与验收](https://github.com/artstur/along-superagent/blob/feature/along-phase0/docs/along/003-implementation.md)：阶段 0 到 E、迁移与验收条件
-- [目标与 Agent 技术链路](docs/goal-agent-flow.md)：迁移前的代码行为，含采用流程，不作为新架构规范
-- [健康评估离线暂存与恢复方案](docs/offline-health-review-plan.md)：旧链路的恢复设计参考；新架构的事件补传与自动生效以本地 Agent 系统架构为准
-- [ios/README.md](ios/README.md)：iPhone App 的运行步骤、HealthKit 读取范围与数据口径
-- [AGENTS.md](AGENTS.md)：参与开发前必读的项目约定与红线
-
-### 新协议任务通知与到期复查
+## 新协议任务通知与到期复查
 
 iPhone 在已同步的任务到点时提醒。Mac 上的 Agent 得出需要告知的推荐或执行结果后，通过通知引导用户回到对应目标和任务。一次性提醒只执行一次，每日续排使用用户已表达的持续委托。复查以持久事件和工单为准，缺少新摘要时可以等待或询问。
 
@@ -298,3 +276,20 @@ iPhone 在已同步的任务到点时提醒。Mac 上的 Agent 得出需要告�
 Host 逐事件保存待发记录。APNs 拒收或短时失败后，已授权 iPhone 下次拉取同步页也能接手近期推荐，即使业务游标已经前进；原生处理后返回回执。到期提醒的远程补送及结果交接只在十分钟有效期内重试。提供方接受请求和设备确实展示分别验收。
 
 本次配套的 Along Agent 发布源码固定为 `b79fccc93f63dd9cdcd219401a4a1b654d6a5152`（[Agent PR #3](https://github.com/artstur/along-superagent/pull/3)，依赖 [#2](https://github.com/artstur/along-superagent/pull/2)）。从该提交单独构建并安装到 along-phone profile。业务库由 Schema 4 原位升级至 5，切换前停写备份。旧版无法打开新版库，已有新写入时应先保全数据再评估回退。
+
+## 当前边界
+
+坦白说，这还是一个 Demo，下面这些是有意为之或尚未完成的：
+
+- **健康更新按授权触发**。新事件链路由原生层统一补传所选类型的摘要，在前台读取或 iOS 提供后台执行机会时上传；Mac 按已有目标独立筛选与跟进。锁屏读取、系统唤醒与网络可达仍受环境限制，真机边界见[阶段 C](docs/stage-c-tech-design.md)。旧 Host 的逐目标后台评估是兼容流程。
+- **通知由 iOS 处理**。新事件链路维护已同步任务的本地预约，明确的推荐与任务结果可走配对通知通道；普通进度和 keep 保持安静。APNs 需要对应签名与 Host 配置，预约成功、提供方接单、设备展示与点开应分别验收，详见[新协议通知](#新协议任务通知与到期复查)。旧 Host 仍保留采用后的提醒兼容流程。
+- **Agent 依赖 Mac**。Mac 关闭或网络断开时，首页确定性进度照常更新，Agent 问答和任务提案显示不可用；GitHub Pages 是静态站，无法常驻生成进程。
+- **理财只是演示**。不接真实账户，不转账，不交易。
+- **个人团队签名**。Xcode 个人团队的配置文件通常 7 天后到期，需要重新构建安装。
+
+## 相关文档
+
+- [文档索引](docs/README.md)：按当前实现、设计、历史验收和开发流程查阅
+- [架构与开发入口](docs/agent-architecture.md)：两工程分工、实现状态与交互边界
+- [iPhone 开发与安装](ios/README.md)：原生运行步骤、HealthKit 范围和数据口径
+- [项目约定](AGENTS.md)：参与开发前必读的构建、校验和隐私边界

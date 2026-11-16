@@ -10,6 +10,16 @@ const version = value => Number.isSafeInteger(value) && value>=0;
 const time = value => typeof value==='string' && Number.isFinite(Date.parse(value));
 const empty = userId => ({version:1,userId,cursor:0,goals:{},messages:{},drafts:{},activeGoalId:null,conversationId:null,returnGoalId:null});
 
+function isActiveGoal(value, goalId) {
+  return goalId != null && value.goals[goalId]?.status === 'active';
+}
+
+function conversationGoal(value, conversationId = value.conversationId) {
+  if (!conversationId) return null;
+  return Object.values(value.messages).find(message =>
+    message.conversationId === conversationId && message.goalId)?.goalId ?? null;
+}
+
 // Wire snapshots are validated before entering the cache; layouts are deterministic projections, not model HTML.
 export function safeWorkspaceGoal(snapshot) {
   if (!record(snapshot)||!record(snapshot.goal)||!record(snapshot.revision)||!Array.isArray(snapshot.tasks)) throw Error('目标同步格式不正确');
@@ -112,7 +122,10 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
   // Old v1 caches did not record an explicit composer selection. Preserve actual unbound messages/drafts.
   function restoreSelection(next) {
     const selected=next.goals[next.activeGoalId];
+    if (!isActiveGoal(next,next.returnGoalId)) next.returnGoalId=null;
     if (selected?.status==='active') return;
+    // A removed selection may keep a truly unbound conversation, never a root of an old goal.
+    if (next.activeGoalId!=null && conversationGoal(next)!==null) next.conversationId=null;
     if (next.composing===undefined) {
       const conversation=next.conversationId;
       next.composing=!selected && (Boolean(next.drafts?.[`conversation:${conversation??'new'}`]) ||
@@ -123,10 +136,15 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
     const last=next.goals[next.returnGoalId];
     const candidate=last?.status==='active'?last:Object.values(next.goals).find(g=>g.status==='active');
     next.activeGoalId=candidate?.id??null;
-    if (candidate) next.returnGoalId=candidate.id;
+    next.returnGoalId=candidate?.id??null;
   }
   restoreSelection(state);
-  function save(next) { if(disposed) throw Error('连接已切换');localStorage.setItem(key,JSON.stringify(next));state=next; }
+  function save(next) {
+    if (disposed) throw Error('连接已切换');
+    restoreSelection(next);
+    localStorage.setItem(key,JSON.stringify(next));
+    state=next;
+  }
   function recoverPending() {
     const next=structuredClone(state);
     for (const {envelope} of pendingEvents(config)) {
@@ -138,10 +156,20 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
   }
   function view() {
     const next=recoverPending(),failures=readEventFailures(config),pending=new Set(pendingEvents(config).map(item=>item.event_id));
-    return {...next,error:lastError,messages:Object.values(next.messages).map(message=>({...message,
+    return {...next,draftScope:draftScope(next),error:lastError,messages:Object.values(next.messages).map(message=>({...message,
       status:failures.some(item=>item.event_id===message.eventId)?'rejected':pending.has(message.eventId)?'pending':message.status}))};
   }
-  function draftScope(value=state) { return value.activeGoalId?`goal:${value.activeGoalId}`:`conversation:${value.conversationId??'new'}`; }
+  function draftScope(value=state) {
+    const conversationScope = `conversation:${value.conversationId??'new'}`;
+    if (!value.activeGoalId) return conversationScope;
+    // A follow-up typed before binding still belongs to that conversation. Resolve it through
+    // persisted messages even after navigating away; keep an older goal draft separate.
+    const drafts = value.drafts??{};
+    const boundScope = [conversationScope, ...Object.keys(drafts).reverse()].find(scope =>
+      scope.startsWith('conversation:') && drafts[scope] &&
+      conversationGoal(value, scope.slice('conversation:'.length)) === value.activeGoalId);
+    return boundScope??`goal:${value.activeGoalId}`;
+  }
   function draft() { return state.drafts?.[draftScope()]??''; }
   function setDraft(value) {
     const clean=typeof value==='string'?value.slice(0,800):'';
@@ -150,20 +178,15 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
     else delete drafts[draftScope()];
     save({...state,drafts,composing:state.activeGoalId?state.composing:true});
   }
-  function conversationGoal(value=state) {
-    if (!value.conversationId) return null;
-    return Object.values(value.messages).find(message=>
-      message.conversationId===value.conversationId&&message.goalId)?.goalId??null;
-  }
   function select(goalId) {
-    if (goalId!==null&&!state.goals[goalId]) return;
+    if (goalId!==null&&!isActiveGoal(state,goalId)) return;
     const returnGoalId=goalId===null
       ? (state.goals[state.activeGoalId]?.status==='active'?state.activeGoalId:state.returnGoalId)
       : goalId;
     // Reopening "new goal" resumes an unbound conversation. This preserves both its durable
     // messages and any follow-up draft written after the first send. Once the server binds that
     // conversation to a goal, the next "new goal" starts from a clean conversation instead.
-    const conversationId=goalId===null&&conversationGoal()?null:state.conversationId;
+    const conversationId=goalId===null&&conversationGoal(state)?null:state.conversationId;
     save({...state,activeGoalId:goalId,conversationId,returnGoalId,composing:goalId===null});onChange();
   }
   function leaveConversation() {

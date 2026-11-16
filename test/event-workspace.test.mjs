@@ -255,3 +255,106 @@ test('previously accepted local timestamps become dated iOS instants',async()=>{
   await createEventWorkspace({config,onNotifications:async b=>batches.push(b)}).sync();
   assert.equal(batches[0].reminders[0].scheduledAt,new Date('2099-01-01T20:00').toISOString());
 });
+
+test('archiving the selected goal clears navigation without deleting its conversation or draft',async()=>{
+  let items=[change(1,'原目标')];
+  const {workspace}=setup(input=>{
+    if(input.path==='/events')return {status:'accepted',event_id:input.body.event_id};
+    if(input.path==='/sync/ack')return {acked:input.body.seqs.length};
+    return {items:items.filter(item=>item.seq>input.body.after_seq)};
+  });
+  await workspace.sync();workspace.select('g_sleep');
+  const messageId=await workspace.submit('这项合成目标先结束');
+  workspace.setDraft('归档前未发送的补充');
+  const archived=change(2,'原目标',2);
+  archived.payload.snapshot.goal.status='archived';
+  archived.payload.snapshot.revision.status='archived';
+  items=[archived];await workspace.sync();
+  const view=workspace.view();
+  assert.equal(view.activeGoalId,null);
+  assert.equal(view.returnGoalId,null);
+  assert.equal(view.conversationId,null,'a new conversation must not inherit the archived goal root');
+  assert.ok(view.messages.some(message=>message.eventId===messageId));
+  assert.equal(view.drafts['goal:g_sleep'],'归档前未发送的补充');
+  assert.equal(view.goals.g_sleep.status,'archived','history must stay cached');
+  workspace.select('g_sleep');
+  assert.equal(workspace.view().activeGoalId,null,'archived goals cannot be selected again');
+  const nextId=await workspace.submit('另一个合成目标');
+  const queued=pendingEvents(config).find(item=>item.event_id===nextId).envelope;
+  assert.equal(queued.goal_id,undefined);
+  assert.equal(queued.causation_id,undefined);
+});
+
+test('reopening an older cache removes archived selections and keeps an unbound conversation resumable',async()=>{
+  const {workspace}=setup(input=>input.path==='/sync/ack'?{acked:1}:{items:[change(1,'原目标')]});
+  await workspace.sync();workspace.select('g_sleep');workspace.select(null);
+  const eventId=await workspace.submit('尚未完成的新目标');
+  workspace.setDraft('新目标的第二句草稿');workspace.leaveConversation();
+  const key=`along.event-workspace.v1:${config.userId}`;
+  const cached=JSON.parse(localStorage.getItem(key));
+  cached.goals.g_sleep.status='archived';
+  localStorage.setItem(key,JSON.stringify(cached));
+  const reopened=createEventWorkspace({config});
+  assert.equal(reopened.view().activeGoalId,null);
+  assert.equal(reopened.view().returnGoalId,null);
+  assert.equal(reopened.view().conversationId,eventId,'unbound work must not be discarded with an unrelated archived goal');
+  reopened.select(null);
+  assert.equal(reopened.draft(),'新目标的第二句草稿');
+  assert.ok(reopened.view().messages.some(message=>message.eventId===eventId));
+});
+
+test('archiving after switching goals detaches any previously bound conversation root',async()=>{
+  const item=(seq,goalId,status='active',revision=1)=>({seq,userId:config.userId,kind:'goal_updated',goalId,payload:{snapshot:{
+    goal:{id:goalId,domain:'custom',status,currentRevision:revision},
+    revision:{goalId,revision,title:goalId,status},tasks:[]}}});
+  let items=[item(1,'g_one'),item(2,'g_two')];
+  const {workspace}=setup(input=>{
+    if(input.path==='/events')return {status:'accepted',event_id:input.body.event_id};
+    if(input.path==='/sync/ack')return {acked:input.body.seqs.length};
+    return {items:items.filter(item=>item.seq>input.body.after_seq)};
+  });
+  await workspace.sync();
+  workspace.select('g_one');const first=await workspace.submit('First goal message');
+  workspace.select('g_two');await workspace.submit('Archive second goal');
+  assert.equal(workspace.view().conversationId,first,'the old root must be present to expose this boundary');
+  items=[item(3,'g_two','archived',2)];await workspace.sync();
+  assert.equal(workspace.view().activeGoalId,'g_one','upstream restores the remaining active goal');
+  assert.equal(workspace.view().conversationId,null);
+  workspace.select(null);
+  const fresh=await workspace.submit('A fresh goal');
+  const envelope=pendingEvents(config).find(item=>item.event_id===fresh).envelope;
+  assert.equal(envelope.goal_id,undefined);
+  assert.equal(envelope.causation_id,undefined);
+});
+
+test('a conversation draft stays reachable after goal binding without overwriting an existing goal draft',async()=>{
+  for (const existingDraft of ['', 'An earlier draft for this goal']) {
+    let items=[change(1,'已存目标')];
+    const {workspace}=setup(input=>{
+      if(input.path==='/events')return {status:'accepted',event_id:input.body.event_id};
+      if(input.path==='/sync/ack')return {acked:input.body.seqs.length};
+      return {items:items.filter(item=>item.seq>input.body.after_seq)};
+    });
+    await workspace.sync();workspace.select('g_sleep');
+    if (existingDraft) workspace.setDraft(existingDraft);
+    workspace.select(null);
+    const root=await workspace.submit('Start a synthetic conversation');
+    workspace.setDraft('The unsent second sentence');
+    items=[{seq:2,userId:config.userId,kind:'message',goalId:'g_sleep',payload:{snapshot:snapshot(),conversation_id:root,
+      message:{id:'msg_binding',eventId:'evt_binding',role:'assistant',direction:'outbound',text:'已关联目标',seq:2,causationId:root}}}];
+    await workspace.sync();
+    assert.equal(workspace.view().activeGoalId,'g_sleep');
+    assert.equal(workspace.draft(),'The unsent second sentence');
+    assert.equal(workspace.view().draftScope,`conversation:${root}`);
+    const reopened=createEventWorkspace({config});
+    assert.equal(reopened.draft(),'The unsent second sentence');
+    // Losing the current root while visiting another conversation must not orphan the bound draft.
+    reopened.select(null);reopened.select('g_sleep');
+    assert.equal(reopened.draft(),'The unsent second sentence');
+    const next=await reopened.submit(reopened.draft());
+    const queued=pendingEvents(config).find(item=>item.event_id===next).envelope;
+    assert.equal(queued.goal_id,'g_sleep');
+    assert.equal(queued.payload.text,'The unsent second sentence');
+    assert.equal(reopened.draft(),existingDraft,'an older goal draft stays separate until the newer conversation draft is sent');
+  }
+});

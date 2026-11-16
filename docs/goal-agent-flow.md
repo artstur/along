@@ -1,12 +1,12 @@
-# Along 技术链路：从一句目标到下一步行动
+# Along 技术链路：事件入口与旧 Host 兼容参考
 
-> 2026-11-15 更新。新链路见下段；其余章节保留旧 Host 兼容路径说明，不能把其中的采用流程当作新架构行为。真实设备与 Agent 全链路验收仍须单独记录。
+> 2026-11-16 校正状态。下段概述现行事件入口；第 1–8 节保留旧 Host 兼容路径的说明和配图，其中的运行时选择、提案及采用流程仅属于旧协议。当前完整实现见[架构入口](agent-architecture.md)和[阶段 B](stage-b-tech-design.md)、[阶段 C](stage-c-tech-design.md)；验收证据按各记录的日期与版本阅读。
 
 Host 配置 `ALONG_EVENT_INGEST=on` 且配置本机桥接凭证后，`/connection/status` 返回 `eventProtocol:1` 与绑定用户。App 切换到服务端拥有的目标空间：`agent-form` → `event-workspace.mjs` → 按用户隔离的持久事件队列 → Host `/events` → Along Agent Inbox → DSH 路由和 Along Worker 工具 → 校验后自动提交 → `/sync` 快照与持久对话 → 客户端整页校验、缓存提交 → `/sync/ack`。网络失败保留原事件号，ack 失败跨重启重试。目标只能通过聊天改变。
 
-Worker 通过 `along_conversation_read` 读取库内原话，无目标的连续聊天也可读；现象描述调用 `along_chat_reply` 回应而不建目标，明确行动意图调用 `along_changes_commit` 创建目标与任务，再保存答复。纠正立即提升输入版本，服务端同时检查触发消息是否已经被后续原话取代，旧工作不能仅换成最新版本号继续提交。普通同步不触发系统通知。新链路不运行旧健康复评和采用处理器；健康持续跟进、记忆接线与批量调度另行实现。设计和验收见 [阶段 B](stage-b-tech-design.md)。
+Worker 通过 `along_conversation_read` 读取库内原话，无目标的连续聊天也可读；现象描述调用 `along_chat_reply` 回应而不建目标，明确行动意图调用 `along_changes_commit` 创建目标与任务，再保存答复。纠正立即提升输入版本，服务端同时检查触发消息是否已经被后续原话取代，旧工作不能仅换成最新版本号继续提交。普通进度同步与 keep 不触发系统通知；明确的推荐、任务结果与到时提醒通道见[新协议通知](../README.md#新协议任务通知与到期复查)。新链路不运行旧健康复评和采用处理器；健康持续跟进已在[阶段 C](stage-c-tech-design.md)实现；记忆 Runtime 接线与定时记忆维护已接通，入口见[架构状态表](agent-architecture.md#当前实现与规范)。完整复盘与 Skill 作业仍待实现。
 
-## 1. 先看全貌
+## 1. 旧 Host 兼容路径全貌
 
 Along 把用户的目标变成一个可以持续更新的工作台，代码里称为“目标空间”。里面有目标说明、进度、计划和动态任务。
 

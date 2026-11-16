@@ -1,6 +1,6 @@
 # Along 阶段 A 技术方案设计
 
-> 2026-11-15。阶段 A（骨架与数据契约）的模块级实施设计。规格依据：[决策记录](https://github.com/artstur/along-superagent/blob/feature/along-phase0/docs/along/000-decisions.md)（D1–D17）、[系统架构](https://github.com/artstur/along-superagent/blob/feature/along-phase0/docs/along/001-architecture.md) v0.6 §4/§5/§7/§8/§9、[实施与验收](https://github.com/artstur/along-superagent/blob/feature/along-phase0/docs/along/003-implementation.md) v0.6 §2/§3/§4、[阶段 0 验证](https://github.com/artstur/along-superagent/blob/feature/along-phase0/docs/along/004-phase0-validation.md)、[业务测试用例](business-test-cases.md)。本文不推翻任何已定决策；对规格未拍板的点以 `SD-n` 编号给出决策与理由（§5），实施中方案有变化须回写本文（AGENTS.md §3）。
+> 2026-11-15。阶段 A（骨架与数据契约）的模块级实施设计。规格依据：[决策记录](https://github.com/artstur/along-superagent/blob/main/docs/along/000-decisions.md)（D1–D17）、[系统架构](https://github.com/artstur/along-superagent/blob/main/docs/along/001-architecture.md) v0.6 §4/§5/§7/§8/§9、[实施与验收](https://github.com/artstur/along-superagent/blob/main/docs/along/003-implementation.md) v0.6 §2/§3/§4、[阶段 0 验证](https://github.com/artstur/along-superagent/blob/main/docs/along/004-phase0-validation.md)、[业务测试用例](business-test-cases.md)。本文不推翻任何已定决策；对规格未拍板的点以 `SD-n` 编号给出决策与理由（§5），实施中方案有变化须回写本文（AGENTS.md §3）。
 >
 > 设计时基线（2026-11-15，非当前实现状态）：Along Agent（`along-superagent`）分支 `feature/along-phase0`，工作树干净，`src/along/` 尚不存在；`along` 仓库分支 `feature/new-structure`。行号引用以该基线为准。
 
