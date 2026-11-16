@@ -46,10 +46,40 @@ function safeMessage(message,item) {
       (item.payload.conversation_id!==undefined&&!id(item.payload.conversation_id))) throw Error('对话同步格式不正确');
   return {id:message.id,eventId:message.eventId,role:message.role,text:message.text,seq:message.seq,
     goalId:item.goalId,conversationId:item.payload.conversation_id??message.causationId??message.eventId,
-    replyToMessageId:message.replyToMessageId,presentation:item.payload.presentation,status:'received'};
+    replyToMessageId:message.replyToMessageId,presentation:item.payload.presentation,
+    notificationEventId:eventId(item.payload.notification?.event_id)&&['recommendation_ready','task_result'].includes(item.payload.notification.kind)
+      ?item.payload.notification.event_id:undefined,status:'received'};
 }
 
-export function createEventWorkspace({config,onChange=()=>{}}) {
+const freshResult = value => {
+  const age=Date.now()-Date.parse(value);
+  return age>=-60_000 && age<=600_000;
+};
+const eventId = value => typeof value==='string' && /^[A-Za-z0-9_.:-]{1,200}$/.test(value);
+
+function validResult(r) {
+  return record(r)&&eventId(r.eventId)&&id(r.goalId)&&(r.taskId==null||id(r.taskId))&&version(r.revision)&&
+    ['recommendation_ready','task_result'].includes(r.kind)&&time(r.createdAt);
+}
+
+function applicableResult(r,goals) {
+  if (!freshResult(r.createdAt)) return false;
+  const goal=goals[r.goalId];
+  if (goal?.status!=='active') return false;
+  if (!r.taskId) return r.kind==='task_result'||goal.revision===r.revision;
+  const task=goal.tasks.find(t=>t.id===r.taskId);
+  return task && (r.kind==='task_result'?task.status!=='cancelled':task.status==='open'&&task.revision===r.revision);
+}
+
+function localResult(item,remote) {
+  const n=item.payload.notification;
+  if (remote!==false||!record(n)||!id(item.goalId)||!eventId(n.event_id)||
+      !['recommendation_ready','task_result'].includes(n.kind)||!version(n.revision)||
+      !freshResult(item.createdAt)||(item.taskId!=null&&!id(item.taskId))) return null;
+  return {eventId:n.event_id,kind:n.kind,goalId:item.goalId,taskId:item.taskId??undefined,revision:n.revision,createdAt:item.createdAt};
+}
+
+export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
   if (!id(config?.userId)) throw Error('缺少服务端绑定用户');
   const key=`along.event-workspace.v1:${config.userId}`;
   let state=empty(config.userId),flight=null,lastError='',disposed=false;
@@ -72,6 +102,8 @@ export function createEventWorkspace({config,onChange=()=>{}}) {
           saved.activeGoalId!==null&&!id(saved.activeGoalId)||saved.conversationId!==null&&!id(saved.conversationId)||
           saved.returnGoalId!==undefined&&saved.returnGoalId!==null&&!id(saved.returnGoalId)||
           saved.pendingAck!==undefined&&(!Array.isArray(saved.pendingAck)||saved.pendingAck.some(seq=>!version(seq)||seq<1||seq>saved.cursor))) throw Error('bad cache');
+      saved.notificationResults=Array.isArray(saved.notificationResults)?saved.notificationResults.filter(validResult):[];
+      saved.notificationReceipts=Array.isArray(saved.notificationReceipts)?saved.notificationReceipts.filter(eventId):[];
       saved.drafts=saved.drafts??{};
       saved.returnGoalId=saved.returnGoalId??null;
       state=saved;
@@ -154,14 +186,26 @@ export function createEventWorkspace({config,onChange=()=>{}}) {
     if(disposed) return;
     if (JSON.stringify([pendingEvents(config),readEventFailures(config)])!==pendingBefore) onChange();
     for (;;) {
-      const page=await agentCall(config,'/sync',{after_seq:state.cursor,limit:50});
+      const receipts=onNotifications?(state.notificationReceipts??[]).slice(0,50):[];
+      const page=await agentCall(config,'/sync',{after_seq:state.cursor,limit:50,
+        ...(onNotifications?{notificationFallback:true,notificationReceipts:receipts}:{})});
       if(disposed) return;
       if (!record(page)||!Array.isArray(page.items)||page.items.length>50) throw Error('同步响应格式不正确');
+      const next=recoverPending(),seqs=[];
+      const fallbacks=onNotifications?page.notificationFallback??[]:[];
+      if (!Array.isArray(fallbacks)||fallbacks.length>50||fallbacks.some(r=>!validResult(r))) throw Error('通知补投格式不正确');
+      if (fallbacks.length) {
+        const pending=new Map((next.notificationResults??[]).map(r=>[r.eventId,r]));
+        for (const r of fallbacks) pending.set(r.eventId,{eventId:r.eventId,kind:r.kind,goalId:r.goalId,taskId:r.taskId??undefined,
+          revision:r.revision,createdAt:r.createdAt,fallback:true});
+        next.notificationResults=[...pending.values()];
+      }
+      if (receipts.length) next.notificationReceipts=next.notificationReceipts.filter(id=>!receipts.includes(id));
       if (page.items.length===0) {
         if (page.nextCursor!==undefined) throw Error('同步分页游标不正确');
+        if (fallbacks.length||receipts.length) save(next);
         break;
       }
-      const next=recoverPending(),seqs=[];
       let previous=state.cursor;
       for (const item of page.items) {
         if (!record(item)||!version(item.seq)||item.seq<=previous||item.userId!==config.userId||!record(item.payload)||
@@ -172,6 +216,13 @@ export function createEventWorkspace({config,onChange=()=>{}}) {
           const goal=safeWorkspaceGoal(item.payload.snapshot);
           if (goal.id!==item.goalId) throw Error('目标同步关联不正确');
           if (!next.goals[goal.id]||goal.revision>=next.goals[goal.id].revision) next.goals[goal.id]=goal;
+        }
+        if (onNotifications) {
+          const notice=localResult(item,item.remoteNotifications??page.remoteNotifications);
+          if (notice) {
+            const queue=next.notificationResults??[];
+            if (!queue.some(r=>r.eventId===notice.eventId)) next.notificationResults=[...queue,notice];
+          }
         }
         if (item.kind==='message') {
           const message=safeMessage(item.payload.message,item);
@@ -190,6 +241,21 @@ export function createEventWorkspace({config,onChange=()=>{}}) {
       await agentCall(config,'/sync/ack',{seqs});
       save({...state,pendingAck:[]});
       if (page.nextCursor===undefined) break;
+    }
+    if (onNotifications&&!disposed) {
+      // Reconcile only a complete sync. A torn page, stale connection or offline cache must never withdraw other tasks.
+      const active=Object.values(state.goals).filter(g=>g.status==='active');
+      const reminders=active.flatMap(g=>g.tasks.filter(t=>t.status==='open'&&Date.parse(t.scheduledAt)>Date.now())
+        .map(t=>({goalId:g.id,taskId:t.id,revision:t.revision,scheduledAt:t.scheduledAt,body:t.content})));
+      const activeTasks=active.flatMap(g=>g.tasks.filter(t=>t.status==='open').map(t=>({goalId:g.id,taskId:t.id,revision:t.revision})));
+      const queued=state.notificationResults??[];
+      const results=queued.filter(r=>applicableResult(r,state.goals));
+      await onNotifications({userId:config.userId,fingerprint:config.fingerprint,cursor:state.cursor,reminders,activeTasks,results});
+      if (!disposed&&queued.length) {
+        const receipts=new Set(state.notificationReceipts??[]);
+        for (const r of queued) if (r.fallback) receipts.add(r.eventId);
+        save({...state,notificationResults:[],notificationReceipts:[...receipts]});
+      }
     }
   }
   function sync() {

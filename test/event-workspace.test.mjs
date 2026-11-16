@@ -141,3 +141,103 @@ test('leaving a new-goal conversation returns to the prior goal without rebindin
   assert.equal(workspace.view().messages.find(message=>message.eventId==='evt_new').goalId,'g_new');
   assert.ok(calls.some(call=>call.path==='/events'));
 });
+
+test('the iOS projection follows final task state and forwards only explicit fresh local result events',async()=>{
+  const now=new Date(), at=new Date(now.getTime()+60000).toISOString();
+  const start=change(1,'测试目标');
+  start.payload.snapshot.tasks[0].scheduledAt=at;
+  const ready={...start,seq:2,kind:'task_updated',taskId:'t_sleep',createdAt:now.toISOString(),
+    payload:{...start.payload,notification:{kind:'recommendation_ready',event_id:'ready_1',revision:1}}};
+  let page=[start,ready], remote=false, batches=[];
+  setup(input=>input.path==='/sync/ack'?{}:{items:page.filter(i=>i.seq>input.body.after_seq),remoteNotifications:remote});
+  const ws=createEventWorkspace({config,onNotifications:async value=>{batches.push(value);}});
+  await ws.sync();
+  assert.deepEqual(batches.at(-1).reminders,[{goalId:'g_sleep',taskId:'t_sleep',revision:1,scheduledAt:at,body:'睡前放下手机'}]);
+  assert.equal(batches.at(-1).results[0].eventId,'ready_1');
+  await ws.sync();assert.equal(batches.at(-1).results.length,0);
+  const done=change(3,'测试目标',2);done.payload.snapshot.tasks[0].status='done';
+  remote=true;page=[done,{...ready,seq:4,payload:{...done.payload,notification:{...ready.payload.notification,event_id:'ready_2'}}}];
+  await ws.sync();assert.deepEqual(batches.at(-1).reminders,[]);assert.deepEqual(batches.at(-1).results,[]);
+});
+
+test('native result failures survive restart and stale or unmarked progress never alerts',async()=>{
+  const fresh=new Date().toISOString(), stale=new Date(Date.now()-86400000).toISOString();
+  const make=(seq,createdAt,notification)=>({...change(seq,'测试'),createdAt,payload:{snapshot:snapshot('测试'),notification}});
+  const mark=event_id=>({event_id,kind:'task_result',revision:1});
+  const page=[make(1,fresh,mark('result_1')),make(2,stale,mark('result_2')),make(3,fresh)];
+  setup(input=>input.path==='/sync/ack'?{}:{items:page.filter(i=>i.seq>input.body.after_seq),remoteNotifications:false});
+  const first=createEventWorkspace({config,onNotifications:async()=>{throw Error('system unavailable');}});
+  await first.sync();
+  const batches=[];const reopened=createEventWorkspace({config,onNotifications:async value=>{batches.push(value);}});
+  await reopened.sync();assert.deepEqual(batches[0].results.map(x=>x.eventId),['result_1']);
+});
+
+test('reschedule, cancellation and archive each reconcile a complete authoritative projection',async()=>{
+  const at=new Date(Date.now()+3600000).toISOString(), later=new Date(Date.now()+7200000).toISOString();
+  const initial=change(1,'一号目标');initial.payload.snapshot.tasks[0].scheduledAt=at;
+  let page=[initial];const batches=[];
+  setup(input=>input.path==='/sync/ack'?{}:{items:page.filter(i=>i.seq>input.body.after_seq)});
+  const ws=createEventWorkspace({config,onNotifications:async batch=>batches.push(batch)});
+  await ws.sync();assert.equal(batches.at(-1).reminders[0].scheduledAt,at);
+  const moved=structuredClone(initial);moved.seq=2;Object.assign(moved.payload.snapshot.tasks[0],{scheduledAt:later,currentRevision:2});
+  page=[moved];await ws.sync();
+  assert.deepEqual(batches.at(-1).reminders.map(t=>[t.goalId,t.taskId,t.revision,t.scheduledAt]),[['g_sleep','t_sleep',2,later]]);
+  const canceled=structuredClone(moved);canceled.seq=3;canceled.payload.snapshot.tasks[0].status='cancelled';
+  page=[canceled];await ws.sync();assert.deepEqual(batches.at(-1).activeTasks,[]);
+  const archived=structuredClone(moved);archived.seq=4;
+  archived.payload.snapshot.goal.status='archived';archived.payload.snapshot.revision.status='archived';
+  page=[archived];await ws.sync();assert.deepEqual(batches.at(-1).reminders,[]);
+  const invalid=structuredClone(initial);invalid.seq=5;invalid.userId='elsewhere';
+  const count=batches.length;page=[invalid];await ws.sync();assert.equal(batches.length,count);
+});
+
+test('remote ownership follows each individual notice across registration changes',async()=>{
+  const make=(seq,remote)=>({...change(seq,'测试'),remoteNotifications:remote,createdAt:new Date().toISOString(),
+    payload:{snapshot:snapshot('测试'),notification:{event_id:'n_'+seq,kind:'task_result',revision:1}}});
+  const items=[make(1,false),make(2,true),make(3,undefined)],results=[];
+  setup(input=>input.path==='/sync/ack'?{}:{items:items.filter(i=>i.seq>input.body.after_seq),remoteNotifications:true});
+  const ws=createEventWorkspace({config,onNotifications:async batch=>results.push(...batch.results)});
+  await ws.sync();assert.deepEqual(results.map(n=>n.eventId),['n_1']);
+});
+
+test('a rejected APNs alert is handed back on an empty page after sync ack, survives crash and retries its receipt',async()=>{
+  const at=new Date().toISOString(), initial=change(1,'测试');
+  initial.createdAt=at;initial.remoteNotifications=true;
+  initial.payload.notification={kind:'recommendation_ready',event_id:'handoff',revision:1};
+  const fallback={kind:'recommendation_ready',eventId:'handoff',goalId:'g_sleep',revision:1,createdAt:at};
+  let stage='remote';const calls=[],delivered=[];
+  setup(input=>{
+    if(input.path==='/sync/ack')return {};
+    calls.push(input.body);
+    if(stage==='remote')return {items:[initial],remoteNotifications:true};
+    if(stage==='retryReceipt')throw Error('offline');
+    return {items:[],notificationFallback:stage==='handoff'?[fallback]:[]};
+  });
+  let available=true;
+  const callback=async batch=>{
+    if(!available)throw Error('app suspended before adding');
+    delivered.push(...batch.results.map(x=>x.eventId));
+  };
+  const first=createEventWorkspace({config,onNotifications:callback});
+  await first.sync();assert.deepEqual(delivered,[]);assert.equal(first.view().cursor,1);
+  stage='handoff';available=false;await first.sync();
+  const saved=JSON.parse(localStorage.getItem('along.event-workspace.v1:'+config.userId));assert.equal(saved.notificationResults[0].eventId,'handoff');
+  stage='recover';available=true;
+  const resumed=createEventWorkspace({config,onNotifications:callback});
+  await resumed.sync();assert.deepEqual(delivered,['handoff']);
+  stage='retryReceipt';await resumed.sync();assert.deepEqual(calls.at(-1).notificationReceipts,['handoff']);
+  stage='recover';await resumed.sync();assert.deepEqual(calls.at(-1).notificationReceipts,['handoff']);
+  await resumed.sync();assert.deepEqual(calls.at(-1).notificationReceipts,[]);
+});
+test('a completed or revised recommendation is suppressed while a completed task can still report its result',async()=>{
+  const at=new Date().toISOString(), page=[change(1,'测试',3)];
+  Object.assign(page[0].payload.snapshot.tasks[0],{status:'done',currentRevision:2});
+  const fallback=[
+    {kind:'recommendation_ready',eventId:'old_goal',goalId:'g_sleep',revision:2,createdAt:at},
+    {kind:'recommendation_ready',eventId:'old_task',goalId:'g_sleep',taskId:'t_sleep',revision:1,createdAt:at},
+    {kind:'recommendation_ready',eventId:'done_task',goalId:'g_sleep',taskId:'t_sleep',revision:2,createdAt:at},
+    {kind:'task_result',eventId:'done_result',goalId:'g_sleep',taskId:'t_sleep',revision:2,createdAt:at}];
+  const batches=[];setup(input=>input.path==='/sync/ack'?{}:{items:page.filter(i=>i.seq>input.body.after_seq),notificationFallback:fallback});
+  const ws=createEventWorkspace({config,onNotifications:async b=>batches.push(b)});
+  await ws.sync();assert.deepEqual(batches[0].results.map(r=>r.eventId),['done_result']);
+});
