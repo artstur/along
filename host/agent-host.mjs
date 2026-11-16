@@ -13,6 +13,8 @@ import {DSH_RUNTIME, KIMI_RUNTIME, safeAgentRuntime} from '../web/super-agent.mj
 import {readJsonBody} from './request-body.mjs';
 import {findDailyGrant} from './daily-delegation.mjs';
 import {HostError, upstream, statusForError} from './host-error.mjs';
+import {createApnsProvider} from './apns.mjs';
+import {taskNotifications} from './task-notifications.mjs';
 import {createBridge, readBridgeToken} from './along-bridge.mjs';
 import {agentHealthSnapshot,cleanHealthContext,cleanPlanningContext,validateReassessment,SLEEP_REMINDER_CRITERIA,DAILY_ACTIONS_CRITERIA,parseDailyActionReply} from '../web/contextual-planning.mjs';
 
@@ -144,7 +146,7 @@ async function runExclusive(operation) {
 // 新旧单消费开关：off（默认）= 新端点 503、旧链路照旧；on = 新端点生效、旧 /super-agent/goals|tasks
 // 的 DSH 分支 409「已切换新链路」。回退 = 改回 off，Along Agent 业务库与 DSH 状态不清（BC-09-03/04）。
 const eventIngest = process.env.ALONG_EVENT_INGEST === 'on';
-const newLinkPaths = new Set(['/events', '/sync', '/sync/ack']);
+const newLinkPaths = new Set(['/events', '/sync', '/sync/ack', '/notifications/device', '/notifications/scheduled']);
 let pairingRegistered = false;
 function requireEventIngest() {
   if (!eventIngest) throw new HostError('新链路未开启：设置 ALONG_EVENT_INGEST=on 后重启 Along 服务',503);
@@ -168,11 +170,26 @@ async function ensurePairingRegistered() {
   try {
     // Along Agent 契约要求全部 /along-source/api/* 用头传绑定身份（缺头 403 invalid_identity），
     // 注册调用与其他回环调用一样带上 identity，body 与头来自同一个绑定对象。
+    const registeredIdentity=identity;
     await bridge.call('/along-source/api/pairing',{value:{user_id:identity.userId,device_id:identity.deviceId},identity,timeout:5_000});
-    pairingRegistered = true;
+    if (registeredIdentity===identity) pairingRegistered = true;
   } catch (error) { console.warn('Along 未能把配对身份注册到 Along Source（稍后自动重试）：',error.message); }
 }
 ensurePairingRegistered();
+function readSyncPage(who,afterSeq,limit) {
+  return upstream(()=>bridge.call(`/along-source/api/sync?user_id=${encodeURIComponent(who.userId)}&after_seq=${afterSeq}&limit=${limit}`,{method:'GET',identity:who}));
+}
+const notifications=taskNotifications({dir,identity:()=>identity,readPage:readSyncPage,send:createApnsProvider()});
+let registeringForNotifications=false;
+async function dispatchNotifications() {
+  if (!eventIngest||!bridgeToken||!notifications.active(identity)||registeringForNotifications) return;
+  if (!pairingRegistered) {
+    registeringForNotifications=true;
+    try {await ensurePairingRegistered();} finally {registeringForNotifications=false;}
+  }
+  if (pairingRegistered) await notifications.dispatch();
+}
+setInterval(dispatchNotifications,3000).unref();
 // 新端点全部 POST（iOS 桥 agentRequest 固定 POST，不改桥语义）：/events 事件接收（回执按 Along Agent 原状态码
 // 透传：200 accepted/duplicate、400 rejected、409 conflict），/sync 同步拉取，/sync/ack 确认。
 async function handleAlongNewLink(req,res,path) {
@@ -186,6 +203,9 @@ async function handleAlongNewLink(req,res,path) {
       ?{status:'rejected',...(legalEventId?{event_id:input.event_id}:{}),reason:'identity_in_body'}
       :{error:'身份字段只能由配对会话提供'});
   }
+  if (!authorized(req)||who!==identity) throw new HostError('配对已变更',403);
+  if (path==='/notifications/scheduled') return respond(res,200,notifications.scheduled(who,input));
+  if (path==='/notifications/device') return respond(res,200,notifications.register(who,input));
   await ensurePairingRegistered();
   if (!pairingRegistered) throw new HostError('配对身份尚未登记到 Along，请稍后重试',503);
   if (path==='/events') {
@@ -196,8 +216,8 @@ async function handleAlongNewLink(req,res,path) {
   if (path==='/sync') {
     const afterSeq=Number.isInteger(input?.after_seq)&&input.after_seq>=0?input.after_seq:0;
     const limit=Number.isInteger(input?.limit)?Math.min(Math.max(input.limit,1),200):50;
-    const result=await upstream(()=>bridge.call(`/along-source/api/sync?user_id=${encodeURIComponent(who.userId)}&after_seq=${afterSeq}&limit=${limit}`,{method:'GET',identity:who}));
-    return respond(res,200,result);
+    const result=await readSyncPage(who,afterSeq,limit);
+    return respond(res,200,notifications.decorate(who,result,input));
   }
   if (path==='/sync/ack') {
     if (!Array.isArray(input?.seqs)||input.seqs.length===0||!input.seqs.every(seq=>Number.isInteger(seq)&&seq>=1)) throw Error('同步确认序号无效');
