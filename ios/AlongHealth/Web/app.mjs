@@ -48,6 +48,7 @@ let verifiedHealthHost=false;
 let checkingHealthHost=false;
 let agentConnection = {status:agentConfig.token?'checking':'unconfigured',error:''};
 let eventWorkspace=null,eventWorkspaceBinding='';
+let pendingRecommendationOpen=null;
 let localSelection=null,waitingForSavedGoal=false;
 let lastNotificationProjection='',lastNotificationCheck=0;
 let renderedRecommendationValidity='';
@@ -1166,15 +1167,22 @@ async function syncEventNotifications(value,binding) {
 }
 async function openEventNotification(route,synced=false) {
   if (!eventWorkspace||route?.userId!==eventWorkspace.view().userId) return;
+  const recommendationMessage=eventWorkspace.view().messages.find(m=>m.goalId===route.goalId&&m.notificationEventId===route.eventId);
+  if (route.kind==='recommendation_ready'&&!recommendationMessage) {
+    pendingRecommendationOpen={route,binding:eventWorkspaceBinding};
+    if (!synced) void eventWorkspace.sync();
+    return;
+  }
   const goal=eventWorkspace.view().goals[route.goalId];
   if (!goal) return;
+  if (pendingRecommendationOpen?.route.eventId===route.eventId) pendingRecommendationOpen=null;
   if (!synced&&route.taskId&&!goal.tasks.some(t=>t.id===route.taskId)) {
     void eventWorkspace.sync();return;
   }
   const task=goal.tasks.find(t=>t.id===route.taskId&&t.status!=='cancelled');
   localSelection=null;waitingForSavedGoal=false;
   eventWorkspace.select(goal.id);
-  const recommendation=route.kind==='recommendation_ready'&&eventWorkspace.view().messages.some(m=>m.notificationEventId===route.eventId&&m.recommendation);
+  const recommendation=route.kind==='recommendation_ready'&&Boolean(recommendationMessage);
   screen=goal.status==='active'&&task&&!recommendation?'home':'agent';render();
   if (task&&goal.status==='active'&&!recommendation) {
     const row=document.getElementById('event-task-'+task.id);
@@ -1286,6 +1294,10 @@ function renderEventUpdate() {
   if (sameScope&&next&&typeof draft==='string') {next.value=draft;if (focused) {next.focus();next.setSelectionRange?.(selection,selection);}}
   const nextScroller=app.querySelector('.agent-scroll');
   nextScroller?.scrollTo({top:follow?nextScroller.scrollHeight:scrollTop,behavior:'instant'});
+  const pending=pendingRecommendationOpen;
+  if (pending?.binding===eventWorkspaceBinding&&eventWorkspace.view().messages.some(m=>m.goalId===pending.route.goalId&&m.notificationEventId===pending.route.eventId)) {
+    pendingRecommendationOpen=null;void openEventNotification(pending.route,true);
+  }
 }
 function render() { app.innerHTML = eventWorkspace ? eventWorkspacePage() : screen === 'lab' ? lab() : screen === 'agent' ? goalAgentPage() : screen === 'task' ? taskDetailPage() : home(); queueBackgroundSync(); }
 function renderAgentUpdate({follow=false}={}) {

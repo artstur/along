@@ -527,3 +527,27 @@ test('visible and resumed recommendation cards re-evaluate expiry even when sync
     assert.equal(JSON.parse(localStorage.getItem('along.event-workspace.v1:u_app_b')).drafts['goal:g_expiry'],'保留未发送的补充');
   } finally {Date.now=realNow;}
 });
+
+
+test('a recommendation notification waits for its own message through offline and delayed sync before acknowledging',async()=>{
+  const goal={id:'g_race',domain:'custom',status:'active',revision:1,title:'原目标',metric:null,context:[],tasks:[
+    {id:'t_race',goalId:'g_race',status:'open',content:'原徒步研究任务',revision:1}]};
+  const saved={version:1,userId:'u_app_b',cursor:1,activeGoalId:goal.id,conversationId:null,goals:{[goal.id]:goal},messages:{},drafts:{}};
+  const dom=installDomStub({storage:{'along.agent.v1':JSON.stringify(config),'along.event-workspace.v1:u_app_b':JSON.stringify(saved)}});
+  document.visibilityState='visible';const state={syncItems:[]},requests=installEventBridge(state),receipts=[],scrolled=[];
+  window.AlongAgentBridge.notification=async(name,value)=>{if(name==='eventTaskOpened')receipts.push(value);return {};};
+  document.getElementById=id=>dom.app.innerHTML.includes('id="'+id+'"')?{focus(){},scrollIntoView:()=>scrolled.push(id)}:null;
+  await import(`../web/app.mjs?recommendation-race=${Date.now()}`);await settle();
+  const online=window.AlongAgentBridge.request;window.AlongAgentBridge.request=async()=>{throw Error('offline');};
+  await dom.fireWindow('along-notification-open',{detail:{userId:'u_app_b',goalId:goal.id,taskId:'t_race',eventId:'reply_race',kind:'recommendation_ready'}});await settle();
+  assert.equal(receipts.length,0);assert.equal(scrolled.includes('event-task-t_race'),false);
+  window.AlongAgentBridge.request=online;await dom.tick(3000);await settle();assert.equal(receipts.length,0);
+  state.syncItems=[{seq:2,userId:'u_app_b',kind:'message',goalId:goal.id,taskId:'t_race',payload:{recommendation:recommendation(),
+    snapshot:{goal:{...goal,currentRevision:1},revision:{goalId:goal.id,revision:1,title:goal.title,status:'active'},tasks:goal.tasks.map(t=>({...t,currentRevision:t.revision}))},
+    notification:{event_id:'reply_race',kind:'recommendation_ready',revision:1},
+    message:{id:'msg_race',eventId:'reply_race',role:'assistant',direction:'outbound',text:'结果已就绪',seq:2}}}];
+  await dom.tick(3000);await settle();
+  assert.match(dom.app.innerHTML,/周末徒步方案/);assert.match(dom.app.innerHTML,/agent-composer/);
+  assert.ok(scrolled.includes('event-message-reply_race'));assert.equal(receipts.length,1);assert.equal(receipts[0].eventId,'reply_race');
+  assert.ok(requests.some(r=>r.path==='/sync'));
+});
