@@ -7,6 +7,31 @@ const id=value=>typeof value==='string'&&/^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$/.test
 const eventId=value=>typeof value==='string'&&/^[A-Za-z0-9][A-Za-z0-9:_.-]{0,179}$/.test(value);
 const same=(a,b)=>a?.userId===b?.userId&&a?.deviceId===b?.deviceId;
 const sameOccurrence=(a,b)=>a.goalId===b.goalId&&a.taskId===b.taskId&&Date.parse(a.scheduledAt)===Date.parse(b.scheduledAt);
+function civil(at,timezone) {
+  const fields=Object.fromEntries(new Intl.DateTimeFormat('en-GB',{timeZone:timezone,hourCycle:'h23',
+    weekday:'short',hour:'2-digit',minute:'2-digit',second:'2-digit'}).formatToParts(new Date(at)).map(p=>[p.type,p.value]));
+  return {clock:fields.hour+':'+fields.minute+':'+fields.second,weekday:['Mon','Tue','Wed','Thu','Fri','Sat','Sun'].indexOf(fields.weekday)+1};
+}
+const instant=value=>typeof value==='string'&&/^\d{4}-\d\d-\d\dT.*(?:Z|[+-]\d\d:\d\d)$/i.test(value)&&Number.isFinite(Date.parse(value));
+function validRecurrence(row) {
+  const has=['repeat','timezone','weekday','firstScheduledAt','wallTime'].some(k=>row[k]!==undefined);
+  if (!has) return true;
+  if (!['daily','weekly'].includes(row.repeat)||typeof row.timezone!=='string'||row.timezone.length>100||
+      !instant(row.firstScheduledAt)||!instant(row.scheduledAt)||Date.parse(row.firstScheduledAt)>Date.parse(row.scheduledAt)||
+      (row.wallTime!==undefined&&!instant(row.wallTime))||
+      (row.repeat==='weekly'? !Number.isInteger(row.weekday)||row.weekday<1||row.weekday>7:row.weekday!==undefined)) return false;
+  try {
+    const actual=civil(row.scheduledAt,row.timezone),anchor=civil(row.wallTime??row.firstScheduledAt,row.timezone);
+    return actual.clock===anchor.clock&&(row.repeat!=='weekly'||actual.weekday===row.weekday);
+  } catch {return false;}
+}
+function coversOccurrence(receipt,route) {
+  if (sameOccurrence(receipt,route)) return true;
+  if (!receipt.repeat||receipt.goalId!==route.goalId||receipt.taskId!==route.taskId||
+      Date.parse(route.scheduledAt)<Date.parse(receipt.firstScheduledAt)) return false;
+  const actual=civil(route.scheduledAt,receipt.timezone),anchor=civil(receipt.wallTime??receipt.firstScheduledAt,receipt.timezone);
+  return actual.clock===anchor.clock&&(receipt.repeat!=='weekly'||actual.weekday===receipt.weekday);
+}
 
 function relevant(route,detail) {
   if (detail?.goal?.id!==route.goalId||detail.goal.status!=='active') return false;
@@ -69,12 +94,14 @@ export function taskNotifications({dir,identity,readPage,send,now=Date.now}) {
   function scheduled(who,input) {
     checkBinding(who,input);
     if (!Array.isArray(input.reminders)||input.reminders.length>64||input.reminders.some(r=>!r||!id(r.goalId)||
-      !id(r.taskId)||!Number.isSafeInteger(r.revision)||r.revision<0||!Number.isFinite(Date.parse(r.scheduledAt))))
+      !id(r.taskId)||!Number.isSafeInteger(r.revision)||r.revision<0||!Number.isFinite(Date.parse(r.scheduledAt))||!validRecurrence(r)))
       throw new HostError('系统排程回执格式不正确',400);
     const previous=same(who,state)?state:start(who);
     // A request disappears from pending when it fires. Retain that occurrence through the remote retry window.
-    const justFired=previous.scheduled.filter(r=>Date.parse(r.scheduledAt)<=now()&&Date.parse(r.scheduledAt)+lifetime>now());
-    const rows=input.reminders.map(({goalId,taskId,revision,scheduledAt})=>({goalId,taskId,revision,scheduledAt}));
+    const justFired=previous.scheduled.filter(r=>Date.parse(r.scheduledAt)<=now()&&Date.parse(r.scheduledAt)+lifetime>now())
+      .map(({goalId,taskId,revision,scheduledAt})=>({goalId,taskId,revision,scheduledAt}));
+    const rows=input.reminders.map(({goalId,taskId,revision,scheduledAt,repeat,timezone,weekday,firstScheduledAt,wallTime})=>
+      ({goalId,taskId,revision,scheduledAt,...(repeat?{repeat,timezone,firstScheduledAt,...(weekday?{weekday}:{}),...(wallTime?{wallTime}:{})}:{})}));
     const next=[...justFired.filter(r=>!rows.some(n=>sameOccurrence(r,n))),...rows];
     if (JSON.stringify(next)!==JSON.stringify(previous.scheduled)) save({...previous,scheduled:next});
     return {userId:who.userId,accepted:rows.length};
@@ -147,7 +174,7 @@ export function taskNotifications({dir,identity,readPage,send,now=Date.now}) {
       if (page.nextCursor!==undefined) return; // Catch up with cancellations and newer revisions first.
       for (const q of [...state.queue]) {
         if (!active(who)||!state.queue.includes(q)||q.local||q.retryAt>now()||q.expires<=now()) continue;
-        if (q.route.kind==='reminder_due'&&state.scheduled.some(r=>sameOccurrence(r,q.route))) {settle(q,'local_schedule');continue;}
+        if (q.route.kind==='reminder_due'&&state.scheduled.some(r=>coversOccurrence(r,q.route))) {settle(q,'local_schedule');continue;}
         inFlight=q.route.eventId;
         let result;
         try {result=await send(state,q.route,q.expires);} catch {result='retry';}

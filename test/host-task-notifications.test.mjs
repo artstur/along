@@ -204,3 +204,62 @@ test('a manual change of time invalidates an offline due notice before retry',as
   await service.dispatch();
   assert.equal(attempts,1);
 });
+
+test('a persisted iOS daily repeat receipt covers later local occurrences after Host restart',async t=>{
+  const f=fixture(t),one=taskNotifications(f.options);
+  one.register(f.who,f.input);
+  const firstScheduledAt=new Date(f.options.now()+1000).toISOString();
+  one.scheduled(f.who,{expectedUserId:f.who.userId,reminders:[{goalId:'g_test',taskId:'t_test',revision:2,
+    scheduledAt:firstScheduledAt,firstScheduledAt,repeat:'daily',timezone:'Asia/Shanghai'}]});
+  f.tick(3*86400_000+1100);
+  const due=f.item(1,'reminder_due');
+  due.payload.notification.scheduled_at=new Date(Date.parse(firstScheduledAt)+3*86400_000).toISOString();
+  due.payload.snapshot.tasks[0].previousDailyOccurrence=due.payload.notification.scheduled_at;
+  f.pages.push(due);
+  await taskNotifications(f.options).dispatch();
+  assert.equal(f.sent.length,0,'an already repeating system request must not be remotely delivered again');
+  const shifted=f.item(2,'reminder_due');
+  shifted.payload.notification.scheduled_at=new Date(Date.parse(due.payload.notification.scheduled_at)+60_000).toISOString();
+  shifted.payload.snapshot.tasks[0].scheduledAt=shifted.payload.notification.scheduled_at;
+  f.pages.push(shifted);
+  await taskNotifications(f.options).dispatch();
+  assert.deepEqual(f.sent.map(n=>n.eventId),['event:2'],'a changed clock still needs delivery');
+});
+
+test('weekly iOS receipts cover only the original weekday and never a prior occurrence',async t=>{
+  for(const [firstDays,dueDays,expected] of [[0,7,0],[0,6,1],[7,0,1]]) {
+    const f=fixture(t),one=taskNotifications(f.options);one.register(f.who,f.input);
+    const origin=f.options.now()+1000,firstScheduledAt=new Date(origin+firstDays*86400_000).toISOString();
+    one.scheduled(f.who,{expectedUserId:f.who.userId,reminders:[{goalId:'g_test',taskId:'t_test',revision:2,
+      scheduledAt:firstScheduledAt,firstScheduledAt,repeat:'weekly',timezone:'Asia/Shanghai',weekday:7}]});
+    f.tick(dueDays*86400_000+1100);
+    const due=f.item(1,'reminder_due');
+    due.payload.notification.scheduled_at=new Date(origin+dueDays*86400_000).toISOString();
+    due.payload.snapshot.tasks[0].scheduledAt=due.payload.notification.scheduled_at;f.pages.push(due);
+    await taskNotifications(f.options).dispatch();assert.equal(f.sent.length,expected);
+  }
+});
+
+test('withdrawing a recurring system receipt retains only its last fired occurrence, not future coverage',async t=>{
+  const f=fixture(t),one=taskNotifications(f.options);one.register(f.who,f.input);
+  const firstScheduledAt=new Date(f.options.now()+1000).toISOString();
+  one.scheduled(f.who,{expectedUserId:f.who.userId,reminders:[{goalId:'g_test',taskId:'t_test',revision:2,
+    scheduledAt:firstScheduledAt,firstScheduledAt,repeat:'daily',timezone:'Asia/Shanghai'}]});
+  f.tick(1100);one.scheduled(f.who,{expectedUserId:f.who.userId,reminders:[]});
+  f.tick(86400_000);
+  const due=f.item(1,'reminder_due');due.payload.notification.scheduled_at=new Date(Date.parse(firstScheduledAt)+86400_000).toISOString();
+  due.payload.snapshot.tasks[0].scheduledAt=due.payload.notification.scheduled_at;f.pages.push(due);
+  await taskNotifications(f.options).dispatch();assert.equal(f.sent.length,1);
+});
+
+test('recurring receipts reject invalid timezone, cadence, weekday, anchor and clock combinations',t=>{
+  const f=fixture(t),one=taskNotifications(f.options);
+  const firstScheduledAt=new Date(f.options.now()+1000).toISOString();
+  const row={goalId:'g_test',taskId:'t_test',revision:2,scheduledAt:firstScheduledAt,firstScheduledAt,repeat:'daily',timezone:'Asia/Shanghai'};
+  for(const patch of [{timezone:'Mars/Olympus'},{repeat:'monthly'},{weekday:2},{firstScheduledAt:'bad'},
+    {firstScheduledAt:new Date(Date.parse(firstScheduledAt)+86400_000).toISOString()},
+    {scheduledAt:new Date(Date.parse(firstScheduledAt)+60_000).toISOString()},
+    {repeat:'weekly',weekday:1},{repeat:undefined},{timezone:undefined}]) {
+    assert.throws(()=>one.scheduled(f.who,{expectedUserId:f.who.userId,reminders:[{...row,...patch}]}),/排程/);
+  }
+});
