@@ -1483,10 +1483,11 @@ app.addEventListener('click', event => {
       localSelection={key:localSelection.key,taskId:actionTarget.dataset.taskId};render();
     } else if (action==='event-chat') {focusedEventRecommendation=null;screen='agent';render();}
     else if (action==='event-recommendation-feedback') {
-      if (eventWorkspace.prepareRecommendationFeedback(actionTarget.dataset.eventId)) {screen='agent';render();}
+      if (eventWorkspace.prepareRecommendationFeedback(actionTarget.dataset.eventId)) {focusedEventRecommendation=null;screen='agent';render();}
     }
     else if (action==='event-health-connect') {void connectHealth();}
     else if (action==='agent-back') {
+      focusedEventRecommendation=null;
       if (!eventWorkspace.view().activeGoalId) eventWorkspace.leaveConversation();
       screen='home';render();
     }
