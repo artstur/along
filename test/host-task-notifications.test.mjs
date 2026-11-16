@@ -263,3 +263,16 @@ test('recurring receipts reject invalid timezone, cadence, weekday, anchor and c
     assert.throws(()=>one.scheduled(f.who,{expectedUserId:f.who.userId,reminders:[{...row,...patch}]}),/排程/);
   }
 });
+
+test('a late first iOS repeat registration cannot claim that an earlier due alert was delivered', async t=>{
+  const f=fixture(t),one=taskNotifications(f.options);one.register(f.who,f.input);
+  const dueAt=new Date(f.options.now()+1000).toISOString();
+  f.tick(31_000); // App syncs for the first time after the due time.
+  const nextAt=new Date(Date.parse(dueAt)+86400_000).toISOString();
+  one.scheduled(f.who,{expectedUserId:f.who.userId,reminders:[{goalId:'g_test',taskId:'t_test',revision:2,
+    scheduledAt:nextAt,firstScheduledAt:dueAt,repeat:'daily',timezone:'Asia/Shanghai'}]});
+  const due=f.item(1,'reminder_due');due.payload.notification.scheduled_at=dueAt;
+  due.payload.snapshot.tasks[0].scheduledAt=dueAt;f.pages.push(due);
+  await one.dispatch();
+  assert.equal(f.sent.length,1,'the newly installed system request will first fire tomorrow, so today still requires delivery');
+});

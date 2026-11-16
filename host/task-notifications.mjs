@@ -28,7 +28,7 @@ function validRecurrence(row) {
 function coversOccurrence(receipt,route) {
   if (sameOccurrence(receipt,route)) return true;
   if (!receipt.repeat||receipt.goalId!==route.goalId||receipt.taskId!==route.taskId||
-      Date.parse(route.scheduledAt)<Date.parse(receipt.firstScheduledAt)) return false;
+      Date.parse(route.scheduledAt)<Date.parse(receipt.scheduledAt)) return false;
   const actual=civil(route.scheduledAt,receipt.timezone),anchor=civil(receipt.wallTime??receipt.firstScheduledAt,receipt.timezone);
   return actual.clock===anchor.clock&&(receipt.repeat!=='weekly'||actual.weekday===receipt.weekday);
 }
