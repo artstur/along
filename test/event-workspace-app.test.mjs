@@ -483,3 +483,89 @@ test('binding a live conversation to a goal preserves the unsent follow-up throu
   await dom.click({action:'agent-back'});await dom.click({action:'event-chat'});
   assert.equal(composing().value,'Second sentence intended for the same conversation');
 });
+
+import {recommendation} from './recommendation-fixture.mjs';
+
+test('a recommendation is visible in its original goal and its notification opens evidence rather than the old task row',async()=>{
+  const goal={id:'g_source_ui',domain:'custom',status:'active',revision:1,title:'原运动目标',metric:null,context:[],tasks:[
+    {id:'t_source_ui',goalId:'g_source_ui',status:'open',content:'周五安排徒步',revision:1}]};
+  const result={eventId:'reply_source_ui',id:'msg_source_ui',role:'assistant',text:'已检索路线',seq:1,goalId:goal.id,taskId:'t_source_ui',
+    recommendation:recommendation(),notificationEventId:'reply_source_ui',status:'received'};
+  const saved={version:1,userId:'u_app_b',cursor:1,activeGoalId:goal.id,conversationId:null,goals:{[goal.id]:goal},messages:{[result.eventId]:result},drafts:{}};
+  const dom=installDomStub({storage:{'along.agent.v1':JSON.stringify(config),'along.event-workspace.v1:u_app_b':JSON.stringify(saved)}});
+  const requests=installEventBridge(),receipts=[],scrolled=[];
+  window.AlongAgentBridge.notification=async(name,value)=>{if(name==='eventTaskOpened')receipts.push(value);return {};};
+  document.getElementById=id=>dom.app.innerHTML.includes('id="'+id+'"')?{focus(){},scrollIntoView:()=>scrolled.push(id)}:null;
+  await import(`../web/app.mjs?recommendation-ui=${Date.now()}`);await settle();
+  assert.match(dom.app.innerHTML,/原运动目标/);assert.match(dom.app.innerHTML,/周末徒步方案/);assert.match(dom.app.innerHTML,/依据来源/);
+  await dom.fireWindow('along-notification-open',{detail:{userId:'u_app_b',goalId:goal.id,taskId:'t_source_ui',eventId:result.eventId,kind:'recommendation_ready'}});
+  assert.ok(scrolled.includes('event-message-'+result.eventId));assert.match(dom.app.innerHTML,/agent-composer/);
+  assert.equal(receipts.at(-1).taskId,'t_source_ui');
+  await dom.click({action:'event-recommendation-feedback',eventId:result.eventId});
+  assert.match(dom.app.innerHTML,/关于「周末徒步方案」/);
+  await dom.app.dispatch('submit',{target:{id:'agent-form',fields:{message:'更想要短一点的路线'},querySelector:()=>null,reset(){},setAttribute(){}},preventDefault(){}});await settle();
+  const sent=requests.find(r=>r.path==='/events').body;
+  assert.equal(sent.goal_id,goal.id);assert.equal(sent.task_id,'t_source_ui');assert.equal(sent.event_type,'along.user_message');
+});
+
+test('visible and resumed recommendation cards re-evaluate expiry even when sync is empty or offline',async()=>{
+  const realNow=Date.now;let now=realNow();Date.now=()=>now;
+  try {
+    const goal={id:'g_expiry',domain:'custom',status:'active',revision:1,title:'原目标',metric:null,context:[],tasks:[]};
+    const r=recommendation();r.retrievedAt=new Date(now-1000).toISOString();r.validUntil=new Date(now+1000).toISOString();
+    r.sources=r.sources.map(s=>({...s,retrievedAt:r.retrievedAt,expiresAt:r.validUntil}));
+    const m={eventId:'reply_expiry',role:'assistant',text:'结果',goalId:goal.id,status:'received',recommendation:r};
+    const saved={version:1,userId:'u_app_b',cursor:1,activeGoalId:goal.id,conversationId:null,goals:{[goal.id]:goal},messages:{[m.eventId]:m},drafts:{'goal:g_expiry':'保留未发送的补充'}};
+    const dom=installDomStub({storage:{'along.agent.v1':JSON.stringify(config),'along.event-workspace.v1:u_app_b':JSON.stringify(saved)}});
+    document.visibilityState='visible';installEventBridge();
+    await import(`../web/app.mjs?recommendation-expiry=${realNow()}`);await settle();assert.match(dom.app.innerHTML,/推荐已就绪/);
+    now+=2000;await dom.tick(3000);await settle();assert.match(dom.app.innerHTML,/资料已过期/);
+    assert.doesNotMatch(dom.app.innerHTML,/>适合考虑</);
+    now-=2000;await dom.tick(3000);await settle();assert.match(dom.app.innerHTML,/推荐已就绪/);
+    now+=2000;window.AlongAgentBridge.request=async()=>{throw Error('offline');};
+    await dom.fireWindow('pageshow');await settle();assert.match(dom.app.innerHTML,/资料已过期/);
+    assert.equal(JSON.parse(localStorage.getItem('along.event-workspace.v1:u_app_b')).drafts['goal:g_expiry'],'保留未发送的补充');
+  } finally {Date.now=realNow;}
+});
+
+
+test('a recommendation notification waits for its own message through offline and delayed sync before acknowledging',async()=>{
+  const goal={id:'g_race',domain:'custom',status:'active',revision:1,title:'原目标',metric:null,context:[],tasks:[
+    {id:'t_race',goalId:'g_race',status:'open',content:'原徒步研究任务',revision:1}]};
+  const saved={version:1,userId:'u_app_b',cursor:1,activeGoalId:goal.id,conversationId:null,goals:{[goal.id]:goal},messages:{},drafts:{}};
+  const dom=installDomStub({storage:{'along.agent.v1':JSON.stringify(config),'along.event-workspace.v1:u_app_b':JSON.stringify(saved)}});
+  document.visibilityState='visible';const state={syncItems:[]},requests=installEventBridge(state),receipts=[],scrolled=[];
+  window.AlongAgentBridge.notification=async(name,value)=>{if(name==='eventTaskOpened')receipts.push(value);return {};};
+  document.getElementById=id=>dom.app.innerHTML.includes('id="'+id+'"')?{focus(){},scrollIntoView:()=>scrolled.push(id)}:null;
+  await import(`../web/app.mjs?recommendation-race=${Date.now()}`);await settle();
+  const online=window.AlongAgentBridge.request;window.AlongAgentBridge.request=async()=>{throw Error('offline');};
+  await dom.fireWindow('along-notification-open',{detail:{userId:'u_app_b',goalId:goal.id,taskId:'t_race',eventId:'reply_race',kind:'recommendation_ready'}});await settle();
+  assert.equal(receipts.length,0);assert.equal(scrolled.includes('event-task-t_race'),false);
+  window.AlongAgentBridge.request=online;await dom.tick(3000);await settle();assert.equal(receipts.length,0);
+  state.syncItems=[{seq:2,userId:'u_app_b',kind:'message',goalId:goal.id,taskId:'t_race',payload:{recommendation:recommendation(),
+    snapshot:{goal:{...goal,currentRevision:1},revision:{goalId:goal.id,revision:1,title:goal.title,status:'active'},tasks:goal.tasks.map(t=>({...t,currentRevision:t.revision}))},
+    notification:{event_id:'reply_race',kind:'recommendation_ready',revision:1},
+    message:{id:'msg_race',eventId:'reply_race',role:'assistant',direction:'outbound',text:'结果已就绪',seq:2}}}];
+  await dom.tick(3000);await settle();
+  assert.match(dom.app.innerHTML,/周末徒步方案/);assert.match(dom.app.innerHTML,/agent-composer/);
+  assert.ok(scrolled.includes('event-message-reply_race'));assert.equal(receipts.length,1);assert.equal(receipts[0].eventId,'reply_race');
+  assert.ok(requests.some(r=>r.path==='/sync'));
+});
+
+
+test('a completed research task result opens the matching sourced recommendation without completing an outing',async()=>{
+  const goal={id:'g_research_done',domain:'custom',status:'active',revision:1,title:'原运动目标',metric:null,context:[],tasks:[
+    {id:'t_research_done',goalId:'g_research_done',status:'done',content:'联网比较徒步方案',revision:2},
+    {id:'t_outing',goalId:'g_research_done',status:'open',content:'周末完成徒步',revision:1}]};
+  const result={eventId:'reply_research_done',role:'assistant',text:'研究结果',goalId:goal.id,taskId:'t_research_done',status:'received',recommendation:recommendation(),notificationEventId:'reply_research_done'};
+  const saved={version:1,recommendationsVersion:1,userId:'u_app_b',cursor:1,activeGoalId:goal.id,conversationId:null,goals:{[goal.id]:goal},messages:{[result.eventId]:result},drafts:{}};
+  const dom=installDomStub({storage:{'along.agent.v1':JSON.stringify(config),'along.event-workspace.v1:u_app_b':JSON.stringify(saved)}});
+  installEventBridge();const receipts=[],scrolled=[];
+  window.AlongAgentBridge.notification=async(name,value)=>{if(name==='eventTaskOpened')receipts.push(value);return {};};
+  document.getElementById=id=>dom.app.innerHTML.includes('id="'+id+'"')?{focus(){},scrollIntoView:()=>scrolled.push(id)}:null;
+  await import(`../web/app.mjs?completed-research-result=${Date.now()}`);await settle();
+  await dom.fireWindow('along-notification-open',{detail:{userId:'u_app_b',goalId:goal.id,taskId:'t_research_done',eventId:result.eventId,kind:'task_result',revision:2}});
+  assert.match(dom.app.innerHTML,/周末徒步方案/);assert.match(dom.app.innerHTML,/agent-composer/);assert.ok(scrolled.includes('event-message-'+result.eventId));
+  assert.equal(receipts.length,1);assert.equal(receipts[0].taskId,'t_research_done');
+  assert.equal(JSON.parse(localStorage.getItem('along.event-workspace.v1:u_app_b')).goals[goal.id].tasks.find(t=>t.id==='t_outing').status,'open');
+});

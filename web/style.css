@@ -355,3 +355,26 @@ footer { padding: 0 0 26px; color: #aaa; text-align: center; font-size: 10px; }
 .day-task .task-meta { color: #575754; font-size: 11px; }
 .day-task [data-weekly-workout-progress], .day-task [data-weekly-workout-progress] strong { font-size: 11px; color: #656561; font-weight: 400; }
 .day-detail small { display: block; margin-top: 12px; overflow-wrap: anywhere; color: #666; }
+
+/* Recommendations use the same type, spacing and borders as existing goal cards. */
+.recommendation-card { background:#fff; border:1px solid #e7e7e6; border-radius:20px; padding:22px 20px; overflow-wrap:anywhere; }
+.recommendation-heading { display:flex; flex-wrap:wrap; align-items:baseline; gap:8px 14px; }
+.recommendation-heading h2 { font-size:19px; line-height:1.4; flex:1; margin:0; }
+.recommendation-heading > span, .recommendation-option summary > span { color:#777; font-size:11px; white-space:nowrap; }
+.recommendation-card p, .recommendation-card li, .recommendation-card dl { font-size:13px; line-height:1.75; }
+.recommendation-card p { margin:12px 0; white-space:pre-wrap; }
+.recommendation-card ul, .recommendation-card ol { margin:6px 0 14px; padding-left:20px; }
+.recommendation-card a { color:#246459; text-decoration:underline; text-underline-offset:3px; }
+.recommendation-option { border-top:1px solid #ececeb; padding:14px 0; }
+.recommendation-option summary { cursor:pointer; font-size:14px; line-height:1.6; }
+.recommendation-option summary > span { margin-left:10px; }
+.recommendation-option dl > div { display:flex; gap:12px; padding:4px 0; }
+.recommendation-option dt { color:#777; min-width:4em; }
+.recommendation-option dd { margin:0; }
+.recommendation-label, .recommendation-check strong { font-weight:600; }
+.recommendation-card .risk, .recommendation-stale { color:#8b503b; }
+.recommendation-sources { border-top:1px solid #ececeb; padding-top:14px; font-size:12px; color:#777; }
+.recommendation-sources summary { cursor:pointer; line-height:1.6; }
+.recommendation-sources li > span { display:block; font-size:11px; }
+.recommendation-next { color:#666; }
+.agent-message:has(.recommendation-card) { max-width:100%; width:100%; padding:0; border:0; margin-right:0; }
