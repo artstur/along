@@ -8,7 +8,7 @@ const record = value => value!==null && typeof value==='object' && !Array.isArra
 const text = (value,max) => typeof value==='string' && value.trim().length>0 && value.length<=max;
 const version = value => Number.isSafeInteger(value) && value>=0;
 const time = value => typeof value==='string' && Number.isFinite(Date.parse(value));
-const empty = userId => ({version:1,userId,cursor:0,goals:{},messages:{},activeGoalId:null,conversationId:null});
+const empty = userId => ({version:1,userId,cursor:0,goals:{},messages:{},drafts:{},activeGoalId:null,conversationId:null,returnGoalId:null});
 
 // Wire snapshots are validated before entering the cache; layouts are deterministic projections, not model HTML.
 export function safeWorkspaceGoal(snapshot) {
@@ -67,8 +67,13 @@ export function createEventWorkspace({config,onChange=()=>{}}) {
           !['user','assistant','system'].includes(message.role)||(message.goalId!==undefined&&!id(message.goalId))||
           (message.conversationId!==undefined&&!id(message.conversationId))) throw Error('bad cache');
       }
-      if (saved.activeGoalId!==null&&!id(saved.activeGoalId)||saved.conversationId!==null&&!id(saved.conversationId)||
+      if (saved.drafts!==undefined&&(!record(saved.drafts)||Object.entries(saved.drafts).some(([scope,value])=>
+          !/^(?:goal|conversation):[A-Za-z0-9_-]{1,96}$/.test(scope)||typeof value!=='string'||value.length>800))||
+          saved.activeGoalId!==null&&!id(saved.activeGoalId)||saved.conversationId!==null&&!id(saved.conversationId)||
+          saved.returnGoalId!==undefined&&saved.returnGoalId!==null&&!id(saved.returnGoalId)||
           saved.pendingAck!==undefined&&(!Array.isArray(saved.pendingAck)||saved.pendingAck.some(seq=>!version(seq)||seq<1||seq>saved.cursor))) throw Error('bad cache');
+      saved.drafts=saved.drafts??{};
+      saved.returnGoalId=saved.returnGoalId??null;
       state=saved;
     }
   } catch { /* A damaged cache is rebuilt from the durable server outbox. */ }
@@ -87,13 +92,42 @@ export function createEventWorkspace({config,onChange=()=>{}}) {
     return {...next,error:lastError,messages:Object.values(next.messages).map(message=>({...message,
       status:failures.some(item=>item.event_id===message.eventId)?'rejected':pending.has(message.eventId)?'pending':message.status}))};
   }
+  function draftScope(value=state) { return value.activeGoalId?`goal:${value.activeGoalId}`:`conversation:${value.conversationId??'new'}`; }
+  function draft() { return state.drafts?.[draftScope()]??''; }
+  function setDraft(value) {
+    const clean=typeof value==='string'?value.slice(0,800):'';
+    const drafts={...state.drafts};
+    if (clean) drafts[draftScope()]=clean;
+    else delete drafts[draftScope()];
+    save({...state,drafts});
+  }
+  function conversationGoal(value=state) {
+    if (!value.conversationId) return null;
+    return Object.values(value.messages).find(message=>
+      message.conversationId===value.conversationId&&message.goalId)?.goalId??null;
+  }
   function select(goalId) {
     if (goalId!==null&&!state.goals[goalId]) return;
-    save({...state,activeGoalId:goalId,conversationId:goalId===null?null:state.conversationId});onChange();
+    const returnGoalId=goalId===null
+      ? (state.goals[state.activeGoalId]?.status==='active'?state.activeGoalId:state.returnGoalId)
+      : goalId;
+    // Reopening "new goal" resumes an unbound conversation. This preserves both its durable
+    // messages and any follow-up draft written after the first send. Once the server binds that
+    // conversation to a goal, the next "new goal" starts from a clean conversation instead.
+    const conversationId=goalId===null&&conversationGoal()?null:state.conversationId;
+    save({...state,activeGoalId:goalId,conversationId,returnGoalId});onChange();
+  }
+  function leaveConversation() {
+    const returnGoalId=state.goals[state.returnGoalId]?.status==='active'?state.returnGoalId:null;
+    // Keep conversationId and its durable outbox intact. A late Agent result must stay bound to
+    // this conversation, while the goal the user returned to remains the visible selection.
+    save({...state,activeGoalId:returnGoalId,returnGoalId});onChange();
+    return returnGoalId;
   }
   async function submit(message) {
     if (!text(message,800)) throw Error('请输入 800 字以内的消息');
     const next=recoverPending();
+    const composingScope=draftScope(next);
     const assembled=assembleEnvelope({event_type:'along.user_message',occurred_at:new Date().toISOString(),
       timezone:Intl.DateTimeFormat().resolvedOptions().timeZone||'Asia/Shanghai',goal_id:next.activeGoalId??undefined,
       causation_id:next.activeGoalId===null?next.conversationId??undefined:undefined,
@@ -103,6 +137,7 @@ export function createEventWorkspace({config,onChange=()=>{}}) {
     if (!receipt.ok) throw Error(receipt.reason);
     const root=next.conversationId??receipt.event_id;
     next.conversationId=root;
+    next.drafts={...next.drafts};delete next.drafts[composingScope];
     next.messages[receipt.event_id]={eventId:receipt.event_id,role:'user',text:message,goalId:next.activeGoalId??undefined,conversationId:root,status:'pending'};
     // The queue is already durable even if this display cache cannot be written.
     try { save(next); } catch { state=next; }
@@ -165,5 +200,5 @@ export function createEventWorkspace({config,onChange=()=>{}}) {
       .finally(()=>{flight=null;if(!disposed&&lastError!==beforeError) onChange();});
     return flight;
   }
-  return {view,select,submit,sync,dispose:()=>{disposed=true;}};
+  return {view,draft,setDraft,select,leaveConversation,submit,sync,dispose:()=>{disposed=true;}};
 }
