@@ -25,7 +25,7 @@ test('risk, incomplete checks and expired sources cannot appear as current recom
   assert.doesNotMatch(recommendationCard(recommendation(),{now:Date.parse('2099-01-03T00:00:00Z')}),/>适合考虑</);
 });
 test('cards expose comparable evidence and unknowns while escaping every external text field',()=>{
-  const r=recommendation();r.options[0].title='<img src=x onerror=alert(1)>';r.summary='<script>alert(1)</script>';
+  const r=recommendation();r.options[0].unknowns=['爬升尚未核实'];r.options[0].title='<img src=x onerror=alert(1)>';r.summary='<script>alert(1)</script>';
   const html=recommendationCard(r,{eventId:'reply_one',now:Date.parse('2099-01-01T01:00:00Z')});
   assert.match(html,/&lt;script&gt;/);assert.match(html,/&lt;img/);assert.doesNotMatch(html,/<script>|<img/);
   assert.match(html,/尚待确认/);assert.match(html,/爬升尚未核实/);assert.match(html,/依据来源/);assert.match(html,/检索/);
@@ -34,8 +34,15 @@ test('cards expose comparable evidence and unknowns while escaping every externa
 });
 
 test('a newly published partial result retains already-expired evidence as visibly stale',()=>{
-  const r=recommendation();r.retrievedAt='2099-01-02T00:00:00Z';r.status='partial';
+  const r=recommendation();r.retrievedAt='2099-01-02T00:00:00Z';r.status='partial';r.options[0].unknowns=['出行日待确认'];
   assert.ok(safeRecommendation(r));
   const html=recommendationCard(r,{now:Date.parse(r.retrievedAt)});
   assert.match(html,/资料已过期/);assert.match(html,/尚待确认/);assert.match(html,/公园官方路线/);
+});
+
+test('explicit unknown checks in general recommendations and invalid source lifetimes never present as ready',()=>{
+  const r=recommendation();r.kind='general';r.options[0].checks[1].status='unknown';
+  assert.equal(safeRecommendation(r).options[0].status,'conditional');
+  assert.equal(safeRecommendation(r).status,'partial');
+  r.sources[0].expiresAt='2098-12-31T00:00:00Z';assert.equal(safeRecommendation(r),null);
 });

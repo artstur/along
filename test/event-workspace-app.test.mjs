@@ -497,7 +497,7 @@ test('a recommendation is visible in its original goal and its notification open
   window.AlongAgentBridge.notification=async(name,value)=>{if(name==='eventTaskOpened')receipts.push(value);return {};};
   document.getElementById=id=>dom.app.innerHTML.includes('id="'+id+'"')?{focus(){},scrollIntoView:()=>scrolled.push(id)}:null;
   await import(`../web/app.mjs?recommendation-ui=${Date.now()}`);await settle();
-  assert.match(dom.app.innerHTML,/原运动目标/);assert.match(dom.app.innerHTML,/周末徒步方案/);assert.match(dom.app.innerHTML,/爬升尚未核实/);
+  assert.match(dom.app.innerHTML,/原运动目标/);assert.match(dom.app.innerHTML,/周末徒步方案/);assert.match(dom.app.innerHTML,/依据来源/);
   await dom.fireWindow('along-notification-open',{detail:{userId:'u_app_b',goalId:goal.id,taskId:'t_source_ui',eventId:result.eventId,kind:'recommendation_ready'}});
   assert.ok(scrolled.includes('event-message-'+result.eventId));assert.match(dom.app.innerHTML,/agent-composer/);
   assert.equal(receipts.at(-1).taskId,'t_source_ui');

@@ -28,7 +28,7 @@ export function safeRecommendation(value) {
         !Array.isArray(value.sources)||value.sources.length>30||!Array.isArray(value.options)||value.options.length>3) return null;
     const seen=new Set(),sources=value.sources.map(s=>{
       if (!record(s)||!id(s.id)||seen.has(s.id)||!text(s.title,300)||!publicSourceURL(s.url)||
-          !instant(s.retrievedAt)||!instant(s.expiresAt)||
+          !instant(s.retrievedAt)||!instant(s.expiresAt)||Date.parse(s.expiresAt)<Date.parse(s.retrievedAt)||
           s.publishedAt!==undefined&&!instant(s.publishedAt)) throw Error();
       seen.add(s.id);
       return {id:s.id,title:s.title,url:publicSourceURL(s.url),retrievedAt:s.retrievedAt,expiresAt:s.expiresAt,
@@ -52,8 +52,8 @@ export function safeRecommendation(value) {
       });
       // Tighten presentation if the server ever sends an inconsistent safety state.
       const risk=checks.some(c=>c.status==='risk');
-      const checked=value.kind!=='hiking'||checks.length===2&&checks.every(c=>c.status==='ok');
-      const status=risk?'excluded':o.status==='recommended'&&(!checked||!o.sourceIds.length)?'conditional':o.status;
+      const checked=checks.every(c=>c.status==='ok')&&(value.kind!=='hiking'||checks.length===2);
+      const status=risk?'excluded':o.status==='recommended'&&(!checked||!o.sourceIds.length||o.unknowns.length)?'conditional':o.status;
       return {id:o.id,title:o.title,reason:o.reason,status,conditions:[...o.conditions],unknowns:[...o.unknowns],facts,checks,sourceIds:[...o.sourceIds]};
     });
     let status=value.status;
@@ -63,7 +63,7 @@ export function safeRecommendation(value) {
   } catch {return null;}
 }
 
-const date=value=>new Date(value).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit',hourCycle:'h23'});
+const date=value=>new Date(value).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',year:'numeric',month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit',hourCycle:'h23'});
 export function recommendationCard(value,{eventId='',feedback=true,now=Date.now()}={}) {
   const r=safeRecommendation(value);if (!r) return '';
   const expired=Date.parse(r.validUntil)<=now||r.sources.some(s=>Date.parse(s.expiresAt)<=now);
