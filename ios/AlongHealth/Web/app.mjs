@@ -1175,30 +1175,32 @@ async function openEventNotification(route,synced=false) {
     goalId:goal.id,taskId:task?.id??null});
 }
 function localGoalEntries() {
-  const custom=customGoalEntries(goalCustom,goalLayouts);
+  const keys=new Set(['health','finance',...Object.keys(goalCustom).filter(isCustomGoalKey),...Object.keys(goalLayouts).filter(isCustomGoalKey)]);
   const entries=[];
-  for (const key of ['health','finance']) {
-    const hasHistory=goalCustom[key]||goalLayouts[key]||conversations[key]?.length||storedActiveGoal===key||
-      (key==='health'?(state.source||state.goals.some(g=>g&&(g.type!=='workout'||g.target!==120))):
-        finance.connected||finance.recordCount>0);
-    if (hasHistory) entries.push({key,title:goalCustom[key]?.title||goalLayouts[key]?.title||currentGoal(key).title});
+  for (const key of keys) {
+    const saved=goalCustom[key];
+    const title=[saved?.title,goalLayouts[key]?.title,saved?.task].find(text=>typeof text==='string'&&text.trim());
+    if (title) entries.push({key,title});
   }
-  return [...entries,...custom];
+  return entries;
 }
 function localTasks(key) {
   if (goalLayouts[key]) return goalLayouts[key].tasks;
+  const old=goalCustom[key];
+  // Some early task accepts saved only the task and its reason, without a named goal.
+  if (typeof old?.task==='string'&&old.task.trim()&&
+      (isCustomGoalKey(key)||typeof old.title!=='string'||!old.title.trim())) {
+    return [{id:'primary',title:old.task,detail:old.reason||''}];
+  }
   // Built-in computed tasks use the same on-device selection/metric checks as their original home.
   if (key==='health'||key==='finance') return currentTaskRecords(key);
-  const old=goalCustom[key];
-  return old?.task?[{id:'primary',title:old.task,detail:old.reason||''}]:[];
+  return [];
 }
-function localRecordPage(choice,picker,connection) {
+function localRecordPage(choice,title,picker,connection) {
   const {key,taskId,reminderTitle,reminderAt,dailyTopic}=choice;
   const allowedTopic=!dailyTopic||dailyPhoneScope(key)?.selectedTypes.includes(dailyTopic);
   const reminderBody=allowedTopic?choice.reminderBody:null;
-  const entry=localGoalEntries().find(e=>e.key===key);
-  const title=entry?.title||(key==='health'?'本机健康目标':key==='finance'?'本机理财目标':'本机目标');
-  const tasks=entry?localTasks(key):[];
+  const tasks=localTasks(key);
   const task=taskId?tasks.find(item=>item.id===taskId):null;
   const receipt=reminderTitle?`<p>${esc(reminderTitle)}${reminderAt&&Number.isFinite(Date.parse(reminderAt))?` · ${esc(formatDate(reminderAt))}`:''}</p>${reminderBody?`<p>${esc(reminderBody)}</p>`:''}`:'';
   const card=task?`${backButton('local-task-back','返回本机目标')}<section class="goal-card"><p class="goal-note">${esc(title)}</p><h1>${esc(task.title)}</h1><p>${esc(task.detail)}</p>${receipt}${task.scheduledFor||task.when?`<p class="goal-note">${esc(task.scheduledFor?formatDate(task.scheduledFor):task.when)}</p>`:''}</section>`
@@ -1213,14 +1215,15 @@ function eventWorkspacePage() {
   const goal=view.goals[view.activeGoalId];
   const chat=screen==='agent'||Boolean(goal&&goal.status!=='active');
   const localChoices=localGoalEntries();
-  if (localSelection&&!localChoices.some(i=>i.key===localSelection.key)) localChoices.push({key:localSelection.key,title:'原提醒的本机目标'});
+  const selectedLocal=localChoices.find(item=>item.key===localSelection?.key);
+  if (!selectedLocal) localSelection=null;
   const options=goals.map(item=>`<option value="${esc(item.id)}" ${!localSelection&&item.id===view.activeGoalId?'selected':''}>${esc(item.title)}</option>`).join('');
   const messages=view.messages.filter(message=>(message.presentation!=='execution'||message.notificationEventId)&&(view.activeGoalId
     ?message.goalId===view.activeGoalId:message.conversationId===view.conversationId));
   const connectionError=view.error||agentConnection.error;
   const connection=connectionError?`<details class="agent-setup"><summary>连接需处理 · ${esc(connectionError)}</summary><form id="host-address-form"><label>Along 服务地址<input name="baseURL" type="url" value="${esc(agentConfig.baseURL||'')}" required></label><button class="button">验证并更新</button></form></details>`:'';
   const goalPicker=`<div class="goal-switch"><label for="event-goal-select">当前目标</label><div class="goal-switch-actions"><div class="select-wrap"><select id="event-goal-select" aria-label="切换目标"><option value="" ${!localSelection&&!view.activeGoalId?'selected':''}>新对话</option>${options}${localChoices.length?`<optgroup label="本机已存目标">${localChoices.map(l=>`<option value="local:${esc(l.key)}" ${localSelection?.key===l.key?'selected':''}>${esc(l.title)}</option>`).join('')}</optgroup>`:''}</select></div><button class="goal-add-button" data-action="new-goal">新建</button></div></div>`;
-  if (localSelection) return localRecordPage(localSelection,goalPicker,connection);
+  if (selectedLocal) return localRecordPage(localSelection,selectedLocal.title,goalPicker,connection);
   const history=messages.map(message=>`<div ${message.notificationEventId?`id="event-message-${esc(message.notificationEventId)}"`: ''} class="agent-message ${message.role==='user'?'user':'assistant'}"><p>${esc(message.text)}</p>${message.status==='pending'?'<p class="agent-disclaimer">待同步</p>':message.status==='rejected'||message.status==='failed'?'<p class="agent-disclaimer">发送未完成，请通过聊天重新说明。</p>':''}</div>`).join('');
   const content=chat?`${backButton('agent-back','返回目标')}<div class="agent-title"><h1>${esc(goal?.title||'说说你想做什么')}</h1></div>${connection}<div class="agent-messages" role="log" aria-live="polite">${history||'<p class="agent-empty">说说你的想法，Along 会和你一起理清下一步。</p>'}</div>`
     :goal?`${connection}<section class="goal-card"><h1>${esc(goal.title)}</h1>${goal.metric?`<p class="goal-note">${esc(goal.metric.target)} ${esc(goal.metric.unit)} · ${esc(goal.metric.period)}</p>`:''}${goal.context.length?`<p class="goal-note">${goal.context.map(item=>esc(typeof item==='string'?item:item.text)).join('；')}</p>`:''}<div class="card-actions"><button class="agent-action" data-action="event-chat">聊聊这个目标</button></div></section>${eventHealthConnection(goal)}<section class="task-section"><div class="section-heading"><h2>动态任务</h2></div><div class="task-list">${goal.tasks.filter(task=>task.status!=='cancelled').map(task=>`<div class="task-row" tabindex="-1" id="event-task-${esc(task.id)}"><div><strong>${esc(task.content)}</strong>${task.scheduledAt?`<p>${esc(new Date(task.scheduledAt).toLocaleString('zh-CN'))}</p>`:''}</div><span class="task-row-status">${task.status==='done'?'已完成':'待完成'}</span></div>`).join('')||'<p class="agent-empty">通过聊天安排下一步。</p>'}</div></section>`:'';
@@ -2395,15 +2398,8 @@ window.addEventListener('along-health-update', async event => {
   await reviewAll('observation',previous);
   if (screen==='home') render();
 });
-function openAlongNotification(detail) {
-  if (!detail || typeof detail!=='object') return;
-  if (detail.userId && detail.eventId) {
-    lastNotificationProjection='';
-    void openEventNotification(detail).catch(()=>{});
-    return;
-  }
+function openSavedLocalNotification(detail) {
   const goalKey=detail.goalKey;
-  if (goalKey!=='health' && goalKey!=='finance' && !isCustomGoalKey(goalKey)) return;
   const planTask=detail.dailyTopic&&typeof detail.planTaskId==='string'&&localTasks(goalKey).some(t=>t.id===detail.planTaskId)?detail.planTaskId:null;
   localSelection={key:goalKey,taskId:detail.kind==='task'?(planTask??(typeof detail.taskId==='string'?detail.taskId:null)):null,
     dailyTopic:['sleep','workout'].includes(detail.dailyTopic)?detail.dailyTopic:null,reminderAt:detail.reminderAt,
@@ -2433,8 +2429,19 @@ function openAlongNotification(detail) {
 let notificationGeneration=0;
 function receiveAlongNotification(detail) {
   notificationGeneration++;
-  openAlongNotification(detail);
-  if (typeof detail?.legacyOpenId==='string'&&localSelection?.key===detail.goalKey) {
+  if (!detail || typeof detail!=='object') return;
+  if (detail.userId || detail.eventId) {
+    if (detail.userId && detail.eventId) {
+      lastNotificationProjection='';
+      void openEventNotification(detail).catch(()=>{});
+    }
+    return;
+  }
+  if (!['goal','task'].includes(detail.kind) ||
+      (detail.goalKey!=='health'&&detail.goalKey!=='finance'&&!isCustomGoalKey(detail.goalKey))) return;
+  if (localGoalEntries().some(item=>item.key===detail.goalKey)) openSavedLocalNotification(detail);
+  // An obsolete tap is consumed too, so the native queue cannot replay it on the next launch.
+  if (typeof detail.legacyOpenId==='string') {
     void Promise.resolve(window.AlongAgentBridge?.notification?.('legacyNotificationOpened',{id:detail.legacyOpenId})).catch(()=>{});
   }
 }

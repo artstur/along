@@ -160,13 +160,16 @@ test('saved goal inventory excludes source data, demo records, drafts and stale 
 test('saved goal inventory preserves an accepted task or validated layout even without a goal proposal',async()=>{
   const seed=localNoticeSeed(),layout=JSON.parse(seed['along.adaptive-layouts.v1'])['custom:legacy'];
   seed['along.adaptive-layouts.v1']=JSON.stringify({health:layout});
-  seed['along.goal-custom.v1']=JSON.stringify({'custom:taskonly':{task:'已确认的行动',reason:'已保存的详情'},finance:{title:'已设定的演示目标'}});
+  seed['along.goal-custom.v1']=JSON.stringify({'custom:taskonly':{task:'已确认的行动',reason:'已保存的详情'},finance:{task:'已确认的演示行动',reason:'已存演示任务详情'}});
   const dom=installDomStub({storage:seed});installEventBridge();
   await import(`../web/app.mjs?saved-task-only=${Date.now()}`);await settle();
   for (const key of ['health','finance','custom:taskonly']) assert.ok(dom.app.innerHTML.includes('value="local:'+key+'"'));
   await dom.fireWindow('along-notification-open',{detail:{kind:'task',goalKey:'custom:taskonly',taskId:'primary'}});
   assert.match(dom.app.innerHTML,/<h1>已确认的行动<\/h1>/);
   assert.match(dom.app.innerHTML,/已保存的详情/);
+  await dom.fireWindow('along-notification-open',{detail:{kind:'task',goalKey:'finance',taskId:'primary'}});
+  assert.match(dom.app.innerHTML,/<h1>已确认的演示行动<\/h1>/);
+  assert.match(dom.app.innerHTML,/已存演示任务详情/);
 });
 test('obsolete legacy notification preserves the visible saved goal and acknowledges only its legacy queue entry',async()=>{
   const seed=localNoticeSeed();seed['along.event-workspace.v1:u_app_b']=savedEventWorkspace();

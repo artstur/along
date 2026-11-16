@@ -63,6 +63,15 @@ test('offline restart rejects invalid conversation references outside the known 
     assert.equal(localStorage.getItem(key),raw);
   }
 });
+test('an execution receipt migration keeps the validated workspace accessible when the cache is read-only',()=>{
+  const key='along.event-workspace.v1:'+config.userId,raw=JSON.stringify(cachedReceiptWorkspace());
+  installDomStub({storage:{[key]:raw}});
+  localStorage.setItem=()=>{throw Error('storage full');};
+  const restored=createEventWorkspace({config}).view();
+  assert.equal(restored.activeGoalId,'g_sleep');assert.equal(restored.goals.g_sleep.tasks.length,5);
+  assert.equal(restored.messages[0].conversationId,undefined);
+  assert.equal(localStorage.getItem(key),raw);
+});
 
 test('chat is durable before sending; same-id retry survives reopening and uses the bound user queue',async()=>{
   let online=false;
