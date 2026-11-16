@@ -6,37 +6,39 @@ const lifetime=10*60_000;
 const id=value=>typeof value==='string'&&/^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$/.test(value);
 const eventId=value=>typeof value==='string'&&/^[A-Za-z0-9][A-Za-z0-9:_.-]{0,179}$/.test(value);
 const same=(a,b)=>a?.userId===b?.userId&&a?.deviceId===b?.deviceId;
-const sameOccurrence=(a,b)=>a.goalId===b.goalId&&a.taskId===b.taskId&&Date.parse(a.scheduledAt)===Date.parse(b.scheduledAt);
+const systemSecond=value=>Math.floor(Date.parse(value)/1000)*1000;
+const sameOccurrence=(a,b)=>a.goalId===b.goalId&&a.taskId===b.taskId&&systemSecond(a.scheduledAt)===systemSecond(b.scheduledAt);
 function civil(at,timezone) {
   const fields=Object.fromEntries(new Intl.DateTimeFormat('en-GB',{timeZone:timezone,hourCycle:'h23',
     year:'numeric',month:'2-digit',day:'2-digit',weekday:'short',hour:'2-digit',minute:'2-digit',second:'2-digit'}).formatToParts(new Date(at)).map(p=>[p.type,p.value]));
   return {stamp:Date.UTC(+fields.year,+fields.month-1,+fields.day,+fields.hour,+fields.minute,+fields.second),clock:fields.hour+':'+fields.minute+':'+fields.second,weekday:['Mon','Tue','Wed','Thu','Fri','Sat','Sun'].indexOf(fields.weekday)+1};
+}
+// Match the scheduler's civil-time policy: shift through a gap; choose the first instant in a fold.
+function recurringInstant(at,row) {
+  const day=86400_000,local=civil(at,row.timezone),anchor=civil(row.wallTime??row.firstScheduledAt,row.timezone);
+  if (row.repeat==='weekly'&&local.weekday!==row.weekday) return undefined;
+  const target=Math.floor(local.stamp/day)*day+anchor.stamp%day;
+  const offsets=[-day,day].map(delta=>civil(target+delta,row.timezone).stamp-(target+delta));
+  return [...new Set(offsets)].map(offset=>target-offset).filter(t=>civil(t,row.timezone).stamp>=target)
+    .sort((a,b)=>civil(a,row.timezone).stamp-civil(b,row.timezone).stamp||a-b)[0];
 }
 const instant=value=>typeof value==='string'&&/^\d{4}-\d\d-\d\dT.*(?:Z|[+-]\d\d:\d\d)$/i.test(value)&&Number.isFinite(Date.parse(value));
 function validRecurrence(row) {
   const has=['repeat','timezone','weekday','firstScheduledAt','wallTime'].some(k=>row[k]!==undefined);
   if (!has) return true;
   if (!['daily','weekly'].includes(row.repeat)||typeof row.timezone!=='string'||row.timezone.length>100||
-      !instant(row.firstScheduledAt)||!instant(row.scheduledAt)||Date.parse(row.firstScheduledAt)>Date.parse(row.scheduledAt)||
+      !instant(row.firstScheduledAt)||!instant(row.scheduledAt)||systemSecond(row.firstScheduledAt)>systemSecond(row.scheduledAt)||
       (row.wallTime!==undefined&&!instant(row.wallTime))||
       (row.repeat==='weekly'? !Number.isInteger(row.weekday)||row.weekday<1||row.weekday>7:row.weekday!==undefined)) return false;
   try {
-    const actual=civil(row.scheduledAt,row.timezone),anchor=civil(row.wallTime??row.firstScheduledAt,row.timezone);
-    return actual.clock===anchor.clock&&(row.repeat!=='weekly'||actual.weekday===row.weekday);
+    return recurringInstant(row.scheduledAt,row)===systemSecond(row.scheduledAt);
   } catch {return false;}
 }
 function coversOccurrence(receipt,route) {
   if (sameOccurrence(receipt,route)) return true;
   if (!receipt.repeat||receipt.goalId!==route.goalId||receipt.taskId!==route.taskId||
       Date.parse(route.scheduledAt)<Date.parse(receipt.scheduledAt)) return false;
-  const actual=civil(route.scheduledAt,receipt.timezone),anchor=civil(receipt.wallTime??receipt.firstScheduledAt,receipt.timezone);
-  if (actual.clock!==anchor.clock||receipt.repeat==='weekly'&&actual.weekday!==receipt.weekday) return false;
-  // Native calendar repeats choose the first instant in an overlap. A later, explicitly
-  // rescheduled instant with the same wall clock is a distinct occurrence and still needs delivery.
-  const at=Date.parse(route.scheduledAt),day=86400_000;
-  const candidates=[at-day,at+day].map(t=>actual.stamp-(civil(t,receipt.timezone).stamp-t));
-  return !candidates.some(t=>t<at&&civil(t,receipt.timezone).stamp===actual.stamp);
-
+  return recurringInstant(route.scheduledAt,receipt)===systemSecond(route.scheduledAt);
 }
 
 function relevant(route,detail) {

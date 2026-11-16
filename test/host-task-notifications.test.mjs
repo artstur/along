@@ -311,3 +311,22 @@ test('the later clock occurrence during a daylight saving fold is not covered by
   due.payload.snapshot.tasks[0].scheduledAt=later;f.pages.push(due);
   await taskNotifications(f.options).dispatch();assert.equal(f.sent.length,1);
 });
+
+test('the Host accepts a real civil recurrence whose next occurrence shifted through a DST gap',t=>{
+  const f=fixture(t),one=taskNotifications(f.options);
+  const receipt={goalId:'g_test',taskId:'t_test',revision:2,repeat:'daily',timezone:'America/New_York',
+    firstScheduledAt:'2027-03-13T07:30:00Z',wallTime:'2027-03-13T07:30:00Z',scheduledAt:'2027-03-14T07:30:00Z'};
+  assert.doesNotThrow(()=>one.scheduled(f.who,{expectedUserId:f.who.userId,reminders:[receipt]}));
+});
+
+
+test('system second precision matches Agent timestamps with fractional milliseconds',async t=>{
+  const f=fixture(t),one=taskNotifications(f.options);one.register(f.who,f.input);
+  const firstScheduledAt=new Date(f.options.now()+1523).toISOString(),actual=new Date(f.options.now()+1000).toISOString();
+  assert.doesNotThrow(()=>one.scheduled(f.who,{expectedUserId:f.who.userId,reminders:[{goalId:'g_test',taskId:'t_test',revision:2,
+    scheduledAt:actual,firstScheduledAt,repeat:'daily',timezone:'Asia/Shanghai'}]}));
+  f.tick(2100);
+  const due=f.item(1,'reminder_due');due.payload.notification.scheduled_at=firstScheduledAt;
+  due.payload.snapshot.tasks[0].scheduledAt=firstScheduledAt;f.pages.push(due);
+  await one.dispatch();assert.equal(f.sent.length,0);
+});

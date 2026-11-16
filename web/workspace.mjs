@@ -13,6 +13,12 @@ export function ensureHealthGoal(state) {
   };
 }
 
+export function withoutDefaultHealthGoal(state) {
+  const goals=state.goals.filter(goal=>!(goal?.id===HEALTH_GOAL_ID && goal.type==='workout' &&
+    goal.target===120 && Object.keys(goal).length===3));
+  return goals.length===state.goals.length?state:{...state,goals};
+}
+
 export function loadFinance(raw) {
   try {
     const value = JSON.parse(raw);

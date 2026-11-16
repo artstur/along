@@ -1,5 +1,5 @@
 import {KEY, loadState, setSnapshot} from './health.mjs';
-import {ACTIVE_GOAL_KEY, FINANCE_KEY, ensureHealthGoal, loadFinance, connectFinanceDemo, addFinanceDemoRecord, healthView, financeView} from './workspace.mjs';
+import {ACTIVE_GOAL_KEY, FINANCE_KEY, ensureHealthGoal, withoutDefaultHealthGoal, loadFinance, connectFinanceDemo, addFinanceDemoRecord, healthView, financeView} from './workspace.mjs';
 import {EXPERIMENT, startExperiment, routeHealthEvent, acceptAgentSuggestion, agentRequestPayload} from './loop.mjs';
 import {goalChangeText} from './goal-agent-core.mjs';
 import {createEventWorkspace} from './event-workspace.mjs';
@@ -23,15 +23,15 @@ if ('serviceWorker' in navigator) {
   try { void navigator.serviceWorker.register('./sw.js').catch(()=>{}); }
   catch { /* 注册失败不影响正常使用。 */ }
 }
-let state = ensureHealthGoal(loadState(localStorage.getItem(KEY)));
+let state = loadState(localStorage.getItem(KEY));
 // 实验是个沙盒：App 重启后不该还停在演示数据上、把用户真实的健康摘要顶掉。
 // 实验室页的「返回目标」退出实验时也是这么做的，这里是重启时的同一件事。
 // 备份本身也可能被写坏：形状不对就用初始状态，别让整个 App 起不来。
-if (state.loop?.experiment === EXPERIMENT) {
+const restoringExperiment=state.loop?.experiment===EXPERIMENT;
+if (restoringExperiment) {
   const backup=state.loop.previousState;
   const restored=backup && typeof backup==='object' && Array.isArray(backup.goals) ? backup : loadState(null);
-  state = ensureHealthGoal(restored);
-  localStorage.setItem(KEY, JSON.stringify(state));
+  state = restored;
 }
 let finance = loadFinance(localStorage.getItem(FINANCE_KEY));
 const storedActiveGoal=localStorage.getItem(ACTIVE_GOAL_KEY);
@@ -65,6 +65,8 @@ function connectEventWorkspace(userId) {
     eventWorkspace=createEventWorkspace({config:{...agentConfig,userId},onChange:()=>renderEventUpdate(),
       onNotifications:window.AlongAgentBridge?.notification?value=>syncEventNotifications(value,bindingKey):undefined});
     eventWorkspaceBinding=bindingKey;
+    const health=healthStateForWorkspace(state);
+    if (health!==state) persistHealthState(health);
     const view=eventWorkspace.view();
     waitingForSavedGoal=!view.activeGoalId&&!view.composing;
     if (!localSelection&&waitingForSavedGoal) {
@@ -208,7 +210,7 @@ function syncAgentViewportHeight() {
 syncAgentViewportHeight();
 window.visualViewport?.addEventListener('resize',syncAgentViewportHeight);
 window.addEventListener('resize',syncAgentViewportHeight);
-if (!eventConnection()) localStorage.setItem(KEY, JSON.stringify(state));
+if (!eventConnection()||restoringExperiment) persistHealthState(state);
 
 const esc = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
 // 仓库外的 Agent 服务给出的字段不保证是字符串：不能直接对它调用 .slice()，
@@ -458,6 +460,14 @@ async function refreshAgentConnection({healthOnly=false}={}) {
   if (eventWorkspace) renderEventUpdate();
   else if (screen==='agent') renderAgentUpdate();
 }
+function healthStateForWorkspace(next) {
+  if ((eventWorkspace||eventConnection())&&!localGoalEntries().some(entry=>entry.key==='health')) return withoutDefaultHealthGoal(next);
+  return ensureHealthGoal(next);
+}
+function persistHealthState(next) {
+  state=healthStateForWorkspace(next);
+  localStorage.setItem(KEY,JSON.stringify(state));
+}
 function saveHealth(next) {
   const source=state.loop?.experiment===EXPERIMENT?state.loop.previousState:state;
   const previous=source?.source==='healthkit'?source.snapshot:null;
@@ -478,8 +488,7 @@ function saveHealth(next) {
       }
     }
   }
-  state = ensureHealthGoal(next);
-  localStorage.setItem(KEY, JSON.stringify(state));
+  persistHealthState(next);
   if (screen !== 'agent') render();
 }
 function saveFinance(next) {
@@ -1287,7 +1296,7 @@ async function connectHealth(goalKey=activeGoal) {
     try {
       if (!window.AlongHealthBridge.healthEvents) throw Error('请重新安装新版 Along App 以启用健康自动跟进');
       const snapshot=await window.AlongHealthBridge.connect({types:['steps','weight','workout','sleep']});
-      state=setSnapshot(state,snapshot,'healthkit'); localStorage.setItem(KEY,JSON.stringify(state));
+      persistHealthState(setSnapshot(state,snapshot,'healthkit'));
       await window.AlongHealthBridge.healthEvents();
       renderEventUpdate();notice('所选健康摘要变化后将自动跟进');
     } catch(error) {notice(error?.message||'健康连接未完成');}
