@@ -129,6 +129,86 @@ function localNoticeSeed() {
     'along.adaptive-layouts.v1':JSON.stringify(layouts),'along.goal-custom.v1':JSON.stringify({[localKey]:{title:'本机原目标'}}),
     'along.active-goal.v1':localKey};
 }
+function savedEventWorkspace() {
+  const goal={id:'g_saved',domain:'custom',status:'active',revision:1,title:'已设定的目标',metric:null,context:[],
+    tasks:[{id:'t_saved',goalId:'g_saved',status:'open',content:'已设定的任务',revision:1}]};
+  return JSON.stringify({version:1,userId:'u_app_b',cursor:1,activeGoalId:goal.id,goals:{[goal.id]:goal},messages:{},drafts:{}});
+}
+test('saved goal inventory excludes source data, demo records, drafts and stale selections after restart',async()=>{
+  const seed=localNoticeSeed(),key='along.event-workspace.v1:u_app_b';
+  seed[key]=savedEventWorkspace();
+  Object.assign(seed,{
+    'along.health.v1':JSON.stringify({version:1,source:'healthkit',goals:[],snapshot:{contextReviewAllowed:true,selectedTypes:[]}}),
+    'along.finance-demo.v1':JSON.stringify({version:1,connected:true,saved:4000,recordCount:1}),
+    'along.active-goal.v1':'finance',
+    'along.goal-conversations.v1':JSON.stringify({health:[{role:'user',text:'尚未设定'}]}),
+  });
+  const before=installDomStub({storage:seed});installEventBridge();
+  await import(`../web/app.mjs?before-removal=${Date.now()}`);await settle();
+  assert.match(before.app.innerHTML,/value="local:custom:legacy"/);
+  const restored=Object.fromEntries(before.store);
+  restored['along.goal-custom.v1']=JSON.stringify({health:{healthTypes:['steps']},finance:{},custom:{title:'  '}});
+  restored['along.adaptive-layouts.v1']='{}';
+  const after=installDomStub({storage:restored});installEventBridge();
+  await import(`../web/app.mjs?removed-records=${Date.now()}`);await settle();
+  assert.doesNotMatch(after.app.innerHTML,/<optgroup label="本机已存目标"|value="local:/);
+  assert.match(after.app.innerHTML,/<h1>已设定的目标<\/h1>/);
+  assert.match(after.app.innerHTML,/已设定的任务/);
+  assert.match(after.app.innerHTML,/所选健康摘要变化后/);
+  assert.equal(after.storage.get('along.health.v1'),seed['along.health.v1']);
+});
+test('saved goal inventory preserves an accepted task or validated layout even without a goal proposal',async()=>{
+  const seed=localNoticeSeed(),layout=JSON.parse(seed['along.adaptive-layouts.v1'])['custom:legacy'];
+  seed['along.adaptive-layouts.v1']=JSON.stringify({health:layout});
+  seed['along.goal-custom.v1']=JSON.stringify({'custom:taskonly':{task:'已确认的行动',reason:'已保存的详情'},finance:{title:'已设定的演示目标'}});
+  const dom=installDomStub({storage:seed});installEventBridge();
+  await import(`../web/app.mjs?saved-task-only=${Date.now()}`);await settle();
+  for (const key of ['health','finance','custom:taskonly']) assert.ok(dom.app.innerHTML.includes('value="local:'+key+'"'));
+  await dom.fireWindow('along-notification-open',{detail:{kind:'task',goalKey:'custom:taskonly',taskId:'primary'}});
+  assert.match(dom.app.innerHTML,/<h1>已确认的行动<\/h1>/);
+  assert.match(dom.app.innerHTML,/已保存的详情/);
+});
+test('obsolete legacy notification preserves the visible saved goal and acknowledges only its legacy queue entry',async()=>{
+  const seed=localNoticeSeed();seed['along.event-workspace.v1:u_app_b']=savedEventWorkspace();
+  const dom=installDomStub({storage:seed});installEventBridge();
+  const acks=[];
+  window.AlongAgentBridge.notification=async (name,value)=>{if (name==='legacyNotificationOpened') acks.push(value.id);return {};};
+  await import(`../web/app.mjs?obsolete-notification=${Date.now()}`);await settle();
+  const route={kind:'task',goalKey:'custom:removed',taskId:'old',reminderTitle:'已移除的提醒',legacyOpenId:'queued-first'};
+  await dom.fireWindow('along-notification-open',{detail:route});
+  assert.match(dom.app.innerHTML,/<h1>已设定的目标<\/h1>/);
+  assert.doesNotMatch(dom.app.innerHTML,/local:custom:removed|已移除的提醒/);
+  await dom.app.dispatch('change',{target:{id:'event-goal-select',value:'local:custom:legacy'}});
+  await dom.fireWindow('along-notification-open',{detail:{...route,legacyOpenId:'queued-next'}});
+  assert.match(dom.app.innerHTML,/<h1>本机原目标<\/h1>/);
+  assert.deepEqual(acks,['queued-first','queued-next']);
+  await dom.fireWindow('along-notification-open',{detail:{userId:'wrong',eventId:'e',goalKey:'custom:legacy',legacyOpenId:'unrelated'}});
+  assert.deepEqual(acks,['queued-first','queued-next']);
+});
+test('obsolete legacy notification from the cold queue allows a subsequently discovered real goal to open',async()=>{
+  const seed=localNoticeSeed();
+  delete seed['along.event-connection.v1'];
+  const dom=installDomStub({storage:seed}),acks=[];
+  let connect;
+  const snapshot={goal:{id:'g_real',domain:'custom',status:'active',currentRevision:1},
+    revision:{goalId:'g_real',revision:1,title:'同步的目标',status:'active'},tasks:[]};
+  window.AlongAgentBridge={request:async input=>{
+    if (input.path==='/connection/status') return new Promise(resolve=>{connect=resolve;});
+    if (input.path==='/sync') return {items:input.body.after_seq?[]:[{seq:1,userId:'u_app_b',goalId:'g_real',kind:'goal_updated',payload:{snapshot}}]};
+    return {};
+  },notification:async (name,value)=>{
+    if (name==='pendingLegacyNotification') return {route:{kind:'goal',goalKey:'custom:removed',legacyOpenId:'queued-cold'}};
+    if (name==='legacyNotificationOpened') acks.push(value.id);
+    return {};
+  }};
+  await import(`../web/app.mjs?obsolete-cold=${Date.now()}`);await settle();
+  assert.equal(dom.storage.get('along.active-goal.v1'),'custom:legacy');
+  connect({along:true,ready:true,runtime:'dsh-superagent',eventProtocol:1,userId:'u_app_b'});await settle();
+  await dom.tick(3000);await settle();
+  assert.match(dom.app.innerHTML,/<h1>同步的目标<\/h1>/);
+  assert.doesNotMatch(dom.app.innerHTML,/local:custom:removed/);
+  assert.deepEqual(acks,['queued-cold']);
+});
 test('legacy notification reopens exactly its own saved task offline and returns to the event workspace',async()=>{
   const seed=localNoticeSeed(),dom=installDomStub({storage:seed});
   document.visibilityState='visible';
