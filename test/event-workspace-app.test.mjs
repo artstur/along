@@ -134,6 +134,83 @@ function savedEventWorkspace() {
     tasks:[{id:'t_saved',goalId:'g_saved',status:'open',content:'已设定的任务',revision:1}]};
   return JSON.stringify({version:1,userId:'u_app_b',cursor:1,activeGoalId:goal.id,conversationId:null,goals:{[goal.id]:goal},messages:{},drafts:{}});
 }
+const healthStateKey='along.health.v1';
+const defaultWorkout={id:'along-health-weekly-workout',type:'workout',target:120};
+test('bound health storage removes only the exact legacy default and keeps imports, observations and offline data',async()=>{
+  const seed=localNoticeSeed(),customWorkout={...defaultWorkout,target:135},annotated={...defaultWorkout,origin:'user'};
+  const kept=[customWorkout,annotated,{id:'independent',type:'workout',target:120}];
+  seed[healthStateKey]=JSON.stringify({version:1,source:'healthkit',snapshot:{steps:10,selectedTypes:['steps']},goals:[defaultWorkout,...kept]});
+  seed['along.event-workspace.v1:u_app_b']=savedEventWorkspace();
+  const dom=installDomStub({storage:seed});installEventBridge();document.visibilityState='visible';
+  const summary=steps=>({steps,selectedTypes:['steps'],contextReviewAllowed:true});
+  window.AlongHealthBridge={connect:async()=>summary(30),healthEvents:async()=>({enabled:true})};
+  await import(`../web/app.mjs?bound-health-store=${Date.now()}`);await settle();
+  const read=()=>JSON.parse(localStorage.getItem(healthStateKey));
+  assert.deepEqual(read().goals,kept);assert.equal(read().snapshot.steps,10);
+  await dom.fireWindow('along-health-update',{detail:summary(20)});
+  assert.equal(read().snapshot.steps,20);assert.deepEqual(read().goals,kept);
+  await dom.click({action:'event-health-connect'});await settle();
+  assert.equal(read().snapshot.steps,30);assert.deepEqual(read().goals,kept);
+  const again=installDomStub({storage:Object.fromEntries(dom.store)});window.AlongAgentBridge={request:async()=>{throw Error('offline');}};
+  let writes=0;const set=localStorage.setItem;
+  localStorage.setItem=(k,v)=>{if (k===healthStateKey) writes++;set(k,v);};
+  await import(`../web/app.mjs?clean-health-restart=${Date.now()}`);await settle();
+  assert.equal(writes,0);assert.deepEqual(read().goals,kept);
+  assert.match(again.app.innerHTML,/<h1>已设定的目标<\/h1>/);
+});
+test('bound health storage stays empty on fresh observation and manual import even when pairing is discovered late',async()=>{
+  const seed=localNoticeSeed();delete seed['along.event-connection.v1'];
+  const dom=installDomStub({storage:seed});document.visibilityState='visible';installEventBridge();
+  window.AlongHealthBridge={connect:async()=>({steps:42,selectedTypes:['steps']}),healthEvents:async()=>({enabled:true})};
+  await import(`../web/app.mjs?later-bound-health=${Date.now()}`);await settle();
+  const read=()=>JSON.parse(localStorage.getItem(healthStateKey));
+  assert.deepEqual(read().goals,[]);
+  await dom.fireWindow('along-health-update',{detail:{steps:15,selectedTypes:['steps']}});
+  assert.deepEqual(read().goals,[]);assert.equal(read().snapshot.steps,15);
+  await dom.click({action:'event-health-connect'});await settle();
+  assert.deepEqual(read().goals,[]);assert.equal(read().snapshot.steps,42);
+});
+test('bound health storage preserves a saved legacy health plan or task matching the default workout target',async()=>{
+  for (const [source,record] of [['along.goal-custom.v1',{health:{task:'已采用的任务'}}],['along.adaptive-layouts.v1',{
+    health:JSON.parse(localNoticeSeed()['along.adaptive-layouts.v1'])['custom:legacy']} ]]) {
+    const seed=localNoticeSeed();seed[source]=JSON.stringify(record);
+    seed[healthStateKey]=JSON.stringify({version:1,source:null,snapshot:null,goals:[defaultWorkout]});
+    const dom=installDomStub({storage:seed});installEventBridge();document.visibilityState='visible';
+    await import(`../web/app.mjs?keep-health-plan=${source}`);await settle();
+    await dom.fireWindow('along-health-update',{detail:{steps:12,selectedTypes:['steps']}});
+    assert.deepEqual(JSON.parse(localStorage.getItem(healthStateKey)).goals,[defaultWorkout]);
+    assert.match(dom.app.innerHTML,/value="local:health"/);
+  }
+});
+test('task reminder plans render source, time, frequency or question and survive an offline restart',async()=>{
+  const seed=localNoticeSeed(),dom=installDomStub({storage:seed}),when='2099-11-23T02:00:00Z';
+  const timed=(source,repeat,fields={})=>({scheduledAt:when,reminderPlan:{state:'scheduled',source,repeat,explanation:'提前安排准备',...fields}});
+  const cases={weekly:timed('agent','weekly',{weekday:1}),daily:timed('agent','daily'),once:timed('agent','once'),
+    user:timed('user','once'),question:{reminderPlan:{state:'needs_time',question:'何时提醒你 <准备>？'}},
+    off:{reminderPlan:{state:'off',reason:'opt_out'}},untimed:{reminderPlan:{state:'off',reason:'untimed'}},old:{scheduledAt:when}};
+  const tasks=Object.entries(cases).map(([id,plan])=>({id,goalId:'g_plans',status:'open',content:'任务 '+id,currentRevision:1,...plan}));
+  const snapshot={goal:{id:'g_plans',domain:'custom',status:'active',currentRevision:1},
+    revision:{goalId:'g_plans',revision:1,title:'测试提醒',status:'active'},tasks};
+  installEventBridge({syncItems:[{seq:1,userId:'u_app_b',goalId:'g_plans',kind:'task_updated',payload:{snapshot}}]});
+  const projections=[];window.AlongAgentBridge.notification=async(name,value)=>{if (name==='eventTaskSync') projections.push(value);return {};};
+  await import(`../web/app.mjs?reminder-plan-rows=${Date.now()}`);await settle();
+  const check=app=>{
+    const row=id=>app.innerHTML.split('id="event-task-'+id+'"')[1].split('</strong>')[1].split('</div>')[0];
+    for (const [id,freq] of [['weekly','每周一'],['daily','每天'],['once','一次']]) {
+      const text=row(id);
+      for (const expected of ['Agent 安排','下次',freq,'提前安排准备',new Date(when).toLocaleString('zh-CN')]) assert.ok(text.includes(expected),text);
+    }
+    assert.doesNotMatch(row('user'),/Agent 安排/);assert.match(row('user'),/一次/);
+    assert.match(row('question'),/何时提醒你 &lt;准备&gt;？/);assert.doesNotMatch(row('question'),/下次|2099/);
+    assert.match(row('off'),/关闭提醒/);assert.doesNotMatch(row('untimed'),/下次|Agent 安排/);
+    assert.equal(row('old'),'<p>'+new Date(when).toLocaleString('zh-CN')+'</p>');
+  };
+  check(dom.app);
+  assert.deepEqual(projections.at(-1).reminders.map(r=>r.taskId).sort(),['daily','old','once','user','weekly']);
+  assert.ok(projections.at(-1).reminders.every(r=>r.scheduledAt===new Date(when).toISOString()));
+  const reopened=installDomStub({storage:Object.fromEntries(dom.store)});window.AlongAgentBridge={request:async()=>{throw Error('offline');}};
+  await import(`../web/app.mjs?reminder-plan-offline=${Date.now()}`);await settle();check(reopened.app);
+});
 test('saved goal inventory excludes source data, demo records, drafts and stale selections after restart',async()=>{
   const seed=localNoticeSeed(),key='along.event-workspace.v1:u_app_b';
   seed[key]=savedEventWorkspace();
