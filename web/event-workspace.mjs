@@ -49,13 +49,13 @@ export function safeWorkspaceGoal(snapshot) {
 }
 
 function safeMessage(message,item) {
-  if (!record(message)||!text(message.id,300)||!(id(message.eventId)||item.payload.presentation==='execution'&&text(message.eventId,200))||!['user','assistant','system'].includes(message.role)||
+  if (!record(message)||!text(message.id,300)||!(id(message.eventId)||item.payload.presentation==='execution'&&eventId(message.eventId))||!['user','assistant','system'].includes(message.role)||
       !['inbound','outbound'].includes(message.direction)||!text(message.text,2000)||!version(message.seq)||message.seq<1||
       (message.causationId!==undefined&&!id(message.causationId))||
       (message.userId!==undefined&&message.userId!==item.userId)||
       (item.payload.conversation_id!==undefined&&!id(item.payload.conversation_id))) throw Error('对话同步格式不正确');
   return {id:message.id,eventId:message.eventId,role:message.role,text:message.text,seq:message.seq,
-    goalId:item.goalId,conversationId:item.payload.conversation_id??message.causationId??message.eventId,
+    goalId:item.goalId,conversationId:item.payload.conversation_id??message.causationId??(item.payload.presentation==='execution'?undefined:message.eventId),
     replyToMessageId:message.replyToMessageId,presentation:item.payload.presentation,
     notificationEventId:eventId(item.payload.notification?.event_id)&&['recommendation_ready','task_result'].includes(item.payload.notification.kind)
       ?item.payload.notification.event_id:undefined,status:'received'};
@@ -102,10 +102,17 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
           revision:{goalId:goal.id,revision:goal.revision,title:goal.title,status:goal.status,metric:goal.metric,context:goal.context},
           tasks:goal.tasks.map(task=>({...task,currentRevision:task.revision}))});
       }
-      for (const [eventId,message] of Object.entries(saved.messages)) {
-        if (!record(message)||message.eventId!==eventId||!text(message.text,2000)||
-          !['user','assistant','system'].includes(message.role)||(message.goalId!==undefined&&!id(message.goalId))||
-          (message.conversationId!==undefined&&!id(message.conversationId))) throw Error('bad cache');
+      let migratedReceipt=false;
+      for (const [key,message] of Object.entries(saved.messages)) {
+        if (!record(message)||message.eventId!==key||!text(message.text,2000)||
+          !['user','assistant','system'].includes(message.role)||(message.goalId!==undefined&&!id(message.goalId))) throw Error('bad cache');
+        if (message.conversationId!==undefined&&!id(message.conversationId)) {
+          // Older versions used the receipt's own event ID when the sender supplied no conversation.
+          if (message.presentation!=='execution'||message.role!=='assistant'||message.status!=='received'||
+            !id(message.goalId)||!Object.hasOwn(saved.goals,message.goalId)||message.conversationId!==key||!eventId(key)) throw Error('bad cache');
+          delete message.conversationId;
+          migratedReceipt=true;
+        }
       }
       if (saved.drafts!==undefined&&(!record(saved.drafts)||Object.entries(saved.drafts).some(([scope,value])=>
           !/^(?:goal|conversation):[A-Za-z0-9_-]{1,96}$/.test(scope)||typeof value!=='string'||value.length>800))||
@@ -117,6 +124,9 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
       saved.drafts=saved.drafts??{};
       saved.returnGoalId=saved.returnGoalId??null;
       state=saved;
+      if (migratedReceipt) {
+        try { localStorage.setItem(key,JSON.stringify(saved)); } catch { /* Keep the validated goals available offline. */ }
+      }
     }
   } catch { /* A damaged cache is rebuilt from the durable server outbox. */ }
   // Old v1 caches did not record an explicit composer selection. Preserve actual unbound messages/drafts.
