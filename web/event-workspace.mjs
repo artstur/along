@@ -29,7 +29,7 @@ function cleanTaskReminder(task) {
   const {reminderPlan:plan,scheduledAt}=task;
   if (plan===undefined) {
     if (scheduledAt!==undefined&&!time(scheduledAt)) throw Error('任务同步格式不正确');
-    return {scheduledAt:absoluteReminderTime(scheduledAt)?scheduledAt:undefined};
+    return {scheduledAt};
   }
   if (!record(plan)) return {};
   if (plan.state==='scheduled'&&absoluteReminderTime(scheduledAt)&&['user','agent'].includes(plan.source)&&
