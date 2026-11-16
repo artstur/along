@@ -1168,7 +1168,7 @@ async function syncEventNotifications(value,binding) {
 async function openEventNotification(route,synced=false) {
   if (!eventWorkspace||route?.userId!==eventWorkspace.view().userId) return;
   const recommendationMessage=eventWorkspace.view().messages.find(m=>m.goalId===route.goalId&&m.notificationEventId===route.eventId);
-  if (route.kind==='recommendation_ready'&&!recommendationMessage) {
+  if (['recommendation_ready','task_result'].includes(route.kind)&&!recommendationMessage) {
     pendingRecommendationOpen={route,binding:eventWorkspaceBinding};
     if (!synced) void eventWorkspace.sync();
     return;
@@ -1182,7 +1182,7 @@ async function openEventNotification(route,synced=false) {
   const task=goal.tasks.find(t=>t.id===route.taskId&&t.status!=='cancelled');
   localSelection=null;waitingForSavedGoal=false;
   eventWorkspace.select(goal.id);
-  const recommendation=route.kind==='recommendation_ready'&&Boolean(recommendationMessage);
+  const recommendation=Boolean(recommendationMessage?.recommendation)||(route.kind==='recommendation_ready'&&Boolean(recommendationMessage));
   screen=goal.status==='active'&&task&&!recommendation?'home':'agent';render();
   if (task&&goal.status==='active'&&!recommendation) {
     const row=document.getElementById('event-task-'+task.id);

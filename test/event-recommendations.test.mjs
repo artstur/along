@@ -7,7 +7,7 @@ const config={userId:'u_research',baseURL:'https://localhost:4176',fingerprint:'
 const snapshot={goal:{id:'g_research',domain:'custom',status:'active',currentRevision:1},revision:{goalId:'g_research',revision:1,title:'运动安排',status:'active'},tasks:[
   {id:'t_research',goalId:'g_research',status:'open',content:'周五查天气安排周末徒步',currentRevision:1},
   {id:'t_sleep',goalId:'g_research',status:'open',content:'按原计划准备睡觉',currentRevision:2,scheduledAt:'2099-01-01T17:30:00Z'}]};
-const message=(rec=recommendation())=>({seq:1,userId:config.userId,kind:'message',goalId:'g_research',taskId:'t_research',payload:{snapshot,recommendation:rec,
+const message=(rec=recommendation())=>({seq:1,userId:config.userId,kind:'message',goalId:'g_research',taskId:'t_research',remoteNotifications:false,payload:{snapshot,recommendation:rec,
   notification:{event_id:'reply_research',kind:'recommendation_ready',revision:1},
   message:{id:'msg_result',eventId:'reply_research',role:'assistant',direction:'outbound',text:'已找到方案',seq:1}}});
 
@@ -93,4 +93,16 @@ test('an interrupted upgrade replay resumes its page cursor without moving the a
   assert.deepEqual(cursors,[0,2,2]);assert.equal(reopened.view().cursor,10);
   assert.equal(reopened.view().messages[0].recommendation.options.length,1);
   assert.equal(JSON.parse(localStorage.getItem(key)).recommendationsVersion,1);
+});
+
+
+test('a completed research task publishes a current task result while ordinary completed-task recommendations remain suppressed',async()=>{
+  const wire=message(),projections=[];wire.payload.snapshot=structuredClone(snapshot);wire.payload.snapshot.tasks[0].status='done';wire.payload.snapshot.tasks[0].currentRevision=2;
+  wire.payload.notification={event_id:'reply_research',kind:'task_result',revision:2};wire.createdAt=new Date().toISOString();
+  installDomStub();window.AlongAgentBridge={request:async input=>input.path==='/sync'?{items:input.body.after_seq?[]:[wire]}:{acked:1}};
+  const w=createEventWorkspace({config,onNotifications:async p=>projections.push(p)});await w.sync();
+  assert.equal(projections.at(-1).results.length,1);assert.equal(projections.at(-1).results[0].kind,'task_result');assert.equal(projections.at(-1).results[0].revision,2);
+  const other=structuredClone(wire);other.payload.notification.kind='recommendation_ready';
+  installDomStub();window.AlongAgentBridge={request:async input=>input.path==='/sync'?{items:input.body.after_seq?[]:[other]}:{acked:1}};
+  const p=[];await createEventWorkspace({config,onNotifications:async v=>p.push(v)}).sync();assert.deepEqual(p.at(-1).results,[]);
 });

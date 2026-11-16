@@ -551,3 +551,21 @@ test('a recommendation notification waits for its own message through offline an
   assert.ok(scrolled.includes('event-message-reply_race'));assert.equal(receipts.length,1);assert.equal(receipts[0].eventId,'reply_race');
   assert.ok(requests.some(r=>r.path==='/sync'));
 });
+
+
+test('a completed research task result opens the matching sourced recommendation without completing an outing',async()=>{
+  const goal={id:'g_research_done',domain:'custom',status:'active',revision:1,title:'原运动目标',metric:null,context:[],tasks:[
+    {id:'t_research_done',goalId:'g_research_done',status:'done',content:'联网比较徒步方案',revision:2},
+    {id:'t_outing',goalId:'g_research_done',status:'open',content:'周末完成徒步',revision:1}]};
+  const result={eventId:'reply_research_done',role:'assistant',text:'研究结果',goalId:goal.id,taskId:'t_research_done',status:'received',recommendation:recommendation(),notificationEventId:'reply_research_done'};
+  const saved={version:1,recommendationsVersion:1,userId:'u_app_b',cursor:1,activeGoalId:goal.id,conversationId:null,goals:{[goal.id]:goal},messages:{[result.eventId]:result},drafts:{}};
+  const dom=installDomStub({storage:{'along.agent.v1':JSON.stringify(config),'along.event-workspace.v1:u_app_b':JSON.stringify(saved)}});
+  installEventBridge();const receipts=[],scrolled=[];
+  window.AlongAgentBridge.notification=async(name,value)=>{if(name==='eventTaskOpened')receipts.push(value);return {};};
+  document.getElementById=id=>dom.app.innerHTML.includes('id="'+id+'"')?{focus(){},scrollIntoView:()=>scrolled.push(id)}:null;
+  await import(`../web/app.mjs?completed-research-result=${Date.now()}`);await settle();
+  await dom.fireWindow('along-notification-open',{detail:{userId:'u_app_b',goalId:goal.id,taskId:'t_research_done',eventId:result.eventId,kind:'task_result',revision:2}});
+  assert.match(dom.app.innerHTML,/周末徒步方案/);assert.match(dom.app.innerHTML,/agent-composer/);assert.ok(scrolled.includes('event-message-'+result.eventId));
+  assert.equal(receipts.length,1);assert.equal(receipts[0].taskId,'t_research_done');
+  assert.equal(JSON.parse(localStorage.getItem('along.event-workspace.v1:u_app_b')).goals[goal.id].tasks.find(t=>t.id==='t_outing').status,'open');
+});
