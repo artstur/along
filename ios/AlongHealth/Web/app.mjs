@@ -1220,7 +1220,7 @@ function localRecordPage(choice,title,picker,connection) {
 }
 function taskReminderLine(task) {
   const plan=task.reminderPlan;
-  const next=task.scheduledAt?esc(new Date(task.scheduledAt).toLocaleString('zh-CN')):'';
+  const next=task.scheduledAt?esc(new Date(task.scheduledAt).toLocaleString('zh-CN',plan?.timezone?{timeZone:plan.timezone,timeZoneName:'short'}:{})):'';
   if (!plan) return next?`<p>${next}</p>`:'';
   if (task.status!=='open') return '';
   if (plan.state==='needs_time') return `<p>提醒时间待补 · ${esc(plan.question)}</p>`;
