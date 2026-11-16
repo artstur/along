@@ -109,6 +109,23 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
       state=saved;
     }
   } catch { /* A damaged cache is rebuilt from the durable server outbox. */ }
+  // Old v1 caches did not record an explicit composer selection. Preserve actual unbound messages/drafts.
+  function restoreSelection(next) {
+    const selected=next.goals[next.activeGoalId];
+    if (selected?.status==='active') return;
+    if (next.composing===undefined) {
+      const conversation=next.conversationId;
+      next.composing=!selected && (Boolean(next.drafts?.[`conversation:${conversation??'new'}`]) ||
+        Boolean(conversation && Object.values(next.messages).some(m=>m.conversationId===conversation&&!m.goalId) &&
+          !Object.values(next.messages).some(m=>m.conversationId===conversation&&m.goalId)));
+    }
+    if (next.composing) {next.activeGoalId=null;return;}
+    const last=next.goals[next.returnGoalId];
+    const candidate=last?.status==='active'?last:Object.values(next.goals).find(g=>g.status==='active');
+    next.activeGoalId=candidate?.id??null;
+    if (candidate) next.returnGoalId=candidate.id;
+  }
+  restoreSelection(state);
   function save(next) { if(disposed) throw Error('连接已切换');localStorage.setItem(key,JSON.stringify(next));state=next; }
   function recoverPending() {
     const next=structuredClone(state);
@@ -131,7 +148,7 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
     const drafts={...state.drafts};
     if (clean) drafts[draftScope()]=clean;
     else delete drafts[draftScope()];
-    save({...state,drafts});
+    save({...state,drafts,composing:state.activeGoalId?state.composing:true});
   }
   function conversationGoal(value=state) {
     if (!value.conversationId) return null;
@@ -147,19 +164,21 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
     // messages and any follow-up draft written after the first send. Once the server binds that
     // conversation to a goal, the next "new goal" starts from a clean conversation instead.
     const conversationId=goalId===null&&conversationGoal()?null:state.conversationId;
-    save({...state,activeGoalId:goalId,conversationId,returnGoalId});onChange();
+    save({...state,activeGoalId:goalId,conversationId,returnGoalId,composing:goalId===null});onChange();
   }
   function leaveConversation() {
     const returnGoalId=state.goals[state.returnGoalId]?.status==='active'?state.returnGoalId:null;
     // Keep conversationId and its durable outbox intact. A late Agent result must stay bound to
     // this conversation, while the goal the user returned to remains the visible selection.
-    save({...state,activeGoalId:returnGoalId,returnGoalId});onChange();
-    return returnGoalId;
+    const next={...state,activeGoalId:returnGoalId,returnGoalId,composing:false};
+    restoreSelection(next);save(next);onChange();
+    return next.activeGoalId;
   }
   async function submit(message) {
     if (!text(message,800)) throw Error('请输入 800 字以内的消息');
     const next=recoverPending();
     const composingScope=draftScope(next);
+    if (!next.activeGoalId) next.composing=true;
     const assembled=assembleEnvelope({event_type:'along.user_message',occurred_at:new Date().toISOString(),
       timezone:Intl.DateTimeFormat().resolvedOptions().timeZone||'Asia/Shanghai',goal_id:next.activeGoalId??undefined,
       causation_id:next.activeGoalId===null?next.conversationId??undefined:undefined,
@@ -227,7 +246,9 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
         if (item.kind==='message') {
           const message=safeMessage(item.payload.message,item);
           next.messages[message.eventId]=message;
-          if (item.goalId&&state.activeGoalId===null&&message.conversationId===state.conversationId) next.activeGoalId=item.goalId;
+          if (item.goalId&&state.activeGoalId===null&&message.conversationId===state.conversationId) {
+            next.activeGoalId=item.goalId;next.returnGoalId=item.goalId;next.composing=false;
+          }
         }
         if (item.kind==='delivery_failed') {
           const eventId=item.payload.event_id;
@@ -235,6 +256,7 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
         }
       }
       if (page.nextCursor!==undefined&&String(page.nextCursor)!==String(previous)) throw Error('同步分页游标不正确');
+      restoreSelection(next);
       next.cursor=previous;next.pendingAck=seqs;
       save(next);onChange();
       // Cache commit precedes ack. A failed ack is retried before pulling further, without replaying data.

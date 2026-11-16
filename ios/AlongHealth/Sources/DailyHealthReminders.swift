@@ -145,6 +145,13 @@ struct DailyReminderScope {
         return nil
     }
 
+    static func deliveryTaskID(_ request: UNNotificationRequest, goalKey: String) -> String? {
+        guard let requestID=request.content.userInfo["requestId"] as? String else { return nil }
+        let row=ledger().values.first { $0["identifier"]==request.identifier && $0["goalKey"]==goalKey && $0["requestId"]==requestID }
+        guard let id=row?["planTaskId"], !id.isEmpty else {return nil}
+        return id
+    }
+
     static func deliveryTopic(_ request: UNNotificationRequest, goalKey: String) -> String? {
         if owns(request, goalKey: goalKey) { return request.content.userInfo["dailyTopic"] as? String }
         return ledger().values.first { $0["identifier"] == request.identifier && $0["goalKey"] == goalKey }?["topic"]

@@ -62,3 +62,9 @@ Apple 健康 App 的手腕温度通常展示相对个人基线的偏差；Health
 已在 Apple 开发者账户启用 Push Notifications 且签名描述文件允许时，签名构建设置 CODE_SIGN_ENTITLEMENTS=AlongHealth/AlongPush.entitlements 与 ALONG_APNS_ENVIRONMENT=development 或 production，与实际签名环境对应。默认描述文件继续支持本地提醒。原生每次启动重新向 Apple 注册，并只向证书固定的配对 Host 传递设备令牌。
 
 Debug 真机验收可用环境变量 ALONG_NOTIFICATION_PROBE_TASK 指定真实测试任务的 ID。将 App 送回主屏，等待到时并点击通知，再用 devicectl 读取 App 数据容器 Library/Caches/AlongNotificationProbe.json。该文件只记录指定任务的匿名哈希、系统回读时间、已送达、点击与定位时间。回到前台读取通知中心也可独立验证送达。验收后通过目标聊天撤销测试任务。
+
+## 从旧通知回到本机任务
+
+Build 54 / Web v62 在原来的目标选择器中列出本机已存目标。连接新协议后，从旧版系统提醒点进来，先按旧 goalKey 和 taskId 打开本机记录。任务已调整时显示原提醒和该目标的现有任务。从本机记录可以返回当前目标或通过新协议新建对话。旧目标、任务、授权和配对继续保存在原位置，不将旧内容重写或代发给服务器。
+
+验收覆盖同时存在两套目标、同名不同目标、无当前新目标、重启、断网、通知先于连接恢复、新对话草稿和已撤销的旧任务。原生保留待打开的旧通知直到内置页面接收。新协议回执继续按绑定用户校验。
