@@ -19,6 +19,25 @@ function installEventBridge(state={syncItems:[]}) {
 
 const settle=()=>new Promise(resolve=>setTimeout(resolve,30));
 
+test('task reminder text preserves the Agent timezone, cadence and escaped explanation in the existing task row',async()=>{
+  const goal={id:'g_plan_ui',domain:'custom',status:'active',revision:1,title:'有提醒的目标',metric:null,context:[],tasks:[
+    {id:'t_plan_ui',goalId:'g_plan_ui',status:'open',content:'准备休息',revision:1,scheduledAt:'2099-01-01T17:30:00Z',
+      reminderPlan:{state:'scheduled',source:'agent',repeat:'daily',timezone:'Asia/Shanghai',explanation:'留出准备时间 <script>bad()</script>'}},
+    {id:'t_ask',goalId:'g_plan_ui',status:'open',content:'等待必要信息',revision:1,reminderPlan:{state:'needs_time',question:'哪一天有空？'}},
+    {id:'t_off',goalId:'g_plan_ui',status:'open',content:'已退出的提醒',revision:1,reminderPlan:{state:'off',reason:'opt_out'}},
+  ]};
+  const saved={version:1,userId:'u_app_b',cursor:1,activeGoalId:goal.id,conversationId:null,goals:{[goal.id]:goal},messages:{},drafts:{}};
+  const dom=installDomStub({storage:{'along.agent.v1':JSON.stringify(config),'along.event-workspace.v1:u_app_b':JSON.stringify(saved)}});
+  installEventBridge();await import(`../web/app.mjs?reminder-timezone=${Date.now()}`);await settle();
+  const expected=new Date('2099-01-01T17:30:00Z').toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',timeZoneName:'short'});
+  assert.ok(dom.app.innerHTML.includes(expected));
+  assert.match(dom.app.innerHTML,/Agent 安排 · 下次 .* · 每天/);
+  assert.match(dom.app.innerHTML,/留出准备时间 &lt;script&gt;bad\(\)&lt;\/script&gt;/);
+  assert.doesNotMatch(dom.app.innerHTML,/<script>bad/);
+  assert.match(dom.app.innerHTML,/提醒时间待补 · 哪一天有空？/);
+  assert.match(dom.app.innerHTML,/已关闭提醒/);
+});
+
 test('a new-goal conversation always has a standard way back',async()=>{
   const dom=installDomStub({storage:{'along.agent.v1':JSON.stringify(config)}});
   document.visibilityState='visible';

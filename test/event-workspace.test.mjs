@@ -307,11 +307,11 @@ test('foreign fallback alerts and receipts never cross into the paired workspace
   await ws.sync();assert.equal(batches.length,0);assert.ok(ws.view().error);
   assert.equal(localStorage.getItem('along.event-workspace.v1:'+config.userId),null);
 });
-test('previously accepted local timestamps become dated iOS instants',async()=>{
+test('legacy local timestamps without an explicit offset do not invent a reminder instant',async()=>{
   const sample=change(1,'历史任务');sample.payload.snapshot.tasks[0].scheduledAt='2099-01-01T20:00';
   const batches=[];setup(input=>input.path==='/sync/ack'?{}:{items:[sample]});
   await createEventWorkspace({config,onNotifications:async b=>batches.push(b)}).sync();
-  assert.equal(batches[0].reminders[0].scheduledAt,new Date('2099-01-01T20:00').toISOString());
+  assert.deepEqual(batches[0].reminders,[]);
 });
 
 test('archiving the selected goal clears navigation without deleting its conversation or draft',async()=>{
