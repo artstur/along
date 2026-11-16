@@ -39,9 +39,32 @@ Along 把一个目标拆成三样东西，并让它们保持联动：
 | **来源** | 与这个目标有关的真实数据 | Apple Health 的本周健身记录 |
 | **动态任务** | 根据进度算出来的下一步 | 「本周只差 35 分钟，找一个活动时段」 |
 
-来源一变，进度和任务就重新计算；变化足够显著时，Agent 才会提出新的安排，等你点「采用」后生效。小变化保持安静，不打扰你。
+新架构中，来源变化先更新事实，足以影响安排时才交给 Agent 判断；目标与任务经程序校验后自动生效，你通过聊天纠正。普通变化只在目标里展示，需要你回答、近期安排有实质变化或执行受阻时才通知。
+
+## 新架构与实现状态
+
+阶段 C 已接入健康事件自动跟进：在新协议目标页复用 Apple Health 连接卡，导入并允许 Agent 使用所选摘要后，手机在前台及系统允许的后台机会自动补传；Mac 按目标筛选变化并自动建评估工单，经校验调整任务。无须再发聊天，也无采用步骤。原始样本仍留在手机。设计、验证与真机边界见 [阶段 C](docs/stage-c-tech-design.md)。
+
+新方案以 [Along 本地 Agent 系统架构](https://github.com/artstur/along-superagent/blob/feature/along-phase0/docs/along/001-architecture.md) 为准：首期自用，Mac 上运行 Along Host、Along Agent（基于 DSH Super Agent）与可选的 Hy-Memory，iPhone 提供聊天和授权健康摘要。Mac 保存业务状态，手机保留离线缓存与待同步事件。记忆提取已接入定时维护；完整复盘与 Skill 自动整理仍待实现。
+
+已确定的交互边界：
+
+- **明确行动意图才自动建目标**。例如「我想改善睡眠」可直接建立目标；「最近睡得不好」先回应，仅在缺少意图时询问，不把现象直接变成目标。
+- **校验后自动生效，通过聊天纠正**。不设采用、确认或审批环节，界面不提供直接编辑或删除目标的入口。
+- **按需要通知**。普通变化只在目标里展示；需要你回答、近期安排有实质变化或执行受阻时才通知。通知仍受 iOS 权限与执行机会限制。
+- **忘记不删除历史聊天**。撤回对应记忆，立即停止将其作为有效记忆使用，并清理派生记忆与索引；历史聊天保留，不能从旧聊天重新提取并复活已撤回的记忆。不因此自动取消目标或重排已有任务。
+
+- **多目标由 Agent 协调**。优先遵守你明确的优先级和硬约束，其余自动协调；无法同时满足硬约束时才询问。
+- **首期按本人自用简化**。不做额外的健康授权撤回及关联历史数据清理流程，系统数据不可用时仍正常处理。
+- **不设应用侧模型用量上限**。不设每日预算或累计调用额度；批量作业、超时和失败重试仍按技术方案运行。
+
+Along Agent 的本地工程目录为 `../along-superagent/`，包名与插件 ID 保留 `dsh-superagent`。方案与验证记录位于该仓库的 `feature/along-phase0` 分支，上述链接沿用现有远端地址。
+
+**阶段 A 基座与阶段 B 最小聊天闭环已有实现，尚未完成真机验收。** Host 开启新事件链路后，App 自动协商使用 DSH：原话可靠入队，目标和任务在校验后自动生效，页面同步展示，你通过聊天纠正。这条链路没有采用、直接编辑或删除入口。健康新协议、长期记忆 Runtime 接线与定时记忆维护已在后续实现；完整复盘、Skill 自动发布与回退、记忆长期质量及迁移恢复仍待完成或验收。旧 Host 兼容路径继续使用下文描述的双运行时和采用流程；旧手机数据保留，本轮不自动导入新库。范围、配置和验收见 [阶段 B 设计](docs/stage-b-tech-design.md) 与 [实施与验收](https://github.com/artstur/along-superagent/blob/feature/along-phase0/docs/along/003-implementation.md)。
 
 ## 能体验什么
+
+以下双运行时与演示入口属于旧 Host 兼容路径；`npm run activate` 启用的新事件链路由 Along Agent 自动维护目标，不显示采用或直接编辑入口。
 
 顶部下拉即可在目标之间切换。一屏只做一件事：看清进度，知道下一步。
 
@@ -49,7 +72,7 @@ Along 把一个目标拆成三样东西，并让它们保持联动：
 | --- | --- | --- |
 | **健康** · 本周累计运动 120 分钟 | iPhone App 连接 Apple Health；普通网页可选演示数据 | 按所选摘要计算进度与下一步，连接页可一键选择全部可读指标 |
 | **理财** · 三个月存下 ¥10,000 应急金 | 纯演示：点「体验连接」出现 ¥3,200 余额 | 「模拟 +¥800」后进度与任务文字随之更新 |
-| **＋ 定义新目标** | 你用自然语言描述期限、偏好和约束 | Agent 实时拆解、分工、执行与综合，结果经校验后由你采用 |
+| **＋ 定义新目标** | 你用自然语言描述期限、偏好和约束 | Agent 分析与综合；首次结果完整时自动创建，后续调整通常仍待采用 |
 
 此外还有两处值得一看：
 
@@ -61,24 +84,27 @@ Along 把一个目标拆成三样东西，并让它们保持联动：
 
 ## 它是怎么工作的
 
+新事件链路的目标流程（聊天与健康跟进已实现，真机验收边界见阶段 B/C）：
+
 ```mermaid
 flowchart LR
-    A[Apple Health / 演示来源] --> B{有意义的变化?}
-    B -- 轻微或无关 --> Q[安静更新进度]
-    B -- 显著 --> C[待处理任务]
-    C --> D[Agent 生成提案<br/>DSH Agents / Kimi Swarm]
-    D --> E[严格校验<br/>JSON Schema + 白名单]
-    E --> F{用户点「采用」?}
-    F -- 是 --> G[更新目标空间]
-    F -- 否 --> Q
+    A[聊天 / 授权健康摘要 / 任务反馈] --> B[可靠接收并保存]
+    B --> C{是否需要行动?}
+    C -- 否 --> Q[只更新事实与展示]
+    C -- 是 --> D[DSH Agent 判断]
+    D --> E[程序校验]
+    E -- 通过 --> F[自动更新目标与任务]
+    F --> G[同步到手机]
+    G --> H[用户通过聊天纠正]
+    H --> A
 ```
 
-几条贯穿全局的约定：
+以下为旧 Host 兼容路径的具体行为（新事件链路见上文及阶段 B/C）：
 
 - **手机整理观察数据**。Apple Health 提供已选指标的汇总。运动摘要同时保留本周进度、最近两个完整七日的记录总量和最近四周的时段分布。在 iPhone 预览并确认后，睡眠与体重也可比较两个七日。每段都标明有记录的天数。
 - **Agent 判断要不要调整计划**。新观察、目标反馈和到期复查会连同已有任务提交给所选运行时。Agent 可维持原计划、提出逐项更改，或提出一个需要用户回答的问题。健康计划中的「动态任务 → 补充信息」可直接告诉 Agent 想做什么，包括按近期作息安排一次定时提醒。
 - **每日行动由 DSH 规划**。在健康目标的「补充信息」明确委托每天提醒睡觉和运动后，睡眠卡显示今天的睡前准备提醒和可选的就寝建议，运动卡显示当天建议的分钟及提醒时间。周目标仍保留。点卡片可查看依据和真实工单；“iPhone 已安排”来自 iOS 待发队列。说“停止每日提醒”可以撤回委托。
-- **Agent 的输出不会直接生效**。结果先过 `validateGoalReply` 与 `safeAdaptiveLayout`，绑定可信指标后再渲染，最后由你决定是否采用。
+- **Agent 输出先校验**。结果先过 `validateGoalReply` 与 `safeAdaptiveLayout`，绑定可信指标后再渲染。首次自定义目标在结果完整时自动创建，已有目标的调整仍有采用流程；新架构将统一为校验后自动生效。
 - **可执行结果会进系统通知**。iPhone 上第一次把目标或动态任务交给 Agent 时请求通知权限；编排完成且结果中确实有“下一步”后才发通知。相同 Request ID 只发一次，点通知回到对应目标或任务。
 
 ## 快速开始
@@ -91,6 +117,14 @@ flowchart LR
 
 ### 本地运行
 
+真机连接新架构，在仓库根目录执行：
+
+```sh
+npm run activate
+```
+
+它会构建相邻的 `../along-superagent` 和 App 内置页面，首次创建独立的 `along-phone` DSH profile，初始化新链路并启动 DSH 与 Along Host。优先复用桌面 DSH 的模型设置；缺少模型配置或 API Key 时在终端询问，Key 隐藏输入并仅保存在 Mac 的 0600 凭证文件中，后续免输。终端会打印手机所需的地址、指纹和连接码，Ctrl+C 关闭本次服务。数据在 `~/.along/phone-test/`，重跑沿用原数据；iPhone 仍需在 Xcode 安装和授权。首次需要本机已有 DSH、Node/npm 与 pnpm，且 Along 已运行 `npm install`。详情见[一条命令激活](docs/stage-b-tech-design.md#一条命令激活本机服务2026-11-16)。
+
 ```sh
 npm install        # 会安装项目自带的 Node 22.23.4
 npm run dev        # http://localhost:4173，仅监听 127.0.0.1
@@ -99,6 +133,8 @@ npm run dev        # http://localhost:4173，仅监听 127.0.0.1
 没有打包器：`web/` 就是前端唯一源码，改完刷新即可。
 
 ### 连接 Agent
+
+下述为旧 Host 兼容接入；新事件链路使用上面的 `npm run activate`。
 
 「定义新目标」和任务提案需要在 Mac 上运行 Along Agent Host。目标页可以在两种运行时之间切换，两者的运行记录相互隔离；没选过时默认用 Kimi。
 
@@ -125,7 +161,7 @@ Agent Host 只从 Mac 本机读取 `~/.kimi-code/server.token`，不会把它发
 npm run agent-host
 ```
 
-Super Agent 只监听 Along Source。GitHub 账号仅用于 Worker 的分支、提交和 PR 交付，默认不自动合并。
+Along 本地部署启用 Along Source 并关闭 GitHub Source，不需要 GitHub 账号。另行配置 GitHub 部署时，账号用于分支、提交和 PR 交付，默认不自动合并。
 
 </details>
 
@@ -153,6 +189,8 @@ iPhone App 的签名、安装与 HealthKit 读取口径见 [ios/README.md](ios/R
 | `ALONG_AGENT_PORT` | `4176` | Agent Host 的 HTTPS 端口 |
 | `ALONG_AGENT_HOST` | `en0` 的 IPv4，取不到时为 `127.0.0.1` | Agent Host 绑定地址 |
 | `ALONG_SUPERAGENT_URL` | `http://127.0.0.1:3082` | DSH Super Agent 地址 |
+| `ALONG_EVENT_INGEST` | `off` | `on` 启用新聊天链路；App 自动协商，停止旧 DSH 写入 |
+| `ALONG_BRIDGE_TOKEN_FILE` | 未设置 | Along Agent 的 `alongBridgeTokenFile` 对应文件绝对路径；凭证只在 Mac 两个进程间传递 |
 | `ALONG_KIMI_CODE_URL` | `http://127.0.0.1:58627` | Kimi Code Web Server 地址 |
 | `ALONG_KIMI_CODE_TOKEN` | 读取 `~/.kimi-code/server.token` | 覆盖 Kimi token |
 | `ALONG_KIMI_CODE_MODEL` | `kimi-code/kimi-for-coding` | Kimi 模型 |
@@ -168,11 +206,12 @@ Along 处理的是健康这类敏感数据，所以边界写得很死：
 | 原则 | 具体做法 |
 | --- | --- |
 | 授权的数据范围 | 旧授权限于已选的周运动总时长。确认导入情境评估后，Agent 可收到所选健康类型的汇总、当前计划、观察变化和近期反馈 |
-| 数据留在手机 | 健康摘要保存在 App 内 WKWebView 的本地页面数据中，不依赖 Mac 同步服务 |
+| 健康数据范围 | 新事件链路在 Mac 保存授权摘要，手机保存本地摘要及待同步事件；原始 HealthKit 样本仍留在手机 |
 | Token 留在 Mac | Kimi token 和配对 token 不发给 iPhone，也不写进运行结果 |
 | 只在局域网 | Agent Host 默认只绑定 Mac 的 Wi-Fi 地址，没有公网通道，退出终端即停止 |
 | 证书钉扎 | 证书由 Mac 本地生成，iPhone 原生网络层校验指纹后才传输，连接后使用随机令牌 |
-| 你说了算 | Agent 结果需通过校验，并由你点「采用」后才改变目标空间 |
+| 通过聊天纠正 | 新事件链路中目标与任务校验后自动生效，目标只能通过聊天改变；采用流程仅保留于旧 Host 兼容路径 |
+| 忘记与历史分开 | 新架构中「忘记这件事」撤回对应记忆，不删除历史聊天；旧聊天不能重新激活已撤回的记忆 |
 
 连接凭证的哈希保存在 Mac 的 `~/.along/agent-host/pairing.json`，连接信息同时保存在 iPhone Keychain。
 
@@ -235,5 +274,12 @@ npm run build   # 产出 dist/（GitHub Pages）与 ios/AlongHealth/Web/（App �
 
 ## 相关文档
 
+- [架构与开发入口](docs/agent-architecture.md)：两工程分工、当前实现状态和文档导航；Along Agent 位于相邻 `along-superagent` 仓库
+- [决策记录](https://github.com/artstur/along-superagent/blob/feature/along-phase0/docs/along/000-decisions.md)：已定边界及其原因
+- [本地 Agent 系统架构](https://github.com/artstur/along-superagent/blob/feature/along-phase0/docs/along/001-architecture.md)：Mac 与 iPhone 分工、可靠事件、目标与任务自动维护
+- [记忆与技能](https://github.com/artstur/along-superagent/blob/feature/along-phase0/docs/along/002-memory-and-skills.md)：Hy-Memory、记忆撤回、批量复盘与 Skill 自动发布
+- [实施与验收](https://github.com/artstur/along-superagent/blob/feature/along-phase0/docs/along/003-implementation.md)：阶段 0 到 E、迁移与验收条件
+- [目标与 Agent 技术链路](docs/goal-agent-flow.md)：迁移前的代码行为，含采用流程，不作为新架构规范
+- [健康评估离线暂存与恢复方案](docs/offline-health-review-plan.md)：旧链路的恢复设计参考；新架构的事件补传与自动生效以本地 Agent 系统架构为准
 - [ios/README.md](ios/README.md)：iPhone App 的运行步骤、HealthKit 读取范围与数据口径
 - [AGENTS.md](AGENTS.md)：参与开发前必读的项目约定与红线

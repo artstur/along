@@ -13,6 +13,7 @@ import {DSH_RUNTIME, KIMI_RUNTIME, safeAgentRuntime} from '../web/super-agent.mj
 import {readJsonBody} from './request-body.mjs';
 import {findDailyGrant} from './daily-delegation.mjs';
 import {HostError, upstream, statusForError} from './host-error.mjs';
+import {createBridge, readBridgeToken} from './along-bridge.mjs';
 import {agentHealthSnapshot,cleanHealthContext,cleanPlanningContext,validateReassessment,SLEEP_REMINDER_CRITERIA,DAILY_ACTIONS_CRITERIA,parseDailyActionReply} from '../web/contextual-planning.mjs';
 
 const dir = process.env.ALONG_AGENT_STATE_DIR||join(homedir(), '.along', 'agent-host');
@@ -34,10 +35,23 @@ const codeExpiry = Date.now() + 15*60_000;
 let pairFailures = 0;
 const pairingPath=join(dir,'pairing.json');
 let tokenHash = null;
+let identity = null;   // 服务端绑定的配对身份 {userId,deviceId}（001 §4.2：身份只来自这里，不信任请求体自称）
 try {
   const saved=JSON.parse(readFileSync(pairingPath,'utf8'));
-  if (typeof saved.hash==='string' && /^[a-f0-9]{64}$/.test(saved.hash)) tokenHash=Buffer.from(saved.hash,'hex');
+  if (typeof saved.hash==='string' && /^[a-f0-9]{64}$/.test(saved.hash)) {
+    tokenHash=Buffer.from(saved.hash,'hex');
+    if (/^u_[0-9a-f]{8}$/.test(saved.user_id??'') && /^d_[0-9a-f]{8}$/.test(saved.device_id??'')) identity={userId:saved.user_id,deviceId:saved.device_id};
+  }
 } catch (error) { if (error.code!=='ENOENT') throw error; }
+const newBoundId=prefix=>prefix+randomBytes(4).toString('hex');
+function savePairingBinding() {
+  writeFileSync(pairingPath,JSON.stringify({hash:tokenHash.toString('hex'),user_id:identity.userId,device_id:identity.deviceId}),{mode:0o600});
+}
+// 旧 pairing.json（仅 hash）启动时幂等升级补齐 user_id/device_id：配对 token 不变、手机无感（§2.4.1）。
+if (tokenHash&&!identity) {
+  identity={userId:newBoundId('u_'),deviceId:newBoundId('d_')};
+  savePairingBinding();
+}
 let busy = false;
 const port = Number(process.env.ALONG_AGENT_PORT) || 4176;
 const lanHost = process.env.ALONG_AGENT_HOST || networkInterfaces().en0?.find(item=>item.family==='IPv4'&&!item.internal)?.address || '127.0.0.1';
@@ -45,6 +59,11 @@ const superAgentURL = (process.env.ALONG_SUPERAGENT_URL || 'http://127.0.0.1:308
 const contextReviewURL=(process.env.ALONG_CONTEXT_REVIEW_URL||superAgentURL).replace(/\/$/,'');
 if (process.env.ALONG_CONTEXT_REVIEW_TOKEN_FILE&&!['localhost','127.0.0.1','[::1]'].includes(new URL(contextReviewURL).hostname)) throw Error('专用情境评估凭据只能发送到本机 DSH');
 const contextToken=process.env.ALONG_CONTEXT_REVIEW_TOKEN_FILE?readFileSync(process.env.ALONG_CONTEXT_REVIEW_TOKEN_FILE,'utf8').trim():null;
+// Host→Along Agent 回环凭证（stage-a-tech-design.md §2.4.3，SD-2）：启动读一次，只在两个 Mac 本机进程内存里走，
+// 不发 iPhone、不写运行结果；缺失时旧链路不带 token 照发，新端点按「未配置桥接凭证」503。
+const bridgeToken=readBridgeToken();
+const bridge=createBridge({url:superAgentURL,token:bridgeToken});
+const contextReviewBridge=createBridge({url:contextReviewURL,token:bridgeToken});
 const kimiAgent = new KimiCodeAgent({workspace:process.env.ALONG_KIMI_WORKSPACE||process.cwd()});
 
 function respond(res,status,data) { res.writeHead(status,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}).end(JSON.stringify(data)); }
@@ -54,25 +73,12 @@ function authorized(req) {
   return !!(token && tokenHash && timingSafeEqual(createHash('sha256').update(token).digest(),tokenHash));
 }
 async function superAgentCall(path,{method='POST',value,contextReview=false}={}) {
-  let response;
-  try {
-    response=await fetch(`${contextReview?contextReviewURL:superAgentURL}${path}`,{method,headers:{'x-along-bridge':'1',...(contextReview&&contextToken?{'x-along-context-token':contextToken}:{}),...(value===undefined?{}:{'content-type':'application/json'})},
-      ...(value===undefined?{}:{body:JSON.stringify(value)}),signal:AbortSignal.timeout(15_000)});
-  } catch(error) { throw new HostError(`Along 服务暂不可用：${error.message}`,502); }
-  let result;
-  try { result=await response.json(); } catch { throw new HostError(`Along 返回了无效响应（${response.status}）`,502); }
-  if (!response.ok) throw new HostError(result?.error || `Along 请求失败（${response.status}）`,502);
-  return result;
+  // 回环传输统一由 along-bridge 承载（桥接凭证、超时与错误语义都在它那里，§2.4.3）；
+  // 情境评估专用凭证只加在专用 URL 上（专用凭证只发本机 DSH 的校验保持不变）。
+  return (contextReview?contextReviewBridge:bridge).call(path,{method,value,contextToken:contextReview&&contextToken?contextToken:null});
 }
 async function superAgentReady() {
-  let response;
-  try {
-    response=await fetch(`${superAgentURL}/along-source/api/goals/along-status-probe`,{
-      method:'GET',headers:{'x-along-bridge':'1'},signal:AbortSignal.timeout(5_000)
-    });
-  } catch(error) { throw new HostError(`DSH Super Agent 未运行：${error.message}`,503); }
-  if (response.status!==404 && !response.ok) throw new HostError(`DSH Along Source 未就绪（${response.status}）`,503);
-  return true;
+  return bridge.ready();
 }
 // 目标名称必须真的是字符串：String() 会把对象变成 "[object Object]"，
 // 这样的假标题会被当成用户目标送进模型。
@@ -134,6 +140,72 @@ async function runExclusive(operation) {
   try { return await operation(); }
   finally { busy=false; }
 }
+// ---- 阶段 A 新链路（docs/stage-a-tech-design.md §2.4/§4.2）----
+// 新旧单消费开关：off（默认）= 新端点 503、旧链路照旧；on = 新端点生效、旧 /super-agent/goals|tasks
+// 的 DSH 分支 409「已切换新链路」。回退 = 改回 off，Along Agent 业务库与 DSH 状态不清（BC-09-03/04）。
+const eventIngest = process.env.ALONG_EVENT_INGEST === 'on';
+const newLinkPaths = new Set(['/events', '/sync', '/sync/ack']);
+let pairingRegistered = false;
+function requireEventIngest() {
+  if (!eventIngest) throw new HostError('新链路未开启：设置 ALONG_EVENT_INGEST=on 后重启 Along 服务',503);
+}
+function requireBridgeCredential() {
+  if (!bridgeToken) throw new HostError('未配置桥接凭证：设置 ALONG_BRIDGE_TOKEN_FILE 后重启 Along 服务',503);
+}
+function boundPairing() {
+  if (!identity) throw new HostError('配对身份缺失，请重新配对',403);
+  return identity;
+}
+// 自报身份检查（BC-07-04 接口侧防线）：user_id/device_id 只能由服务端绑定的配对会话提供，请求体自称一律不收。
+function claimedIdentityField(input) {
+  if (input===null||typeof input!=='object'||Array.isArray(input)) return null;
+  return 'user_id' in input ? 'user_id' : ('device_id' in input ? 'device_id' : null);
+}
+// 配对身份注册进 Along Agent（幂等可重试，§2.4.1）：Along Agent 幂等 upsert user 行并把 user_id 加入 sources.along.allowed；
+// Along Agent 暂不可达时下一次新端点调用会再试。
+async function ensurePairingRegistered() {
+  if (pairingRegistered || !identity || !bridgeToken) return;
+  try {
+    // Along Agent 契约要求全部 /along-source/api/* 用头传绑定身份（缺头 403 invalid_identity），
+    // 注册调用与其他回环调用一样带上 identity，body 与头来自同一个绑定对象。
+    await bridge.call('/along-source/api/pairing',{value:{user_id:identity.userId,device_id:identity.deviceId},identity,timeout:5_000});
+    pairingRegistered = true;
+  } catch (error) { console.warn('Along 未能把配对身份注册到 Along Source（稍后自动重试）：',error.message); }
+}
+ensurePairingRegistered();
+// 新端点全部 POST（iOS 桥 agentRequest 固定 POST，不改桥语义）：/events 事件接收（回执按 Along Agent 原状态码
+// 透传：200 accepted/duplicate、400 rejected、409 conflict），/sync 同步拉取，/sync/ack 确认。
+async function handleAlongNewLink(req,res,path) {
+  requireEventIngest();
+  requireBridgeCredential();
+  const who=boundPairing();
+  const input=await body(req);
+  if (claimedIdentityField(input)) {
+    const legalEventId=typeof input?.event_id==='string'&&/^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$/.test(input.event_id);
+    return respond(res,400,path==='/events'
+      ?{status:'rejected',...(legalEventId?{event_id:input.event_id}:{}),reason:'identity_in_body'}
+      :{error:'身份字段只能由配对会话提供'});
+  }
+  await ensurePairingRegistered();
+  if (!pairingRegistered) throw new HostError('配对身份尚未登记到 Along，请稍后重试',503);
+  if (path==='/events') {
+    // /events 在 Along Agent 侧含 DSH 投递触发，15s 不够 → 30s（§2.4.3）。
+    const {status,result}=await upstream(()=>bridge.receipt('/along-source/api/events',{value:input,identity:who,timeout:30_000}));
+    return respond(res,status,result);
+  }
+  if (path==='/sync') {
+    const afterSeq=Number.isInteger(input?.after_seq)&&input.after_seq>=0?input.after_seq:0;
+    const limit=Number.isInteger(input?.limit)?Math.min(Math.max(input.limit,1),200):50;
+    const result=await upstream(()=>bridge.call(`/along-source/api/sync?user_id=${encodeURIComponent(who.userId)}&after_seq=${afterSeq}&limit=${limit}`,{method:'GET',identity:who}));
+    return respond(res,200,result);
+  }
+  if (path==='/sync/ack') {
+    if (!Array.isArray(input?.seqs)||input.seqs.length===0||!input.seqs.every(seq=>Number.isInteger(seq)&&seq>=1)) throw Error('同步确认序号无效');
+    const result=await upstream(()=>bridge.call('/along-source/api/sync/ack',{value:{seqs:input.seqs},identity:who}));
+    return respond(res,200,result);
+  }
+  return respond(res,404,{error:'未找到接口'});
+}
 function requestId(value) {
   const id=String(value??'');
   if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$/.test(id)) throw Error('Along requestId 无效');
@@ -182,8 +254,12 @@ const server=createServer({key:readFileSync(key),cert:readFileSync(cert)},async(
       if (Date.now()>codeExpiry || pairFailures>=5 || input?.code!==code) {pairFailures++; return respond(res,403,{error:'配对码无效或已过期'});}
       const token=randomBytes(32).toString('hex');
       tokenHash=createHash('sha256').update(token).digest();
-      writeFileSync(pairingPath,JSON.stringify({hash:tokenHash.toString('hex')}),{mode:0o600});
+      // 新配对覆盖旧绑定（D1 单用户）：同一用户换手机 → user_id 不变、device_id 换新（§2.4.1）。
+      identity={userId:identity?.userId||newBoundId('u_'),deviceId:newBoundId('d_')};
+      savePairingBinding();
+      pairingRegistered=false;
       pairFailures=5;
+      ensurePairingRegistered();
       return respond(res,200,{token});
     }
     if (!authorized(req)) return respond(res,401,{error:'请先配对这台 Mac'});
@@ -197,6 +273,14 @@ const server=createServer({key:readFileSync(key),cert:readFileSync(cert)},async(
       return respond(res,200,{paired:true});
     }
     if (req.method==='POST' && path==='/connection/status') {
+      if (eventIngest) {
+        requireBridgeCredential();
+        const who=boundPairing();
+        await ensurePairingRegistered();
+        if (!pairingRegistered) throw new HostError('配对身份尚未登记到 Along，请稍后重试',503);
+        await upstream(()=>bridge.call('/along-source/api/goals/along-status-probe',{method:'GET',identity:who}));
+        return respond(res,200,{along:true,runtime:DSH_RUNTIME,ready:true,eventProtocol:1,userId:who.userId});
+      }
       const input=await body(req),runtime=requestedRuntime(input?.runtime);
       if (runtime===KIMI_RUNTIME) {
         const kimi=await upstream(()=>kimiAgent.ready());
@@ -207,8 +291,11 @@ const server=createServer({key:readFileSync(key),cert:readFileSync(cert)},async(
       console.log(`连接检查通过：iPhone → Along Host → DSH (${new Date().toISOString()})`);
       return respond(res,200,{along:true,runtime,ready:true,dsh:true});
     }
+    if (req.method==='POST'&&newLinkPaths.has(path)) return await handleAlongNewLink(req,res,path);
     if (req.method==='POST' && path==='/super-agent/tasks') {
       const input=await body(req),runtime=requestedRuntime(input?.runtime);
+      // 旧适配器停止消费用户输入：新链路开启后 DSH 分支不再接收（BC-09-03）。
+      if (eventIngest&&runtime===DSH_RUNTIME) return respond(res,409,{error:'已切换新链路'});
       const {runtime:_runtime,...dshInput}=input;
       if (dshInput.goal?.domain==='health') dshInput.context=agentHealthSnapshot(dshInput.context);
       if (runtime===KIMI_RUNTIME) return respond(res,200,await upstream(()=>kimiAgent.startTask(dshInput)));
@@ -221,6 +308,8 @@ const server=createServer({key:readFileSync(key),cert:readFileSync(cert)},async(
     }
     if (req.method==='POST' && path==='/super-agent/goals') {
       const input=await body(req),runtime=requestedRuntime(input?.runtime);
+      // 旧适配器停止消费用户输入：新链路开启后 DSH 分支不再接收（BC-09-03）。
+      if (eventIngest&&runtime===DSH_RUNTIME) return respond(res,409,{error:'已切换新链路'});
       const goal=cleanGoal(input.goal,!!input.snapshot?.planning), snapshot=cleanSnapshot(input.snapshot,goal.domain,goal.target);
       if (snapshot.planning?.dailyDelegation&&runtime!==DSH_RUNTIME) throw Error('每日委托需要 DSH 运行时');
       if (snapshot.planning&&goal.domain==='health') goal.target=snapshot.planning.weeklyWorkoutMinutes;

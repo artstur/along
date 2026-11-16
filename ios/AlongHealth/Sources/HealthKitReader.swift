@@ -8,6 +8,7 @@ import UIKit
 final class HealthKitReader {
     private let store = HKHealthStore()
     private var observers: [HKObserverQuery] = []
+    private var readingDates: [HealthMetric: Date] = [:]
 
     func read(_ selection: Set<HealthMetric>, requestPermission: Bool = true, includeContext: Bool = true, includeComparisonHistory: Bool = false) async throws -> HealthSummary {
         guard HKHealthStore.isHealthDataAvailable() else {
@@ -22,6 +23,7 @@ final class HealthKitReader {
         }
 
         let now = Date()
+        readingDates = [:]
         var result = HealthSummary(selected: ordered, capturedAt: now)
         if selection.contains(.steps) { result.steps = try await todaySteps(now: now) }
         if selection.contains(.workout) {
@@ -44,6 +46,7 @@ final class HealthKitReader {
         if selection.contains(.activeEnergy) { result.activeEnergyKcal = try await todayActiveEnergy(now: now) }
         if selection.contains(.restingHeartRate) { result.restingHeartRate = try await latestRestingHeartRate(now: now) }
         if selection.contains(.wristTemperature) { result.wristTemperatureC = try await latestWristTemperature(now: now) }
+        result.readingDates = readingDates
         return result
     }
 
@@ -137,6 +140,7 @@ final class HealthKitReader {
     private func latestRestingHeartRate(now: Date) async throws -> Int? {
         let type = HKQuantityType.quantityType(forIdentifier: .restingHeartRate)!
         guard let sample = try await latestQuantity(type, since: -7, now: now) else { return nil }
+        readingDates[.restingHeartRate] = sample.endDate
         let beatsPerMinute = HKUnit.count().unitDivided(by: .minute())
         return max(0, Int(sample.quantity.doubleValue(for: beatsPerMinute).rounded()))
     }
@@ -144,6 +148,7 @@ final class HealthKitReader {
     private func latestWristTemperature(now: Date) async throws -> Double? {
         let type = HKQuantityType.quantityType(forIdentifier: .appleSleepingWristTemperature)!
         guard let sample = try await latestQuantity(type, since: -30, now: now) else { return nil }
+        readingDates[.wristTemperature] = sample.endDate
         return (sample.quantity.doubleValue(for: .degreeCelsius()) * 10).rounded() / 10
     }
 
@@ -219,6 +224,7 @@ final class HealthKitReader {
         let sorted = [NSSortDescriptor(key: HKSampleSortIdentifierEndDate, ascending: false)]
         let values = try await samples(of: type, predicate: nil, limit: 1, sort: sorted)
         guard let latest = values.first as? HKQuantitySample else { return nil }
+        readingDates[.weight] = latest.endDate
         return (latest.quantity.doubleValue(for: .gramUnit(with: .kilo)) * 10).rounded() / 10
     }
 
@@ -337,6 +343,7 @@ enum BackgroundReviewAdmission {
     private let armedKey = "along.health.backgroundReviewArmed.v1", dirtyKey = "along.health.backgroundReviewDirty.v1"
     private let observedTypesKey = "along.health.backgroundTargetTypes.v1"
     private let dailyWakeGoal = "along.health.dailyWakeGoal.v1"
+    var usesEventProtocol: () -> Bool = { false }
     var scheduleCalendarRefresh: (Date?) -> Void = { _ in }
     var permitsDailyReview: ([String: Any], String, [String]) -> Bool = { _, _, _ in false }
     var deliverDailyResult: ([String: Any], String, [String]) async -> Bool = { _, _, _ in false }
@@ -486,6 +493,7 @@ enum BackgroundReviewAdmission {
         configureObservers()
     }
     func configureObservers() {
+        if usesEventProtocol() { reader.stopObserving(); observations = []; return }
         let typed = Set((defaults.stringArray(forKey: observedTypesKey) ?? []).compactMap(HealthMetric.init(rawValue:)))
         let desired = authorizedGoal == nil ? Set<HealthMetric>() : nativeSelection.intersection(typed)
         if desired != observations {
@@ -734,11 +742,13 @@ enum BackgroundReviewAdmission {
                 self.handle(task)
             }
         }
+        reviews.usesEventProtocol = { HealthEventDelivery.shared.enabled }
         reviews.scheduleCalendarRefresh = { [weak self] date in self?.schedule(date) }
         reviews.permitsDailyReview = { grant, key, types in DailyHealthReminders.permitsBackground(grant, goalKey: key, selectedTypes: types) }
         reviews.deliverDailyResult = { run, key, types in await DailyHealthReminders.receivedInBackground(run, goalKey: key, selectedTypes: types) }
         if application.applicationState == .active { enterForeground() }
         reviews.configureObservers()
+        HealthEventDelivery.shared.configureObservers()
         NotificationCenter.default.addObserver(self, selector: #selector(enterForeground), name: UIApplication.willEnterForegroundNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(becameActive), name: UIApplication.didBecomeActiveNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(unlocked), name: UIApplication.protectedDataDidBecomeAvailableNotification, object: nil)
@@ -747,7 +757,165 @@ enum BackgroundReviewAdmission {
     @objc private func enterForeground() {
         awaitingInitialForeground = false
         BackgroundHealthReviews.shared.foregroundStarted()
+        HealthEventDelivery.shared.request()
     }
     @objc private func becameActive() { if awaitingInitialForeground { enterForeground() } }
-    @objc private func unlocked() { BackgroundHealthReviews.shared.protectedDataAvailable() }
+    @objc private func unlocked() { BackgroundHealthReviews.shared.protectedDataAvailable(); HealthEventDelivery.shared.request() }
+}
+
+// New event protocol: a protected durable outbox shared by foreground and HealthKit background callbacks.
+// Credentials remain in Keychain. A stored binding hash prevents delivery after re-pairing to another identity.
+@MainActor final class HealthEventDelivery {
+    static let shared = HealthEventDelivery()
+    private let reader = HealthKitReader(), defaults = UserDefaults.standard
+    private let enabledKey = "along.health.events.binding.v1", dirtyKey = "along.health.events.dirty.v1"
+    private var worker: Task<Void, Never>?
+    private var callbacks: [() -> Void] = []
+    private var selection: Set<HealthMetric> = []
+    var enabled: Bool { defaults.string(forKey: enabledKey) != nil }
+    private var selected: Set<HealthMetric> {
+        guard defaults.bool(forKey: "along.health.contextReview.v1") else { return [] }
+        return Set((defaults.stringArray(forKey: "along.health.selectedTypes") ?? []).compactMap(HealthMetric.init(rawValue:)))
+    }
+    private func connection() throws -> ([String: String], String) {
+        guard let c = AlongConnectionStore.load(), let base = c["baseURL"], let pin = c["fingerprint"], let token = c["token"] else { throw AgentBridgeError.invalidConfiguration }
+        let hash = SHA256.hash(data: Data([base, pin, token].joined(separator: "\n").utf8)).map { String(format: "%02x", $0) }.joined()
+        return (c, hash)
+    }
+    private func stateURL() throws -> URL {
+        let dir = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+            .appendingPathComponent("AlongHealthEvents", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.protectionKey: FileProtectionType.complete])
+        var excluded = dir, values = URLResourceValues(); values.isExcludedFromBackup = true; try excluded.setResourceValues(values)
+        return dir.appendingPathComponent("outbox.json")
+    }
+    private func load() throws -> [String: Any] {
+        do {
+            let data = try Data(contentsOf: stateURL())
+            guard let state = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw AgentBridgeError.invalidConfiguration }
+            return state
+        } catch let error as CocoaError where error.code == .fileReadNoSuchFile { return [:] }
+    }
+    private func save(_ state: [String: Any]) throws {
+        try JSONSerialization.data(withJSONObject: state, options: [.sortedKeys]).write(to: stateURL(), options: [.atomic, .completeFileProtection])
+    }
+    private func call(_ connection: [String: String], path: String, body: [String: Any]) async throws -> [String: Any] {
+        var input = connection.reduce(into: [String: Any]()) { $0[$1.key] = $1.value }
+        input["path"] = path; input["body"] = body
+        return try await AlongWebView.Coordinator.agentRequest(input, background: UIApplication.shared.applicationState == .background)
+    }
+    func configure() async throws -> [String: Any] {
+        let (c, hash) = try connection()
+        let status = try await call(c, path: "/connection/status", body: ["runtime": "dsh-superagent"])
+        guard status["eventProtocol"] as? Int == 1, status["ready"] as? Bool == true,
+              let user = status["userId"] as? String, !user.isEmpty, try connection().1 == hash else { throw AgentBridgeError.invalidConfiguration }
+        var state = try load()
+        if state["binding"] as? String != hash {
+            // Keep an old outbox on disk for its original identity instead of sending it to the new one.
+            if !state.isEmpty {
+                let archived = try stateURL().deletingLastPathComponent().appendingPathComponent("previous-" + UUID().uuidString + ".json")
+                try JSONSerialization.data(withJSONObject: state).write(to: archived, options: [.atomic, .completeFileProtection])
+            }
+            state = ["binding": hash, "user": user, "pending": []]
+            try save(state)
+        }
+        defaults.set(hash, forKey: enabledKey)
+        BackgroundHealthReviews.shared.usesEventProtocol = { HealthEventDelivery.shared.enabled }
+        BackgroundHealthReviews.shared.disarm()
+        BackgroundHealthReviews.shared.configureObservers()
+        configureObservers(); request()
+        return ["enabled": true]
+    }
+    func configureObservers() {
+        let desired = enabled ? selected : []
+        guard desired != selection else { return }
+        selection = desired
+        reader.observeChanges(desired) { completion in
+            Task { @MainActor in HealthEventDelivery.shared.request(completion) }
+        }
+        reader.updateBackgroundDelivery(desired)
+    }
+    func consentChanged() { configureObservers(); request() }
+    func request(_ completion: @escaping () -> Void = {}) {
+        guard enabled else { completion(); return }
+        defaults.set(true, forKey: dirtyKey)
+        guard UIApplication.shared.isProtectedDataAvailable else { completion(); return }
+        callbacks.append(completion)
+        guard worker == nil else { return }
+        worker = Task {
+            while !callbacks.isEmpty {
+                let batch = callbacks; callbacks.removeAll()
+                do { try await deliver() } catch { /* Durable queue and dirty marker recover on next execution opportunity. */ }
+                batch.forEach { $0() }
+            }
+            worker = nil
+        }
+    }
+    private func deliver() async throws {
+        let (c, hash) = try connection()
+        guard defaults.string(forKey: enabledKey) == hash else { return }
+        var state = try load()
+        guard state["binding"] as? String == hash else { return }
+        let types = selected
+        if !types.isEmpty {
+            let summary = try await reader.read(types, requestPermission: false, includeContext: true)
+            guard types == selected, try connection().1 == hash else { return }
+            let summaries = summary.eventSummaries()
+            let content = try HealthEventOutbox.content(summaries)
+            if state["lastContent"] as? String != content {
+                let event: [String: Any] = ["event_id": "health-" + UUID().uuidString.lowercased(), "schema_version": "1",
+                    "event_type": "along.health_summary_updated", "occurred_at": ISO8601DateFormatter().string(from: summary.capturedAt),
+                    "timezone": TimeZone.current.identifier, "payload": ["event_type": "along.health_summary_updated", "summaries": summaries]]
+                var pending = state["pending"] as? [[String: Any]] ?? []
+                pending.append(event); state["pending"] = pending; state["lastContent"] = content
+                try save(state) // Never send an event that has not been committed locally.
+            }
+        }
+        while let event = (state["pending"] as? [[String: Any]])?.first {
+            guard types == selected, !types.isEmpty, try connection().1 == hash else { return }
+            if !HealthEventOutbox.permitted(event, types: types) {
+                var held = state["held"] as? [[String: Any]] ?? []; held.append(event); state["held"] = held
+                var pending = state["pending"] as? [[String: Any]] ?? []; pending.removeFirst(); state["pending"] = pending
+                try save(state); continue
+            }
+            let response: [String: Any]
+            do { response = try await call(c, path: "/events", body: event) }
+            catch AgentBridgeError.receipt(let receipt) {
+                guard try connection().1 == hash, HealthEventOutbox.terminal(event, receipt: receipt) else { throw AgentBridgeError.receipt(receipt) }
+                // A permanent refusal must not poison later valid snapshots. Retain the complete failed event locally.
+                var held = state["held"] as? [[String: Any]] ?? []; held.append(["event": event, "receipt": receipt]); state["held"] = held
+                var pending = state["pending"] as? [[String: Any]] ?? []; pending.removeFirst(); state["pending"] = pending
+                try save(state); continue
+            }
+            guard try connection().1 == hash else { return }
+            guard HealthEventOutbox.acknowledged(event, by: response) else { throw AgentBridgeError.invalidConfiguration }
+            var pending = state["pending"] as? [[String: Any]] ?? []; pending.removeFirst(); state["pending"] = pending
+            try save(state) // A failed save causes a safe same-id duplicate next time.
+        }
+        defaults.set(false, forKey: dirtyKey)
+    }
+}
+
+// Pure Foundation contract, executed from the actual source by the native queue regression tests.
+enum HealthEventOutbox {
+    static func content(_ summaries: [[String: Any]]) throws -> String {
+        let facts = summaries.map { row in row.filter { $0.key != "metric_version" } }
+        let data = try JSONSerialization.data(withJSONObject: facts, options: [.sortedKeys])
+        return data.base64EncodedString()
+    }
+    static func permitted(_ event: [String: Any], types: Set<HealthMetric>) -> Bool {
+        let names: [HealthMetric: String] = [.steps: "steps", .workout: "workout", .activeEnergy: "active_energy", .weight: "weight",
+            .restingHeartRate: "resting_heart_rate", .wristTemperature: "wrist_temperature", .sleep: "sleep"]
+        let allowed = Set(types.compactMap { names[$0] })
+        guard let payload = event["payload"] as? [String: Any], let summaries = payload["summaries"] as? [[String: Any]], !summaries.isEmpty else { return false }
+        return summaries.allSatisfy { row in (row["type"] as? String).map { allowed.contains($0) } ?? false }
+    }
+    static func terminal(_ event: [String: Any], receipt: [String: Any]) -> Bool {
+        guard let id = event["event_id"] as? String, receipt["event_id"] as? String == id else { return false }
+        return ["rejected", "conflict"].contains(receipt["status"] as? String ?? "")
+    }
+    static func acknowledged(_ event: [String: Any], by receipt: [String: Any]) -> Bool {
+        guard let id = event["event_id"] as? String, receipt["event_id"] as? String == id else { return false }
+        return ["accepted", "duplicate"].contains(receipt["status"] as? String ?? "")
+    }
 }

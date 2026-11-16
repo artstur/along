@@ -4,6 +4,10 @@
 
 ## 在 iPhone 上运行
 
+新架构真机验证可先在 Along 根目录运行 `npm run activate`，自动准备专用 DSH profile 并启动 DSH 与 Host。缺少模型或 Key 时终端会询问，Key 隐藏输入且保存在 Mac；后续启动免输。随后在 Xcode 安装 App，按终端显示的地址、指纹和连接码配对。初始化与边界见[一条命令激活](../docs/stage-b-tech-design.md#一条命令激活本机服务2026-11-16)。
+
+新聊天链路：先启动已构建的 Along DSH profile（`alongStateDir`、`alongBridgeTokenFile` 为绝对路径，Along 启用且 GitHub 关闭），再以 `ALONG_EVENT_INGEST=on`、`ALONG_BRIDGE_TOKEN_FILE` 指向同一凭证文件启动 Host。App 配对后自动识别新协议，聊天变更校验后自动展示，无需采用。构建和真机验收按 [阶段 B 设计](../docs/stage-b-tech-design.md) 执行；旧手机数据保留，本轮不自动导入新库。阶段 C 进一步接入自动健康跟进：重新构建、安装 App 后，在新协议目标页的 Apple Health 卡片连接或管理所选类型，点「导入并允许 Agent 评估」。前后台共用原生持久事件队列，Mac 自动跟进已有目标并更新任务。iOS 是否唤醒及锁屏时是否能读取仍由系统决定，解锁或回前台会重试；不承诺即时送达。资源版本 59、Bundle 52。验收见 [阶段 C](../docs/stage-c-tech-design.md)。以下双运行时和采用步骤属于旧 Host 兼容路径。
+
 1. 安装支持手机系统版本的完整 Xcode，打开 [AlongHealth.xcodeproj](AlongHealth.xcodeproj)。例如，iOS 27 需要 Xcode 27。在 Xcode → Settings → Apple Accounts 登录自己的 Apple 账号；然后在 target 的 **Signing & Capabilities** 里选自己的 Team，确认 **HealthKit** capability 已开启。若 bundle ID 与你的签名冲突，改成自己的唯一 ID。
 2. 在 iOS 27 + Xcode 27 上，可以打开 Xcode 的 Device Hub，点侧栏的 `+` → **Pair Nearby Device…**，首次通过同一局域网无线配对；也可以用数据线连接。按提示在 iPhone 上完成配对、信任设备并开启开发者模式。选择这台 iPhone 作为运行设备，点 Run。HealthKit 的真实读取需要真机。
 3. 在目标首页的 Apple Health 连接卡点「连接」或「管理」，选择所需类型，点「读取并预览」，然后点「导入并允许 Agent 评估」。iPhone 在本机读取摘要和更新进度。自动编排还需要手机能够访问已配对的 Mac。具名目标通过自己的连接卡关联摘要，提案和采用后的任务保存在该目标中。

@@ -16,7 +16,7 @@
 
 你正在 `~/workspace/along` 里修复 bug。
 
-Along 是手机优先的目标工作台：把一个目标拆成「目标 / 来源 / 动态任务」三样联动的东西，确定性的部分在本地算，生成式的部分交给 Agent，Agent 的产出必须被校验且由用户点「采用」后才生效。
+Along 是手机优先的目标工作台：把一个目标拆成「目标 / 来源 / 动态任务」三样联动的东西，确定性的部分在本地算，生成式的部分交给 Agent，Agent 的产出必须通过校验才能生效；目标方向是校验后自动生效、用户通过聊天纠正，现有「采用」流程是待迁移的旧行为（见 `AGENTS.md` 第 4、5 节）。
 
 项目是「一份源码，两份产物」的纯前端 + Mac 宿主结构：
 
@@ -119,10 +119,10 @@ Along 是手机优先的目标工作台：把一个目标拆成「目标 / 来�
 - **补回归测试。** 放 `test/`，命名体现被钉住的不变量（例：`test('health router stays quiet when the target is already met')`），不要 `fix-bug-123`。
 - **共享文件双端可用。** 改 `web/goal-agent-core.mjs`、`web/adaptive-ui.mjs`、`web/super-agent.mjs`、`web/loop.mjs` 时，必须同时能在浏览器和 Node 里跑通，不得引入 Node 专用模块。
 - **同步产物与版本号**（用户可见的改动，漏一处手机上就还是旧页面）：
-  - `web/index.html` 的 `?v=`（当前 46）
-  - `web/sw.js` 的 `CACHE`（当前 `along-shell-v46`）
-  - `ios/AlongHealth/Sources/AlongShellView.swift` 的 `build=`（当前 46）
-  - 需要重新安装 App 时，再提 `ios/AlongHealth/Info.plist` 的 `CFBundleVersion`（当前 40）
+  - `web/index.html` 的 `?v=`（具体版本以文件为准）
+  - `web/sw.js` 的 `CACHE`（具体版本以文件为准）
+  - `ios/AlongHealth/Sources/AlongShellView.swift` 的 `build=`（具体版本以文件为准）
+  - 需要重新安装 App 时，再提 `ios/AlongHealth/Info.plist` 的 `CFBundleVersion`（具体版本以文件为准）
 - **新增前端文件**要同时登记到 `tools/build.mjs` 的 `files` 和 `web/sw.js` 的 `FILES`，并保持 `web/` 平铺。
 - **改源码，不手改产物。** `dist/` 和 `ios/AlongHealth/Web/` 由 `npm run build` 生成；`ios/AlongHealth/Web/` 被 git 跟踪，build 后要连同源码一起提交。
 
@@ -163,7 +163,7 @@ Along 是手机优先的目标工作台：把一个目标拆成「目标 / 来�
 ## 4. 红线（违反即回滚，不是「权衡」）
 
 - Token 只留在 Mac：Kimi token、配对 token 不发给 iPhone、不写进运行结果、不进日志
-- Agent 的输出不能直接生效：先过 `validateGoalReply` 与 `safeAdaptiveLayout`，用户点「采用」才改变目标空间
+- Agent 的输出必须先过 `validateGoalReply` 与 `safeAdaptiveLayout` 等校验才能改变目标空间；不新增采用、确认或审批环节，校验只能加严
 - 健康数据只发汇总值，不发原始 HealthKit 样本
 - 理财只用演示数据：不接真实账户、不读取账户、不转账、不交易
 - 不手改 `dist/` 和 `ios/AlongHealth/Web/`
@@ -192,6 +192,9 @@ Along 是手机优先的目标工作台：把一个目标拆成「目标 / 来�
 - 推 `main` 不会自动部署：GitHub Pages 要手动触发工作流（`gh workflow run pages.yml --ref main`），iPhone 要在 Xcode 里重新构建安装
 
 ## 7. 这个仓库已经踩过的坑（别再踩一遍）
+
+- **真实 Harness 的工具输出必须是 lossless JSON**。直接调用工具函数的测试会容忍对象里的 `undefined`，Harness 0.2.2 在渲染前就会拒绝。Along 工具边界省略可选对象字段，并保留对非 JSON 值的拒绝；联调时检查真实 `tool/result`，不能只看最终任务成功。阶段 B 回归见 Along Agent `tests/along-phaseB.spec.ts`。
+- **需要对话回应，不等于有创建目标的意图**。沿用仓库编程 Agent 的路由提示会把「最近睡得不好」当作与仓库无关而 ignore。Along 本地部署应把允许用户的聊天交给 Worker 回应，再由 Worker 判断是否建目标；保持健康观察、用户停止、暂停与授权的原边界。
 
 - **`web/app.mjs` 在 Node 里没法 import**：模块顶层就访问 `document` / `localStorage`，历史上等于零测试覆盖。仓库里已有最小 DOM 桩 `test/dom-stub.mjs`（`installDomStub()`），装上桩后 `await import('../web/app.mjs')` 就能驱动真实的渲染、点击与提交；要给 app.mjs 的行为补测试，先用它，别自己重写一份。
 - **App 内置页面不是安全上下文**：`along://` 是自定义 scheme，WKWebView 不把它当安全上下文（无公开 API 可改），`crypto.randomUUID` 是 `[SecureContext]` 方法，可能压根不存在；一旦缺失，新建目标、发消息、HealthKit 桥接、Agent 桥接会整体抛 `TypeError`。需要随机 id 时用 `web/super-agent.mjs` 的 `newId()`，它自带降级。

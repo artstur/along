@@ -41,6 +41,7 @@ enum AgentBridgeError: Error { case invalidConfiguration }
  static var sample = 20
  static var reads = 0
  static var lastSelection = Set<HealthMetric>()
+ func stopObserving() {}
  func updateBackgroundDelivery(_ selected: Set<HealthMetric>) { Self.lastSelection=selected }
  func observeChanges(_ selected: Set<HealthMetric>, onChange: @escaping (@escaping ()->Void)->Void) { Self.update=onChange }
  func read(_ selected: Set<HealthMetric>,requestPermission:Bool,includeContext:Bool,includeComparisonHistory:Bool) async throws -> Snapshot {

@@ -22,6 +22,7 @@
 
 ## 3. 怎样算改完
 
+- 先写文档，再实现：新增功能、调整行为或修 bug 前，先在仓库文档中写清目标、范围、实现方案和验收标准，再开始改代码。优先更新已有文档；实现中方案有变化，同步更新文档。
 - 修 bug 走 `docs/bugfix-goal-prompt.md` 里的流程（复现 → 独立核实 → 修复 → 回归验证 → 交付）。那份文档同时是跨轮次的记忆：第 7 节记着这个仓库已经踩过的坑，PR 描述的遗留清单记着还没修的——**开工前先读这两处，别重犯、别重修**。
 - 跑 `npm run check`，这是 CI 用的检查（语法检查加全部测试）。`npm test` 只跑全部测试，不能替代它。
 - `check` 按目录匹配：`web/`、`host/` 下的 `.mjs` 自动做语法检查，`test/*.test.mjs` 自动运行。新文件放对目录即可，不用改 `package.json`。
@@ -29,12 +30,16 @@
 
 ## 4. 运行时
 
+- Agent 工程统一称为 **Along Agent**；本地目录沿用 `../along-superagent/`，包名与插件 ID 沿用 `dsh-superagent`。
+
 - Agent 有两种运行时，在 `web/super-agent.mjs` 里定义：`dsh-superagent` 和 `kimi-code-swarm`。用户没选过时，前端默认用 Kimi。Host 的路由在 `host/agent-host.mjs`。
 - Mac 本地状态存在 `~/.along/agent-host/`，环境变量见 `README.md`。
+- 目标方向是全链路自动化：Agent 结果校验后自动生效，目标只能通过聊天改变。现有代码里的「采用」流程、待采用提案和目标编辑入口是待迁移的旧行为；方案见 `../along-superagent/docs/along/`。改到相关代码时按第 5 节迁移，不要再新增采用、确认或审批环节。
 
 ## 5. 红线
 
 - Token 只留在 Mac 上：Kimi token 和配对 token 不发给 iPhone，也不写进运行结果。
-- Agent 的输出不能直接生效：先经过 `validateGoalReply` 和 `safeAdaptiveLayout` 校验，用户点「采用」后才改变目标空间。
+- Agent 的输出必须先通过校验才能生效：经过 `validateGoalReply`、`safeAdaptiveLayout` 及对应的变更校验，通过后自动写入目标空间，不等用户采用；用户不认可时通过聊天纠正。校验只能加严，不能为了让结果通过而放宽。
+- 目标只能通过聊天改变：界面不提供直接编辑或删除目标的入口。
 - 健康数据只发汇总值，不发原始 HealthKit 样本。
 - 理财只用演示数据：不接真实账户，不转账，不交易。
