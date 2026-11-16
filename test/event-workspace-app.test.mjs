@@ -102,3 +102,25 @@ test('the real app discovers the new protocol, uses events during ongoing work, 
   await dom.click({action:'accept-goal',requestId:'forged'});
   assert.equal(requests.some(item=>item.path.startsWith('/super-agent/')),false);
 });
+
+test('archiving a goal while chatting still lets the user return to the goal home',async()=>{
+  const dom=installDomStub({storage:{'along.agent.v1':JSON.stringify(config)}});
+  document.visibilityState='visible';
+  const snapshot={goal:{id:'g_archive',domain:'custom',status:'active',currentRevision:1},
+    revision:{goalId:'g_archive',revision:1,title:'一项合成目标',status:'active'},tasks:[]};
+  const bridge={syncItems:[{seq:1,userId:'u_app_b',kind:'goal_updated',goalId:'g_archive',payload:{snapshot}}]};
+  installEventBridge(bridge);
+  await import(`../web/app.mjs?event-archive=${Date.now()}`);await settle();
+  await dom.app.dispatch('change',{target:{id:'event-goal-select',value:'g_archive'}});
+  await dom.click({action:'event-chat'});
+  assert.match(dom.app.innerHTML,/agent-composer/);
+  const archived=structuredClone(snapshot);
+  Object.assign(archived.goal,{status:'archived',currentRevision:2});
+  Object.assign(archived.revision,{status:'archived',revision:2});
+  bridge.syncItems.push({seq:2,userId:'u_app_b',kind:'goal_updated',goalId:'g_archive',payload:{snapshot:archived}});
+  await dom.tick(3000);await settle();
+  await dom.click({action:'agent-back'});
+  assert.doesNotMatch(dom.app.innerHTML,/agent-composer/,'return must leave the archived goal conversation');
+  assert.doesNotMatch(dom.app.innerHTML,/一项合成目标/,'archived goals must not remain on the active home');
+  assert.match(dom.app.innerHTML,/当前目标/);
+});
