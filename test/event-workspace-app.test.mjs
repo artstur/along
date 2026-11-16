@@ -132,7 +132,7 @@ function localNoticeSeed() {
 function savedEventWorkspace() {
   const goal={id:'g_saved',domain:'custom',status:'active',revision:1,title:'已设定的目标',metric:null,context:[],
     tasks:[{id:'t_saved',goalId:'g_saved',status:'open',content:'已设定的任务',revision:1}]};
-  return JSON.stringify({version:1,userId:'u_app_b',cursor:1,activeGoalId:goal.id,goals:{[goal.id]:goal},messages:{},drafts:{}});
+  return JSON.stringify({version:1,userId:'u_app_b',cursor:1,activeGoalId:goal.id,conversationId:null,goals:{[goal.id]:goal},messages:{},drafts:{}});
 }
 test('saved goal inventory excludes source data, demo records, drafts and stale selections after restart',async()=>{
   const seed=localNoticeSeed(),key='along.event-workspace.v1:u_app_b';

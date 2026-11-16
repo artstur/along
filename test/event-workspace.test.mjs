@@ -15,6 +15,55 @@ function setup(handler) {
   return {dom,calls,workspace:createEventWorkspace({config})};
 }
 
+const receiptId='out:ticket_one:assignment_one';
+const receiptMessage={id:'msg_result',eventId:receiptId,role:'assistant',direction:'outbound',text:'已完成这次执行',seq:2};
+function cachedReceiptWorkspace() {
+  const goal={id:'g_sleep',domain:'custom',status:'active',revision:1,title:'已设定的目标',metric:null,context:[],
+    tasks:Array.from({length:5},(_,i)=>({id:'t_'+i,goalId:'g_sleep',content:'已设定的任务 '+i,status:'open',revision:1}))};
+  const receipt={...receiptMessage,goalId:goal.id,presentation:'execution',status:'received',conversationId:receiptId};
+  return {version:1,userId:config.userId,cursor:2,activeGoalId:goal.id,conversationId:null,
+    goals:{[goal.id]:goal},messages:{[receiptId]:receipt},drafts:{}};
+}
+
+test('execution receipts keep their own event identity and explicit conversation roots across offline restart',async()=>{
+  const key='along.event-workspace.v1:'+config.userId,root='chat_root';
+  const execution=(seq,eventId,fields)=>({...change(seq,'已设定的目标'),kind:'message',payload:{
+    snapshot:snapshot('已设定的目标'),presentation:'execution',...fields,message:{...receiptMessage,seq,eventId}}});
+  const items=[execution(1,receiptId,{}),execution(2,'out:second:worker',{conversation_id:root})];
+  const {workspace}=setup(input=>input.path==='/sync'?{items:input.body.after_seq?[]:items}:{acked:2});
+  await workspace.sync();
+  assert.equal(workspace.view().cursor,2);
+  const stored=JSON.parse(localStorage.getItem(key));
+  assert.equal(stored.messages[receiptId].conversationId,undefined);
+  assert.equal(stored.messages['out:second:worker'].conversationId,root);
+  window.AlongAgentBridge.request=async()=>{throw Error('offline');};
+  const reopened=createEventWorkspace({config});await reopened.sync();
+  assert.equal(reopened.view().activeGoalId,'g_sleep');
+  assert.deepEqual(reopened.view().messages.map(m=>m.eventId),[receiptId,'out:second:worker']);
+});
+test('offline restart migrates a goal-bound execution receipt self-reference while retaining every task and message',async()=>{
+  const key='along.event-workspace.v1:'+config.userId,seed=cachedReceiptWorkspace();
+  installDomStub({storage:{[key]:JSON.stringify(seed)}});
+  window.AlongAgentBridge={request:async()=>{throw Error('offline');}};
+  const reopened=createEventWorkspace({config});await reopened.sync();
+  assert.equal(reopened.view().activeGoalId,'g_sleep');
+  assert.deepEqual(reopened.view().goals.g_sleep.tasks.map(t=>t.id),seed.goals.g_sleep.tasks.map(t=>t.id));
+  const [message]=reopened.view().messages;
+  assert.equal(message.eventId,receiptId);assert.equal(message.conversationId,undefined);
+  assert.equal(message.text,receiptMessage.text);assert.equal(message.goalId,'g_sleep');
+  assert.equal(JSON.parse(localStorage.getItem(key)).messages[receiptId].conversationId,undefined);
+});
+test('offline restart rejects invalid conversation references outside the known goal-bound execution receipt shape',()=>{
+  const key='along.event-workspace.v1:'+config.userId;
+  for (const change of [{presentation:'chat'},{goalId:'other_goal'},{goalId:undefined},
+    {conversationId:'out:another:event'},{role:'user'},{status:'pending'}]) {
+    const seed=cachedReceiptWorkspace();Object.assign(seed.messages[receiptId],change);
+    const raw=JSON.stringify(seed);installDomStub({storage:{[key]:raw}});
+    assert.equal(createEventWorkspace({config}).view().cursor,0);
+    assert.equal(localStorage.getItem(key),raw);
+  }
+});
+
 test('chat is durable before sending; same-id retry survives reopening and uses the bound user queue',async()=>{
   let online=false;
   const {workspace,calls}=setup(input=>{
