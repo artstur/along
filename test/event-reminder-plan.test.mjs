@@ -90,3 +90,20 @@ test('off, cancellation and a rescheduled recurrence reconcile the same task ide
   page=[{seq:++seq,userId:config.userId,kind:'task_updated',goalId:'g_plan',payload:{snapshot:data}}];
   await workspace.sync();assert.deepEqual(batches.at(-1).reminders,[]);assert.deepEqual(batches.at(-1).activeTasks,[]);
 });
+
+test('an unrelated wallTime cannot replace the Agent scheduled civil clock after its first occurrence',()=>{
+  const bad={...plan,wallTime:'2099-01-01T01:00:00.000Z'};
+  const projected=safeWorkspaceGoal(snapshot(bad)).tasks[0];
+  assert.equal(projected.reminderPlan,undefined);
+  assert.equal(projected.scheduledAt,undefined);
+  assert.equal(projected.content,'休息前整理物品');
+});
+
+test('an original civil clock may shift only through the matching timezone DST gap',()=>{
+  const spring={...plan,timezone:'America/New_York',wallTime:'2026-03-07T07:30:00.000Z'};
+  assert.deepEqual(safeWorkspaceGoal(snapshot(spring,'2026-03-08T07:30:00.000Z')).tasks[0].reminderPlan,spring);
+  assert.equal(safeWorkspaceGoal(snapshot(spring,'2026-03-08T08:30:00.000Z')).tasks[0].reminderPlan,undefined);
+  assert.equal(safeWorkspaceGoal(snapshot(spring,'2026-03-09T07:30:00.000Z')).tasks[0].reminderPlan,undefined);
+  const normal={...plan,wallTime:'2020-01-01T17:30:00.000Z'};
+  assert.deepEqual(safeWorkspaceGoal(snapshot(normal)).tasks[0].reminderPlan,normal);
+});

@@ -38,6 +38,17 @@ test('task reminder text preserves the Agent timezone, cadence and escaped expla
   assert.match(dom.app.innerHTML,/已关闭提醒/);
 });
 
+test('offline recurring task never labels an elapsed anchor as its next reminder',async()=>{
+  const goal={id:'g_elapsed_ui',domain:'custom',status:'active',revision:1,title:'离线重复目标',metric:null,context:[],tasks:[
+    {id:'t_elapsed_ui',goalId:'g_elapsed_ui',status:'open',content:'整理物品',revision:1,scheduledAt:'2020-01-01T17:30:00Z',
+      reminderPlan:{state:'scheduled',source:'agent',repeat:'daily',timezone:'Asia/Shanghai',explanation:'提前留出准备时间'}}]};
+  const saved={version:1,userId:'u_app_b',cursor:1,activeGoalId:goal.id,conversationId:null,goals:{[goal.id]:goal},messages:{},drafts:{}};
+  const dom=installDomStub({storage:{'along.agent.v1':JSON.stringify(config),'along.event-workspace.v1:u_app_b':JSON.stringify(saved)}});
+  installEventBridge();await import(`../web/app.mjs?elapsed-reminder-review=${Date.now()}`);await settle();
+  assert.doesNotMatch(dom.app.innerHTML,/下次 2020/);
+  assert.match(dom.app.innerHTML,/每天 .*01:30/);
+});
+
 test('a new-goal conversation always has a standard way back',async()=>{
   const dom=installDomStub({storage:{'along.agent.v1':JSON.stringify(config)}});
   document.visibilityState='visible';

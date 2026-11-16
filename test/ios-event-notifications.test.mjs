@@ -87,3 +87,34 @@ precondition(!rule.sameRequest(original,request(body:"已更新的正文")))
   const run=spawnSync('swift',['-'],{input:program,encoding:'utf8'});
   if (run.error?.code!=='ENOENT') assert.equal(run.status,0,run.stderr);
 });
+
+test('a missing recurring system readback never passes the already-fired one-time exception',()=>{
+  const swift=readFileSync(new URL('../ios/AlongHealth/Sources/EventTaskNotifications.swift',import.meta.url),'utf8');
+  const predicate=swift.match(/planned\.allSatisfy\(\{ r in[\s\S]*?\}\)/)?.[0];
+  const helper=swift.match(/    static func oneTimeMayHaveFired\([\s\S]*?\n    }/)?.[0]??'';
+  assert.ok(predicate);
+  const program=`import Foundation
+import UserNotifications
+enum Rule {
+${helper}
+static func accepts(_ planned:[UNNotificationRequest])->Bool {
+  let confirmed:[String:UNNotificationRequest]=[:]
+  func sameRequest(_ a:UNNotificationRequest,_ b:UNNotificationRequest)->Bool { fatalError("no confirmed item should exist") }
+  return ${predicate}
+}
+}
+var calendar=Calendar(identifier:.gregorian);calendar.timeZone=TimeZone(identifier:"Asia/Shanghai")!
+let future=Date().addingTimeInterval(86400),past=Date().addingTimeInterval(-60)
+func request(_ date:Date,_ repeats:Bool)->UNNotificationRequest {
+  let units:Set<Calendar.Component>=repeats ? [.calendar,.timeZone,.hour,.minute,.second] : [.calendar,.timeZone,.year,.month,.day,.hour,.minute,.second]
+  return UNNotificationRequest(identifier:"task",content:UNMutableNotificationContent(),trigger:UNCalendarNotificationTrigger(
+    dateMatching:calendar.dateComponents(units,from:date),repeats:repeats))
+}
+precondition(!Rule.accepts([request(future,true)]))
+precondition(!Rule.accepts([request(past,true)]))
+precondition(!Rule.accepts([request(future,false)]))
+precondition(Rule.accepts([request(past,false)]))
+`;
+  const run=spawnSync('swift',['-'],{input:program,encoding:'utf8'});
+  if (run.error?.code!=='ENOENT') assert.equal(run.status,0,run.stderr);
+});

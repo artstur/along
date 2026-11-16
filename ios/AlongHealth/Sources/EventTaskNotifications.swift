@@ -138,6 +138,12 @@ import UserNotifications
         return (parts,true)
     }
 
+    static func oneTimeMayHaveFired(_ request: UNNotificationRequest, now: Date) -> Bool {
+        guard let trigger=request.trigger as? UNCalendarNotificationTrigger, !trigger.repeats,
+              let date=trigger.dateComponents.date else { return false }
+        return date <= now
+    }
+
     private func reconcile(_ value: [String:Any]) async throws -> [String:Any] {
         guard let c = AlongConnectionStore.load(), let user = value["userId"] as? String, valid(user),
               let pin = value["fingerprint"] as? String, pin.uppercased() == c["fingerprint"],
@@ -220,7 +226,7 @@ import UserNotifications
         let returned = Set(readback.map(\.identifier))
         let confirmed = Dictionary(uniqueKeysWithValues:readback.map { ($0.identifier,$0) })
         guard planned.allSatisfy({ r in confirmed[r.identifier].map { sameRequest($0,r) } == true ||
-            ((r.trigger as? UNCalendarNotificationTrigger)?.dateComponents.date ?? .distantFuture) <= Date() }),
+            Self.oneTimeMayHaveFired(r,now:Date()) }),
               returned.isDisjoint(with:obsolete.map(\.identifier)) else { throw AgentBridgeError.server("系统提醒预约尚未完成") }
         // The Host can cover deadlines not already scheduled on this phone (for example tomorrow's renewal).
         // A missing or offline Host never invalidates an iOS receipt.
