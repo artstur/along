@@ -442,7 +442,7 @@ enum AlongConnectionStore {
 
 struct AlongWebView: UIViewRepresentable {
     @ObservedObject var bridge: AlongBridgeModel
-    private let site = URL(string: "along://app/index.html?build=66")!
+    private let site = URL(string: "along://app/index.html?build=67")!
 
     func makeCoordinator() -> Coordinator { Coordinator(bridge: bridge) }
 
@@ -463,6 +463,7 @@ struct AlongWebView: UIViewRepresentable {
         context.coordinator.attach(webView)
         EventTaskNotifications.shared.attach(context.coordinator)
         webView.navigationDelegate = context.coordinator
+        webView.uiDelegate = context.coordinator
         let request = URLRequest(url: site, cachePolicy: .reloadIgnoringLocalCacheData)
 #if DEBUG
         Task { @MainActor in
@@ -544,7 +545,7 @@ struct AlongWebView: UIViewRepresentable {
     })();
     """
 
-    final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate, UIGestureRecognizerDelegate, UNUserNotificationCenterDelegate {
+    final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUIDelegate, UIGestureRecognizerDelegate, UNUserNotificationCenterDelegate {
         let bridge: AlongBridgeModel
         private weak var webView: WKWebView?
         private weak var edgeBackGesture: UIScreenEdgePanGestureRecognizer?
@@ -1006,10 +1007,37 @@ struct AlongWebView: UIViewRepresentable {
             bridge.webError = "页面进程意外退出，请重新打开 App"
         }
 
+        // Only a person tapping a public HTTPS source may leave the bundled page.
+        // Automatic redirects, script popups and URLs containing credentials stay blocked.
+        static func publicSource(_ url: URL) -> Bool {
+            guard let parts = URLComponents(url: url, resolvingAgainstBaseURL: false),
+                  parts.scheme == "https", parts.user == nil, parts.password == nil,
+                  parts.port == nil || parts.port == 443,
+                  let host = parts.host?.lowercased(), url.absoluteString.count <= 2048,
+                  host.range(of: #"^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$"#, options: .regularExpression) != nil,
+                  host.range(of: #"(?:^|\.)(?:localhost|local|internal|test|invalid|example|onion)$"#, options: .regularExpression) == nil,
+                  url.absoluteString.rangeOfCharacter(from: .controlCharacters) == nil,
+                  !url.absoluteString.contains("\\") else { return false }
+            return !(parts.queryItems ?? []).contains { item in
+                item.name.range(of: #"^(?:api[_-]?key|access[_-]?token|token|password|secret|authorization|credential)$"#,
+                                options: [.regularExpression, .caseInsensitive]) != nil
+            }
+        }
+
+        func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
+                     for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+            if navigationAction.navigationType == .linkActivated,
+               let url = navigationAction.request.url, Self.publicSource(url) {
+                UIApplication.shared.open(url)
+            }
+            return nil
+        }
+
         func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
                      decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
             guard let url = navigationAction.request.url else { decisionHandler(.cancel); return }
-            if url.scheme == "https", ["duolingo.com", "www.duolingo.com"].contains(url.host ?? "") {
+            let legacyDuolingo = url.scheme == "https" && ["duolingo.com", "www.duolingo.com"].contains(url.host ?? "")
+            if legacyDuolingo || (navigationAction.navigationType == .linkActivated && Self.publicSource(url)) {
                 UIApplication.shared.open(url)
                 decisionHandler(.cancel)
                 return

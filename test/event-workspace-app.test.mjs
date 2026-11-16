@@ -483,3 +483,27 @@ test('binding a live conversation to a goal preserves the unsent follow-up throu
   await dom.click({action:'agent-back'});await dom.click({action:'event-chat'});
   assert.equal(composing().value,'Second sentence intended for the same conversation');
 });
+
+import {recommendation} from './recommendation-fixture.mjs';
+
+test('a recommendation is visible in its original goal and its notification opens evidence rather than the old task row',async()=>{
+  const goal={id:'g_source_ui',domain:'custom',status:'active',revision:1,title:'原运动目标',metric:null,context:[],tasks:[
+    {id:'t_source_ui',goalId:'g_source_ui',status:'open',content:'周五安排徒步',revision:1}]};
+  const result={eventId:'reply_source_ui',id:'msg_source_ui',role:'assistant',text:'已检索路线',seq:1,goalId:goal.id,taskId:'t_source_ui',
+    recommendation:recommendation(),notificationEventId:'reply_source_ui',status:'received'};
+  const saved={version:1,userId:'u_app_b',cursor:1,activeGoalId:goal.id,conversationId:null,goals:{[goal.id]:goal},messages:{[result.eventId]:result},drafts:{}};
+  const dom=installDomStub({storage:{'along.agent.v1':JSON.stringify(config),'along.event-workspace.v1:u_app_b':JSON.stringify(saved)}});
+  const requests=installEventBridge(),receipts=[],scrolled=[];
+  window.AlongAgentBridge.notification=async(name,value)=>{if(name==='eventTaskOpened')receipts.push(value);return {};};
+  document.getElementById=id=>dom.app.innerHTML.includes('id="'+id+'"')?{focus(){},scrollIntoView:()=>scrolled.push(id)}:null;
+  await import(`../web/app.mjs?recommendation-ui=${Date.now()}`);await settle();
+  assert.match(dom.app.innerHTML,/原运动目标/);assert.match(dom.app.innerHTML,/周末徒步方案/);assert.match(dom.app.innerHTML,/爬升尚未核实/);
+  await dom.fireWindow('along-notification-open',{detail:{userId:'u_app_b',goalId:goal.id,taskId:'t_source_ui',eventId:result.eventId,kind:'recommendation_ready'}});
+  assert.ok(scrolled.includes('event-message-'+result.eventId));assert.match(dom.app.innerHTML,/agent-composer/);
+  assert.equal(receipts.at(-1).taskId,'t_source_ui');
+  await dom.click({action:'event-recommendation-feedback',eventId:result.eventId});
+  assert.match(dom.app.innerHTML,/关于「周末徒步方案」/);
+  await dom.app.dispatch('submit',{target:{id:'agent-form',fields:{message:'更想要短一点的路线'},querySelector:()=>null,reset(){},setAttribute(){}},preventDefault(){}});await settle();
+  const sent=requests.find(r=>r.path==='/events').body;
+  assert.equal(sent.goal_id,goal.id);assert.equal(sent.task_id,'t_source_ui');assert.equal(sent.event_type,'along.user_message');
+});

@@ -2,6 +2,7 @@ import {agentCall, queueEvent, flushEventQueue, pendingEvents, readEventFailures
 import {assembleEnvelope} from './event-envelope.mjs';
 import {validateGoalReply} from './goal-agent-core.mjs';
 import {safeAdaptiveLayout} from './adaptive-ui.mjs';
+import {safeRecommendation} from './recommendations.mjs';
 
 const id = value => typeof value==='string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$/.test(value);
 const record = value => value!==null && typeof value==='object' && !Array.isArray(value);
@@ -116,6 +117,8 @@ function safeMessage(message,item) {
   return {id:message.id,eventId:message.eventId,role:message.role,text:message.text,seq:message.seq,
     goalId:item.goalId,conversationId:item.payload.conversation_id??message.causationId??(item.payload.presentation==='execution'?undefined:message.eventId),
     replyToMessageId:message.replyToMessageId,presentation:item.payload.presentation,
+    ...(item.goalId&&id(item.taskId)?{taskId:item.taskId}:{}),
+    ...(message.role==='assistant'&&item.goalId&&safeRecommendation(item.payload.recommendation)?{recommendation:safeRecommendation(item.payload.recommendation)}:{}),
     notificationEventId:eventId(item.payload.notification?.event_id)&&['recommendation_ready','task_result'].includes(item.payload.notification.kind)
       ?item.payload.notification.event_id:undefined,status:'received'};
 }
@@ -165,6 +168,11 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
       for (const [key,message] of Object.entries(saved.messages)) {
         if (!record(message)||message.eventId!==key||!text(message.text,2000)||
           !['user','assistant','system'].includes(message.role)||(message.goalId!==undefined&&!id(message.goalId))) throw Error('bad cache');
+        if (message.recommendation!==undefined) {
+          const r=message.role==='assistant'&&message.goalId&&safeRecommendation(message.recommendation);
+          if (r) message.recommendation=r; else delete message.recommendation;
+        }
+        if (message.taskId!==undefined&&(!id(message.taskId)||!saved.goals[message.goalId]?.tasks.some(t=>t.id===message.taskId))) delete message.taskId;
         if (message.conversationId!==undefined&&!id(message.conversationId)) {
           // Older versions used the receipt's own event ID when the sender supplied no conversation.
           if (message.presentation!=='execution'||message.role!=='assistant'||message.status!=='received'||
@@ -266,6 +274,14 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
     restoreSelection(next);save(next);onChange();
     return next.activeGoalId;
   }
+  function prepareRecommendationFeedback(eventId) {
+    const message=state.messages[eventId];
+    if (!message?.recommendation||message.goalId!==state.activeGoalId||!isActiveGoal(state,state.activeGoalId)) return false;
+    const taskId=message.taskId&&state.goals[state.activeGoalId].tasks.find(t=>t.id===message.taskId&&t.status!=='cancelled')?.id;
+    const scope=draftScope(state),draft=state.drafts?.[scope]||`关于「${message.recommendation.title}」，`;
+    save({...state,drafts:{...state.drafts,[scope]:draft},feedbackContext:{goalId:state.activeGoalId,...(taskId?{taskId}:{})}});
+    onChange();return true;
+  }
   async function submit(message) {
     if (!text(message,800)) throw Error('请输入 800 字以内的消息');
     const next=recoverPending();
@@ -274,13 +290,14 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
     const assembled=assembleEnvelope({event_type:'along.user_message',occurred_at:new Date().toISOString(),
       timezone:Intl.DateTimeFormat().resolvedOptions().timeZone||'Asia/Shanghai',goal_id:next.activeGoalId??undefined,
       causation_id:next.activeGoalId===null?next.conversationId??undefined:undefined,
+      task_id:next.feedbackContext?.goalId===next.activeGoalId&&next.goals[next.activeGoalId]?.tasks.some(t=>t.id===next.feedbackContext.taskId&&t.status!=='cancelled')?next.feedbackContext.taskId:undefined,
       payload:{event_type:'along.user_message',text:message}});
     if (!assembled.ok) throw Error(assembled.reason);
     const receipt=await queueEvent(config,assembled.envelope,{send:false});
     if (!receipt.ok) throw Error(receipt.reason);
     const root=next.conversationId??receipt.event_id;
     next.conversationId=root;
-    next.drafts={...next.drafts};delete next.drafts[composingScope];
+    next.drafts={...next.drafts};delete next.drafts[composingScope];delete next.feedbackContext;
     next.messages[receipt.event_id]={eventId:receipt.event_id,role:'user',text:message,goalId:next.activeGoalId??undefined,conversationId:root,status:'pending'};
     // The queue is already durable even if this display cache cannot be written.
     try { save(next); } catch { state=next; }
@@ -383,5 +400,5 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
       .finally(()=>{flight=null;if(!disposed&&lastError!==beforeError) onChange();});
     return flight;
   }
-  return {view,draft,setDraft,select,leaveConversation,submit,sync,dispose:()=>{disposed=true;}};
+  return {view,draft,setDraft,select,leaveConversation,prepareRecommendationFeedback,submit,sync,dispose:()=>{disposed=true;}};
 }
