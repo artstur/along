@@ -1,3 +1,4 @@
+import UserNotifications
 import Foundation
 import BackgroundTasks
 import HealthKit
@@ -734,7 +735,12 @@ enum BackgroundReviewAdmission {
         reviews.calendarRefresh { success in finish(success) }
     }
 
+    func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken token: Data) {
+        EventTaskNotifications.shared.received(token:token)
+    }
+
     func application(_ application: UIApplication, didFinishLaunchingWithOptions options: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
+        UNUserNotificationCenter.current().delegate = EventTaskNotifications.shared
         let reviews = BackgroundHealthReviews.shared
         BGTaskScheduler.shared.register(forTaskWithIdentifier: dailyRefreshID, using: .main) { [weak self] task in
             Task { @MainActor in

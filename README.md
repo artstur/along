@@ -262,12 +262,27 @@ npm run build   # 产出 dist/（GitHub Pages）与 ios/AlongHealth/Web/（App �
 - GitHub Pages：手动触发工作流（GitHub Actions → Deploy GitHub Pages → Run workflow，或 `gh workflow run pages.yml --ref main`），依次执行 `npm ci`、`npm run check`、`npm run build` 并发布 `dist/`。
 - iPhone：先 `npm run build`，再在 Xcode 里重新构建并安装。
 
+## 新协议任务通知与到期复查
+
+iPhone 在已同步的任务到点时提醒。Mac 上的 Agent 得出需要告知的推荐或执行结果后，通过通知引导用户回到对应目标和任务。一次性提醒只执行一次，每日续排使用用户已表达的持续委托。复查以持久事件和工单为准，缺少新摘要时可以等待或询问。
+
+- Agent 在既有同步项的 `payload.notification` 标记已生效且需要告知的结果，包括稳定 `event_id`、`kind`（`recommendation_ready` 或 `task_result`）和 `revision`。归属使用该同步项的 `goalId`、可选 `taskId` 和配对用户。普通执行进度和 keep 保持安静，旧版仍能消费同步页。
+- iPhone 从通过校验的有效任务快照维护本地系统队列。授权的设备通过原有固定证书的配对连接向 `POST /notifications/device` 发送 `{token,environment,expectedUserId}`（development 或 production），撤权发送 `{enabled:false,expectedUserId}`。宿主单独消费 Agent 的持久同步记录，iPhone 挂起时仍可将新结果发送至 APNs。远程开启状态随同步页返回；缺少远程能力时，已授权手机在前台同步可补收近期结果。
+- Host 使用专属于 Along 的 Apple APNs 令牌签名密钥。为 Host 进程设置 `ALONG_APNS_KEY_FILE`（私有 P-256 .p8，0600）、`ALONG_APNS_KEY_ID` 和 `ALONG_APNS_TEAM_ID`；App 标识为 `com.artstur.AlongHealth`。开发和生产设备使用各自签名环境，发布包应具备对应的 aps-environment。设备令牌和签名材料留在私有目录，通知正文只提示用户打开 Along 阅读。
+- 验收覆盖重复同步、改期和取消、授权与配对切换、服务重启、失败重试、实际复评及跨日续排。iOS 系统接受排程、通知中心实际送达、点开定位分别记录。远程送达需要有效签名与 provider，并单独在 App 挂起时验证。
+
+已取得的 iOS 系统排程回执通过 `POST /notifications/scheduled` 回传。Agent 为到点的任务产生 `reminder_due`，Host 遇到同一目标、任务和触发时刻已有本地回执时抑制远程副本。用户一直未打开 App 时，Mac 次日才生成的安排可在到点走 APNs。手机完全离线期间，系统仍可能展示断线前已经预约的旧时刻，重连后按当前任务校准。
+
+Host 逐事件保存待发记录。APNs 拒收或短时失败后，已授权 iPhone 下次拉取同步页也能接手近期推荐，即使业务游标已经前进；原生处理后返回回执。到期提醒的远程补送及结果交接只在十分钟有效期内重试。提供方接受请求和设备确实展示分别验收。
+
+本次配套的 Along Agent 发布源码固定为 `b79fccc93f63dd9cdcd219401a4a1b654d6a5152`（[Agent PR #3](https://github.com/artstur/along-superagent/pull/3)，依赖 [#2](https://github.com/artstur/along-superagent/pull/2)）。从该提交单独构建并安装到 along-phone profile。业务库由 Schema 4 原位升级至 5，切换前停写备份。旧版无法打开新版库，已有新写入时应先保全数据再评估回退。
+
 ## 当前边界
 
 坦白说，这还是一个 Demo，下面这些是有意为之或尚未完成的：
 
 - **健康更新按授权触发**。新事件链路由原生层统一补传所选类型的摘要，在前台读取或 iOS 提供后台执行机会时上传；Mac 按已有目标独立筛选与跟进。锁屏读取、系统唤醒与网络可达仍受环境限制，真机边界见[阶段 C](docs/stage-c-tech-design.md)。旧 Host 的逐目标后台评估是兼容流程。
-- **通知由 iOS 处理**。当前主线的新事件链路普通同步不发系统通知；目标与任务在下次前台同步可见。Agent 结果通知及采用后的定时提醒属于旧 Host 兼容流程；正在开发的新协议通知不能当作主线已交付能力。
+- **通知由 iOS 处理**。新事件链路维护已同步任务的本地预约，明确的推荐与任务结果可走配对通知通道；普通进度和 keep 保持安静。APNs 需要对应签名与 Host 配置，预约成功、提供方接单、设备展示与点开应分别验收，详见[新协议通知](#新协议任务通知与到期复查)。旧 Host 仍保留采用后的提醒兼容流程。
 - **Agent 依赖 Mac**。Mac 关闭或网络断开时，首页确定性进度照常更新，Agent 问答和任务提案显示不可用；GitHub Pages 是静态站，无法常驻生成进程。
 - **理财只是演示**。不接真实账户，不转账，不交易。
 - **个人团队签名**。Xcode 个人团队的配置文件通常 7 天后到期，需要重新构建安装。

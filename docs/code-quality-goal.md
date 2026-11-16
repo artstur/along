@@ -18,7 +18,7 @@
 
 - Along 主分类：ui/data（事件工作区状态与共享协议校验）；基线 `aa1d7b2c79a74bdf766d2d0a28ce5f418f0bb212`。
 - Along Agent 主分类：agent/data；独立任务从该仓库最新 main 开始，方案与证据见配套 PR。
-- 默认无跨仓接口变更或 PR 依赖。本轮避开正在开发的通知功能（Along #17/#18、Along Agent #3）。
+- 默认无跨仓接口变更或 PR 依赖。开工时避开正在开发的通知功能（Along #17/#18、Along Agent #3）；交付前这些 PR 已并入主线，本轮同步后重验兼容性。
 - 用户可观察验收：目标归档后仍能返回可操作的首页或其余目标，已保存的对话和草稿不丢；畸形健康摘要被明确拒绝，队列调用不因校验异常而中断。
 
 ## 实现方案与候选（已完成）
@@ -33,9 +33,15 @@
 - C1 → Bug#2：`node --test test/event-workspace.test.mjs test/event-workspace-app.test.mjs`，修复前 3 failed / 10 passed，修复后 13/13；只回退 `web/event-workspace.mjs` 后同样 3 项失败。`e253bcb` 集中维护导航选择不变量，缓存恢复与状态写入共用，历史快照、草稿和无关新会话保留。
 - C2 → Bug#3：`node --test test/event-envelope.test.mjs`，修复前 2 项因 `Cannot use 'in' operator to search for 'start'` 失败，修复后 2/2；只回退 `web/event-envelope.mjs` 后再次 2 项失败。`d17f574` 提取窗口结构校验，再执行已有摘要约束；无效输入明确拒绝，不入队不发网络。
 - 契约未变：仍只接受既有信封与已校验状态；修复使无效输入按原契约拒绝，归档历史仍保留且不作为活动目标。
-- 最终 `npm run check`：309/309 通过，0 跳过。`npm run build`：18 个文件与 `dist/`、`ios/AlongHealth/Web/` 逐字节一致。
-- 资源版本 v62：Web 查询串、Service Worker、iOS 内置壳同步；避开待集成通知 PR 的 v61。未安装 App，Bundle 仍为 52。生成资源独立提交 `7eb1e39`。
+- 初轮修复 `npm run check`：309/309 通过，0 跳过。`npm run build`：18 个文件与 `dist/`、`ios/AlongHealth/Web/` 逐字节一致。
+- 资源版本 v62：Web 查询串、Service Worker、iOS 内置壳同步；避开待集成通知 PR 的 v61。初轮未安装 App，Bundle 当时为 52；后续同步主线沿用其 Bundle 53。生成资源独立提交 `7eb1e39`。
 - 真实 Chrome 393×852 浏览器：合成协议桥接下“选目标 → 聊天 → 同步归档 → 返回首页”可退出，归档前草稿保留，新对话草稿返回后可恢复；无横向溢出或页面异常。本地 `host/server.mjs` 实际启动并提供页面与模块，验收后停止。此项不是实际 Agent 或真机验证。
 - 文档：新增统一索引，收敛重复长导航；24 个旧开发分支链接改为主线；修正新事件能力被写成待实现、旧采用流程被混作现行规范，以及固定旧机器路径/复用已合并分支的指引。45 个本地链接和 24 个跨仓主线文件路径核对成功，历史验收数字保留。
 - 日志：`/tmp/along-quality-{baseline,final}.log`、`/tmp/along-{archive,window}-{before,rollback}.log`；浏览器证据在工作区 `outputs/Along-code-quality-20261116/`。独立核实及 PR 随后补记。
 - 本轮不涉及安装真机、公开部署或现有用户数据迁移；这些流程未执行时不得记录为已验收。
+
+## 独立发现与主线同步
+
+首轮独立核实为 PARTIAL：原始两项缺陷复现与校验修复成立，但发现归档聊天后旧 textarea 值被复制进新会话，以及跨目标聊天后仍残留先前绑定的会话根。两处均补先失败回归，修复 `5100d69`；分别恢复旧 textarea 处理、旧根判定时，各有 1 项测试失败。现在由工作区提供统一 draftScope，页面只在同一作用域保留真实输入；移除目标选择后仅保留真正未绑定的新对话。无关的新会话草稿仍可恢复。
+
+交付前同步 Along `43464b4c` 与 Along Agent `b79fccc`：通知与到期复查已成为主线能力。保留上游通知实现与测试，解决共同文件和资源版本冲突；本轮资源 v62，高于主线 v61，Bundle 沿用主线 53。本轮没有将新资源安装到设备或发布，主线发布/验收记录属于其他任务。

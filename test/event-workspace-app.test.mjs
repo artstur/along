@@ -103,6 +103,24 @@ test('the real app discovers the new protocol, uses events during ongoing work, 
   assert.equal(requests.some(item=>item.path.startsWith('/super-agent/')),false);
 });
 
+test('a system notification opens its bound goal and focuses the exact task before acknowledging',async()=>{
+  const dom=installDomStub({storage:{'along.agent.v1':JSON.stringify(config)}});
+  document.visibilityState='visible';
+  const item=(id,seq)=>({seq,userId:'u_app_b',kind:'goal_updated',goalId:id,payload:{snapshot:{
+    goal:{id,domain:'custom',status:'active',currentRevision:1},revision:{goalId:id,revision:1,title:id,status:'active'},
+    tasks:[{id:'t_'+id,goalId:id,status:'open',content:'测试任务 '+id,currentRevision:1}]}}});
+  installEventBridge({syncItems:[item('goal_one',1),item('goal_two',2)]});
+  const receipts=[],focused=[];
+  window.AlongAgentBridge.notification=async (name,value)=>{if(name==='eventTaskOpened')receipts.push(value);return {};};
+  document.getElementById=id=>dom.app.innerHTML.includes('id="'+id+'"')?{focus:()=>focused.push(id),scrollIntoView(){}}:null;
+  await import(`../web/app.mjs?event-click=${Date.now()}`);await settle();
+  await dom.fireWindow('along-notification-open',{detail:{userId:'u_other',goalId:'goal_two',taskId:'t_goal_two',eventId:'e_one'}});
+  assert.equal(receipts.length,0);
+  await dom.fireWindow('along-notification-open',{detail:{userId:'u_app_b',goalId:'goal_two',taskId:'t_goal_two',eventId:'e_two'}});
+  await settle();assert.match(dom.app.innerHTML,/<h1>goal_two<\/h1>/);
+  assert.deepEqual(focused,['event-task-t_goal_two']);assert.equal(receipts.at(-1).taskId,'t_goal_two');
+});
+
 test('archiving a goal while chatting still lets the user return to the goal home',async()=>{
   const dom=installDomStub({storage:{'along.agent.v1':JSON.stringify(config)}});
   document.visibilityState='visible';

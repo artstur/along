@@ -4,7 +4,7 @@
 
 Host 配置 `ALONG_EVENT_INGEST=on` 且配置本机桥接凭证后，`/connection/status` 返回 `eventProtocol:1` 与绑定用户。App 切换到服务端拥有的目标空间：`agent-form` → `event-workspace.mjs` → 按用户隔离的持久事件队列 → Host `/events` → Along Agent Inbox → DSH 路由和 Along Worker 工具 → 校验后自动提交 → `/sync` 快照与持久对话 → 客户端整页校验、缓存提交 → `/sync/ack`。网络失败保留原事件号，ack 失败跨重启重试。目标只能通过聊天改变。
 
-Worker 通过 `along_conversation_read` 读取库内原话，无目标的连续聊天也可读；现象描述调用 `along_chat_reply` 回应而不建目标，明确行动意图调用 `along_changes_commit` 创建目标与任务，再保存答复。纠正立即提升输入版本，服务端同时检查触发消息是否已经被后续原话取代，旧工作不能仅换成最新版本号继续提交。普通同步不触发系统通知。新链路不运行旧健康复评和采用处理器；健康持续跟进已在[阶段 C](stage-c-tech-design.md)实现；记忆 Runtime 接线与定时记忆维护已接通，入口见[架构状态表](agent-architecture.md#当前实现与规范)。完整复盘与 Skill 作业仍待实现。
+Worker 通过 `along_conversation_read` 读取库内原话，无目标的连续聊天也可读；现象描述调用 `along_chat_reply` 回应而不建目标，明确行动意图调用 `along_changes_commit` 创建目标与任务，再保存答复。纠正立即提升输入版本，服务端同时检查触发消息是否已经被后续原话取代，旧工作不能仅换成最新版本号继续提交。普通进度同步与 keep 不触发系统通知；明确的推荐、任务结果与到时提醒通道见[新协议通知](../README.md#新协议任务通知与到期复查)。新链路不运行旧健康复评和采用处理器；健康持续跟进已在[阶段 C](stage-c-tech-design.md)实现；记忆 Runtime 接线与定时记忆维护已接通，入口见[架构状态表](agent-architecture.md#当前实现与规范)。完整复盘与 Skill 作业仍待实现。
 
 ## 1. 旧 Host 兼容路径全貌
 

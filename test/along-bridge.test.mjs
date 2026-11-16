@@ -130,6 +130,8 @@ function newLinkContext(overrides={}) {
   // handleAlongNewLink 再被逐请求调用——和生产里「模块加载一次 + 每请求进路由」一致。
   const handle=vm.runInNewContext(`(()=>{${newLinkSource}\nreturn handleAlongNewLink})()`,{
     process:{env:{...(overrides.env??{})}},
+    dir:'/unused',authorized:()=>true,createApnsProvider:()=>null,
+    taskNotifications:()=>({decorate:(_,page)=>page}),setInterval:()=>({unref(){}}),
     HostError,
     respond:(res,status,data)=>{const outcome={status,data:JSON.parse(JSON.stringify(data))};respondLog.push(outcome);return outcome;},
     body:async req=>req.input,

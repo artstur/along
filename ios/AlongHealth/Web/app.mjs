@@ -47,6 +47,7 @@ let verifiedHealthHost=false;
 let checkingHealthHost=false;
 let agentConnection = {status:agentConfig.token?'checking':'unconfigured',error:''};
 let eventWorkspace=null,eventWorkspaceBinding='';
+let lastNotificationProjection='',lastNotificationCheck=0;
 const EVENT_CONNECTION_KEY='along.event-connection.v1';
 function eventConnection(config=agentConfig) {
   const saved=readStored(EVENT_CONNECTION_KEY,null);
@@ -59,7 +60,9 @@ function connectEventWorkspace(userId) {
   const bindingKey=JSON.stringify([agentConfig.baseURL,agentConfig.fingerprint,agentConfig.token,userId]);
   if (!eventWorkspace||previous?.userId!==userId||eventWorkspaceBinding!==bindingKey) {
     eventWorkspace?.dispose();
-    eventWorkspace=createEventWorkspace({config:{...agentConfig,userId},onChange:()=>renderEventUpdate()});
+    lastNotificationProjection='';
+    eventWorkspace=createEventWorkspace({config:{...agentConfig,userId},onChange:()=>renderEventUpdate(),
+      onNotifications:window.AlongAgentBridge?.notification?value=>syncEventNotifications(value,bindingKey):undefined});
     eventWorkspaceBinding=bindingKey;
     if (!eventWorkspace.view().activeGoalId) screen='agent';
   }
@@ -1132,26 +1135,57 @@ function eventHealthConnection(goal) {
   const connected=state.source==='healthkit'&&state.snapshot?.contextReviewAllowed;
   return `<section class="connection-section"><div class="connection-card"><div class="connection-symbol" aria-hidden="true">♥</div><div class="connection-copy"><div class="connection-name"><strong>Apple Health</strong></div><p>${connected?'所选健康摘要变化后，Along 会自动跟进。':'连接所选健康摘要，让 Along 随变化自动跟进。'}</p></div><button class="agent-action connection-agent-action" data-action="event-health-connect">${connected?'管理':'连接'}</button></div></section>`;
 }
+async function syncEventNotifications(value,binding) {
+  if (binding!==eventWorkspaceBinding) return;
+  const projection=JSON.stringify(value);
+  if (projection===lastNotificationProjection && Date.now()-lastNotificationCheck<30_000) return;
+  const response=await window.AlongAgentBridge.notification('eventTaskSync',value);
+  if (binding!==eventWorkspaceBinding) return;
+  lastNotificationProjection=projection;lastNotificationCheck=Date.now();
+  if (response?.route) await openEventNotification(response.route,true);
+}
+async function openEventNotification(route,synced=false) {
+  if (!eventWorkspace||route?.userId!==eventWorkspace.view().userId) return;
+  const goal=eventWorkspace.view().goals[route.goalId];
+  if (!goal) return;
+  if (!synced&&route.taskId&&!goal.tasks.some(t=>t.id===route.taskId)) {
+    void eventWorkspace.sync();return;
+  }
+  const task=goal.tasks.find(t=>t.id===route.taskId&&t.status!=='cancelled');
+  eventWorkspace.select(goal.id);
+  screen=goal.status==='active'&&task?'home':'agent';render();
+  if (task&&goal.status==='active') {
+    const row=document.getElementById('event-task-'+task.id);
+    if (!row) return;
+    row.focus?.({preventScroll:true});
+    row?.scrollIntoView?.({block:'center'});
+  }
+  if (!task) document.getElementById('event-message-'+route.eventId)?.scrollIntoView?.({block:'center'});
+  await window.AlongAgentBridge.notification('eventTaskOpened',{eventId:route.eventId,userId:route.userId,
+    goalId:goal.id,taskId:task?.id??null});
+}
 function eventWorkspacePage() {
   const view=eventWorkspace.view();
   const goals=Object.values(view.goals).filter(goal=>goal.status==='active');
   const goal=view.goals[view.activeGoalId];
   const chat=screen==='agent'||Boolean(goal&&goal.status!=='active');
   const options=goals.map(item=>`<option value="${esc(item.id)}" ${item.id===view.activeGoalId?'selected':''}>${esc(item.title)}</option>`).join('');
-  const messages=view.messages.filter(message=>message.presentation!=='execution'&&(view.activeGoalId
+  const messages=view.messages.filter(message=>(message.presentation!=='execution'||message.notificationEventId)&&(view.activeGoalId
     ?message.goalId===view.activeGoalId:message.conversationId===view.conversationId));
   const connectionError=view.error||agentConnection.error;
   const connection=connectionError?`<details class="agent-setup"><summary>连接需处理 · ${esc(connectionError)}</summary><form id="host-address-form"><label>Along 服务地址<input name="baseURL" type="url" value="${esc(agentConfig.baseURL||'')}" required></label><button class="button">验证并更新</button></form></details>`:'';
   const goalPicker=`<div class="goal-switch"><label for="event-goal-select">当前目标</label><div class="goal-switch-actions"><div class="select-wrap"><select id="event-goal-select" aria-label="切换目标"><option value="" ${!view.activeGoalId?'selected':''}>新对话</option>${options}</select></div><button class="goal-add-button" data-action="new-goal">新建</button></div></div>`;
-  const history=messages.map(message=>`<div class="agent-message ${message.role==='user'?'user':'assistant'}"><p>${esc(message.text)}</p>${message.status==='pending'?'<p class="agent-disclaimer">待同步</p>':message.status==='rejected'||message.status==='failed'?'<p class="agent-disclaimer">发送未完成，请通过聊天重新说明。</p>':''}</div>`).join('');
+  const history=messages.map(message=>`<div ${message.notificationEventId?`id="event-message-${esc(message.notificationEventId)}"`: ''} class="agent-message ${message.role==='user'?'user':'assistant'}"><p>${esc(message.text)}</p>${message.status==='pending'?'<p class="agent-disclaimer">待同步</p>':message.status==='rejected'||message.status==='failed'?'<p class="agent-disclaimer">发送未完成，请通过聊天重新说明。</p>':''}</div>`).join('');
   const content=chat?`${backButton('agent-back','返回目标')}<div class="agent-title"><h1>${esc(goal?.title||'说说你想做什么')}</h1></div>${connection}<div class="agent-messages" role="log" aria-live="polite">${history||'<p class="agent-empty">说说你的想法，Along 会和你一起理清下一步。</p>'}</div>`
-    :goal?`${connection}<section class="goal-card"><h1>${esc(goal.title)}</h1>${goal.metric?`<p class="goal-note">${esc(goal.metric.target)} ${esc(goal.metric.unit)} · ${esc(goal.metric.period)}</p>`:''}${goal.context.length?`<p class="goal-note">${goal.context.map(item=>esc(typeof item==='string'?item:item.text)).join('；')}</p>`:''}<div class="card-actions"><button class="agent-action" data-action="event-chat">聊聊这个目标</button></div></section>${eventHealthConnection(goal)}<section class="task-section"><div class="section-heading"><h2>动态任务</h2></div><div class="task-list">${goal.tasks.filter(task=>task.status!=='cancelled').map(task=>`<div class="task-row"><div><strong>${esc(task.content)}</strong>${task.scheduledAt?`<p>${esc(new Date(task.scheduledAt).toLocaleString('zh-CN'))}</p>`:''}</div><span class="task-row-status">${task.status==='done'?'已完成':'待完成'}</span></div>`).join('')||'<p class="agent-empty">通过聊天安排下一步。</p>'}</div></section>`:'';
-  return `<div class="app-shell ${chat?'agent-shell':''}"><header class="topbar"><div class="topbar-inner">${brand()}</div></header><main class="content ${chat?'agent-page':''}"><div class="${chat?'agent-scroll':''}">${goalPicker}${content}</div>${chat?`<div class="agent-composer-dock"><form id="agent-form" class="agent-composer"><textarea name="message" rows="1" placeholder="说说你的想法" maxlength="800" required>${esc(eventWorkspace.draft())}</textarea><button class="agent-send" aria-label="发送" ${agentBusy?'disabled':''}>↑</button></form><p class="agent-disclaimer">Along · 一起，慢慢向前</p></div>`:''}</main></div>`;
+    :goal?`${connection}<section class="goal-card"><h1>${esc(goal.title)}</h1>${goal.metric?`<p class="goal-note">${esc(goal.metric.target)} ${esc(goal.metric.unit)} · ${esc(goal.metric.period)}</p>`:''}${goal.context.length?`<p class="goal-note">${goal.context.map(item=>esc(typeof item==='string'?item:item.text)).join('；')}</p>`:''}<div class="card-actions"><button class="agent-action" data-action="event-chat">聊聊这个目标</button></div></section>${eventHealthConnection(goal)}<section class="task-section"><div class="section-heading"><h2>动态任务</h2></div><div class="task-list">${goal.tasks.filter(task=>task.status!=='cancelled').map(task=>`<div class="task-row" tabindex="-1" id="event-task-${esc(task.id)}"><div><strong>${esc(task.content)}</strong>${task.scheduledAt?`<p>${esc(new Date(task.scheduledAt).toLocaleString('zh-CN'))}</p>`:''}</div><span class="task-row-status">${task.status==='done'?'已完成':'待完成'}</span></div>`).join('')||'<p class="agent-empty">通过聊天安排下一步。</p>'}</div></section>`:'';
+  return `<div class="app-shell ${chat?'agent-shell':''}"><header class="topbar"><div class="topbar-inner">${brand()}</div></header><main class="content ${chat?'agent-page':''}"><div class="${chat?'agent-scroll':''}">${goalPicker}${content}</div>${chat?`<div class="agent-composer-dock"><form id="agent-form" class="agent-composer"><textarea name="message" rows="1" placeholder="说说你的想法" maxlength="800" data-draft-scope="${esc(view.draftScope)}" required>${esc(eventWorkspace.draft())}</textarea><button class="agent-send" aria-label="发送" ${agentBusy?'disabled':''}>↑</button></form><p class="agent-disclaimer">Along · 一起，慢慢向前</p></div>`:''}</main></div>`;
 }
 function renderEventUpdate() {
   if (!eventWorkspace) return;
-  // Keep a draft and its selection intact while background synchronization updates the conversation.
+  // Preserve live input only within the same draft scope. A sync can archive the goal and
+  // move the composer to a fresh conversation; that scope must use its own persisted draft.
   const input=app.querySelector('#agent-form textarea');
+  const sameScope=input?.dataset.draftScope===eventWorkspace.view().draftScope;
   const draft=input?.value,selection=input?.selectionStart;
   const focused=document.activeElement===input;
   const scroller=app.querySelector('.agent-scroll');
@@ -1159,7 +1193,7 @@ function renderEventUpdate() {
   const follow=scroller&&(scroller.scrollHeight-scroller.scrollTop-scroller.clientHeight<80);
   render();
   const next=app.querySelector('#agent-form textarea');
-  if (next&&typeof draft==='string') {next.value=draft;if (focused) {next.focus();next.setSelectionRange?.(selection,selection);}}
+  if (sameScope&&next&&typeof draft==='string') {next.value=draft;if (focused) {next.focus();next.setSelectionRange?.(selection,selection);}}
   const nextScroller=app.querySelector('.agent-scroll');
   nextScroller?.scrollTo({top:follow?nextScroller.scrollHeight:scrollTop,behavior:'instant'});
 }
@@ -1488,6 +1522,7 @@ app.addEventListener('submit', async event => {
   const message=String(form.get('message')).trim();
   if (!message) return;
   if (eventWorkspace) {
+    void enableAgentNotifications().then(()=>{lastNotificationProjection='';return eventWorkspace?.sync();});
     agentBusy=true;
     try {
       await eventWorkspace.submit(message);
@@ -2297,6 +2332,11 @@ window.addEventListener('along-health-update', async event => {
 window.addEventListener('along-notification-open', event => {
   const detail=event.detail;
   if (!detail || typeof detail!=='object') return;
+  if (detail.userId && detail.eventId) {
+    lastNotificationProjection='';
+    void openEventNotification(detail).catch(()=>{});
+    return;
+  }
   const goalKey=detail.goalKey;
   if (goalKey!=='health' && goalKey!=='finance' && !isCustomGoalKey(goalKey)) return;
   activeGoal=goalKey;
@@ -2383,6 +2423,8 @@ async function refreshFromNative(force=false) {
 }
 void refreshFromNative();
 function resumeNativeHealth() {
+  lastNotificationCheck=0;
+  if (eventWorkspace) void eventWorkspace.sync();
   if (window.AlongHealthBridge?.backgroundReview&&window.AlongHealthBridge.refresh) {
     nativeObservationSeen=false;
     nativeHealthStatus='checking';

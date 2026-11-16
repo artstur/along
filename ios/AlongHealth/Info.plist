@@ -10,6 +10,8 @@
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
 	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>AlongAPNsEnvironment</key>
+	<string>$(ALONG_APNS_ENVIRONMENT)</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
@@ -19,7 +21,7 @@
 	<key>CFBundleShortVersionString</key>
 	<string>1.0</string>
 	<key>CFBundleVersion</key>
-	<string>52</string>
+	<string>53</string>
 	<key>BGTaskSchedulerPermittedIdentifiers</key>
 	<array><string>com.artstur.AlongHealth.daily-review</string></array>
 	<key>UIBackgroundModes</key>

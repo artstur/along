@@ -50,3 +50,15 @@ Apple 健康 App 的手腕温度通常展示相对个人基线的偏差；Health
 - HealthKit 对没有匹配记录的统计查询可能返回 `errorNoData`；此时界面显示“无可读取记录”，不会把它当作整个连接失败。
 - 当前使用 Xcode 个人团队签名。个人团队的配置文件通常 7 天后到期，届时需重新构建并安装。GitHub 提交和 Pages 更新不会自动更新已安装的 iPhone App；移动端需重新同步内置资源并安装。
 - 新目标输入和动态任务详情都已接入 Mac 上独立运行的 DSH Super Agent。目标页展示真实的 Source、Main Session、Ticket、Worker、子 Agent 分工、进展、输出与最终综合结果；任务页展示 Source、Eval、Ticket、Assignment 和 Report。Mac 服务或 GitHub Agent 账号未就绪时，页面明确显示阻塞原因，不会本地模拟完成。
+
+## 新协议任务通知
+
+对已配对用户，App 按同步完成后的活动目标和未完成任务，将未来的 scheduledAt 排入 iOS。任务改期使用同一系统标识替换，完成、取消、归档和权限变化会清理本协议的预约。已有旧协议委托和用户资料保留。同步回执不等于通知送达，验收分别核对 iOS pending、delivered 以及点击后的目标和任务。
+
+经过 Agent 校验且明确标记的推荐或执行结果使用独立事件身份。已配置远程推送时由 Host 发 APNs，凭据在 Host 管理，设备注册使用已配对的原生固定证书连接。无远程通道时，仅在前台同步到新结果且已获授权时发本机通知。手机将确认过的系统队列摘要回传 Host，供后续委托在手机挂起期间选择推送。APNs 拒收后，Host 可将近期结果交回前台补投，App 先保存事件，再按相同身份投递和回执。iOS 系统按已预约的时刻触发本地提醒。尚未同步到手机的改期需等连接恢复。
+
+本机验收时通过真实目标对话创建短时间后的一次性测试任务。在它出现后回主屏，等待通知，点击核对任务，再通过对话取消测试任务。不得删除其他目标、通知或配对。Build 53 / Web v61。
+
+已在 Apple 开发者账户启用 Push Notifications 且签名描述文件允许时，签名构建设置 CODE_SIGN_ENTITLEMENTS=AlongHealth/AlongPush.entitlements 与 ALONG_APNS_ENVIRONMENT=development 或 production，与实际签名环境对应。默认描述文件继续支持本地提醒。原生每次启动重新向 Apple 注册，并只向证书固定的配对 Host 传递设备令牌。
+
+Debug 真机验收可用环境变量 ALONG_NOTIFICATION_PROBE_TASK 指定真实测试任务的 ID。将 App 送回主屏，等待到时并点击通知，再用 devicectl 读取 App 数据容器 Library/Caches/AlongNotificationProbe.json。该文件只记录指定任务的匿名哈希、系统回读时间、已送达、点击与定位时间。回到前台读取通知中心也可独立验证送达。验收后通过目标聊天撤销测试任务。
