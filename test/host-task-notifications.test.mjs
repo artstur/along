@@ -26,7 +26,7 @@ function fixture(t) {
   const item=(seq,kind='recommendation_ready')=>({
     seq,createdAt:new Date(clock+1).toISOString(),userId:who.userId,goalId:'g_test',taskId:'t_test',
     payload:{notification:{kind,event_id:'event:'+seq,revision:2},snapshot:{
-      goal:{id:'g_test',status:'active'},tasks:[{id:'t_test',goalId:'g_test',status:'open',content:'private task'}]}}});
+      goal:{id:'g_test',status:'active',currentRevision:2},tasks:[{id:'t_test',goalId:'g_test',status:'open',currentRevision:2,content:'private task'}]}}});
   return {options,dir,input,who,pages,sent,item,tick:ms=>{clock+=ms;}};
 }
 test('offline retry, duplicate event, process restart and repeated phone sync preserve one routing receipt',async t=>{
@@ -39,9 +39,10 @@ test('offline retry, duplicate event, process restart and repeated phone sync pr
   assert.equal(receipt.items[0].remoteNotifications,true);
   const offline=taskNotifications({...f.options,send:async()=>{throw Error('offline');}});
   await offline.dispatch();
-  await Promise.all([one.dispatch(),one.dispatch()]);
+  f.tick(3000);
   const two=taskNotifications(f.options);
-  await two.dispatch();
+  await Promise.all([two.dispatch(),two.dispatch()]);
+  await taskNotifications(f.options).dispatch();
   assert.deepEqual(f.sent,[{userId:'u_test',goalId:'g_test',taskId:'t_test',kind:'recommendation_ready',eventId:'event:1',revision:2}]);
   assert.deepEqual(two.decorate(f.who,{items:f.pages}),receipt);
   assert.equal(statSync(join(f.dir,'notification-device.json')).mode&0o777,0o600);
@@ -123,4 +124,62 @@ test('Apple request uses ES256, the signed environment and a generic alert with 
   assert.equal(JSON.parse(Buffer.from(head,'base64url')).alg,'ES256');
   assert.equal(JSON.parse(Buffer.from(claims,'base64url')).iss,env.ALONG_APNS_TEAM_ID);
   assert.equal(verify('sha256',Buffer.from(head+'.'+claims),{key:publicKey,dsaEncoding:'ieee-p1363'},Buffer.from(sig,'base64url')),true);
+});
+
+test('APNs refusal after a phone sync can hand off on an empty page until the phone acknowledges',async t=>{
+  const f=fixture(t);
+  const first=taskNotifications({...f.options,send:async()=>'invalid_device'});
+  first.register(f.who,f.input);
+  f.pages.push(f.item(1));
+  assert.equal(first.decorate(f.who,{items:f.pages}).items[0].remoteNotifications,true);
+  await first.dispatch();
+  const next=taskNotifications(f.options);
+  const sync=receipts=>next.decorate(f.who,{items:[]},{notificationFallback:true,notificationReceipts:receipts});
+  assert.equal(sync([]).notificationFallback[0].eventId,'event:1');
+  next.register(f.who,f.input);
+  f.tick(4000);
+  await next.dispatch();
+  assert.equal(f.sent.length,0);
+  assert.equal(sync([]).notificationFallback.length,1);
+  assert.deepEqual(sync(['event:1']).notificationFallback,[]);
+  assert.equal(next.decorate(f.who,{items:f.pages}).items[0].remoteNotifications,true);
+});
+test('a newer recommendation supersedes a queued retry without dropping an independent task result',async t=>{
+  const f=fixture(t);
+  let offline=true;
+  const one=taskNotifications({...f.options,send:async(...args)=>{
+    if (offline) throw Error('offline');
+    return f.options.send(...args);
+  }});
+  one.register(f.who,f.input);
+  f.pages.push(f.item(1),f.item(2,'task_result'));
+  await one.dispatch();
+  const updated=f.item(3);
+  updated.payload.notification.revision=3;
+  updated.payload.snapshot.tasks[0].currentRevision=3;
+  f.pages.push(updated);
+  f.tick(4000);offline=false;
+  await one.dispatch();
+  assert.deepEqual(f.sent.map(n=>n.eventId),['event:2','event:3']);
+});
+test('an actual iOS scheduling receipt suppresses the same due occurrence; an unseen next-day task gets a remote alert',async t=>{
+  const f=fixture(t),one=taskNotifications(f.options);
+  one.register(f.who,f.input);
+  const scheduledAt=new Date(f.options.now()+1000).toISOString();
+  const occurrence={goalId:'g_test',taskId:'t_test',revision:2,scheduledAt};
+  one.scheduled(f.who,{expectedUserId:f.who.userId,reminders:[occurrence]});
+  f.tick(1100);
+  one.scheduled(f.who,{expectedUserId:f.who.userId,reminders:[]});
+  const due=f.item(1,'reminder_due');
+  due.payload.notification.scheduled_at=scheduledAt;
+  f.pages.push(due);
+  await one.dispatch();
+  assert.equal(f.sent.length,0);
+  f.tick(86400_000);
+  const tomorrow=f.item(2,'reminder_due');
+  tomorrow.payload.notification.scheduled_at=new Date(f.options.now()).toISOString();
+  f.pages.push(tomorrow);
+  const next=taskNotifications(f.options);
+  await next.dispatch();
+  assert.deepEqual(f.sent.map(n=>[n.eventId,n.kind]),[['event:2','reminder_due']]);
 });

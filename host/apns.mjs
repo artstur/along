@@ -37,7 +37,7 @@ export function createApnsProvider(env=process.env,openSession=connect) {
     }
     return async ({environment,token},along,expiresAt)=>{
       const collapse=createHash('sha256').update(JSON.stringify([along.userId,along.eventId])).digest('hex');
-      const title=along.kind==='recommendation_ready'?'Along 有一条新推荐':'Along 任务有了结果';
+      const title={recommendation_ready:'Along 有一条新推荐',task_result:'Along 任务有了结果',reminder_due:'Along 任务提醒'}[along.kind];
       const payload=JSON.stringify({aps:{alert:{title,body:'打开查看详情'},sound:'default'},along});
       return await new Promise((resolve,reject)=>{
         const stream=session(environment).request({':method':'POST',':path':'/3/device/'+token,

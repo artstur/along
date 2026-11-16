@@ -146,7 +146,7 @@ async function runExclusive(operation) {
 // 新旧单消费开关：off（默认）= 新端点 503、旧链路照旧；on = 新端点生效、旧 /super-agent/goals|tasks
 // 的 DSH 分支 409「已切换新链路」。回退 = 改回 off，Along Agent 业务库与 DSH 状态不清（BC-09-03/04）。
 const eventIngest = process.env.ALONG_EVENT_INGEST === 'on';
-const newLinkPaths = new Set(['/events', '/sync', '/sync/ack', '/notifications/device']);
+const newLinkPaths = new Set(['/events', '/sync', '/sync/ack', '/notifications/device', '/notifications/scheduled']);
 let pairingRegistered = false;
 function requireEventIngest() {
   if (!eventIngest) throw new HostError('新链路未开启：设置 ALONG_EVENT_INGEST=on 后重启 Along 服务',503);
@@ -204,6 +204,7 @@ async function handleAlongNewLink(req,res,path) {
       :{error:'身份字段只能由配对会话提供'});
   }
   if (!authorized(req)||who!==identity) throw new HostError('配对已变更',403);
+  if (path==='/notifications/scheduled') return respond(res,200,notifications.scheduled(who,input));
   if (path==='/notifications/device') return respond(res,200,notifications.register(who,input));
   await ensurePairingRegistered();
   if (!pairingRegistered) throw new HostError('配对身份尚未登记到 Along，请稍后重试',503);
@@ -216,7 +217,7 @@ async function handleAlongNewLink(req,res,path) {
     const afterSeq=Number.isInteger(input?.after_seq)&&input.after_seq>=0?input.after_seq:0;
     const limit=Number.isInteger(input?.limit)?Math.min(Math.max(input.limit,1),200):50;
     const result=await readSyncPage(who,afterSeq,limit);
-    return respond(res,200,notifications.decorate(who,result));
+    return respond(res,200,notifications.decorate(who,result,input));
   }
   if (path==='/sync/ack') {
     if (!Array.isArray(input?.seqs)||input.seqs.length===0||!input.seqs.every(seq=>Number.isInteger(seq)&&seq>=1)) throw Error('同步确认序号无效');
