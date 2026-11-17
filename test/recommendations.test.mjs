@@ -70,3 +70,41 @@ test('expired weather retains route candidates without marking the whole hiking 
   assert.match(html,/路线候选保留/);assert.match(html,/data-event-id="reply_weather"/);
   assert.match(html,/上次核对/);
 });
+
+
+test('weather expiry is scoped to affected candidates and never hides an existing exclusion',()=>{
+  const r=recommendation(),first=r.options[0];
+  r.sources.push({...r.sources[1],id:'weather_later',expiresAt:'2099-01-01T12:00:00Z'});
+  r.options.push({...structuredClone(first),id:'option_two',title:'第二条路线',
+    checks:first.checks.map(c=>c.kind==='weather'?{...c,sourceIds:['weather_later']}:c),sourceIds:['source_access','weather_later']});
+  let html=recommendationCard(r,{now:Date.parse('2099-01-01T07:00:00Z')});
+  assert.match(html,/<strong>合成公园路线<\/strong><span>天气待更新<\/span>/);
+  assert.match(html,/<strong>第二条路线<\/strong><span>适合考虑<\/span>/);
+  first.checks[0].status='risk';first.checks[0].summary='公园临时关闭';
+  html=recommendationCard(r,{now:Date.parse('2099-01-01T07:00:00Z')});
+  assert.match(html,/<strong>合成公园路线<\/strong><span>暂不建议<\/span>/);
+  assert.match(html,/公园临时关闭/);
+});
+
+test('expired access, shared and unclassified evidence still requires verification',()=>{
+  const now=Date.parse('2099-01-01T07:00:00Z');
+  for(const type of ['access','shared','unclassified']){
+    const r=recommendation();
+    if(type==='access')r.sources[0].expiresAt=r.validUntil;
+    if(type==='shared')r.options[0].checks[0].sourceIds.push('source_weather');
+    if(type==='unclassified')r.sources.push({...r.sources[1],id:'other_evidence'});
+    const html=recommendationCard(r,{now});
+    assert.match(html,/资料已过期/,type);assert.match(html,/需重新核实/,type);
+    assert.doesNotMatch(html,/>适合考虑</,type);
+  }
+});
+
+test('independent plan deadlines and old recommendations without evidence retain expiry protection',()=>{
+  for(const sources of [recommendation().sources,[]]){
+    const r=recommendation();r.validUntil='2099-01-01T00:30:00Z';
+    if(!sources.length){r.sources=[];r.options=[];r.status='unavailable';}
+    const html=recommendationCard(r,{now:Date.parse('2099-01-01T01:00:00Z')});
+    assert.match(html,/资料已过期/);assert.doesNotMatch(html,/>适合考虑</);
+    assert.match(recommendationCard(r,{now:Date.parse('2099-01-01T07:00:00Z')}),/资料已过期/);
+  }
+});
