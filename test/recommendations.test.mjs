@@ -108,3 +108,15 @@ test('independent plan deadlines and old recommendations without evidence retain
     assert.match(recommendationCard(r,{now:Date.parse('2099-01-01T07:00:00Z')}),/资料已过期/);
   }
 });
+
+
+test('weather evidence reused by another candidate remains visibly stale in facts and route status',()=>{
+  const r=recommendation();
+  r.sources.push({...r.sources[1],id:'weather_new',expiresAt:'2099-01-01T12:00:00Z'});
+  const other=structuredClone(r.options[0]);other.id='other';other.title='共用天气依据的路线';
+  other.facts=[{label:'天气',value:'上次气温20度',sourceIds:['source_weather']}];
+  other.checks[1].sourceIds=['weather_new'];other.sourceIds=['source_access','source_weather','weather_new'];r.options.push(other);
+  const html=recommendationCard(r,{now:Date.parse('2099-01-01T07:00:00Z')});
+  assert.match(html,/<strong>共用天气依据的路线<\/strong><span>天气待更新<\/span>/);
+  assert.match(html,/上次资料（待更新）：上次气温20度/);assert.doesNotMatch(html,/>适合考虑</);
+});
