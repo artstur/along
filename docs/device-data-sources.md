@@ -26,9 +26,9 @@ POST `/sources/device`，沿用原配对 TLS/鉴权；仅本地 App 原生代码
 - disconnect：`{action,provider,goalId,grantId,eventId,sequence}`。本机先持久撤回、删除凭证、丢弃旧代际摘要，再将稳定撤回事件补传。Host 同所有者可清理已归档目标，旧 grant 的断开不能删除新的连接。
 - 回执含匹配 event_id、status accepted/duplicate/stale/rejected；accepted/duplicate确认Host接收，stale/rejected/conflict放入held后移出队首，未知/不匹配回执仍保留原id重试。不得换id复活旧授权。schema 严格白名单，拒绝任何凭据、签名、请求头、UID或任意数据字典。
 
-Host gateway 作为并行 source journal 的缓存适配器，不另建 Agent source 状态：保存前 prepareReady、设备摘要附 sourceStamp 原子落盘、commitSaved；中断通过 sourceSnapshot/recover 对账。提供现有 source-event-bridge 要求的 `sourceSnapshot({userId,goalId,stillAuthorized})` 和 `handle(disconnect)` 接口。source generation/revision 由既有 Host journal 管理；手机 grantId/sequence 只负责设备授权与投递排序，两者不得混用。Agent 继续用 /source-events → /source-reads → /source-read-results 及既有 ready/generation/revision/reference 契约。
+Host gateway 作为并行 source journal 的缓存适配器，不另建 Agent source 状态：先将实际接收的admitted metadata/规范摘要/稳定事件与序号原子落盘，再调用统一recordVerifiedState并保存返回的Host stamp；重启以相同metadata重放对账。只有open立即撤回旧epoch保留prepareAbsent/commitAbsent，native ready不再走旧vault的prepareReady/commitSaved。metadata固定为connectionId=grantId、version=sequence、state、observedAt及ready时的digest；retired的disconnected/revoked重放返回stale属于安全终态，不能恢复旧summary。提供现有 source-event-bridge 要求的 `sourceSnapshot({userId,goalId,stillAuthorized})` 和 `handle(disconnect)` 接口。source generation/revision 由既有 Host journal 管理；手机 grantId/sequence 只负责设备授权与投递排序，两者不得混用。Agent 继续用 /source-events → /source-reads → /source-read-results 及既有 ready/generation/revision/reference 契约。
 
-手机先持久连接requestId/作用域，再请求open；成功验证后存Keychain，再把summary/sequence/事件同文件原子提交。后者失败补偿删除Keychain，中断留下的opening记录不能被当成connected。Host已接收但响应丢失时同id重试。撤回先持久tombstone+撤回事件，再删Keychain；中断在下次前台继续清理，不再采集。Host prepare→cache→commit任何中断以已保存stamp对账，不能凭内存成功返回。采集时间允许未来最多5分钟，但未来值仍不能被read bridge冒充新鲜；Agent freshness继续按实际observedAt计算。
+手机先持久连接requestId/作用域，再请求open；成功验证后存Keychain，再把summary/sequence/事件同文件原子提交。后者失败补偿删除Keychain，中断留下的opening记录不能被当成connected。Host已接收但响应丢失时同id重试。撤回先持久tombstone+撤回事件，再删Keychain；中断在下次前台继续清理，不再采集。Host admitted-cache→recordVerifiedState→stamp任何中断以已保存metadata幂等对账，不能凭内存成功返回。采集时间允许未来最多5分钟，但未来值仍不能被read bridge冒充新鲜；Agent freshness继续按实际observedAt计算。
 
 ## 交付证据
 
