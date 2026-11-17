@@ -3,13 +3,14 @@ import {assembleEnvelope} from './event-envelope.mjs';
 import {validateGoalReply} from './goal-agent-core.mjs';
 import {safeAdaptiveLayout} from './adaptive-ui.mjs';
 import {safeRecommendation} from './recommendations.mjs';
+import {safeDataSources} from './data-sources.mjs';
 
 const id = value => typeof value==='string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$/.test(value);
 const record = value => value!==null && typeof value==='object' && !Array.isArray(value);
 const text = (value,max) => typeof value==='string' && value.trim().length>0 && value.length<=max;
 const version = value => Number.isSafeInteger(value) && value>=0;
 const time = value => typeof value==='string' && Number.isFinite(Date.parse(value));
-const empty = userId => ({version:1,recommendationsVersion:1,conversationVersion:1,userId,cursor:0,goals:{},messages:{},drafts:{},activeGoalId:null,conversationId:null,returnGoalId:null});
+const empty = userId => ({version:1,recommendationsVersion:1,conversationVersion:1,dataSourcesVersion:1,userId,cursor:0,goals:{},messages:{},drafts:{},activeGoalId:null,conversationId:null,returnGoalId:null});
 
 function absoluteReminderTime(value) {
   if (!time(value)||!/^\d{4}-\d\d-\d\dT(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)$/.test(value)) return false;
@@ -105,7 +106,7 @@ export function safeWorkspaceGoal(snapshot) {
       title:'下一步',detail:task.content,state:'planned'})),questions:[],connections:[]},goal.domain);
   if (!layout) throw Error('目标页面校验失败');
   return {id:goal.id,domain:goal.domain,status:goal.status,revision:goal.currentRevision,title:revision.title,
-    metric:metric??null,context:revision.context??[],tasks:cleanTasks,layout};
+    metric:metric??null,context:revision.context??[],tasks:cleanTasks,layout,dataSources:safeDataSources(snapshot.dataSources)};
 }
 
 function safeMessage(message,item) {
@@ -165,7 +166,7 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
         if (!record(goal)||key!==goal.id) throw Error('bad cache');
         saved.goals[key]=safeWorkspaceGoal({goal:{...goal,currentRevision:goal.revision},
           revision:{goalId:goal.id,revision:goal.revision,title:goal.title,status:goal.status,metric:goal.metric,context:goal.context},
-          tasks:goal.tasks.map(task=>({...task,currentRevision:task.revision}))});
+          tasks:goal.tasks.map(task=>({...task,currentRevision:task.revision})),dataSources:goal.dataSources});
       }
       let migratedReceipt=false;
       for (const [key,message] of Object.entries(saved.messages)) {
@@ -196,6 +197,7 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
       saved.returnGoalId=saved.returnGoalId??null;
       if (saved.recommendationsVersion!==1&&(!version(saved.recommendationReplayAfter)||saved.recommendationReplayAfter>saved.cursor)) saved.recommendationReplayAfter=0;
       if (saved.conversationVersion!==1&&(!version(saved.conversationReplayAfter)||saved.conversationReplayAfter>saved.cursor)) saved.conversationReplayAfter=0;
+      if (saved.dataSourcesVersion!==1&&(!version(saved.dataSourcesReplayAfter)||saved.dataSourcesReplayAfter>saved.cursor)) saved.dataSourcesReplayAfter=0;
       state=saved;
       if (migratedReceipt) {
         try { localStorage.setItem(key,JSON.stringify(saved)); } catch { /* Keep the validated goals available offline. */ }
@@ -324,8 +326,9 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
       // Old clients acknowledged messages without retaining the optional recommendation.
       // Replay once from the durable outbox, preserving the acknowledged cursor and drafts.
       const replayConversation=state.conversationVersion!==1;
-      const replay=state.recommendationsVersion!==1||replayConversation;
-      const after=replayConversation?state.conversationReplayAfter??0:replay?state.recommendationReplayAfter??0:state.cursor;
+      const replaySources=state.dataSourcesVersion!==1;
+      const replay=state.recommendationsVersion!==1||replayConversation||replaySources;
+      const after=replayConversation?state.conversationReplayAfter??0:replaySources?state.dataSourcesReplayAfter??0:replay?state.recommendationReplayAfter??0:state.cursor;
       const page=await agentCall(config,'/sync',{after_seq:after,limit:50,conversation_version:1,
         ...(onNotifications?{notificationFallback:true,notificationReceipts:receipts}:{})});
       if(disposed) return;
@@ -342,7 +345,7 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
       if (receipts.length) next.notificationReceipts=next.notificationReceipts.filter(id=>!receipts.includes(id));
       if (page.items.length===0) {
         if (page.nextCursor!==undefined) throw Error('同步分页游标不正确');
-        if (replay) {next.recommendationsVersion=1;next.conversationVersion=1;delete next.recommendationReplayAfter;delete next.conversationReplayAfter;}
+        if (replay) {next.recommendationsVersion=1;next.conversationVersion=1;next.dataSourcesVersion=1;delete next.recommendationReplayAfter;delete next.conversationReplayAfter;delete next.dataSourcesReplayAfter;}
         if (replay||fallbacks.length||receipts.length) save(next);
         break;
       }
@@ -380,8 +383,8 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
       restoreSelection(next);
       next.cursor=Math.max(next.cursor,previous);next.pendingAck=seqs;
       if (replay) {
-        if (page.nextCursor===undefined) {next.recommendationsVersion=1;next.conversationVersion=1;delete next.recommendationReplayAfter;delete next.conversationReplayAfter;}
-        else {next.recommendationReplayAfter=previous;if(replayConversation)next.conversationReplayAfter=previous;}
+        if (page.nextCursor===undefined) {next.recommendationsVersion=1;next.conversationVersion=1;next.dataSourcesVersion=1;delete next.recommendationReplayAfter;delete next.conversationReplayAfter;delete next.dataSourcesReplayAfter;}
+        else {next.recommendationReplayAfter=previous;if(replayConversation)next.conversationReplayAfter=previous;if(replaySources)next.dataSourcesReplayAfter=previous;}
       }
       save(next);onChange();
       // Cache commit precedes ack. A failed ack is retried before pulling further, without replaying data.
