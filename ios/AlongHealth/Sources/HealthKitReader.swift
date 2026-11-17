@@ -864,7 +864,7 @@ enum BackgroundReviewAdmission {
         guard state["binding"] as? String == hash else { return }
         let types = selected
         if !types.isEmpty {
-            let summary = try await reader.read(types, requestPermission: false, includeContext: true)
+            let summary = try await HealthDeviceDataCollector(reader: reader, types: types).collect()
             guard types == selected, try connection().1 == hash else { return }
             let summaries = summary.eventSummaries()
             let content = try HealthEventOutbox.content(summaries)
@@ -872,8 +872,8 @@ enum BackgroundReviewAdmission {
                 let event: [String: Any] = ["event_id": "health-" + UUID().uuidString.lowercased(), "schema_version": "1",
                     "event_type": "along.health_summary_updated", "occurred_at": ISO8601DateFormatter().string(from: summary.capturedAt),
                     "timezone": TimeZone.current.identifier, "payload": ["event_type": "along.health_summary_updated", "summaries": summaries]]
-                var pending = state["pending"] as? [[String: Any]] ?? []
-                pending.append(event); state["pending"] = pending; state["lastContent"] = content
+                try DeviceEventQueue.append(event, to: &state, maxPending: Int.max)
+                state["lastContent"] = content
                 try save(state) // Never send an event that has not been committed locally.
             }
         }
@@ -917,11 +917,9 @@ enum HealthEventOutbox {
         return summaries.allSatisfy { row in (row["type"] as? String).map { allowed.contains($0) } ?? false }
     }
     static func terminal(_ event: [String: Any], receipt: [String: Any]) -> Bool {
-        guard let id = event["event_id"] as? String, receipt["event_id"] as? String == id else { return false }
-        return ["rejected", "conflict"].contains(receipt["status"] as? String ?? "")
+        DeviceEventQueue.disposition(event: event, receipt: receipt) == .held
     }
     static func acknowledged(_ event: [String: Any], by receipt: [String: Any]) -> Bool {
-        guard let id = event["event_id"] as? String, receipt["event_id"] as? String == id else { return false }
-        return ["accepted", "duplicate"].contains(receipt["status"] as? String ?? "")
+        DeviceEventQueue.disposition(event: event, receipt: receipt) == .acknowledged
     }
 }

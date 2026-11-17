@@ -91,7 +91,16 @@ for error in cases { print(AgentBridgeError.transportMessage(error) ?? "unchange
   } finally {rmSync(dir,{recursive:true,force:true});}
 });
 
-test('iPhone foreground requests retain their deadlines and background work stops promptly offline',()=>{
+test('iPhone foreground requests retain their deadlines and background work stops promptly offline',{skip:!hasSwift},()=>{
   assert.match(swiftSource,/configuration\.waitsForConnectivity = !background/);
-  assert.match(swiftSource,/configuration\.timeoutIntervalForResource = background \? 10 : \(path == "\/connection\/verify" \? 15 : 120\)/);
+  const request=swiftSource.match(/request\.timeoutInterval = ([^\n]+)/)?.[1];
+  const resource=swiftSource.match(/configuration\.timeoutIntervalForResource = ([^\n]+)/)?.[1];
+  assert.ok(request&&resource);
+  const dir=mkdtempSync(join(tmpdir(),'along-deadlines-'));
+  try {
+    const file=join(dir,'main.swift');
+    writeFileSync(file,`import Foundation\nfunc deadline(_ background: Bool,_ path: String) -> [Double] { [${request},${resource}] }\nlet values=[deadline(false,"/events"),deadline(false,"/connection/verify"),deadline(false,"/sources/device"),deadline(true,"/events"),deadline(true,"/sources/device")]\nprint(String(data:try! JSONSerialization.data(withJSONObject:values),encoding:.utf8)!)`);
+    const output=execFileSync('swift',['-module-cache-path',join(dir,'cache'),file],{encoding:'utf8',timeout:30000});
+    assert.deepEqual(JSON.parse(output),[[120,120],[12,15],[12,15],[8,10],[8,10]]);
+  }finally{rmSync(dir,{recursive:true,force:true});}
 });

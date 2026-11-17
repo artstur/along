@@ -12,7 +12,8 @@ struct OKXConnectionSheet: View {
     @State private var apiKey = ""
     @State private var secretKey = ""
     @State private var passphrase = ""
-    @State private var site: OKXSite = .global
+    @State private var site: OKXDeviceSite = .global
+    @State private var networkStatus = "正在检查手机网络…"
     @State private var snapshot: OKXConnectionSnapshot?
     @State private var errorMessage: String?
     @State private var busy = false
@@ -24,6 +25,8 @@ struct OKXConnectionSheet: View {
         NavigationStack {
             Form {
                 Section("连接状态") {
+                    LabeledContent("采集设备", value: "iPhone")
+                    LabeledContent("OKX 网络", value: networkStatus)
                     LabeledContent("OKX", value: snapshot?.connected == true ? "已连接 · 只读" : (snapshot == nil ? "尚未读取" : "未连接"))
                     if let snapshot, snapshot.connected {
                         if let date = snapshot.lastSyncedAt {
@@ -32,6 +35,7 @@ struct OKXConnectionSheet: View {
                                     .multilineTextAlignment(.trailing)
                             }
                         }
+                        LabeledContent("数据传递", value: snapshot.syncState == "received" ? "Mac 已接收" : "等待同步至 Mac")
                         if let summary = snapshot.summary {
                             LabeledContent("交易账户权益（USD）", value: summary.equity)
                             LabeledContent("资产种类", value: String(summary.assetCount))
@@ -42,16 +46,20 @@ struct OKXConnectionSheet: View {
                         Button("断开连接", role: .destructive) { start(.disconnect) }
                             .disabled(busy)
                     } else {
+                        if snapshot?.syncState == "pending" {
+                            Text("本机已停止采集，等待 Mac 接收撤回。")
+                                .foregroundStyle(.secondary)
+                        }
                         Button("重新读取状态") { start(.status) }
                             .disabled(busy)
                     }
-                    if busy { ProgressView("正在连接 Mac…") }
+                    if busy { ProgressView("正在验证并同步…") }
                 }
 
                 if snapshot?.connected != true {
                     Section {
                         Picker("OKX 站点", selection: $site) {
-                            ForEach(OKXSite.allCases) { value in
+                            ForEach(OKXDeviceSite.allCases) { value in
                                 Text(value.title).tag(value)
                             }
                         }
@@ -64,7 +72,7 @@ struct OKXConnectionSheet: View {
                     } header: {
                         Text("连接只读账户")
                     } footer: {
-                        Text("在 OKX 仅勾选读取权限，完成后回到 Along 填写三项凭证。Along 会核实实际权限并读取交易账户摘要。凭证经加密连接发送至已配对的 Mac 保存，不进入网页或 Agent。")
+                        Text("在 OKX 仅勾选读取权限，完成后回到 Along 填写三项凭证。iPhone 会核实实际权限并读取交易账户摘要。凭证只存本机钥匙串，摘要经原配对连接发送至 Mac，供 Agent 按目标读取。")
                     }
                     .disabled(busy)
                 }
@@ -82,7 +90,11 @@ struct OKXConnectionSheet: View {
                 }
             }
         }
-        .task { start(.status) }
+        .task {
+            start(.status)
+            await checkPhoneNetwork()
+        }
+        .onChange(of: site) { _, _ in Task { await checkPhoneNetwork() } }
         .onChange(of: goalID) { _, _ in
             operationID = nil
             operation?.cancel()
@@ -119,21 +131,20 @@ struct OKXConnectionSheet: View {
         operationID = id
         busy = true
         errorMessage = nil
-        var body: [String: Any] = ["action": action.rawValue, "goalId": goalID]
-        if action == .connect {
-            guard credentialsReady else { busy = false; return }
-            body["site"] = site.rawValue
-            body["credentials"] = ["apiKey": apiKey, "secretKey": secretKey, "passphrase": passphrase]
-        }
-        var input: [String: Any] = pairing
-        input["path"] = "/sources/okx"
-        input["body"] = body
         operation = Task { @MainActor in
             defer {
                 if operationID == id { busy = false; operation = nil }
             }
             do {
-                let result = try await AlongWebView.Coordinator.agentRequest(input, privateSourceRequest: true)
+                let result: [String: Any]
+                switch action {
+                case .status: result = try await PhoneSourceCoordinator.shared.status(goalID: goalID)
+                case .connect:
+                    guard credentialsReady else { throw OKXDeviceClientError.invalidCredentials }
+                    result = try await PhoneSourceCoordinator.shared.connect(goalID: goalID, site: site, credentials: OKXDeviceCredentials(apiKey: apiKey, secretKey: secretKey, passphrase: passphrase))
+                case .refresh: result = try await PhoneSourceCoordinator.shared.refresh(goalID: goalID)
+                case .disconnect: result = try await PhoneSourceCoordinator.shared.disconnect(goalID: goalID)
+                }
                 guard !Task.isCancelled, !closed, operationID == id else { return }
                 guard AlongConnectionStore.load() == pairing else {
                     clearCredentials()
@@ -156,8 +167,30 @@ struct OKXConnectionSheet: View {
                     snapshot = nil
                 }
                 // Never surface an arbitrary server/transport string that could contain credentials.
-                errorMessage = action.failureMessage(for: error)
+                if let safe = error as? OKXDeviceClientError {
+                    if safe == .permissionDenied {
+                        let current = try? await PhoneSourceCoordinator.shared.status(goalID: goalID)
+                        guard !Task.isCancelled, !closed, operationID == id else { return }
+                        snapshot = current.flatMap(OKXConnectionSnapshot.init)
+                    }
+                    errorMessage = safe.localizedDescription
+                }
+                else if let safe = error as? PhoneSourceCoordinatorError {
+                    if [.credentialDeletionFailed, .storageUnavailable, .authorizationChanged].contains(safe) { snapshot = nil }
+                    errorMessage = safe.localizedDescription
+                }
+                else { errorMessage = action.failureMessage(for: error) }
             }
+        }
+    }
+
+    private func checkPhoneNetwork() async {
+        let selectedSite = site
+        do {
+            _ = try await OKXDeviceClient().probe(site: selectedSite)
+            if site == selectedSite { networkStatus = "iPhone 可访问" }
+        } catch {
+            if site == selectedSite { networkStatus = "iPhone 暂不可访问" }
         }
     }
 
@@ -181,25 +214,6 @@ struct OKXConnectionSheet: View {
     private func close() {
         finishClose()
         dismiss()
-    }
-}
-
-private enum OKXSite: String, CaseIterable, Identifiable {
-    case global, eea, us
-    var id: String { rawValue }
-    var title: String {
-        switch self {
-        case .global: "Global · www.okx.com"
-        case .eea: "EEA · my.okx.com"
-        case .us: "US · app.okx.com"
-        }
-    }
-    var settingsURL: URL {
-        switch self {
-        case .global: URL(string: "https://www.okx.com/account/my-api")!
-        case .eea: URL(string: "https://my.okx.com/account/my-api")!
-        case .us: URL(string: "https://app.okx.com/account/my-api")!
-        }
     }
 }
 
@@ -262,12 +276,15 @@ private struct OKXConnectionSnapshot {
     let connected: Bool
     let lastSyncedAt: Date?
     let summary: OKXAccountSummary?
+    let syncState: String
 
     init?(_ value: [String: Any]) {
         guard value["provider"] as? String == "okx",
               let state = value["state"] as? String,
               ["connected", "disconnected"].contains(state) else { return nil }
         connected = state == "connected"
+        let delivery = value["syncState"] as? String
+        syncState = ["none", "pending", "received"].contains(delivery ?? "") ? delivery! : (connected ? "pending" : "none")
         if connected {
             guard let rawDate = value["lastSyncedAt"] as? String,
                   let date = Self.date(rawDate),

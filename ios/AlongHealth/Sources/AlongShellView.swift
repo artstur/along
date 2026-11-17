@@ -85,7 +85,7 @@ final class AlongBridgeModel: ObservableObject {
         if foregroundReadsAllowed() { resumeForeground() }
     }
 
-    func resumeForeground() { startObservers(); refreshHealth(); requestHealthEventSync() }
+    func resumeForeground() { startObservers(); refreshHealth(); requestHealthEventSync(); PhoneSourceCoordinator.shared.resumeForeground() }
     func pauseForeground() { reader.stopObserving() }
 
     private var savedSelection: Set<HealthMetric> {
@@ -449,7 +449,7 @@ enum AlongConnectionStore {
 
 struct AlongWebView: UIViewRepresentable {
     @ObservedObject var bridge: AlongBridgeModel
-    private let site = URL(string: "along://app/index.html?build=75")!
+    private let site = URL(string: "along://app/index.html?build=76")!
 
     func makeCoordinator() -> Coordinator { Coordinator(bridge: bridge) }
 
@@ -938,13 +938,7 @@ struct AlongWebView: UIViewRepresentable {
         }
 
         static func okxStatus(goalID: String) async throws -> [String: Any] {
-            guard let saved = AlongConnectionStore.load() else { throw AgentBridgeError.invalidConfiguration }
-            var input: [String: Any] = saved.mapValues { $0 as Any }
-            input["path"] = "/sources/okx"
-            input["body"] = ["action": "status", "goalId": goalID]
-            let value = try await agentRequest(input, privateSourceRequest: true)
-            guard AlongConnectionStore.load() == saved else { throw AgentBridgeError.invalidConfiguration }
-            return value
+            try await PhoneSourceCoordinator.shared.status(goalID: goalID)
         }
 
         static func agentRequest(_ input: [String: Any], background: Bool = false, privateNotificationRequest: Bool = false, privateSourceRequest: Bool = false) async throws -> [String: Any] {
@@ -962,12 +956,12 @@ struct AlongWebView: UIViewRepresentable {
                   let path = input["path"] as? String,
                   // 新链路端点（docs/stage-a-tech-design.md §2.4.2）：全部 POST，语义与旧路径一致——仅网络转发。
                   (["/pair", "/connection/verify", "/connection/status", "/goal/event", "/super-agent/tasks", "/super-agent/tasks/status", "/super-agent/daily-delegation",
-                   "/super-agent/goals", "/super-agent/goals/status", "/events", "/sync", "/sync/ack"].contains(path) || (privateNotificationRequest && ["/notifications/device","/notifications/scheduled"].contains(path)) || (privateSourceRequest && path == "/sources/okx")),
+                   "/super-agent/goals", "/super-agent/goals/status", "/events", "/sync", "/sync/ack"].contains(path) || (privateNotificationRequest && ["/notifications/device","/notifications/scheduled"].contains(path)) || (privateSourceRequest && ["/sources/okx", "/sources/device"].contains(path))),
                   let body = input["body"] as? [String: Any],
                   let url = URL(string: base + path) else { throw AgentBridgeError.invalidConfiguration }
             var request = URLRequest(url: url)
             request.httpMethod = "POST"
-            request.timeoutInterval = background ? 8 : (path == "/connection/verify" ? 12 : 120)
+            request.timeoutInterval = background ? 8 : (["/connection/verify", "/sources/device"].contains(path) ? 12 : 120)
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             if let token = input["token"] as? String, !token.isEmpty {
                 request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
@@ -976,7 +970,7 @@ struct AlongWebView: UIViewRepresentable {
             let delegate = PinnedAgentDelegate(fingerprint: fingerprint.uppercased())
             let configuration = URLSessionConfiguration.ephemeral
             configuration.waitsForConnectivity = !background
-            configuration.timeoutIntervalForResource = background ? 10 : (path == "/connection/verify" ? 15 : 120)
+            configuration.timeoutIntervalForResource = background ? 10 : (["/connection/verify", "/sources/device"].contains(path) ? 15 : 120)
             // Every session is tied to one private address, pinned certificate and non-redirecting request.
             configuration.connectionProxyDictionary = [
                 kCFNetworkProxiesProxyAutoConfigEnable as String: true,

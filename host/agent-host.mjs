@@ -17,6 +17,8 @@ import {createApnsProvider} from './apns.mjs';
 import {taskNotifications} from './task-notifications.mjs';
 import {createOkxConnection} from './okx-connection.mjs';
 import {createSourceJournal,createHostSourceEventBridge} from './source-event-bridge.mjs';
+import {createDeviceSourceGateway} from './device-source-gateway.mjs';
+import {createDeviceSourceRoute,deviceAwareSourceConnection} from './device-source-routes.mjs';
 import {validateOkxSourceRequest,requireOkxGoal,requireOwnedSourceGoal,reconcileOkxSources} from './source-access.mjs';
 import {createBridge, readBridgeToken} from './along-bridge.mjs';
 import {agentHealthSnapshot,cleanHealthContext,cleanPlanningContext,validateReassessment,SLEEP_REMINDER_CRITERIA,DAILY_ACTIONS_CRITERIA,parseDailyActionReply} from '../web/contextual-planning.mjs';
@@ -25,6 +27,8 @@ const dir = process.env.ALONG_AGENT_STATE_DIR||join(homedir(), '.along', 'agent-
 mkdirSync(dir, {recursive:true, mode:0o700});
 const sourceJournal=createSourceJournal({dir:join(dir,'source-events')});
 const okxConnection=createOkxConnection({dir:join(dir,'okx-connections'),sourceJournal});
+const deviceSources=createDeviceSourceGateway({dir:join(dir,'device-sources'),journal:sourceJournal});
+const sourceConnections=deviceAwareSourceConnection({gateway:deviceSources,legacy:okxConnection,identity:()=>identity});
 function pruneExpiredPlans() {
   try {pruneDailyActions(dir);} catch {console.warn('Along 未能清理已过期的安排索引');}
 }
@@ -72,6 +76,11 @@ const bridgeToken=readBridgeToken();
 const bridge=createBridge({url:superAgentURL,token:bridgeToken});
 const contextReviewBridge=createBridge({url:contextReviewURL,token:bridgeToken});
 const kimiAgent = new KimiCodeAgent({workspace:process.env.ALONG_KIMI_WORKSPACE||process.cwd()});
+const deviceSourceRoute=createDeviceSourceRoute({gateway:deviceSources,identity:()=>identity,
+  readGoal:(who,goalId)=>upstream(()=>bridge.call(`/along-source/api/goals/${encodeURIComponent(goalId)}`,{method:'GET',identity:who})),
+  retireLegacy:(who,goalId)=>okxConnection.handle({userId:who.userId,goalId,input:{action:'disconnect'},stillAuthorized:()=>identity===who}),
+  pump:()=>sourceEvents.pump(),
+});
 
 function respond(res,status,data) { res.writeHead(status,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}).end(JSON.stringify(data)); }
 async function body(req) { return readJsonBody(req,32_000); }
@@ -214,6 +223,10 @@ async function handleAlongNewLink(req,res,path) {
   await ensurePairingRegistered();
   if (!pairingRegistered) throw new HostError('配对身份尚未登记到 Along，请稍后重试',503);
   if (path==='/events') {
+    const eventType=input?.payload?.event_type??input?.event_type;
+    if(typeof eventType==='string'&&eventType.startsWith('along.source_')) {
+      return respond(res,400,{status:'rejected',event_id:input?.event_id,reason:'native_source_route_required'});
+    }
     // /events 在 Along Agent 侧含 DSH 投递触发，15s 不够 → 30s（§2.4.3）。
     const {status,result}=await upstream(()=>bridge.receipt('/along-source/api/events',{value:input,identity:who,timeout:30_000}));
     return respond(res,status,result);
@@ -224,9 +237,9 @@ async function handleAlongNewLink(req,res,path) {
     const result=await readSyncPage(who,afterSeq,limit,input?.conversation_version===1?1:0);
     await reconcileOkxSources(result,who,{
       isCurrent:()=>identity===who,
-      status:goalId=>okxConnection.handle({userId:who.userId,goalId,input:{action:'status'}}),
+      status:goalId=>sourceConnections.handle({userId:who.userId,goalId,input:{action:'status'}}),
       readGoal:goalId=>upstream(()=>bridge.call(`/along-source/api/goals/${encodeURIComponent(goalId)}`,{method:'GET',identity:who})),
-      disconnect:(goalId,revokeIf)=>okxConnection.handle({userId:who.userId,goalId,input:{action:'disconnect'},stillAuthorized:()=>identity===who,revokeIf}),
+      disconnect:(goalId,revokeIf)=>sourceConnections.handle({userId:who.userId,goalId,input:{action:'disconnect'},stillAuthorized:()=>identity===who,revokeIf}),
     });
     return respond(res,200,notifications.decorate(who,result,input));
   }
@@ -295,9 +308,21 @@ const server=createServer({key:readFileSync(key),cert:readFileSync(cert)},async(
     }
     if (!authorized(req)) return respond(res,401,{error:'请先配对这台 Mac'});
     const recipient=tokenHash.toString('hex');
+    if(req.method==='POST'&&path==='/sources/device') {
+      requireEventIngest();requireBridgeCredential();
+      const who=boundPairing();
+      await ensurePairingRegistered();
+      if(identity!==who||!authorized(req))throw new HostError('配对已变化',403);
+      if(!pairingRegistered)throw new HostError('配对身份尚未登记到 Along，请稍后重试',503);
+      const input=await body(req);
+      if(identity!==who||!authorized(req))throw new HostError('配对已变化',403);
+      const result=await deviceSourceRoute(input);
+      return respond(res,result.status,result.value);
+    }
     if(req.method==='POST'&&path==='/sources/okx') {
       requireEventIngest();requireBridgeCredential();
       const who=boundPairing(),input=validateOkxSourceRequest(await body(req));
+      if(['connect','refresh'].includes(input.action))throw new HostError('请更新 Along，在 iPhone 上连接或刷新；凭证只保存在采集设备',409);
       const allowed=async()=>{
         if(identity!==who)return false;
         const detail=await upstream(()=>bridge.call(`/along-source/api/goals/${encodeURIComponent(input.goalId)}`,{method:'GET',identity:who}));
@@ -307,7 +332,7 @@ const server=createServer({key:readFileSync(key),cert:readFileSync(cert)},async(
       };
       if(!await allowed())throw new HostError('配对已变化，请重新打开连接',403);
       const {goalId,...command}=input;
-      const result=await okxConnection.handle({userId:who.userId,goalId,input:command,stillAuthorized:allowed});
+      const result=await sourceConnections.handle({userId:who.userId,goalId,input:command,stillAuthorized:allowed});
       if(identity!==who)throw new HostError('配对已变化，请重新打开连接',403);
       return respond(res,200,result);
     }
@@ -401,7 +426,7 @@ const server=createServer({key:readFileSync(key),cert:readFileSync(cert)},async(
   } catch(error) { respond(res,statusForError(error),{error:error.message}); }
 });
 let lastSourceWarning=0;
-const sourceEvents=createHostSourceEventBridge({journal:sourceJournal,connection:okxConnection,bridge,endpoint:superAgentURL,
+const sourceEvents=createHostSourceEventBridge({journal:sourceJournal,connection:sourceConnections,bridge,endpoint:superAgentURL,
   identity:()=>eventIngest&&bridgeToken&&pairingRegistered?identity:null,
   onError:()=>{if(Date.now()-lastSourceWarning>60_000){lastSourceWarning=Date.now();console.warn('Along 源状态同步暂不可用，将保留待发状态稍后重试');}},
 });

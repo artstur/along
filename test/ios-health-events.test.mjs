@@ -42,13 +42,14 @@ ${pure}
   print("native aggregate and receipt invariants passed")
  }
 }`.replace('precondition(try HealthEventOutbox.content(rows)==HealthEventOutbox.content(repeated))','let a=try HealthEventOutbox.content(rows), b=try HealthEventOutbox.content(repeated);precondition(a==b)'));
-  execFileSync('swiftc',['-parse-as-library',fileURLToPath(new URL('../ios/AlongHealth/Sources/HealthModels.swift',import.meta.url)),join(dir,'Check.swift'),'-o',join(dir,'check')],{timeout:30000});
+  execFileSync('swiftc',['-parse-as-library',fileURLToPath(new URL('../ios/AlongHealth/Sources/DeviceEventQueue.swift',import.meta.url)),fileURLToPath(new URL('../ios/AlongHealth/Sources/HealthModels.swift',import.meta.url)),join(dir,'Check.swift'),'-o',join(dir,'check')],{timeout:30000});
   assert.match(execFileSync(join(dir,'check'),{encoding:'utf8',timeout:10000}),/invariants passed/);
  } finally {rmSync(dir,{recursive:true,force:true});}
 });
 
 test('the real native outbox persists before sending, retries the same id after restart, isolates pairing and defers locked reads',{skip:!hasSwift},()=>{
  const source=readFileSync(new URL('../ios/AlongHealth/Sources/HealthKitReader.swift',import.meta.url),'utf8');
+ const collectors=readFileSync(new URL('../ios/AlongHealth/Sources/DeviceDataCollectors.swift',import.meta.url),'utf8').split('@MainActor struct OKXDeviceDataCollector')[0];
  const core=source.slice(source.indexOf('@MainActor final class HealthEventDelivery {'))
   .replaceAll('UserDefaults.standard','TestEnvironment.settings')
   .replace(/let dir = try FileManager.default.url\(for:[^\n]+/,'let dir = URL(fileURLWithPath: CommandLine.arguments[1])')
@@ -94,6 +95,7 @@ enum AgentBridgeError:Error {case invalidConfiguration; case receipt([String:Any
   return ["status":"accepted","event_id":wrong ? "wrong" : id]
  }
 }}
+${collectors}
 ${core}
 @main struct Fixture {
  @MainActor static func settle()async {for _ in 0..<40 {try? await Task.sleep(for:.milliseconds(5))}}
@@ -128,7 +130,7 @@ ${core}
  }
 }`);
   const bin=join(dir,'check');
-  execFileSync('swiftc',['-parse-as-library',fileURLToPath(new URL('../ios/AlongHealth/Sources/HealthModels.swift',import.meta.url)),join(dir,'Check.swift'),'-o',bin],{timeout:120000});
+  execFileSync('swiftc',['-parse-as-library',fileURLToPath(new URL('../ios/AlongHealth/Sources/DeviceEventQueue.swift',import.meta.url)),fileURLToPath(new URL('../ios/AlongHealth/Sources/HealthModels.swift',import.meta.url)),join(dir,'Check.swift'),'-o',bin],{timeout:120000});
   assert.match(execFileSync(bin,[dir,`along-health-event-${Date.now()}`],{encoding:'utf8',timeout:10000}),/durable outbox invariants passed/);
  } finally {rmSync(dir,{recursive:true,force:true});}
 });
