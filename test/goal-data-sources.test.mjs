@@ -72,6 +72,28 @@ test('a new source migration starts before an interrupted older conversation rep
   assert.equal(cache.dataSourcesVersion,1);assert.equal(cache.conversationVersion,1);
 });
 
+test('new execution history replays from zero even when recommendation replay is already part-way through',async()=>{
+  const wire=snapshot();
+  wire.tasks=[{id:'t_exec',goalId:'g_okx',content:'研究策略',status:'open',currentRevision:1,
+    execution:{version:1,count:1,records:[{id:'run_one',kind:'research',executedAt:'2026-11-17T12:00:00Z',outcome:'researched'}]}}];
+  const old=structuredClone(wire);delete old.tasks[0].execution;
+  const goal=safeWorkspaceGoal(old);
+  const saved={version:1,dataSourcesVersion:1,conversationVersion:1,recommendationReplayAfter:5,userId:config.userId,cursor:10,
+    activeGoalId:goal.id,conversationId:null,goals:{[goal.id]:goal},messages:{},drafts:{}};
+  installDomStub({storage:{['along.event-workspace.v1:'+config.userId]:JSON.stringify(saved)}});
+  const requested=[];
+  window.AlongAgentBridge={request:async input=>{
+    if(input.path!=='/sync')return {acked:1};
+    requested.push(input.body.after_seq);
+    return {items:input.body.after_seq===0?[{seq:1,userId:config.userId,kind:'goal_updated',goalId:goal.id,payload:{snapshot:wire}}]:[]};
+  }};
+  const ws=createEventWorkspace({config});await ws.sync();
+  assert.deepEqual(requested,[0]);
+  assert.equal(ws.view().goals.g_okx.tasks[0].execution.count,1);
+  const cache=JSON.parse(localStorage.getItem('along.event-workspace.v1:'+config.userId));
+  assert.equal(cache.executionVersion,1);assert.equal(cache.cursor,10);
+});
+
 test('the real goal page renders OKX setup instead of unrelated Apple Health and never claims authorization',async()=>{
   const dom=installDomStub({storage:{'along.agent.v1':JSON.stringify(config)}});
   const items=[{seq:1,userId:config.userId,kind:'goal_updated',goalId:'g_okx',payload:{snapshot:snapshot()}}];

@@ -214,6 +214,7 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
       saved.returnGoalId=saved.returnGoalId??null;
       if (saved.recommendationsVersion!==1&&(!version(saved.recommendationReplayAfter)||saved.recommendationReplayAfter>saved.cursor)) saved.recommendationReplayAfter=0;
       if (saved.conversationVersion!==1&&(!version(saved.conversationReplayAfter)||saved.conversationReplayAfter>saved.cursor)) saved.conversationReplayAfter=0;
+      if (saved.executionVersion!==1&&(!version(saved.executionReplayAfter)||saved.executionReplayAfter>saved.cursor)) saved.executionReplayAfter=0;
       if (saved.dataSourcesVersion!==1&&(!version(saved.dataSourcesReplayAfter)||saved.dataSourcesReplayAfter>saved.cursor)) saved.dataSourcesReplayAfter=0;
       state=saved;
       if (migratedReceipt) {
@@ -348,7 +349,7 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
       // An older migration may already be part-way through. A newly added projection
       // still needs its earlier pages, so all pending migrations share the earliest cursor.
       const replayCursors=[...(state.recommendationsVersion!==1?[state.recommendationReplayAfter??0]:[]),
-        ...(replayConversation?[state.conversationReplayAfter??0]:[]),...(replaySources?[state.dataSourcesReplayAfter??0]:[]),...(state.executionVersion!==1?[state.recommendationReplayAfter??0]:[])];
+        ...(replayConversation?[state.conversationReplayAfter??0]:[]),...(replaySources?[state.dataSourcesReplayAfter??0]:[]),...(state.executionVersion!==1?[state.executionReplayAfter??0]:[])];
       const after=replay?Math.min(...replayCursors):state.cursor;
       const page=await agentCall(config,'/sync',{after_seq:after,limit:50,conversation_version:1,
         ...(onNotifications?{notificationFallback:true,notificationReceipts:receipts}:{})});
@@ -366,7 +367,7 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
       if (receipts.length) next.notificationReceipts=next.notificationReceipts.filter(id=>!receipts.includes(id));
       if (page.items.length===0) {
         if (page.nextCursor!==undefined) throw Error('同步分页游标不正确');
-        if (replay) {next.recommendationsVersion=1;next.conversationVersion=1;next.dataSourcesVersion=1;next.executionVersion=1;delete next.recommendationReplayAfter;delete next.conversationReplayAfter;delete next.dataSourcesReplayAfter;}
+        if (replay) {next.recommendationsVersion=1;next.conversationVersion=1;next.dataSourcesVersion=1;next.executionVersion=1;delete next.recommendationReplayAfter;delete next.conversationReplayAfter;delete next.dataSourcesReplayAfter;delete next.executionReplayAfter;}
         if (replay||fallbacks.length||receipts.length) save(next);
         break;
       }
@@ -404,8 +405,8 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
       restoreSelection(next);
       next.cursor=Math.max(next.cursor,previous);next.pendingAck=seqs;
       if (replay) {
-        if (page.nextCursor===undefined) {next.recommendationsVersion=1;next.conversationVersion=1;next.dataSourcesVersion=1;next.executionVersion=1;delete next.recommendationReplayAfter;delete next.conversationReplayAfter;delete next.dataSourcesReplayAfter;}
-        else {next.recommendationReplayAfter=previous;if(replayConversation)next.conversationReplayAfter=previous;if(replaySources)next.dataSourcesReplayAfter=previous;}
+        if (page.nextCursor===undefined) {next.recommendationsVersion=1;next.conversationVersion=1;next.dataSourcesVersion=1;next.executionVersion=1;delete next.recommendationReplayAfter;delete next.conversationReplayAfter;delete next.dataSourcesReplayAfter;delete next.executionReplayAfter;}
+        else {next.recommendationReplayAfter=previous;if(replayConversation)next.conversationReplayAfter=previous;if(replaySources)next.dataSourcesReplayAfter=previous;if(state.executionVersion!==1)next.executionReplayAfter=previous;}
       }
       save(next);onChange();
       // Cache commit precedes ack. A failed ack is retried before pulling further, without replaying data.
