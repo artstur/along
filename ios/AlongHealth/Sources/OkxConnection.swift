@@ -1,8 +1,8 @@
 import SwiftUI
 import CoreFoundation
 
-/// Credentials stay in this native sheet until sent to the pinned, paired Host.
-/// Only the Host's account summary is rendered; nothing is passed to the WebView.
+/// Credentials remain on iPhone; the native collector persists them in Keychain.
+/// Only the scoped account summary is delivered to the pinned, paired Host.
 @MainActor
 struct OKXConnectionSheet: View {
     let goalID: String

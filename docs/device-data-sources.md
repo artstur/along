@@ -16,7 +16,7 @@ Apple Health 保留现有 HealthKit 权限、七类摘要和 wire 协议；提�
 
 旧 Mac vault 不向手机下载密钥；迁移时只清理该作用域的旧凭证。旧 `/sources/okx` connect/refresh 不再收真实密钥，返回升级提示；纯断开继续允许清理。采集事实的 provenance 为 iOS 原生设备报告，不能称 Host 独立向 OKX 验证。
 
-## 原生专用入口草案（待上游冻结后接线）
+## 原生专用入口
 
 POST `/sources/device`，沿用原配对 TLS/鉴权；仅本地 App 原生代码可调用，通用网页 request 禁止此路径。服务端本人身份只来自配对，client 不能自报 userId/deviceId。固定 action：context/open/publish/disconnect/status；固定 provider 当前仅 okx。
 
