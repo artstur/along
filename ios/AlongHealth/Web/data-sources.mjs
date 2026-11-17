@@ -1,6 +1,6 @@
 // Provider actions are application capabilities, never URLs invented by a model.
 const CATALOG=Object.freeze({
-  okx:Object.freeze({name:'OKX',symbol:'O',url:'https://www.okx.com/account/my-api',action:'前往 OKX 设置',
+  okx:Object.freeze({name:'OKX',symbol:'O',url:'https://www.okx.com/account/my-api',action:'连接',
     detail:'只读接入 · 尚未连接'}),
   'apple-health':Object.freeze({name:'Apple Health',symbol:'♥'}),
 });
