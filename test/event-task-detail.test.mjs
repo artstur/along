@@ -4,7 +4,7 @@ import {installDomStub} from './dom-stub.mjs';
 import {recommendation} from './recommendation-fixture.mjs';
 const config={baseURL:'https://localhost:4176',fingerprint:'A'.repeat(64),token:'b'.repeat(64)};
 let instance=0;
-async function fixture({records=true}={}) {
+async function fixture({records=true,typed=false}={}) {
   const goal={id:'goal_detail',domain:'custom',status:'active',revision:1,title:'周末安排',metric:null,context:[],
     dataSources:[{provider:'apple-health',status:'recommended',reason:'使用活动摘要安排周末运动'}],tasks:[
     {id:'research_task',goalId:'goal_detail',status:'open',content:'查天气后推荐周末路线',revision:1,scheduledAt:'2099-01-02T11:00:00Z',
@@ -13,6 +13,12 @@ async function fixture({records=true}={}) {
     {id:'outing_task',goalId:'goal_detail',status:'open',content:'实际去徒步',revision:1},
     {id:'dated_task',goalId:'goal_detail',status:'open',content:'有日期的实际行动',revision:1,scheduledAt:'2099-01-03T01:00:00Z'},
   ]};
+  if(typed)goal.tasks.push(
+    {id:'calc_task',goalId:goal.id,status:'done',content:'核算预算余额',revision:3,trigger:{version:1,kind:'immediate',actor:'agent',capability:'calculation',state:'settled',label:'立即执行',conditions:[],notifyBefore:false},execution:{version:1,count:1,records:[{id:'calc_exec',kind:'calculation',outcome:'calculated',executedAt:'2026-11-18T00:00:00Z',summary:'计算结果：1990 CNY',calculationReceiptId:'calc_'+'a'.repeat(40)}]}},
+    {id:'event_task',goalId:goal.id,status:'open',content:'账户连接后核算差额',revision:1,trigger:{version:1,kind:'event',actor:'agent',capability:'calculation',state:'waiting',label:'数据源连接并可读取后执行',conditions:[{kind:'source_ready',provider:'okx',capability:'trading_account_summary'}],notifyBefore:false}},
+    {id:'waiting_task',goalId:goal.id,status:'open',content:'等待预算金额',revision:1,trigger:{version:1,kind:'waiting',actor:'agent',capability:'calculation',state:'waiting',label:'请补充每月可存金额',conditions:[],notifyBefore:false}},
+    {id:'immediate_task',goalId:goal.id,status:'open',content:'立即核算另一项',revision:1,trigger:{version:1,kind:'immediate',actor:'agent',capability:'calculation',state:'pending',label:'立即执行',conditions:[],notifyBefore:false}}
+  );
   const r=recommendation(),other=recommendation();other.title='不属于这项任务的方案';
   const messages={bound:{eventId:'bound',role:'assistant',goalId:goal.id,taskId:'research_task',text:'后台结果',audience:'background',status:'received',recommendation:r,notificationEventId:'bound'},
     other:{eventId:'other',role:'assistant',goalId:goal.id,taskId:'outing_task',text:'另一项结果',audience:'background',status:'received',recommendation:other}};
@@ -73,4 +79,15 @@ test('independent: mismatched recommendation route cannot navigate to another go
  assert.match(dom.app.innerHTML,/<h1>目标one<\/h1>/);
  await dom.fireWindow('along-notification-open',{detail:{userId:'ui_independent',goalId:'two',taskId:'b_two',eventId:'rec_result',kind:'recommendation_ready'}});
  assert.equal(receipts.length,0);assert.match(dom.app.innerHTML,/<h1>目标one<\/h1>/);
+});
+
+
+test('typed tasks show their real activation label and completed calculation summary only in its own detail',async()=>{
+ const {dom}=await fixture({typed:true});
+ for(const [id,label] of [['event_task','数据源连接并可读取后执行'],['waiting_task','请补充每月可存金额'],['immediate_task','立即执行']]){
+  const row=dom.app.innerHTML.split('id="event-task-'+id+'"')[1].split('</article>')[0];assert.ok(row.includes(label));assert.doesNotMatch(row,/待安排|定时任务/);
+ }
+ assert.doesNotMatch(dom.app.innerHTML,/计算结果：1990/);
+ await dom.click({action:'event-task-detail',taskId:'calc_task'});
+ assert.match(dom.app.innerHTML,/已记录 1 次执行/);assert.match(dom.app.innerHTML,/计算结果：1990 CNY/);assert.doesNotMatch(dom.app.innerHTML,/周末徒步方案|连接数据源|agent-composer/);
 });
