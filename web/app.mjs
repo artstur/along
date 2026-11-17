@@ -1282,7 +1282,7 @@ function isEventTimedTask(task) {
   return task.status==='open'&&Boolean(task.scheduledAt)&&task.reminderPlan?.state==='scheduled';
 }
 function eventTaskCard(task) {
-  return `<article class="task-row event-task-card" tabindex="-1" id="event-task-${esc(task.id)}"><div><strong>${esc(task.content)}</strong><p>执行时间 · ${esc(eventTaskTime(task))}</p><div class="event-task-footer">${isEventTimedTask(task)?'<span class="task-schedule-tag">定时任务</span>':''}<button class="task-detail-link" data-action="event-task-detail" data-task-id="${esc(task.id)}">查看详情</button></div></div><span class="task-row-status">${task.status==='done'?'已完成':'待完成'}</span></article>`;
+  return `<article class="task-row event-task-card" tabindex="-1" id="event-task-${esc(task.id)}"><div><strong>${esc(task.content)}</strong><p>执行时间 · ${esc(eventTaskTime(task))}</p><div class="event-task-footer">${isEventTimedTask(task)?'<span class="task-schedule-tag">定时任务</span>':''}</div></div><div class="event-task-meta"><span class="task-row-status">${task.status==='done'?'已完成':'待完成'}</span><button class="task-detail-link" data-action="event-task-detail" data-task-id="${esc(task.id)}">查看详情<span class="task-detail-chevron" aria-hidden="true">›</span></button></div></article>`;
 }
 function eventTaskDetail(goal,messages) {
   const task=goal.tasks.find(t=>t.id===selectedEventTaskId&&t.status!=='cancelled');
