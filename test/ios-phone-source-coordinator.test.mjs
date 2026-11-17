@@ -79,6 +79,8 @@ private actor API {
     var records=[String:Remote](),requests=[[String:Any]](),rotations=0
     var offline=false,loseOpenOnce=false,wrongReceiptOnce=false,terminal:String?
     var suspendNextPublish=false,publishWaiting=false,publishContinuation:CheckedContinuation<Void,Never>?
+    var suspendContext=false,contextWaiting=false,contextContinuation:CheckedContinuation<Void,Never>?
+    func releaseContext(){contextWaiting=false;contextContinuation?.resume();contextContinuation=nil}
     var onOpen:(([String:Any])->Void)?,onPublish:(([String:Any])->Void)?
     func clone()->Host{let h=Host();h.records=records;h.rotations=rotations;return h}
     func releasePublish(){publishWaiting=false;publishContinuation?.resume();publishContinuation=nil}
@@ -89,11 +91,17 @@ private actor API {
         for forbidden in ["apiKey","secretKey","passphrase","synthetic-api","synthetic-secret","synthetic-pass"]{precondition(!text.contains(forbidden),"source transport cannot contain secrets")}
         requests.append(body)
         if offline{throw AgentBridgeError.server("synthetic-secret")}
-        if action=="context"{return["provider":"okx","goalId":goal,"userId":"u_fixture","deviceId":"d_fixture"]}
+        if action=="context"{
+            let result:[String:Any]=["provider":"okx","goalId":goal,"userId":"u_fixture","deviceId":"d_fixture","currentGrantId":records[goal]?.grant as Any? ?? NSNull()]
+            if suspendContext{suspendContext=false;contextWaiting=true;await withCheckedContinuation{contextContinuation=$0}}
+            return result
+        }
         if action=="open"{
             onOpen?(body)
             let request=body["requestId"]as!String
             if let r=records[goal],let old=r.opens[request]{return["provider":"okx","goalId":goal,"userId":"u_fixture","deviceId":"d_fixture","grantId":old,"state":old==r.grant ? r.phase:"disconnected"]}
+            precondition(body["expectedGrantId"] != nil,"open must carry durable compare-and-swap predecessor")
+            guard body["expectedGrantId"]as?String == records[goal]?.grant else{throw AgentBridgeError.server("目标或配对已变化，请重新连接。")}
             rotations+=1;let grant=String(format:"%064x",rotations)
             var r=Remote(grant:grant,request:request);r.opens=records[goal]?.opens ?? [:];r.opens[request]=grant;records[goal]=r
             if loseOpenOnce{loseOpenOnce=false;throw AgentBridgeError.server("lost open response")}
@@ -145,6 +153,18 @@ private actor API {
 
 @main private struct Check {
     @MainActor static func main()async throws{
+        // A context reply from an older coordinator must not overwrite the
+        // record written by a newer one while the old operation was suspended.
+        let race=World(),older=race.coordinator();race.host.suspendContext=true
+        let delayed=Task{@MainActor in try await connected(older)}
+        for _ in 0..<100{if race.host.contextWaiting{break};try? await Task.sleep(nanoseconds:2_000_000)}
+        precondition(race.host.contextWaiting)
+        check(try await connected(race.coordinator()),"connected","received")
+        let newerRecord=race.storage.files
+        race.host.releaseContext()
+        do{_=try await delayed.value;fatalError("late context cannot replace newer connection")}catch{precondition(error as?PhoneSourceCoordinatorError == .authorizationChanged)}
+        precondition(race.storage.files==newerRecord && race.host.rotations==1,"late context overwrote newer durable connection")
+
         // Crash boundary 1: open rotates remotely but its response is lost.
         let a=World(),ca=a.coordinator();a.host.loseOpenOnce=true
         check(try await ca.status(goalID:"g_fixture"),"disconnected","none")
@@ -152,6 +172,7 @@ private actor API {
         let request=a.storage.record()["requestId"]as!String
         check(try await ca.status(goalID:"g_fixture"),"disconnected","none")
         check(try await connected(a.coordinator()),"connected","received")
+        precondition(a.host.requests.filter{$0["action"]as?String=="open"}.allSatisfy{$0["expectedGrantId"] is NSNull},"retry must retain original predecessor even after Host rotated")
         precondition(a.host.rotations==1 && a.host.requests.filter{$0["action"]as?String=="open"}.allSatisfy{$0["requestId"]as?String==request})
         // API failures retry the same durable intent and grant, never rotate implicitly.
         let b=World();await b.api.setFailure(true)

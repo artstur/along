@@ -290,3 +290,5 @@ Along 是手机优先的目标工作台：把一个目标拆成「目标 / 来�
 验收：直接用户对话（即使包含“补齐提醒”等词）可见；内部补排和后台推荐不进 chat；推荐区和通知/同任务反馈仍可用；历史缓存重放、重启、多页游标以及目标隔离通过；目标任务、原提醒和配对逐项保留。手机断开期间完成代码/主线/服务/签名包交接，真机安装与前台同步待重连。
 
 Historical audience-only corrections carry `classification_only:true`: retain evidence/deep-link identity but never create another alert in either Host or iOS fallback.
+
+- **原生来源重连也需要拒绝晚到的旧意图**：requestId 只能对已见请求去重，不能判定一个第一次抵达的旧 open。手机在等待 context 后比对本机耐久记录、持久保存 expectedGrantId，Host 在串行作用域内比较当前 grant 才轮换；已知 requestId 重试仍返回原 grant。去重历史采用有界 FIFO，新 grant 清空旧事件，窗口外请求由 grant/sequence 拒绝，不能把 2048 条变成来源终生不可恢复的上限。

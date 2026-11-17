@@ -139,8 +139,8 @@ test('device intake persists a scoped observation, blocks credentials and emits 
   const base={provider:'okx',goalId};
   assert.equal((await call({...base,action:'context'},{})).status,401);
   assert.equal((await call({...base,action:'context',userId:'forged'})).status,400);
-  assert.deepEqual((await call({...base,action:'context'})).json,{userId,deviceId,goalId,provider:'okx'});
-  const opened=(await call({...base,action:'open',requestId:'open_device'})).json;
+  assert.deepEqual((await call({...base,action:'context'})).json,{userId,deviceId,goalId,provider:'okx',currentGrantId:null});
+  const opened=(await call({...base,action:'open',requestId:'open_device',expectedGrantId:null})).json;
   assert.equal(opened.state,'pending');
   const event={...base,action:'publish',eventId:'device_observation',sequence:1,grantId:opened.grantId,permission:'read_only',observedAt:new Date().toISOString(),summary:{tradingEquityUsd:12,assetCount:2,positionCount:1}};
   assert.equal((await call({...event,credentials:{apiKey:'never-allowed'}})).status,400);

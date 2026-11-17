@@ -105,10 +105,16 @@ enum PhoneSourceCoordinatorError: String, LocalizedError {
     func connect(goalID: String, site: OKXDeviceSite, credentials: OKXDeviceCredentials) async throws -> [String: Any] {
         let operation = try begin(goalID)
         defer { end(operation) }
+        let initialRecord = try recordBytes(load(operation))
         let context = try await call(["action": "context", "provider": "okx", "goalId": goalID], operation)
         guard context["provider"] as? String == "okx", context["goalId"] as? String == goalID,
               let user = context["userId"] as? String, Self.validID(user),
               let device = context["deviceId"] as? String, Self.validID(device) else { throw PhoneSourceCoordinatorError.invalidResponse }
+        // A delayed context from another coordinator instance must not replace
+        // a newer durable intent. There is no await between this check and save.
+        guard try recordBytes(load(operation)) == initialRecord else { throw PhoneSourceCoordinatorError.authorizationChanged }
+        guard let expectedGrant = context["currentGrantId"],
+              expectedGrant is NSNull || (expectedGrant as? String).map(Self.validHash) == true else { throw PhoneSourceCoordinatorError.invalidResponse }
         var state = try load(operation) ?? [:]
         let retry = ["opening", "collecting"].contains(state["phase"] as? String ?? "") &&
             state["userId"] as? String == user && state["deviceId"] as? String == device
@@ -119,7 +125,7 @@ enum PhoneSourceCoordinatorError: String, LocalizedError {
             let sequence = sameOwner ? (state["sequence"] as? Int ?? 0) : 0
             state = ["version": 1, "provider": "okx", "goalId": goalID, "binding": operation.binding,
                      "userId": user, "deviceId": device, "site": site.rawValue,
-                     "requestId": "open-" + UUID().uuidString.lowercased(), "phase": "opening", "sequence": sequence,
+                     "requestId": "open-" + UUID().uuidString.lowercased(), "expectedGrantId": expectedGrant, "phase": "opening", "sequence": sequence,
                      "pending": [], "held": [], "deletionAccounts": accounts]
             if let previousGrant { state["previousGrantId"] = previousGrant }
         } else { state["site"] = site.rawValue }
@@ -128,7 +134,7 @@ enum PhoneSourceCoordinatorError: String, LocalizedError {
         blockedScopes.remove(operation.scope) // Only a new explicit connect may replace a failed revocation intent.
         let requestID = state["requestId"] as! String
         try checkRecord(state, operation)
-        let opened = try await call(["action": "open", "provider": "okx", "goalId": goalID, "requestId": requestID], operation)
+        let opened = try await call(["action": "open", "provider": "okx", "goalId": goalID, "requestId": requestID, "expectedGrantId": state["expectedGrantId"]!], operation)
         try checkRecord(state, operation)
         guard opened["provider"] as? String == "okx", opened["goalId"] as? String == goalID,
               opened["userId"] as? String == user, opened["deviceId"] as? String == device,
@@ -243,6 +249,11 @@ enum PhoneSourceCoordinatorError: String, LocalizedError {
             guard Self.validState(state, operation) else { throw PhoneSourceCoordinatorError.storageUnavailable }
             return state
         } catch { throw PhoneSourceCoordinatorError.storageUnavailable }
+    }
+    private func recordBytes(_ state: [String: Any]?) throws -> Data? {
+        guard let state else { return nil }
+        do { return try JSONSerialization.data(withJSONObject: state, options: [.sortedKeys]) }
+        catch { throw PhoneSourceCoordinatorError.storageUnavailable }
     }
     private func checkRecord(_ state: [String: Any], _ operation: Operation) throws {
         try check(operation)
@@ -497,7 +508,7 @@ enum PhoneSourceCoordinatorError: String, LocalizedError {
     private static func account(_ state: [String: Any], grant: String) -> String { hash(["okx", state["userId"] as? String ?? "", state["deviceId"] as? String ?? "", state["goalId"] as? String ?? "", state["binding"] as? String ?? "", grant]) }
     private static func accounts(_ state: [String: Any]) -> [String] { Array(Set((state["deletionAccounts"] as? [String] ?? []) + ((state["credentialAccount"] as? String).map { [$0] } ?? []))) }
     private static func validState(_ state: [String: Any], _ operation: Operation) -> Bool {
-        let fields: Set<String> = ["version", "provider", "goalId", "binding", "userId", "deviceId", "site", "requestId", "phase", "sequence", "pending", "held", "deletionAccounts", "grantId", "previousGrantId", "credentialAccount", "summary", "lastSyncedAt", "receivedSequence", "lastAttemptAt", "lastCollectedAt"]
+        let fields: Set<String> = ["version", "provider", "goalId", "binding", "userId", "deviceId", "site", "requestId", "expectedGrantId", "phase", "sequence", "pending", "held", "deletionAccounts", "grantId", "previousGrantId", "credentialAccount", "summary", "lastSyncedAt", "receivedSequence", "lastAttemptAt", "lastCollectedAt"]
         guard Set(state.keys).isSubset(of: fields), integer(state["version"]) == 1, state["provider"] as? String == "okx", state["goalId"] as? String == operation.goal,
               state["binding"] as? String == operation.binding, let user = state["userId"] as? String, validID(user),
               let device = state["deviceId"] as? String, validID(device), let request = state["requestId"] as? String, validID(request),
@@ -507,6 +518,7 @@ enum PhoneSourceCoordinatorError: String, LocalizedError {
               let pending = state["pending"] as? [[String: Any]], pending.count <= 200,
               let held = state["held"] as? [[String: Any]], held.count <= 100,
               let deletions = state["deletionAccounts"] as? [String], deletions.count <= 8, deletions.allSatisfy(validHash) else { return false }
+        guard let expected = state["expectedGrantId"], expected is NSNull || (expected as? String).map(validHash) == true else { return false }
         if state["receivedSequence"] != nil { guard let received = integer(state["receivedSequence"]), received >= 0, received <= sequence else { return false } }
         if state["lastAttemptAt"] != nil && !validDate(state["lastAttemptAt"]) { return false }
         if state["lastCollectedAt"] != nil && !validDate(state["lastCollectedAt"]) { return false }

@@ -33,3 +33,9 @@ Host gateway 作为并行 source journal 的缓存适配器，不另建 Agent so
 ## 交付证据
 
 先验证 iPhone 自身无凭证 public/time 可达性，再做真实授权。隔离测试覆盖 HMAC、权限拒绝、Keychain隔离、队列重启/重复/冲突、配对变化、撤回与重连竞态、源事实/按需读取/任务恢复。手机覆盖安装保留原目标、任务、提醒与配对；不代发正式测试消息。模拟器、真机联网、真实API授权、Agent实际执行分别记录。
+
+## 连接轮换条件与有界重试记录
+
+可信配对的 `context` 额外返回 `currentGrantId`（未建立作用域为 null）。手机先将该值与稳定 requestId 一起持久化，`open` 必须显式携带 `expectedGrantId:null|64hex`。已记录 requestId 优先返回原 grant，不再轮换；未知 requestId 只有 expectedGrantId 严格等于当前 grant 才能创建新授权，否则拒绝为 stale_authorization。晚到旧 open 不得撤回较新的连接。
+
+Host 的 opens 按实际插入顺序保留最近 2048 项；每次新 grant 清空 events，当前 grant 的 events 同样按插入顺序保留最近 2048 项。达到上限只淘汰最早记录，不永久阻断新连接或正常同步。被淘汰旧 open 以原 expectedGrantId 重试会因授权条件不匹配被拒绝；被淘汰旧事件以原序号重试返回 stale，不能恢复旧状态。验收同时覆盖延迟 open、跨重启、超过 2048 次轮换／事件，以及被淘汰记录重放。

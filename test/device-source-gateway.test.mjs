@@ -5,6 +5,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createSourceJournal} from '../host/source-event-bridge.mjs';
 import {createDeviceSourceGateway,DeviceSourceError} from '../host/device-source-gateway.mjs';
+import {createDeviceSourceRoute} from '../host/device-source-routes.mjs';
 
 const NOW=Date.parse('2026-11-18T00:00:00Z'),SCOPE={userId:'u_test',deviceId:'d_test',goalId:'g_test'};
 const SUMMARY={tradingEquityUsd:125.5,assetCount:2,positionCount:1};
@@ -24,13 +25,13 @@ function journalFixture(dir){
 function fixture(t){const dir=mkdtempSync(join(tmpdir(),'along-device-gateway-'));t.after(()=>rmSync(dir,{recursive:true,force:true}));const journal=journalFixture(join(dir,'journal'));let time=NOW;
   const make=()=>createDeviceSourceGateway({dir:join(dir,'cache'),journal,now:()=>time});const gateway=make();
   const handle=(input,extra={})=>gateway.handle({...SCOPE,input:{provider:'okx',...input},...extra});
-  let opens=0;const open=(requestId='open_'+(++opens))=>handle({action:'open',requestId});const publish=(grantId,extra={},context={})=>handle({action:'publish',grantId,eventId:'event_1',sequence:1,observedAt:new Date(time).toISOString(),permission:'read_only',summary:{...SUMMARY},...extra},context);
+  let opens=0;const open=async(requestId='open_'+(++opens),expectedGrantId=undefined)=>handle({action:'open',requestId,expectedGrantId:expectedGrantId===undefined?(await handle({action:'context'})).currentGrantId:expectedGrantId});const publish=(grantId,extra={},context={})=>handle({action:'publish',grantId,eventId:'event_1',sequence:1,observedAt:new Date(time).toISOString(),permission:'read_only',summary:{...SUMMARY},...extra},context);
   return {dir,journal,gateway,make,handle,open,publish,time(n){time=n;}};
 }
 async function error(promise,code){await assert.rejects(promise,e=>{assert.ok(e instanceof DeviceSourceError);assert.equal(e.code,code);assert.doesNotMatch(e.message,/remote-secret|u_test|g_test|\.json/);return true;});}
 
 test('context does not connect; open is pending and only trusted binding supplies identity',async t=>{
- const f=fixture(t);assert.deepEqual(await f.handle({action:'context'}),{...SCOPE,provider:'okx'});assert.equal(f.gateway.hasScope(SCOPE),false);
+ const f=fixture(t);assert.deepEqual(await f.handle({action:'context'}),{...SCOPE,provider:'okx',currentGrantId:null});assert.equal(f.gateway.hasScope(SCOPE),false);
  const opened=await f.open();assert.equal(opened.state,'pending');assert.match(opened.grantId,/^[a-f0-9]{64}$/);assert.equal(opened.deviceId,SCOPE.deviceId);assert.equal(f.journal.calls.filter(x=>x[0]==='prepareReady').length,0);
  assert.equal(f.gateway.owned(SCOPE),true);assert.equal(f.gateway.owned({...SCOPE,deviceId:'d_other'}),false);assert.equal(await f.gateway.sourceSnapshot(SCOPE),null);
  await error(f.handle({action:'open',userId:'attacker'}),'invalid_request');await error(f.handle({action:'context',goalId:'other'}),'invalid_request');
@@ -89,7 +90,7 @@ test('cache rejects symlinks, hardlinks, broad permissions and corrupt state',as
 test('same scope operations serialize across gateway instances while authorization is awaiting',async t=>{
  const f=fixture(t),{grantId}=await f.open();let release,entered;const wait=new Promise(r=>{release=r;}),started=new Promise(r=>{entered=r;});let calls=0;
  const publishing=f.publish(grantId,{}, {stillAuthorized:async()=>{if(++calls===1){entered();await wait;}return true;}});await started;
- const reopened=f.make();const rotating=reopened.handle({...SCOPE,input:{action:'open',provider:'okx',requestId:'open_later'}});release();await publishing;const newer=await rotating;
+ const reopened=f.make();const rotating=reopened.handle({...SCOPE,input:{action:'open',provider:'okx',requestId:'open_later',expectedGrantId:grantId}});release();await publishing;const newer=await rotating;
  assert.notEqual(newer.grantId,grantId);assert.equal(newer.state,'pending');assert.equal(await reopened.sourceSnapshot(SCOPE),null);assert.equal(f.journal.rows.get('u_test:g_test').current.state,'disconnected');
 });
 
@@ -99,10 +100,10 @@ test('open request retries are stable; replacement and restart never restore the
  assert.equal((await f.open('open_original')).grantId,old.grantId);assert.equal(f.journal.calls.filter(x=>x[0]==='prepareAbsent').length,before);
  f.journal.breakAbsent();await error(f.open('open_replacement'),'storage_unavailable');
  const reopened=f.make();assert.equal(await reopened.sourceSnapshot(SCOPE),null);assert.equal(f.journal.rows.get('u_test:g_test').current.state,'disconnected');
- const next=await reopened.handle({...SCOPE,input:{action:'open',provider:'okx',requestId:'open_replacement'}});assert.notEqual(next.grantId,old.grantId);assert.equal(next.state,'pending');
+ const next=await reopened.handle({...SCOPE,input:{action:'open',provider:'okx',requestId:'open_replacement',expectedGrantId:old.grantId}});assert.notEqual(next.grantId,old.grantId);assert.equal(next.state,'pending');
  const replay=await f.open('open_original');assert.equal(replay.grantId,old.grantId);assert.equal(replay.state,'disconnected');assert.equal((await f.handle({action:'status'})).grantId,next.grantId);
  assert.equal((await f.publish(old.grantId,{eventId:'old_late',sequence:90})).status,'stale');
- await error(f.handle({action:'open',requestId:'open_replacement'},{deviceId:'d_other'}),'stale_authorization');
+ await error(f.handle({action:'open',requestId:'open_replacement',expectedGrantId:old.grantId},{deviceId:'d_other'}),'stale_authorization');
 });
 
 test('disconnect survives interruption after cache clear, and future freshness remains explicit',async t=>{
@@ -157,4 +158,55 @@ test('actual journal retirement suppresses stale admitted summaries and cannot r
  assert.equal((await f.publish(grantId)).status,'stale');assert.equal((await f.publish(grantId,{eventId:'after_retirement',sequence:3})).status,'stale');
  const reopened=f.make();assert.equal(await reopened.sourceSnapshot(SCOPE),null);
  const next=await f.open();await f.publish(next.grantId,{eventId:'after_new_grant'});assert.deepEqual((await f.gateway.sourceSnapshot(SCOPE)).summary,SUMMARY);
+});
+
+test('a genuinely late unknown open cannot revoke a newer grant; known intent retries precede CAS',async t=>{
+ const f=fixture(t),initial=(await f.handle({action:'context'})).currentGrantId;assert.equal(initial,null);
+ let release;const gate=new Promise(r=>{release=r;});
+ const late=gate.then(()=>f.handle({action:'open',requestId:'delayed_open',expectedGrantId:initial}));
+ const current=await f.open('arrived_first',initial);await f.publish(current.grantId);
+ const before=f.journal.actual.current(SCOPE.userId,SCOPE.goalId);release();await error(late,'stale_authorization');
+ assert.equal((await f.handle({action:'context'})).currentGrantId,current.grantId);assert.equal((await f.handle({action:'status'})).state,'connected');assert.deepEqual(f.journal.actual.current(SCOPE.userId,SCOPE.goalId),before);
+ assert.equal((await f.handle({action:'open',requestId:'arrived_first',expectedGrantId:null})).grantId,current.grantId);
+ await error(f.handle({action:'open',requestId:'missing_expected'}),'invalid_request');
+ for(const expectedGrantId of [undefined,42,'short',{},'z'.repeat(64)])await error(f.handle({action:'open',requestId:'invalid_expected',expectedGrantId}),'invalid_request');
+});
+
+test('actual route preflight delay cannot allow an old open to rotate the grant after a newer request',async t=>{
+ const f=fixture(t);let release,entered,first=true;
+ const gate=new Promise(r=>{release=r;}),started=new Promise(r=>{entered=r;});
+ const route=createDeviceSourceRoute({gateway:f.gateway,identity:()=>SCOPE,readGoal:async()=>{
+  if(first){first=false;entered();await gate;}
+  return {goal:{id:SCOPE.goalId,userId:SCOPE.userId,status:'active',currentRevision:1},revision:{goalId:SCOPE.goalId,userId:SCOPE.userId,status:'active',revision:1},dataSources:[{provider:'okx',status:'recommended'}]};
+ }});
+ const late=route({action:'open',provider:'okx',goalId:SCOPE.goalId,requestId:'slow_route_open',expectedGrantId:null});await started;
+ const current=await route({action:'open',provider:'okx',goalId:SCOPE.goalId,requestId:'fast_route_open',expectedGrantId:null});await f.publish(current.value.grantId);
+ const before=f.journal.actual.current(SCOPE.userId,SCOPE.goalId);release();await error(late,'stale_authorization');
+ assert.equal((await f.handle({action:'status'})).grantId,current.value.grantId);assert.equal((await f.handle({action:'status'})).state,'connected');assert.deepEqual(f.journal.actual.current(SCOPE.userId,SCOPE.goalId),before);
+});
+
+test('more than 2048 actual grant opens stay usable and evicted old intents cannot rotate after restart',async t=>{
+ const f=fixture(t);let current=null,firstGrant;
+ for(let n=0;n<2051;n++){
+  const opened=await f.handle({action:'open',requestId:String(2051-n),expectedGrantId:current});
+  if(n===0)firstGrant=opened.grantId;current=opened.grantId;
+ }
+ const cache=join(f.dir,'cache'),file=join(cache,readdirSync(cache)[0]),disk=JSON.parse(readFileSync(file));
+ assert.equal(Object.keys(disk.opens).length,2048);assert.equal(disk.openOrder.length,2048);assert.equal(disk.openOrder[0],'2048');assert.equal(disk.openOrder.at(-1),'1');assert.equal(Object.hasOwn(disk.opens,'2051'),false);
+ const reopened=f.make();await error(reopened.handle({...SCOPE,input:{action:'open',provider:'okx',requestId:'2051',expectedGrantId:null}}),'stale_authorization');
+ assert.equal((await f.handle({action:'context'})).currentGrantId,current);assert.notEqual(current,firstGrant);
+ await f.publish(current,{eventId:'after_many_opens'});assert.equal((await f.handle({action:'status'})).state,'connected');
+ const replaced=await f.open('new_after_boundary',current);assert.notEqual(replaced.grantId,current);assert.equal(Object.keys(JSON.parse(readFileSync(file)).events).length,0);
+});
+
+test('more than 2048 actual events stay usable; evicted old sequences cannot restore data or block disconnect',async t=>{
+ const f=fixture(t),{grantId}=await f.open();
+ for(let sequence=1;sequence<=2051;sequence++)assert.equal((await f.publish(grantId,{eventId:String(2052-sequence),sequence})).status,'accepted');
+ const cache=join(f.dir,'cache'),file=join(cache,readdirSync(cache)[0]),disk=JSON.parse(readFileSync(file));
+ assert.equal(Object.keys(disk.events).length,2048);assert.equal(disk.eventOrder[0],'2048');assert.equal(disk.eventOrder.at(-1),'1');assert.equal(Object.hasOwn(disk.events,'2051'),false);
+ const before=f.journal.actual.current(SCOPE.userId,SCOPE.goalId);
+ assert.equal((await f.publish(grantId,{eventId:'2051',sequence:1})).status,'stale');assert.equal((await f.publish(grantId,{eventId:'2051',sequence:1,summary:{...SUMMARY,tradingEquityUsd:9}})).status,'stale');
+ assert.deepEqual(f.journal.actual.current(SCOPE.userId,SCOPE.goalId),before);
+ assert.equal((await f.publish(grantId,{eventId:'1',sequence:2051})).status,'duplicate');
+ assert.equal((await f.handle({action:'disconnect',grantId,eventId:'after_many_events_disconnect',sequence:2052})).status,'accepted');assert.equal(await f.gateway.sourceSnapshot(SCOPE),null);
 });

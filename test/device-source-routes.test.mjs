@@ -10,7 +10,7 @@ test('device ingress binds server identity, rechecks ownership and retires legac
     calls.push(args);assert.equal(await args.stillAuthorized(),true);owned=true;return {grantId:'opaque'};
   }},retireLegacy:async()=>{assert.equal(owned,true);retired=true;}});
   for(const field of ['userId','deviceId','user_id','device_id'])await assert.rejects(route({action:'open',provider:'okx',goalId,[field]:'forged'}));
-  await route({action:'open',provider:'okx',goalId,requestId:'open_one'});
+  await route({action:'open',provider:'okx',goalId,requestId:'open_one',expectedGrantId:null});
   assert.equal(retired,true);assert.equal(calls[0].userId,userId);assert.equal(calls[0].deviceId,deviceId);
   const gate=calls[0].stillAuthorized;who={...who};assert.equal(await gate(),false);
 });
