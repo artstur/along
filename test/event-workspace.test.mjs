@@ -497,3 +497,47 @@ test('the capability projection replays once into an acknowledged cache without 
  assert.equal(JSON.parse(localStorage.getItem(key)).drafts['goal:g_sleep'],'keep this draft');assert.deepEqual(alerts,[]);
  const restarted=createEventWorkspace({config});await restarted.sync();assert.equal(calls.filter(c=>c.path==='/sync').at(-1).body.after_seq,50);assert.equal(restarted.view().goals.g_sleep.tasks[0].execution.records[0].calculationReceiptId,receipt);
 });
+
+test('full sync projects only legacy, user and explicitly retained advance reminders while keeping Agent results and task identity',async()=>{
+  const at=new Date(Date.now()+3600000).toISOString(),now=new Date().toISOString(),batches=[];
+  const trigger=(actor,notifyBefore)=>({version:1,kind:'time',actor,capability:actor==='user'?'reminder':'research',
+    state:'scheduled',label:'按计划执行',conditions:[],notifyBefore});
+  const wire=snapshot('真实排期的目标');
+  const task=(id,extra={})=>({id,goalId:'g_sleep',content:'行动 '+id,status:'open',currentRevision:1,scheduledAt:at,...extra});
+  const daily={state:'scheduled',source:'agent',repeat:'daily',timezone:'Asia/Shanghai',wallTime:at,explanation:'按照原委托保留时刻'};
+  wire.tasks=[task('legacy'),task('user',{trigger:trigger('user',false)}),
+    task('agent_quiet',{trigger:trigger('agent',false),reminderPlan:daily}),
+    task('agent_preserved',{trigger:trigger('agent',true),reminderPlan:daily})];
+  const result={seq:2,userId:config.userId,kind:'message',goalId:'g_sleep',taskId:'agent_quiet',createdAt:now,
+    payload:{snapshot:wire,notification:{kind:'task_result',event_id:'agent_result',revision:1},audience:'background',
+      message:{id:'msg_agent_result',eventId:'agent_result',role:'assistant',direction:'outbound',audience:'background',text:'研究结果保存在原任务详情',seq:2}}};
+  let items=[{seq:1,userId:config.userId,kind:'goal_updated',goalId:'g_sleep',payload:{snapshot:wire}},result];
+  setup(input=>input.path==='/sync/ack'?{}:{items:items.filter(item=>item.seq>input.body.after_seq),remoteNotifications:false});
+  const ws=createEventWorkspace({config,onNotifications:async batch=>batches.push(batch)});
+  await ws.sync();
+  assert.equal(ws.view().error,'');
+  const expected=[{goalId:'g_sleep',taskId:'legacy',revision:1,scheduledAt:at,body:'行动 legacy'},
+    {goalId:'g_sleep',taskId:'user',revision:1,scheduledAt:at,body:'行动 user'},
+    {goalId:'g_sleep',taskId:'agent_preserved',revision:1,scheduledAt:at,body:'行动 agent_preserved',repeat:'daily',timezone:'Asia/Shanghai',wallTime:at}];
+  assert.deepEqual(batches.at(-1).reminders,expected);
+  assert.deepEqual(batches.at(-1).activeTasks.map(t=>t.taskId),['legacy','user','agent_quiet','agent_preserved']);
+  assert.equal(batches.at(-1).results[0].eventId,'agent_result');
+  await ws.sync();assert.deepEqual(batches.at(-1).reminders,expected);assert.deepEqual(batches.at(-1).results,[]);
+  const reopened=createEventWorkspace({config,onNotifications:async batch=>batches.push(batch)});
+  await reopened.sync();assert.deepEqual(batches.at(-1).reminders,expected);assert.deepEqual(batches.at(-1).results,[]);
+  const corrected=structuredClone(wire);corrected.goal.currentRevision=2;corrected.revision.revision=2;
+  corrected.tasks.find(t=>t.id==='agent_preserved').currentRevision=2;
+  corrected.tasks.find(t=>t.id==='agent_preserved').trigger.notifyBefore=false;
+  items.push({seq:3,userId:config.userId,kind:'goal_updated',goalId:'g_sleep',payload:{snapshot:corrected}});
+  await reopened.sync();assert.deepEqual(batches.at(-1).reminders,expected.slice(0,2));
+  assert.equal(batches.at(-1).activeTasks.length,4);
+});
+
+test('a finance goal from the real event workspace is not falsely labeled as demonstration data',()=>{
+  const wire=snapshot('核对我输入的月度预算');wire.goal.domain='finance';
+  wire.revision.metric={type:'budget',target:10000,unit:'元',period:'month'};
+  wire.tasks[0].content='核对本月预算余额';
+  const goal=safeWorkspaceGoal(wire);
+  assert.equal(goal.layout.summary,'按你的目标持续调整');
+  assert.equal(goal.tasks[0].content,'核对本月预算余额');assert.equal(goal.metric.target,10000);
+});

@@ -44,3 +44,15 @@
 范围仅Web展示、Host通知筛选与专属回归；不改原生采集、凭据位置或成功hook，不发布或安装设备。新增共享模块同时登记build和ServiceWorker白名单；版本号在Build67或后续统一集成时提高。
 
 本子任务回归：完整 `npm run check` 457项通过；构建21文件且web/dist/iOS资源一致。新增投影、缓存重放、DOM详情与通知边界回归，原8dace代码在真实业务断言失败（typed/calculation投影丢失、completed结果筛选错误），修复后通过。另直接运行上游真实Runtime/Engine/SQLite/注册工具的合成新目标计算竖链，再用实际goalDetail+receipt检验本客户端清洗及Host共用过滤，2项通过；模型决策仍由fixture驱动，不能称真实模型或设备送达证据。CSS未改，真浏览器与真机最终验收由统一发版执行。
+
+## Agent 定时执行与提前提醒分开投影
+
+主分类 client，依赖 Along Agent 已有 typed trigger 的 actor/notifyBefore，以及上游对合法旧提醒的 notify_before 保留；基线为 `bb4f95648e86c9e2245eb3ed9485e38d0c5a8aad`（Build67 / Web76）。本轮仅修 Web 同步与详情文案，由统一集成另行升版本、构建及手机验收，不改 Swift、采集、配对或版本号。
+
+问题：完整同步后，客户端把所有未来 scheduledAt 都投影成原生提醒。因此一个只需到时后台研究、结果存详情的 Agent time 任务，也会提前响“该研究了”。修复仅在完整 sync → onNotifications 的 reminders 集合中排除已校验 typed Agent 且 notifyBefore:false 的任务；它仍保留在 activeTasks、原任务详情和结果通知通道中。无 trigger 的 legacy、有 user actor 的真实用户行动、notifyBefore:true 的明确提前提醒，保持原时刻、频率、时区、身份及去重方式。显式关闭之前保留的 Agent 提前提醒只撤该任务的系统提醒，不能清掉其他计划。部分同步/失败不得触发全量撤销。
+
+详情对不提前提醒的 Agent 时间使用“执行安排”，说明结果保存在任务详情，不再把执行时刻称作“你指定的提醒”。不增加入口、不改三主要模块与12px右对齐样式，也不承诺 APNs 或实际送达。真实协议工作区的 finance 目标使用中性持续调整摘要，不能仅因 domain=finance 就称为演示数据；独立静态理财演示页面保持原边界。
+
+验收先以基线失败测试复现，再运行真实 createEventWorkspace.sync→onNotifications 完整投影：legacy/user/显式提前提醒原样保留，Agent quiet 无预提醒，activeTasks 与结果不丢、重同步/冷缓存不重发、显式关闭只移除自身。DOM 回归核对任务详情执行安排、原 user 提醒文案和真实 finance 摘要。运行 npm run check / build 并检查 web/dist/iOS 资源一致；用单独回退修复的变异检查证明测试能抓住原错误。系统实际送达与真机前台验收留统一发版，合成投影通过不等于设备已通知。
+
+本子任务实测：基线 npm run check 482/482；修复后485/485（含原Native/Host覆盖与去重回归）。新增完整sync投影、真实finance清洗和详情DOM三项测试通过；分别回退event-workspace与app源码后对应业务断言重新失败，前者出现多出的agent_quiet系统提醒和演示摘要，后者出现“你指定的提醒”。build21文件，web/dist/iOS逐字节一致；Swift、CSS、Build67/Web76版本入口均未修改。结果是代码/合成同步与DOM验证，未部署或验收实际通知送达。

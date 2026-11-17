@@ -648,3 +648,23 @@ test('weather then access expiry updates offline cards independently and retains
     assert.equal(JSON.parse(localStorage.getItem('along.event-workspace.v1:u_app_b')).drafts['goal:g_weather'],'保留我的路线偏好');
   } finally {Date.now=realNow;}
 });
+
+test('a quiet Agent time task shows execution arrangement rather than claiming an advance reminder',async()=>{
+  const goal={id:'g_execute_ui',domain:'custom',status:'active',revision:1,title:'定时研究目标',metric:null,context:[],tasks:[
+    {id:'t_execute_ui',goalId:'g_execute_ui',status:'open',content:'研究周末路线',revision:1,scheduledAt:'2099-01-01T11:00:00Z',
+      trigger:{version:1,kind:'time',actor:'agent',capability:'research',state:'scheduled',label:'按指定时间执行',conditions:[],notifyBefore:false},
+      reminderPlan:{state:'scheduled',source:'user',repeat:'once',timezone:'Asia/Shanghai',explanation:'按照指定时刻执行研究'}},
+    {id:'t_execute_waiting',goalId:'g_execute_ui',status:'open',content:'等待研究窗口',revision:1,
+      trigger:{version:1,kind:'waiting',actor:'agent',capability:'research',state:'waiting',label:'等待执行窗口',conditions:[],notifyBefore:false},
+      reminderPlan:{state:'needs_time',question:'哪一段时间适合执行？'}},
+  ]};
+  const saved={version:1,userId:'u_app_b',cursor:1,activeGoalId:goal.id,conversationId:null,goals:{[goal.id]:goal},messages:{},drafts:{}};
+  const dom=installDomStub({storage:{'along.agent.v1':JSON.stringify(config),'along.event-workspace.v1:u_app_b':JSON.stringify(saved)}});
+  installEventBridge();await import(`../web/app.mjs?execution-arrangement=${Date.now()}`);await settle();
+  await dom.click({action:'event-task-detail',taskId:'t_execute_ui'});
+  assert.match(dom.app.innerHTML,/执行安排 · 下次/);
+  assert.match(dom.app.innerHTML,/结果保存在任务详情/);
+  assert.doesNotMatch(dom.app.innerHTML,/你指定的提醒/);
+  await dom.click({action:'event-task-back'});await dom.click({action:'event-task-detail',taskId:'t_execute_waiting'});
+  assert.match(dom.app.innerHTML,/执行时间待补/);assert.doesNotMatch(dom.app.innerHTML,/提醒时间待补/);
+});
