@@ -9,7 +9,7 @@ const record = value => value!==null && typeof value==='object' && !Array.isArra
 const text = (value,max) => typeof value==='string' && value.trim().length>0 && value.length<=max;
 const version = value => Number.isSafeInteger(value) && value>=0;
 const time = value => typeof value==='string' && Number.isFinite(Date.parse(value));
-const empty = userId => ({version:1,recommendationsVersion:1,conversationVersion:1,userId,cursor:0,goals:{},messages:{},drafts:{},activeGoalId:null,conversationId:null,returnGoalId:null});
+const empty = userId => ({version:1,recommendationsVersion:1,conversationVersion:1,executionVersion:1,userId,cursor:0,goals:{},messages:{},drafts:{},activeGoalId:null,conversationId:null,returnGoalId:null});
 
 function absoluteReminderTime(value) {
   if (!time(value)||!/^\d{4}-\d\d-\d\dT(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)$/.test(value)) return false;
@@ -80,6 +80,23 @@ function conversationGoal(value, conversationId = value.conversationId) {
     message.conversationId === conversationId && message.goalId)?.goalId ?? null;
 }
 
+// Optional host-computed history cannot make a valid old goal unreadable.
+function cleanTaskExecution(value) {
+  if (!record(value)||value.version!==1||!Number.isSafeInteger(value.count)||value.count<0||
+      !Array.isArray(value.records)||value.records.length>20||value.count<value.records.length) return {};
+  const seen=new Set(),records=[];
+  for (const item of value.records) {
+    if (!record(item)||typeof item.id!=='string'||!item.id||item.id.length>300||seen.has(item.id)||
+        !['research','completed'].includes(item.kind)||!time(item.executedAt)||
+        item.outcome!==(item.kind==='research'?'researched':'completed')||
+        (item.summary!==undefined&&!text(item.summary,120))||
+        (item.recommendationEventId!==undefined&&!eventId(item.recommendationEventId))) return {};
+    seen.add(item.id);records.push({id:item.id,kind:item.kind,executedAt:item.executedAt,outcome:item.outcome,
+      ...(item.summary?{summary:item.summary}:{}),...(item.recommendationEventId?{recommendationEventId:item.recommendationEventId}:{})});
+  }
+  return {execution:{version:1,count:value.count,records}};
+}
+
 // Wire snapshots are validated before entering the cache; layouts are deterministic projections, not model HTML.
 export function safeWorkspaceGoal(snapshot) {
   if (!record(snapshot)||!record(snapshot.goal)||!record(snapshot.revision)||!Array.isArray(snapshot.tasks)) throw Error('目标同步格式不正确');
@@ -96,7 +113,7 @@ export function safeWorkspaceGoal(snapshot) {
     if (!record(task)||!id(task.id)||seen.has(task.id)||task.goalId!==goal.id||!text(task.content,120)||!version(task.currentRevision)||
         !['open','done','cancelled'].includes(task.status)) throw Error('任务同步格式不正确');
     seen.add(task.id);
-    return {id:task.id,goalId:goal.id,content:task.content,status:task.status,revision:task.currentRevision,...cleanTaskReminder(task)};
+    return {id:task.id,goalId:goal.id,content:task.content,status:task.status,revision:task.currentRevision,...cleanTaskReminder(task),...cleanTaskExecution(task.execution)};
   });
   validateGoalReply({reply:'目标已同步',proposal:{title:revision.title,target:metric?.target??null,
     task:cleanTasks[0]?.content||'通过聊天安排下一步',reason:'已校验的目标状态'}},goal.domain,'');
@@ -324,7 +341,7 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
       // Old clients acknowledged messages without retaining the optional recommendation.
       // Replay once from the durable outbox, preserving the acknowledged cursor and drafts.
       const replayConversation=state.conversationVersion!==1;
-      const replay=state.recommendationsVersion!==1||replayConversation;
+      const replay=state.recommendationsVersion!==1||replayConversation||state.executionVersion!==1;
       const after=replayConversation?state.conversationReplayAfter??0:replay?state.recommendationReplayAfter??0:state.cursor;
       const page=await agentCall(config,'/sync',{after_seq:after,limit:50,conversation_version:1,
         ...(onNotifications?{notificationFallback:true,notificationReceipts:receipts}:{})});
@@ -342,7 +359,7 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
       if (receipts.length) next.notificationReceipts=next.notificationReceipts.filter(id=>!receipts.includes(id));
       if (page.items.length===0) {
         if (page.nextCursor!==undefined) throw Error('同步分页游标不正确');
-        if (replay) {next.recommendationsVersion=1;next.conversationVersion=1;delete next.recommendationReplayAfter;delete next.conversationReplayAfter;}
+        if (replay) {next.recommendationsVersion=1;next.conversationVersion=1;next.executionVersion=1;delete next.recommendationReplayAfter;delete next.conversationReplayAfter;}
         if (replay||fallbacks.length||receipts.length) save(next);
         break;
       }
@@ -380,7 +397,7 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
       restoreSelection(next);
       next.cursor=Math.max(next.cursor,previous);next.pendingAck=seqs;
       if (replay) {
-        if (page.nextCursor===undefined) {next.recommendationsVersion=1;next.conversationVersion=1;delete next.recommendationReplayAfter;delete next.conversationReplayAfter;}
+        if (page.nextCursor===undefined) {next.recommendationsVersion=1;next.conversationVersion=1;next.executionVersion=1;delete next.recommendationReplayAfter;delete next.conversationReplayAfter;}
         else {next.recommendationReplayAfter=previous;if(replayConversation)next.conversationReplayAfter=previous;}
       }
       save(next);onChange();

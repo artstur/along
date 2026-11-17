@@ -378,3 +378,11 @@ footer { padding: 0 0 26px; color: #aaa; text-align: center; font-size: 10px; }
 .recommendation-sources li > span { display:block; font-size:11px; }
 .recommendation-next { color:#666; }
 .agent-message:has(.recommendation-card) { max-width:100%; width:100%; padding:0; border:0; margin-right:0; }
+
+.event-task-footer { display:flex; align-items:center; gap:12px; margin-top:12px; }
+.event-task-footer .agent-action { margin-left:auto; }
+.task-schedule-tag { display:inline-block; color:#666; font-size:11px; padding:3px 8px; border:1px solid #e5e5e3; border-radius:6px; }
+.task-execution-list { margin:0; padding:0; list-style:none; }
+.task-execution-list li { padding:12px 0; border-bottom:1px solid #eee; font-size:13px; }
+.task-execution-list p { margin:5px 0 0; color:#888; font-size:11px; }
+.event-task-card strong { font-size:14px; line-height:1.6; }
