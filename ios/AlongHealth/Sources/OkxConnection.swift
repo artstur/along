@@ -156,7 +156,7 @@ struct OKXConnectionSheet: View {
                     snapshot = nil
                 }
                 // Never surface an arbitrary server/transport string that could contain credentials.
-                errorMessage = action.failureMessage
+                errorMessage = action.failureMessage(for: error)
             }
         }
     }
@@ -208,9 +208,52 @@ private enum OKXConnectionAction: String {
     var failureMessage: String {
         switch self {
         case .status: "未能读取连接状态。请确认已配对的 Mac 在线后重试。"
-        case .connect: "连接失败。请确认站点、三项凭证和仅有读取权限，再重试。"
+        case .connect: "连接未完成，请稍后重试。"
         case .refresh: "本次刷新失败，仍显示上次同步的摘要。请确认 Mac 在线及 OKX 连接有效后重试。"
         case .disconnect: "断开失败。请确认 Mac 在线后重试，凭证尚未确认删除。"
+        }
+    }
+
+    func failureMessage(for error: Error) -> String {
+        let reason: String
+        if case let AgentBridgeError.server(message) = error {
+            // Exact matches only: these are Host-owned constants, never raw OKX messages.
+            switch message {
+            case "OKX 请求超时，请稍后重试。":
+                reason = "Mac 请求 OKX 超时。请检查 Mac 到 OKX 的网络；这不代表凭证错误。"
+            case "暂时无法连接 OKX，请稍后重试。":
+                reason = "Mac 无法连接 OKX。请检查 Mac 到 OKX 的网络后重试。"
+            case "仅支持只读 API Key，请关闭交易和提现权限后重试。",
+                 "OKX 未接受请求，请检查凭证、所属站点及 IP 白名单。",
+                 "OKX 返回的数据无法验证，请稍后重试。",
+                 "本机 OKX 凭证存储不可用，请检查后重试。",
+                 "目标或配对已变化，本次连接未保存。",
+                 "请完整填写 OKX API 凭证。",
+                 "此目标尚未连接 OKX。",
+                 "这个目标当前无法连接 OKX，请同步目标后重试",
+                 "配对已变化，请重新打开连接",
+                 "请先配对这台 Mac":
+                reason = message
+            case "代理未能连接到 Mac。请确认当前代理或 VPN 允许 Along 直连局域网，再重试评估。",
+                 "连接 Mac 失败。请让 iPhone 和 Mac 接入可互访的网络，并确认 Mac 上的 Along 服务正在运行。若 Mac 地址变了，请到「编辑目标」更新地址后重试。":
+                reason = "iPhone 无法连接 Mac。请确认 Mac 的 Along 服务在线，且手机能访问它。"
+            case "iPhone 未能验证 Mac 的安全连接。若使用代理或 VPN，请允许 Along 直连局域网后重试。":
+                reason = "iPhone 未能验证 Mac 的安全连接。请检查原配对和局域网连接。"
+            default: return failureMessage
+            }
+        } else {
+            let network = error as NSError
+            guard network.domain == NSURLErrorDomain else { return failureMessage }
+            switch URLError.Code(rawValue: network.code) {
+            case .timedOut, .cannotConnectToHost, .cannotFindHost, .notConnectedToInternet, .networkConnectionLost:
+                reason = "iPhone 无法连接 Mac。请确认 Mac 的 Along 服务在线，且手机能访问它。"
+            default: return failureMessage
+            }
+        }
+        switch self {
+        case .refresh: return "本次刷新失败，仍显示上次同步的摘要。" + reason
+        case .disconnect: return "断开失败，凭证尚未确认删除。" + reason
+        case .connect, .status: return reason
         }
     }
 }
