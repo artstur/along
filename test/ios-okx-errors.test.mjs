@@ -10,7 +10,7 @@ test('the real OKX catch shows trusted failure reasons and never arbitrary serve
   const shell=readFileSync(new URL('../ios/AlongHealth/Sources/AlongShellView.swift',import.meta.url),'utf8');
   const policy=source.slice(source.indexOf('private enum OKXConnectionAction'),source.indexOf('private struct OKXConnectionSnapshot'));
   const errorType=shell.slice(shell.indexOf('enum AgentBridgeError:'),shell.indexOf('final class PinnedAgentDelegate:'));
-  const catchAssignment=source.match(/\/\/ Never surface[^\n]*\n\s*(errorMessage = [^\n]*)/)?.[1];
+  const catchAssignment=source.split('// Never surface')[1]?.match(/errorMessage = (action\.failureMessage[^}\n]*)/)?.[0]?.trim();
   assert.ok(catchAssignment,'exercise the assignment from the actual catch block');
   const dir=mkdtempSync(join(tmpdir(),'along-okx-errors-'));
   try {

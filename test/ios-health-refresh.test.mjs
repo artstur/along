@@ -18,6 +18,10 @@ test('iOS serializes foreground reads and rechecks changes that arrive during a 
     writeFileSync(file,`import Foundation
 @propertyWrapper struct Published<T> { var wrappedValue: T }
 protocol ObservableObject {}
+@MainActor final class PhoneSourceCoordinator {
+    static let shared = PhoneSourceCoordinator()
+    func resumeForeground() {}
+}
 final class WKWebView {
     var messages = [String]()
     func evaluateJavaScript(_ script: String) { messages.append(script) }

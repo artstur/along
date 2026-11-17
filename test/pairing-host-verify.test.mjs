@@ -124,6 +124,39 @@ async function waitFor(predicate,label,timeout=6_000) {
   assert.ok(false,`等待超时：${label}`);
 }
 
+test('device intake persists a scoped observation, blocks credentials and emits only metadata facts',async t=>{
+  const dir=mkdtempSync(join(tmpdir(),'along-device-intake-')),agent=await stubAlongAgent();
+  const token='e'.repeat(64),userId='u_aaaa1111',deviceId='d_aaaa1111',goalId='g_device';
+  writeFileSync(join(dir,'pairing.json'),JSON.stringify({hash:sha256hex(token),user_id:userId,device_id:deviceId}),{mode:0o600});
+  writeFileSync(join(dir,'bridge-token'),BRIDGE_TOKEN,{mode:0o600});
+  agent.script.set('/along-source/api/goals/'+goalId,()=>({body:{goal:{id:goalId,userId,status:'active',currentRevision:1},revision:{goalId,userId,status:'active',revision:1},dataSources:[{provider:'okx',status:'recommended'}]}}));
+  agent.script.set('/along-source/api/goals',()=>({body:{items:[{id:goalId}]}}));
+  agent.script.set('/along-source/api/source-events',r=>({body:{event_id:r.body.event_id,status:'accepted'}}));
+  agent.script.set('/along-source/api/source-reads',()=>({body:{requests:[]}}));
+  const host=await spawnHost({dir,agentPort:agent.port,eventIngest:true});
+  t.after(async()=>{await host.stop();await agent.close();rmSync(dir,{recursive:true,force:true});});
+  const call=(body,headers={authorization:`Bearer ${token}`})=>phoneCall(host.port,'/sources/device',{method:'POST',headers,body});
+  const base={provider:'okx',goalId};
+  assert.equal((await call({...base,action:'context'},{})).status,401);
+  assert.equal((await call({...base,action:'context',userId:'forged'})).status,400);
+  assert.deepEqual((await call({...base,action:'context'})).json,{userId,deviceId,goalId,provider:'okx',currentGrantId:null});
+  const opened=(await call({...base,action:'open',requestId:'open_device',expectedGrantId:null})).json;
+  assert.equal(opened.state,'pending');
+  const event={...base,action:'publish',eventId:'device_observation',sequence:1,grantId:opened.grantId,permission:'read_only',observedAt:new Date().toISOString(),summary:{tradingEquityUsd:12,assetCount:2,positionCount:1}};
+  assert.equal((await call({...event,credentials:{apiKey:'never-allowed'}})).status,400);
+  assert.deepEqual((await call(event)).json,{event_id:event.eventId,status:'accepted'});
+  assert.deepEqual((await call(event)).json,{event_id:event.eventId,status:'duplicate'});
+  assert.equal((await call({...base,action:'status'})).json.state,'connected');
+  await waitFor(()=>agent.calls.some(r=>r.path==='/along-source/api/source-events'&&r.body.state==='ready'),'ready metadata');
+  const facts=agent.calls.filter(r=>r.path==='/along-source/api/source-events').map(r=>r.body);
+  assert.doesNotMatch(JSON.stringify(facts),/tradingEquityUsd|assetCount|positionCount|apiKey|credentials/);
+  const forbidden=await phoneCall(host.port,'/events',{method:'POST',headers:{authorization:`Bearer ${token}`},body:{event_id:'fake_source',event_type:'along.source_summary_updated',payload:{event_type:'along.source_summary_updated'}}});
+  assert.equal(forbidden.json.reason,'native_source_route_required');
+  assert.deepEqual((await call({...base,action:'disconnect',grantId:opened.grantId,eventId:'device_disconnect',sequence:2})).json,{event_id:'device_disconnect',status:'accepted'});
+  assert.ok(['stale','duplicate'].includes((await call(event)).json.status));
+  assert.equal((await call({...base,action:'status'})).json.state,'disconnected');
+});
+
 test('OKX route is pairing-bound and refuses foreign or unrecommended goals before any connector access',async t=>{
   const dir=mkdtempSync(join(tmpdir(),'along-okx-route-'));
   const agent=await stubAlongAgent();
@@ -143,7 +176,7 @@ test('OKX route is pairing-bound and refuses foreign or unrecommended goals befo
   detail.goal.userId='u_other';
   assert.equal((await call({action:'status',goalId:'g_okx'})).status,403);
   detail.goal.userId=userId;detail.dataSources=[];
-  assert.equal((await call({action:'connect',goalId:'g_okx',credentials:{apiKey:'fake',secretKey:'fake',passphrase:'fake'},site:'global'})).status,403);
+  assert.equal((await call({action:'connect',goalId:'g_okx',credentials:{apiKey:'fake',secretKey:'fake',passphrase:'fake'},site:'global'})).status,409);
   assert.deepEqual((await call({action:'disconnect',goalId:'g_okx'})).json,{provider:'okx',state:'disconnected'});
   assert.doesNotMatch(JSON.stringify(agent.calls),/apiKey|secretKey|passphrase/);
 });

@@ -1,10 +1,12 @@
 # OKX 只读连接
 
+当前规则已由用户于2026-11-18改为[设备侧授权与采集](device-data-sources.md)：OKX凭证只在iPhone钥匙串，手机完成只读验证和获取，Host持久接收设备摘要后通过统一来源事件/按需读取交给Agent。下面PR31的Mac采集与凭证保存契约属于历史兼容；其connect/refresh已退役，仅保留旧状态清理，不向手机下载旧密钥。Host接收设备报告不等同Host独立请求OKX验签。
+
 主分类：data。依赖已合并的目标数据源推荐（PR28）及当前 main fe652f34248346d3025a1f608ad0eeb913dfb785。验收：在原目标点击“连接”，在原生安全表单填写只读 API 凭证，Host 验证真实权限并成功读取余额后，App 展示“已连接”、最近同步时间与账户摘要；重新打开仍能读取，断开后删除凭证。
 
 用户已明确要求连接真实 OKX 账户，只读授权取代本场景原来的演示数据限制，不包含交易、提现或自动策略执行。官方 Agent Trade Kit 当前 OAuth 示例包含 live:trade，不能冒充只读授权；本次采用 API Key / Secret / Passphrase。官方设置链接只负责创建密钥，不代表已连接。
 
-## 实现契约
+## PR31 历史实现契约（已由设备采集规则替代）
 
 - 推荐仍来自 Agent；连接状态由 Host 真实请求决定，不允许模型设置 connected。点击现有 OKX 卡打开 iOS 原生连接 sheet，凭证绝不传 WebView。公开 Web 提示在 iPhone App 连接。
 - 原生调用沿用原配对的私网 HTTPS、证书固定及配对鉴权；新增私有 `/sources/okx` POST，通用网页 request 禁止访问。请求 `{action:'status'|'connect'|'refresh'|'disconnect',goalId,...}`；仅 connect 包含 `{credentials:{apiKey,secretKey,passphrase},site:'global'|'eea'|'us'}`。
