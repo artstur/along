@@ -1,6 +1,7 @@
 import {createCipheriv,createDecipheriv,createHash,createHmac,randomBytes} from 'node:crypto';
 import {constants,openSync,closeSync,readFileSync,writeFileSync,mkdirSync,lstatSync,fstatSync,chmodSync,renameSync,unlinkSync,fsyncSync,readdirSync} from 'node:fs';
 import {resolve,join} from 'node:path';
+import {sourceDigest,validSourceStamp} from './source-event-bridge.mjs';
 
 // URLs and verbs are intentionally not caller-configurable. No trading/funding write endpoint exists here.
 const SITES=Object.freeze({global:'https://openapi.okx.com',eea:'https://eea.okx.com',us:'https://us.okx.com'});
@@ -52,7 +53,7 @@ function summary(value){
 }
 
 /** One Host-owned encrypted vault. Target ownership/recommendation is checked by the authenticated caller. */
-export function createOkxConnection({dir,fetchImpl=fetch,now=Date.now,timeoutMs=10_000,maxBytes=512*1024}={}){
+export function createOkxConnection({dir,fetchImpl=fetch,now=Date.now,timeoutMs=10_000,maxBytes=512*1024,sourceJournal=null}={}){
   if(typeof dir!=='string'||!dir||typeof fetchImpl!=='function'||typeof now!=='function'||
       !Number.isInteger(timeoutMs)||timeoutMs<1||timeoutMs>30_000||!Number.isSafeInteger(maxBytes)||maxBytes<1||maxBytes>2*1024*1024)fail('invalid_request');
   const root=resolve(dir),master=join(root,'master.key');
@@ -101,6 +102,7 @@ export function createOkxConnection({dir,fetchImpl=fetch,now=Date.now,timeoutMs=
       const value=JSON.parse(plain.toString('utf8'));
       if(!record(value)||value.version!==1||value.userId!==userId||value.goalId!==goalId||!Object.hasOwn(SITES,value.site)||
           typeof value.lastSyncedAt!=='string'||!Number.isFinite(Date.parse(value.lastSyncedAt))||!summary(value.summary))fail('vault_unavailable');
+      if(value.sourceStamp!==undefined&&!validSourceStamp(value.sourceStamp))fail('vault_unavailable');
       value.credentials=credentials(value.credentials);
       return value;
     }finally{secret.fill(0);plain?.fill(0);}
@@ -168,12 +170,42 @@ export function createOkxConnection({dir,fetchImpl=fetch,now=Date.now,timeoutMs=
     try{if(typeof check!=='function'||await check()!==true)fail('stale_authorization');}
     catch{fail('stale_authorization');}
   }
-  return {async handle(context={}){
+  function serialized(key,run){
+    const queueKey=root+':'+key,operation=(QUEUES.get(queueKey)??Promise.resolve()).catch(()=>{}).then(run);
+    QUEUES.set(queueKey,operation);const clear=()=>{if(QUEUES.get(queueKey)===operation)QUEUES.delete(queueKey);};operation.then(clear,clear);return operation;
+  }
+  const sourceFailed=()=>{}; // Reservations remain durable; the bounded Host pump reconciles a later commit failure.
+  return {
+  hasSavedSource({userId,goalId}={}){if(!identity(userId)||!identity(goalId))fail('invalid_request');try{directory();return !!lstatSync(join(root,createHash('sha256').update(JSON.stringify([userId,goalId])).digest('hex')+'.json'));}catch(e){if(e?.code==='ENOENT')return false;throw e;}},
+  async sourceSnapshot({userId,goalId,stillAuthorized}={}){
+    if(!identity(userId)||!identity(goalId)||typeof stillAuthorized!=='function')fail('invalid_request');
+    const key=createHash('sha256').update(JSON.stringify([userId,goalId])).digest('hex');
+    return serialized(key,async()=>{
+      await authorized(stillAuthorized);directory();let saved;
+      try{saved=load(key,userId,goalId);}catch{
+        if(sourceJournal)try{const stamp=sourceJournal.prepareAbsent({userId,goalId,state:'unavailable'});sourceJournal.commitAbsent({userId,goalId,stamp});}catch{}
+        fail('vault_unavailable');
+      }
+      await authorized(stillAuthorized);
+      if(!saved){
+        if(sourceJournal){sourceJournal.recover({userId,goalId,missing:true});if(sourceJournal.current(userId,goalId)?.state==='ready'){const stamp=sourceJournal.prepareAbsent({userId,goalId,state:'unavailable'});sourceJournal.commitAbsent({userId,goalId,stamp});}}
+        return null;
+      }
+      if(sourceJournal){
+        const digest=sourceDigest(saved.summary);
+        if(!saved.sourceStamp){const stamp=sourceJournal.prepareReady({userId,goalId,operation:'adopt',digest});save(key,{...saved,sourceStamp:stamp});saved.sourceStamp=stamp;}
+        sourceJournal.recover({userId,goalId,stamp:saved.sourceStamp,digest});
+      }
+      return {provider:'okx',observedAt:saved.lastSyncedAt,summary:{...saved.summary},...(saved.sourceStamp?{sourceStamp:{...saved.sourceStamp}}:{})};
+    });
+  },
+  async handle(context={}){
     if(!record(context))fail('invalid_request');
-    const {userId,goalId,input,stillAuthorized,revokeIf}=context;
+    const {userId,goalId,input,stillAuthorized,revokeIf,sourceState='disconnected'}=context;
+    if(!['disconnected','revoked'].includes(sourceState))fail('invalid_request');
     if(!identity(userId)||!identity(goalId))fail('invalid_request');
-    const command=requestInput(input),key=createHash('sha256').update(JSON.stringify([userId,goalId])).digest('hex'),queueKey=root+':'+key;
-    const operation=(QUEUES.get(queueKey)??Promise.resolve()).catch(()=>{}).then(async()=>{
+    const command=requestInput(input),key=createHash('sha256').update(JSON.stringify([userId,goalId])).digest('hex');
+    return serialized(key,async()=>{
       await authorized(stillAuthorized);
       try{directory();}catch{fail('vault_unavailable');}
       let saved;
@@ -187,18 +219,22 @@ export function createOkxConnection({dir,fetchImpl=fetch,now=Date.now,timeoutMs=
           if(await revokeIf()!==true)return null; // Internal conditional cleanup, not a public action.
         }
         await authorized(stillAuthorized);
+        let hadSaved=false;try{hadSaved=!!lstatSync(join(root,key+'.json'));}catch(error){if(error?.code!=='ENOENT')fail('vault_unavailable');}
+        let stamp;
+        if(sourceJournal)try{if(!hadSaved)sourceJournal.recover({userId,goalId,missing:true});if(hadSaved||sourceJournal.current(userId,goalId))stamp=sourceJournal.prepareAbsent({userId,goalId,state:sourceState});}catch{fail('vault_unavailable');}
         try{unlinkSync(join(root,key+'.json'));}catch(error){if(error?.code!=='ENOENT')fail('vault_unavailable');}
+        if(stamp)try{sourceJournal.commitAbsent({userId,goalId,stamp});}catch{sourceFailed();}
         return disconnected();
       }
       if(command.action==='refresh'&&!saved)fail('not_connected');
       const site=command.action==='connect'?command.site:saved.site,credential=command.action==='connect'?command.credentials:saved.credentials;
       const current=await sync(site,credential);
       await authorized(stillAuthorized);
-      try{save(key,{version:1,userId,goalId,site,credentials:credential,...current});}catch{fail('vault_unavailable');}
+      let sourceStamp;
+      if(sourceJournal)try{sourceStamp=sourceJournal.prepareReady({userId,goalId,operation:command.action,digest:sourceDigest(current.summary),priorStamp:saved?.sourceStamp});}catch{fail('vault_unavailable');}
+      try{save(key,{version:1,userId,goalId,site,credentials:credential,...current,...(sourceStamp?{sourceStamp}:{})});}catch{fail('vault_unavailable');}
+      if(sourceStamp)try{sourceJournal.commitSaved({userId,goalId,stamp:sourceStamp,digest:sourceDigest(current.summary)});}catch{sourceFailed();}
       return connected(current);
     });
-    QUEUES.set(queueKey,operation);
-    const clear=()=>{if(QUEUES.get(queueKey)===operation)QUEUES.delete(queueKey);};operation.then(clear,clear);
-    return operation;
   }};
 }
