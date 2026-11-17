@@ -99,10 +99,11 @@ test('an interrupted upgrade replay resumes its page cursor without moving the a
 test('a completed research task publishes a current task result while ordinary completed-task recommendations remain suppressed',async()=>{
   const wire=message(),projections=[];wire.payload.snapshot=structuredClone(snapshot);wire.payload.snapshot.tasks[0].status='done';wire.payload.snapshot.tasks[0].currentRevision=2;
   wire.payload.notification={event_id:'reply_research',kind:'task_result',revision:2};wire.createdAt=new Date().toISOString();
+  wire.payload.snapshot.tasks[0].execution={version:1,count:1,records:[{id:'research_execution',kind:'research',outcome:'researched',executedAt:wire.createdAt,recommendationEventId:'reply_research'}]};
   installDomStub();window.AlongAgentBridge={request:async input=>input.path==='/sync'?{items:input.body.after_seq?[]:[wire]}:{acked:1}};
   const w=createEventWorkspace({config,onNotifications:async p=>projections.push(p)});await w.sync();
   assert.equal(projections.at(-1).results.length,1);assert.equal(projections.at(-1).results[0].kind,'task_result');assert.equal(projections.at(-1).results[0].revision,2);
-  const other=structuredClone(wire);other.payload.notification.kind='recommendation_ready';
+  const other=structuredClone(wire);other.payload.notification.kind='recommendation_ready';delete other.payload.snapshot.tasks[0].execution;
   installDomStub();window.AlongAgentBridge={request:async input=>input.path==='/sync'?{items:input.body.after_seq?[]:[other]}:{acked:1}};
   const p=[];await createEventWorkspace({config,onNotifications:async v=>p.push(v)}).sync();assert.deepEqual(p.at(-1).results,[]);
 });

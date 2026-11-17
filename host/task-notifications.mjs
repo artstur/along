@@ -1,6 +1,7 @@
 import {readFileSync,renameSync,writeFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {HostError} from './host-error.mjs';
+import {taskResultRelevant,resultEvidence} from '../web/task-results.mjs';
 
 const lifetime=10*60_000;
 const id=value=>typeof value==='string'&&/^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$/.test(value);
@@ -47,8 +48,7 @@ function relevant(route,detail) {
   if (route.taskId&&(!task||task.status==='cancelled')) return false;
   if (route.kind==='reminder_due') return task?.status==='open'&&
     [task.scheduledAt,task.previousDailyOccurrence].some(at=>Date.parse(at)===Date.parse(route.scheduledAt));
-  if (route.kind!=='recommendation_ready') return true;
-  return (!task||task.status==='open')&&(task||detail.goal).currentRevision===route.revision;
+  return taskResultRelevant(route,detail.goal,task);
 }
 function notification(item,who) {
   const n=item.payload?.notification;
@@ -61,7 +61,8 @@ function notification(item,who) {
     scheduledAt=n.scheduled_at;
   }
   const route={userId:who.userId,goalId:item.goalId,...(item.taskId?{taskId:item.taskId}:{}),
-    eventId:n.event_id,revision:n.revision,kind:n.kind,...(scheduledAt?{scheduledAt}:{})};
+    eventId:n.event_id,revision:n.revision,kind:n.kind,...(scheduledAt?{scheduledAt}:{}),
+    ...(resultEvidence(item.payload)?{evidence:resultEvidence(item.payload)}:{})};
   return relevant(route,item.payload.snapshot)?route:null;
 }
 

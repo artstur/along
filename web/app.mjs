@@ -1302,6 +1302,8 @@ function eventTaskStamp(value,timezone) {
   return timezone&&timezone!==localZone?`${stamp}（${timezone==='Asia/Shanghai'?'北京时间':timezone}）`:stamp;
 }
 function eventTaskTime(task) {
+  if(task.status==='done'&&task.execution?.records?.[0]?.executedAt)return eventTaskStamp(task.execution.records[0].executedAt,task.reminderPlan?.timezone);
+  if(task.trigger&&task.trigger.kind!=='time')return task.trigger.label;
   if (!task.scheduledAt) return '待安排';
   const plan=task.reminderPlan;
   if (plan?.state==='scheduled'&&['daily','weekly'].includes(plan.repeat)&&Date.parse(task.scheduledAt)<=Date.now()) {
@@ -1312,7 +1314,7 @@ function eventTaskTime(task) {
   return eventTaskStamp(task.scheduledAt,task.reminderPlan?.timezone);
 }
 function isEventTimedTask(task) {
-  return task.status==='open'&&Boolean(task.scheduledAt)&&task.reminderPlan?.state==='scheduled';
+  return task.status==='open'&&(!task.trigger||task.trigger.kind==='time')&&Boolean(task.scheduledAt)&&task.reminderPlan?.state==='scheduled';
 }
 function eventTaskCard(task) {
   return `<article class="task-row event-task-card" tabindex="-1" id="event-task-${esc(task.id)}"><div><strong>${esc(task.content)}</strong><p>执行时间 · ${esc(eventTaskTime(task))}</p><div class="event-task-footer">${isEventTimedTask(task)?'<span class="task-schedule-tag">定时任务</span>':''}</div></div><div class="event-task-meta"><span class="task-row-status">${task.status==='done'?'已完成':'待完成'}</span><button class="task-detail-link" data-action="event-task-detail" data-task-id="${esc(task.id)}">查看详情<span class="task-detail-chevron" aria-hidden="true">›</span></button></div></article>`;
@@ -1324,7 +1326,7 @@ function eventTaskDetail(goal,messages) {
   const result=candidates.find(m=>m.eventId===focusedEventRecommendation)??candidates.at(-1);
   const execution=task.execution;
   const history=execution?.records??[];
-  return `${backButton('event-task-back','返回动态任务')}<section class="goal-card" tabindex="-1" id="event-task-${esc(task.id)}"><p class="goal-note">${esc(goal.title)}</p><h1>${esc(task.content)}</h1><p>执行时间 · ${esc(eventTaskTime(task))}</p>${isEventTimedTask(task)?'<span class="task-schedule-tag">定时任务</span>':''}${taskReminderLine(task)}</section><section class="task-section"><div class="section-heading"><h2>已记录 ${execution?.count??0} 次执行</h2></div>${history.length?`<ol class="task-execution-list">${history.map(record=>`<li><strong>${esc(record.summary??(record.kind==='research'?'已整理推荐方案':'已确认完成'))}</strong><p>${esc(eventTaskStamp(record.executedAt,task.reminderPlan?.timezone))}</p></li>`).join('')}</ol>`:'<p class="goal-note">暂无可核实的执行记录</p>'}</section>${result?`<section class="task-section" id="event-message-${esc(result.notificationEventId??result.eventId)}">${recommendationCard(result.recommendation,{eventId:result.eventId})}</section>`:''}`;
+  return `${backButton('event-task-back','返回动态任务')}<section class="goal-card" tabindex="-1" id="event-task-${esc(task.id)}"><p class="goal-note">${esc(goal.title)}</p><h1>${esc(task.content)}</h1><p>执行时间 · ${esc(eventTaskTime(task))}</p>${isEventTimedTask(task)?'<span class="task-schedule-tag">定时任务</span>':''}${taskReminderLine(task)}</section><section class="task-section"><div class="section-heading"><h2>已记录 ${execution?.count??0} 次执行</h2></div>${history.length?`<ol class="task-execution-list">${history.map(record=>`<li><strong>${esc(record.summary??(record.kind==='research'?'已整理推荐方案':record.kind==='calculation'?'已完成计算':'已确认完成'))}</strong><p>${esc(eventTaskStamp(record.executedAt,task.reminderPlan?.timezone))}</p></li>`).join('')}</ol>`:'<p class="goal-note">暂无可核实的执行记录</p>'}</section>${result?`<section class="task-section" id="event-message-${esc(result.notificationEventId??result.eventId)}">${recommendationCard(result.recommendation,{eventId:result.eventId})}</section>`:''}`;
 }
 function recommendationValidity(view) {
   const now=Date.now();
