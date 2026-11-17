@@ -50,3 +50,7 @@
 `test/source-event-bridge.test.mjs` 的 12 项专属测试使用合成只读账户、真实加密文件与 loopback HTTP Agent 协议替身。覆盖：保存后丢 hook／删除后丢 commit 的重启对账、status 与同值刷新幂等、单调版本与退役连接、跨目标和配对隔离、旧 generation 拒绝、同 generation 新 revision 跟进、stale 同请求刷新恢复、临时目标服务失败恢复、读取期间撤权，以及无凭据的持久 native 摘要 adapter。禁用 native producer admission 的受控变异在“应有一条 ready event”断言失败（实际 0），证明该回归能识别原断点。
 
 上述均为隔离协议／文件路径证据，不是实际 OKX 网络、Agent 真实模型调用、真机采集或通知送达证据。实际 native 采集上传成功后的权威存储 hook 尚依赖上游协议；当前 vault 适配不决定未来凭据位置。完整回归、固定提交与跨仓接口复核由本轮集成人登记。
+
+### 回执绑定补充
+
+Source event 仅接受匹配 `event_id` 的 `accepted`／`stale`；read result 仅接受匹配 `request_id` 的 `accepted`／`reused`。错误 ID、conflict／rejected 或未知状态不能清理本地待发事实或标记 read 已递送。新增两项专属回归在原提交上均失败，修复后 14/14。隔离跨仓验证直接加载 Agent `SourceStateStore` 固定提交 `6a319d9ed12de9b0cc5727f116bd0199fe33a25d`（非复制协议），实际 SQLite + Host loopback 覆盖错 ID 保留、原 event 重放、实际 `reused` read 回执和私有数据隔离；6 项断言通过。该测试仍是合成数据/隔离传输证据。
