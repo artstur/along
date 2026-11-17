@@ -1280,16 +1280,18 @@ function localRecordPage(choice,title,picker,connection) {
 }
 function taskReminderLine(task) {
   const plan=task.reminderPlan;
+  const executionOnly=task.trigger?.actor==='agent'&&task.trigger.notifyBefore===false;
   const next=task.scheduledAt?esc(eventTaskStamp(task.scheduledAt,plan?.timezone)):'';
   if (!plan) return next?`<p>${next}</p>`:'';
   if (task.status!=='open') return '';
-  if (plan.state==='needs_time') return `<p>提醒时间待补 · ${esc(plan.question)}</p>`;
+  if (plan.state==='needs_time') return `<p>${executionOnly?'执行时间待补':'提醒时间待补'} · ${esc(plan.question)}</p>`;
   if (plan.state==='off') return plan.reason==='opt_out'?'<p>已关闭提醒</p>':'';
   const frequency=plan.repeat==='weekly'?'每周'+'一二三四五六日'[plan.weekday-1]:plan.repeat==='daily'?'每天':'一次';
   const future=Date.parse(task.scheduledAt)>Date.now();
   const clock=esc(new Date(plan.wallTime??task.scheduledAt).toLocaleTimeString('zh-CN',{
     hour:'2-digit',minute:'2-digit',hourCycle:'h23',...(plan.timezone?{timeZone:plan.timezone,timeZoneName:'short'}:{})}));
   const timing=future?`下次 ${next} · ${frequency}`:plan.repeat==='once'?`计划于 ${next}`:`${frequency} ${clock}`;
+  if (executionOnly) return `<p>执行安排 · ${timing}</p><p>结果保存在任务详情</p>`;
   return `<p>${plan.source==='agent'?'Agent 安排':'你指定的提醒'} · ${timing}</p><p>${esc(plan.explanation)}</p>`;
 }
 function eventTaskStamp(value,timezone) {
