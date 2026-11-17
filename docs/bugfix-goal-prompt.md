@@ -165,7 +165,7 @@ Along 是手机优先的目标工作台：把一个目标拆成「目标 / 来�
 - Token 只留在 Mac：Kimi token、配对 token 不发给 iPhone、不写进运行结果、不进日志
 - Agent 的输出必须先过 `validateGoalReply` 与 `safeAdaptiveLayout` 等校验才能改变目标空间；不新增采用、确认或审批环节，校验只能加严
 - 健康数据只发汇总值，不发原始 HealthKit 样本
-- 理财只用演示数据：不接真实账户、不读取账户、不转账、不交易
+- 理财默认演示；用户明确授权的 OKX 真实只读连接遵循 [专用契约](okx-readonly-connection.md)，必须验证实际权限仅只读；不转账、不交易
 - 不手改 `dist/` 和 `ios/AlongHealth/Web/`
 - `web/` 与 `host/` 共享的文件不得引入 Node 专用模块
 - 默认做减法：不加新入口、开关、说明、状态、页面；一屏只服务一个主要任务
