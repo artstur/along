@@ -49,6 +49,8 @@ let verifiedHealthHost=false;
 let checkingHealthHost=false;
 let agentConnection = {status:agentConfig.token?'checking':'unconfigured',error:''};
 let eventWorkspace=null,eventWorkspaceBinding='';
+const okxStates=new Map();
+const okxPending=new Map();
 let focusedEventRecommendation=null;
 let selectedEventTaskId=null;
 let pendingRecommendationOpen=null;
@@ -67,6 +69,7 @@ function connectEventWorkspace(userId) {
   const bindingKey=JSON.stringify([agentConfig.baseURL,agentConfig.fingerprint,agentConfig.token,userId]);
   if (!eventWorkspace||previous?.userId!==userId||eventWorkspaceBinding!==bindingKey) {
     eventWorkspace?.dispose();
+    okxStates.clear();okxPending.clear();
     lastNotificationProjection='';
     eventWorkspace=createEventWorkspace({config:{...agentConfig,userId},onChange:()=>renderEventUpdate(),
       onNotifications:window.AlongAgentBridge?.notification?value=>syncEventNotifications(value,bindingKey):undefined});
@@ -1161,12 +1164,42 @@ function eventDataSources(goal) {
   return `<section class="connection-section" aria-label="连接数据源"><div class="section-heading"><h2>连接数据源</h2></div>${sources.map(source=>{
     const provider=dataSourceProvider(source.provider);
     const health=source.provider==='apple-health';
-    const connected=health&&state.source==='healthkit'&&state.snapshot?.contextReviewAllowed;
-    const detail=health?(connected?'所选健康摘要变化后，Along 会自动跟进。':'连接所选健康摘要，让 Along 随变化自动跟进。'):provider.detail;
+    if(!health) queueOkxStatus(goal.id);
+    const okx=okxStates.get(goal.id);
+    const connected=health?state.source==='healthkit'&&state.snapshot?.contextReviewAllowed:okx?.state==='connected';
+    const detail=health?(connected?'所选健康摘要变化后，Along 会自动跟进。':'连接所选健康摘要，让 Along 随变化自动跟进。')
+      :okx?.error?'连接状态暂不可用，请打开管理重试。':connected?'只读 · 已连接，可打开查看账户摘要':'只读接入 · 尚未连接';
     const action=health?`<button class="agent-action connection-agent-action" data-action="event-health-connect">${connected?'管理':'连接'}</button>`
-      :`<a class="agent-action connection-agent-action" href="${provider.url}" target="_blank" rel="noopener noreferrer">${provider.action}</a>`;
+      :`<button class="agent-action connection-agent-action" data-action="event-okx-connect">${connected?'管理连接':'连接'}</button>`;
     return `<div class="connection-card"><div class="connection-symbol" aria-hidden="true">${provider.symbol}</div><div class="connection-copy"><div class="connection-name"><strong>${provider.name}</strong><span class="source-tag">Agent 推荐</span></div><p>${esc(source.reason)}</p><p>${detail}</p></div>${action}</div>`;
   }).join('')}</section>`;
+}
+function queueOkxStatus(goalId) {
+  if(!window.AlongAgentBridge?.source||okxPending.has(goalId)||okxStates.has(goalId))return;
+  const binding=eventWorkspaceBinding;
+  const request={};
+  okxPending.set(goalId,request);
+  const current=()=>binding===eventWorkspaceBinding&&okxPending.get(goalId)===request;
+  void Promise.resolve().then(()=>window.AlongAgentBridge.source('status',goalId)).then(value=>{
+    if(current())okxStates.set(goalId,{state:value?.provider==='okx'&&value.state==='connected'?'connected':'disconnected'});
+  }).catch(()=>{if(current())okxStates.set(goalId,{error:true});}).finally(()=>{
+    if(current()){okxPending.delete(goalId);render();}
+  });
+}
+async function connectOkx() {
+  const goalId=eventWorkspace?.view().activeGoalId;
+  const goal=eventWorkspace?.view().goals[goalId];
+  if(!goal?.dataSources.some(s=>s.provider==='okx'))return;
+  if(!window.AlongAgentBridge?.source){notice('请在 iPhone Along App 中连接 OKX');return;}
+  if(okxPending.get(goalId)?.connect)return;
+  const binding=eventWorkspaceBinding,request={connect:true};
+  okxPending.set(goalId,request);
+  const current=()=>binding===eventWorkspaceBinding&&okxPending.get(goalId)===request;
+  try {
+    const value=await window.AlongAgentBridge.source('connect',goalId);
+    if(current())okxStates.set(goalId,{state:value?.provider==='okx'&&value.state==='connected'?'connected':'disconnected'});
+  }catch{if(current())notice('无法打开连接，请检查 Mac 连接后重试');}
+  if(current()){okxPending.delete(goalId);render();}
 }
 async function syncEventNotifications(value,binding) {
   if (binding!==eventWorkspaceBinding) return;
@@ -1536,6 +1569,7 @@ app.addEventListener('click', event => {
       if (eventWorkspace.prepareRecommendationFeedback(actionTarget.dataset.eventId)) {focusedEventRecommendation=null;screen='agent';render();}
     }
     else if (action==='event-health-connect') {void connectHealth();}
+    else if (action==='event-okx-connect') {void connectOkx();}
     else if (action==='agent-back') {
       selectedEventTaskId=null;focusedEventRecommendation=null;
       if (!eventWorkspace.view().activeGoalId) eventWorkspace.leaveConversation();

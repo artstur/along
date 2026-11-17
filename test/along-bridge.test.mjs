@@ -7,6 +7,7 @@ import {createServer} from 'node:http';
 import vm from 'node:vm';
 import {createBridge, readBridgeToken} from '../host/along-bridge.mjs';
 import {HostError} from '../host/host-error.mjs';
+import {reconcileOkxSources} from '../host/source-access.mjs';
 
 // Host↔Along Agent 回环接口（docs/stage-a-tech-design.md §2.4/§4.2）。Along Agent 侧契约（含归属 404 不泄露）由
 // along-superagent 仓库的 tests/along-bridge.spec.ts 锁定；这里锁 Host 侧：桥接凭证只在本机进程之间走、
@@ -131,7 +132,7 @@ function newLinkContext(overrides={}) {
   const handle=vm.runInNewContext(`(()=>{${newLinkSource}\nreturn handleAlongNewLink})()`,{
     process:{env:{...(overrides.env??{})}},
     dir:'/unused',authorized:()=>true,createApnsProvider:()=>null,
-    taskNotifications:()=>({decorate:(_,page)=>page}),setInterval:()=>({unref(){}}),
+    taskNotifications:()=>({decorate:(_,page)=>page}),setInterval:()=>({unref(){}}),reconcileOkxSources,
     HostError,
     respond:(res,status,data)=>{const outcome={status,data:JSON.parse(JSON.stringify(data))};respondLog.push(outcome);return outcome;},
     body:async req=>req.input,
