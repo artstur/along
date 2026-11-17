@@ -28,7 +28,7 @@ POST `/sources/device`，沿用原配对 TLS/鉴权；仅本地 App 原生代码
 
 Host gateway 作为并行 source journal 的缓存适配器，不另建 Agent source 状态：先将实际接收的admitted metadata/规范摘要/稳定事件与序号原子落盘，再调用统一recordVerifiedState并保存返回的Host stamp；重启以相同metadata重放对账。只有open立即撤回旧epoch保留prepareAbsent/commitAbsent，native ready不再走旧vault的prepareReady/commitSaved。metadata固定为connectionId=grantId、version=sequence、state、observedAt及ready时的digest；retired的disconnected/revoked重放返回stale属于安全终态，不能恢复旧summary。提供现有 source-event-bridge 要求的 `sourceSnapshot({userId,goalId,stillAuthorized})` 和 `handle(disconnect)` 接口。source generation/revision 由既有 Host journal 管理；手机 grantId/sequence 只负责设备授权与投递排序，两者不得混用。Agent 继续用 /source-events → /source-reads → /source-read-results 及既有 ready/generation/revision/reference 契约。
 
-手机先持久连接requestId/作用域，再请求open；成功验证后存Keychain，再把summary/sequence/事件同文件原子提交。后者失败补偿删除Keychain，中断留下的opening记录不能被当成connected。Host已接收但响应丢失时同id重试。撤回先持久tombstone+撤回事件，再删Keychain；中断在下次前台继续清理，不再采集。Host admitted-cache→recordVerifiedState→stamp任何中断以已保存metadata幂等对账，不能凭内存成功返回。采集时间允许未来最多5分钟，但未来值仍不能被read bridge冒充新鲜；Agent freshness继续按实际observedAt计算。
+手机先持久连接requestId/作用域，再请求open；成功验证后存Keychain，再把summary/sequence/事件同文件原子提交。后者失败补偿删除Keychain，中断留下的opening记录不能被当成connected。Host已接收但响应丢失时同id重试。撤回先持久tombstone+撤回事件，再删Keychain；中断在下次前台继续清理，不再采集。Host admitted-cache→recordVerifiedState→stamp任何中断以已保存metadata幂等对账，不能凭内存成功返回。若文件写入失败，仍尝试删除Keychain并明确报断开未完成；若文件与Keychain同时失败，只能在当前进程阻止读取，不能承诺跨重启已撤回或远端已清理。采集时间允许未来最多5分钟，但未来值仍不能被read bridge冒充新鲜；Agent freshness继续按实际observedAt计算。
 
 ## 交付证据
 

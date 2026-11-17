@@ -1168,7 +1168,7 @@ function eventDataSources(goal) {
     const okx=okxStates.get(goal.id);
     const connected=health?state.source==='healthkit'&&state.snapshot?.contextReviewAllowed:okx?.state==='connected';
     const detail=health?(connected?'所选健康摘要变化后，Along 会自动跟进。':'连接所选健康摘要，让 Along 随变化自动跟进。')
-      :okx?.error?'连接状态暂不可用，请打开管理重试。':connected?'只读 · 已连接，可打开查看账户摘要':'只读接入 · 尚未连接';
+      :okx?.error?'连接状态暂不可用，请打开管理重试。':connected?(okx?.syncState==='received'?'只读 · iPhone 已连接，Mac 已接收摘要':'只读 · iPhone 已连接，等待同步至 Mac'):'只读接入 · 尚未连接';
     const action=health?`<button class="agent-action connection-agent-action" data-action="event-health-connect">${connected?'管理':'连接'}</button>`
       :`<button class="agent-action connection-agent-action" data-action="event-okx-connect">${connected?'管理连接':'连接'}</button>`;
     return `<div class="connection-card"><div class="connection-symbol" aria-hidden="true">${provider.symbol}</div><div class="connection-copy"><div class="connection-name"><strong>${provider.name}</strong><span class="source-tag">Agent 推荐</span></div><p>${esc(source.reason)}</p><p>${detail}</p></div>${action}</div>`;
@@ -1181,7 +1181,7 @@ function queueOkxStatus(goalId) {
   okxPending.set(goalId,request);
   const current=()=>binding===eventWorkspaceBinding&&okxPending.get(goalId)===request;
   void Promise.resolve().then(()=>window.AlongAgentBridge.source('status',goalId)).then(value=>{
-    if(current())okxStates.set(goalId,{state:value?.provider==='okx'&&value.state==='connected'?'connected':'disconnected'});
+    if(current())okxStates.set(goalId,{state:value?.provider==='okx'&&value.state==='connected'?'connected':'disconnected',syncState:value?.syncState==='received'?'received':'pending'});
   }).catch(()=>{if(current())okxStates.set(goalId,{error:true});}).finally(()=>{
     if(current()){okxPending.delete(goalId);render();}
   });
@@ -1197,7 +1197,7 @@ async function connectOkx() {
   const current=()=>binding===eventWorkspaceBinding&&okxPending.get(goalId)===request;
   try {
     const value=await window.AlongAgentBridge.source('connect',goalId);
-    if(current())okxStates.set(goalId,{state:value?.provider==='okx'&&value.state==='connected'?'connected':'disconnected'});
+    if(current())okxStates.set(goalId,{state:value?.provider==='okx'&&value.state==='connected'?'connected':'disconnected',syncState:value?.syncState==='received'?'received':'pending'});
   }catch{if(current())notice('无法打开连接，请检查 Mac 连接后重试');}
   if(current()){okxPending.delete(goalId);render();}
 }
