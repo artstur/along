@@ -36,12 +36,12 @@ async function fixture(t,options={}){
   if(path==='/along-source/api/goals'){assert.equal(url.searchParams.get('user_id'),WHO.userId);body={items:[...state.goals.keys()].map(id=>({id}))};}
   else if(path.startsWith('/along-source/api/goals/'))body=detail(decodeURIComponent(path.split('/').at(-1)));
   else if(path==='/along-source/api/source-events'){
-   const value=JSON.parse(raw);state.events.push(value);body={status:'accepted'};
+   const value=JSON.parse(raw);state.events.push(value);body=options.eventReceipt?options.eventReceipt(value):{event_id:value.event_id,status:'accepted'};
   }else if(path==='/along-source/api/source-reads'){assert.equal(req.method,'GET');assert.equal(url.searchParams.get('user_id'),WHO.userId);body={requests:state.requests};}
   else if(path==='/along-source/api/source-read-results'){
    const value=JSON.parse(raw);state.results.push(value);
-   if(['ready','denied'].includes(value.state))state.requests=state.requests.filter(r=>r.request_id!==value.request_id);
-   body={status:'accepted'};
+   if(!options.keepRequests&&['ready','denied'].includes(value.state))state.requests=state.requests.filter(r=>r.request_id!==value.request_id);
+   body=options.readReceipt?options.readReceipt(value):{request_id:value.request_id,status:'accepted'};
   }else{res.writeHead(404,{'content-type':'application/json'});res.end(JSON.stringify({error:'not_found'}));return;}
   res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify(body));
  });
@@ -181,4 +181,19 @@ test('goal authorization lost while obtaining an admitted snapshot blocks its re
  const pump=f.makePump(undefined,f.journal,{adapters:{okx:adapter}});t.after(()=>pump.close());
  await pump.pump();f.state.requests=[f.request('race_read')];withdraw=true;await pump.pump();
  assert.equal(f.state.results.at(-1).state,'denied');assert.equal(f.state.results.at(-1).data,undefined);
+});
+
+test('an unrelated event receipt cannot acknowledge the pending fact; only matching accepted or stale clears it',async t=>{
+ let valid=false;
+ const f=await fixture(t,{eventReceipt:value=>({event_id:valid?value.event_id:'unrelated_event',status:valid?'stale':'accepted'})});
+ await f.connect();await f.pump.pump();assert.equal(f.journal.outbox(WHO.userId).length,1);assert.ok(f.state.errors.includes('invalid_source_receipt'));
+ valid=true;await f.pump.pump();assert.equal(f.journal.outbox(WHO.userId).length,0);assert.equal(f.state.events[0].event_id,f.state.events[1].event_id);
+});
+
+test('a wrong read receipt remains retryable and a matching reused response acknowledges that exact request',async t=>{
+ let valid=false;
+ const f=await fixture(t,{keepRequests:true,readReceipt:value=>({request_id:valid?value.request_id:'unrelated_read',status:valid?'reused':'accepted'})});
+ await f.connect();await f.pump.pump();f.state.requests=[f.request('receipt_read')];await f.pump.pump();
+ assert.equal(f.state.results.length,1);assert.ok(f.state.errors.includes('invalid_read_receipt'));
+ valid=true;await f.pump.pump();assert.equal(f.state.results.length,2);await f.pump.pump();assert.equal(f.state.results.length,2);
 });

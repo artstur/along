@@ -191,7 +191,7 @@ export function createSourceEventBridge({journal,connection,bridge,endpoint,iden
    if(!active(who))return false;
    const reply=await bridge.call('/along-source/api/source-events',{value,identity:who,timeout:5000});
    if(!active(who))return false;
-   if(!['accepted','duplicate','stale','recorded'].includes(reply?.status))fail('invalid_source_receipt');
+   if(reply?.event_id!==item.event_id||!['accepted','stale'].includes(reply?.status))fail('invalid_source_receipt');
    journal.acknowledge(who.userId,item.goal_id,item.event_id,provider);
   }
   return journal.outbox(who.userId).filter(e=>providers[e.provider]).length===0;
@@ -236,7 +236,7 @@ export function createSourceEventBridge({journal,connection,bridge,endpoint,iden
    if(journal.delivered(who.userId,request.request_id,dedup))continue;
    const reply=await bridge.call('/along-source/api/source-read-results',{value:result,identity:who,timeout:5000});
    if(!active(who))return;
-   if(!['accepted','duplicate','recorded','stale'].includes(reply?.status))fail('invalid_read_receipt');
+   if(reply?.request_id!==request.request_id||!['accepted','reused'].includes(reply?.status))fail('invalid_read_receipt');
    journal.markDelivered(who.userId,request.request_id,dedup);
   }
  }
