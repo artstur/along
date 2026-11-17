@@ -615,3 +615,29 @@ test('leaving an opened notification lets the goal show a newer background recom
   await dom.click({action:'event-chat'});await dom.click({action:'agent-back'});
   assert.match(dom.app.innerHTML,/新方案/);assert.doesNotMatch(dom.app.innerHTML,/旧方案/);
 });
+
+
+test('weather then access expiry updates offline cards independently and retains the draft',async()=>{
+  const realNow=Date.now;let now=realNow();Date.now=()=>now;
+  try {
+    const goal={id:'g_weather',domain:'custom',status:'active',revision:1,title:'原目标',metric:null,context:[],tasks:[]};
+    const r=recommendation();r.retrievedAt=new Date(now-1000).toISOString();
+    r.validUntil=new Date(now+1000).toISOString();
+    r.sources=r.sources.map(s=>({...s,retrievedAt:r.retrievedAt,expiresAt:new Date(now+(s.id==='source_weather'?1000:5000)).toISOString()}));
+    const m={eventId:'reply_weather',role:'assistant',text:'结果',goalId:goal.id,status:'received',recommendation:r};
+    const saved={version:1,userId:'u_app_b',cursor:1,activeGoalId:goal.id,conversationId:null,goals:{[goal.id]:goal},messages:{[m.eventId]:m},drafts:{'goal:g_weather':'保留我的路线偏好'}};
+    const dom=installDomStub({storage:{'along.agent.v1':JSON.stringify(config),'along.event-workspace.v1:u_app_b':JSON.stringify(saved)}});
+    document.visibilityState='visible';installEventBridge();
+    await import(`../web/app.mjs?weather-expiry=${realNow()}`);await settle();
+    assert.match(dom.app.innerHTML,/推荐已就绪/);
+    window.AlongAgentBridge.request=async()=>{throw Error('offline');};
+    now+=2000;await dom.tick(3000);await settle();
+    assert.match(dom.app.innerHTML,/天气待更新/);assert.match(dom.app.innerHTML,/路线候选保留/);
+    assert.doesNotMatch(dom.app.innerHTML,/资料已过期|>适合考虑</);
+    now+=4000;await dom.tick(3000);await settle();
+    assert.match(dom.app.innerHTML,/资料已过期/);assert.match(dom.app.innerHTML,/需重新核实/);
+    now-=4000;await dom.fireWindow('pageshow');await settle();
+    assert.match(dom.app.innerHTML,/天气待更新/);assert.doesNotMatch(dom.app.innerHTML,/资料已过期/);
+    assert.equal(JSON.parse(localStorage.getItem('along.event-workspace.v1:u_app_b')).drafts['goal:g_weather'],'保留我的路线偏好');
+  } finally {Date.now=realNow;}
+});
