@@ -434,3 +434,40 @@ test('a conversation draft stays reachable after goal binding without overwritin
     assert.equal(reopened.draft(),existingDraft,'an older goal draft stays separate until the newer conversation draft is sent');
   }
 });
+
+
+test('host execution history is optional, bounded and never inflated by malformed cache extensions',()=>{
+  const record={id:'source_event_one',kind:'research',executedAt:'2099-01-01T12:00:00Z',outcome:'researched',summary:'已整理方案'};
+  const wire=snapshot();wire.tasks[0].execution={version:1,count:1,records:[record]};
+  assert.deepEqual(safeWorkspaceGoal(wire).tasks[0].execution,wire.tasks[0].execution);
+  for (const value of [{version:2,count:100,records:[]},{version:1,count:-1,records:[]},{version:1,count:0,records:[record]},
+    {version:1,count:2,records:[record,record]},{version:1,count:1,records:[{...record,kind:'notification'}]},
+    {version:1,count:1,records:[{...record,executedAt:'invalid'}]}]) {
+    wire.tasks[0].execution=value;const clean=safeWorkspaceGoal(wire);
+    assert.equal(clean.tasks[0].execution,undefined);assert.equal(clean.tasks[0].content,'睡前放下手机');
+  }
+});
+
+test('an older acknowledged cache hydrates host execution history once without replaying result alerts or drafts',async()=>{
+  const wire=snapshot(),goal=safeWorkspaceGoal(wire),key='along.event-workspace.v1:'+config.userId;
+  const seed={version:1,recommendationsVersion:1,conversationVersion:1,userId:config.userId,cursor:50,activeGoalId:goal.id,
+    conversationId:null,goals:{[goal.id]:goal},messages:{},drafts:{'goal:g_sleep':'未发送的偏好'}};
+  installDomStub({storage:{[key]:JSON.stringify(seed)}});
+  wire.tasks[0].execution={version:1,count:1,records:[{id:'business_result',kind:'research',executedAt:new Date().toISOString(),outcome:'researched'}]};
+  const calls=[],projections=[];
+  window.AlongAgentBridge={request:async input=>{
+    calls.push(input);
+    if(input.path==='/sync')return {items:input.body.after_seq===0?[{seq:1,userId:config.userId,goalId:goal.id,taskId:'t_sleep',kind:'message',createdAt:new Date().toISOString(),remoteNotifications:false,
+      payload:{snapshot:wire,notification:{kind:'task_result',event_id:'old_result',revision:1},
+        message:{id:'m_history',eventId:'old_result',role:'assistant',direction:'outbound',text:'历史结果',seq:1,audience:'background'}}}]:[]};
+    if(input.path==='/sync/ack')return {acked:input.body.seqs.length};throw Error(input.path);
+  }};
+  const workspace=createEventWorkspace({config,onNotifications:value=>projections.push(value)});
+  await workspace.sync();assert.equal(workspace.view().error,'');
+  assert.equal(workspace.view().goals[goal.id].tasks[0].execution.count,1);
+  assert.equal(workspace.draft(),'未发送的偏好');
+  assert.equal(projections.flatMap(p=>p.results).length,0);
+  await workspace.sync();
+  assert.deepEqual(calls.filter(c=>c.path==='/sync').map(c=>c.body.after_seq),[0,50]);
+  const cache=JSON.parse(localStorage.getItem(key));assert.equal(cache.cursor,50);assert.equal(cache.executionVersion,1);
+});

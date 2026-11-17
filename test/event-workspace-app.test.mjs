@@ -29,12 +29,15 @@ test('task reminder text preserves the Agent timezone, cadence and escaped expla
   const saved={version:1,userId:'u_app_b',cursor:1,activeGoalId:goal.id,conversationId:null,goals:{[goal.id]:goal},messages:{},drafts:{}};
   const dom=installDomStub({storage:{'along.agent.v1':JSON.stringify(config),'along.event-workspace.v1:u_app_b':JSON.stringify(saved)}});
   installEventBridge();await import(`../web/app.mjs?reminder-timezone=${Date.now()}`);await settle();
-  const expected=new Date('2099-01-01T17:30:00Z').toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',timeZoneName:'short'});
+  const expected=new Intl.DateTimeFormat('zh-CN',{year:'numeric',month:'long',day:'numeric',hour:'2-digit',minute:'2-digit',hourCycle:'h23',timeZone:'Asia/Shanghai'}).format(new Date('2099-01-01T17:30:00Z'));
   assert.ok(dom.app.innerHTML.includes(expected));
+  await dom.click({action:'event-task-detail',taskId:'t_plan_ui'});
   assert.match(dom.app.innerHTML,/Agent 安排 · 下次 .* · 每天/);
   assert.match(dom.app.innerHTML,/留出准备时间 &lt;script&gt;bad\(\)&lt;\/script&gt;/);
   assert.doesNotMatch(dom.app.innerHTML,/<script>bad/);
+  await dom.click({action:'event-task-back'});await dom.click({action:'event-task-detail',taskId:'t_ask'});
   assert.match(dom.app.innerHTML,/提醒时间待补 · 哪一天有空？/);
+  await dom.click({action:'event-task-back'});await dom.click({action:'event-task-detail',taskId:'t_off'});
   assert.match(dom.app.innerHTML,/已关闭提醒/);
 });
 
@@ -148,7 +151,7 @@ test('a system notification opens its bound goal and focuses the exact task befo
   await dom.fireWindow('along-notification-open',{detail:{userId:'u_other',goalId:'goal_two',taskId:'t_goal_two',eventId:'e_one'}});
   assert.equal(receipts.length,0);
   await dom.fireWindow('along-notification-open',{detail:{userId:'u_app_b',goalId:'goal_two',taskId:'t_goal_two',eventId:'e_two'}});
-  await settle();assert.match(dom.app.innerHTML,/<h1>goal_two<\/h1>/);
+  await settle();assert.match(dom.app.innerHTML,/<h1>测试任务 goal_two<\/h1>/);
   assert.deepEqual(focused,['event-task-t_goal_two']);assert.equal(receipts.at(-1).taskId,'t_goal_two');
 });
 
@@ -225,22 +228,22 @@ test('task reminder plans render source, time, frequency or question and survive
   installEventBridge({syncItems:[{seq:1,userId:'u_app_b',goalId:'g_plans',kind:'task_updated',payload:{snapshot}}]});
   const projections=[];window.AlongAgentBridge.notification=async(name,value)=>{if (name==='eventTaskSync') projections.push(value);return {};};
   await import(`../web/app.mjs?reminder-plan-rows=${Date.now()}`);await settle();
-  const check=app=>{
-    const row=id=>app.innerHTML.split('id="event-task-'+id+'"')[1].split('</strong>')[1].split('</div>')[0];
+  const check=async dom=>{
     for (const [id,freq] of [['weekly','每周一'],['daily','每天'],['once','一次']]) {
-      const text=row(id);
-      for (const expected of ['Agent 安排','下次',freq,'提前安排准备',new Date(when).toLocaleString('zh-CN')]) assert.ok(text.includes(expected),text);
+      await dom.click({action:'event-task-detail',taskId:id});
+      for (const expected of ['Agent 安排','下次',freq,'提前安排准备',new Intl.DateTimeFormat('zh-CN',{year:'numeric',month:'long',day:'numeric',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).format(new Date(when))]) assert.ok(dom.app.innerHTML.includes(expected),expected);
+      await dom.click({action:'event-task-back'});
     }
-    assert.doesNotMatch(row('user'),/Agent 安排/);assert.match(row('user'),/一次/);
-    assert.match(row('question'),/何时提醒你 &lt;准备&gt;？/);assert.doesNotMatch(row('question'),/下次|2099/);
-    assert.match(row('off'),/关闭提醒/);assert.doesNotMatch(row('untimed'),/下次|Agent 安排/);
-    assert.equal(row('old'),'<p>'+new Date(when).toLocaleString('zh-CN')+'</p>');
+    for (const [id,pattern] of [['user',/一次/],['question',/何时提醒你 &lt;准备&gt;？/],['off',/关闭提醒/],['old',/执行时间/]]) {
+      await dom.click({action:'event-task-detail',taskId:id});assert.match(dom.app.innerHTML,pattern);
+      await dom.click({action:'event-task-back'});
+    }
   };
-  check(dom.app);
+  await check(dom);
   assert.deepEqual(projections.at(-1).reminders.map(r=>r.taskId).sort(),['daily','old','once','user','weekly']);
   assert.ok(projections.at(-1).reminders.every(r=>r.scheduledAt===new Date(when).toISOString()));
   const reopened=installDomStub({storage:Object.fromEntries(dom.store)});window.AlongAgentBridge={request:async()=>{throw Error('offline');}};
-  await import(`../web/app.mjs?reminder-plan-offline=${Date.now()}`);await settle();check(reopened.app);
+  await import(`../web/app.mjs?reminder-plan-offline=${Date.now()}`);await settle();await check(reopened);
 });
 test('saved goal inventory excludes source data, demo records, drafts and stale selections after restart',async()=>{
   const seed=localNoticeSeed(),key='along.event-workspace.v1:u_app_b';
@@ -498,9 +501,10 @@ test('a recommendation is visible in its original goal and its notification open
   window.AlongAgentBridge.notification=async(name,value)=>{if(name==='eventTaskOpened')receipts.push(value);return {};};
   document.getElementById=id=>dom.app.innerHTML.includes('id="'+id+'"')?{focus(){},scrollIntoView:()=>scrolled.push(id)}:null;
   await import(`../web/app.mjs?recommendation-ui=${Date.now()}`);await settle();
-  assert.match(dom.app.innerHTML,/原运动目标/);assert.match(dom.app.innerHTML,/周末徒步方案/);assert.match(dom.app.innerHTML,/依据来源/);
+  assert.match(dom.app.innerHTML,/原运动目标/);assert.doesNotMatch(dom.app.innerHTML,/recommendation-card/);
+  await dom.click({action:'event-task-detail',taskId:'t_source_ui'});assert.match(dom.app.innerHTML,/周末徒步方案/);assert.match(dom.app.innerHTML,/依据来源/);
   await dom.fireWindow('along-notification-open',{detail:{userId:'u_app_b',goalId:goal.id,taskId:'t_source_ui',eventId:result.eventId,kind:'recommendation_ready'}});
-  assert.ok(scrolled.includes('event-message-'+result.eventId));assert.match(dom.app.innerHTML,/agent-composer/);
+  assert.ok(scrolled.includes('event-message-'+result.eventId));assert.doesNotMatch(dom.app.innerHTML,/agent-composer/);
   assert.equal(receipts.at(-1).taskId,'t_source_ui');
   await dom.click({action:'event-recommendation-feedback',eventId:result.eventId});
   assert.match(dom.app.innerHTML,/关于「周末徒步方案」/);
@@ -512,14 +516,14 @@ test('a recommendation is visible in its original goal and its notification open
 test('visible and resumed recommendation cards re-evaluate expiry even when sync is empty or offline',async()=>{
   const realNow=Date.now;let now=realNow();Date.now=()=>now;
   try {
-    const goal={id:'g_expiry',domain:'custom',status:'active',revision:1,title:'原目标',metric:null,context:[],tasks:[]};
+    const goal={id:'g_expiry',domain:'custom',status:'active',revision:1,title:'原目标',metric:null,context:[],tasks:[{id:'t_g_expiry',goalId:'g_expiry',status:'open',content:'研究方案',revision:1}]};
     const r=recommendation();r.retrievedAt=new Date(now-1000).toISOString();r.validUntil=new Date(now+1000).toISOString();
     r.sources=r.sources.map(s=>({...s,retrievedAt:r.retrievedAt,expiresAt:r.validUntil}));
-    const m={eventId:'reply_expiry',role:'assistant',text:'结果',goalId:goal.id,status:'received',recommendation:r};
+    const m={eventId:'reply_expiry',taskId:'t_g_expiry',role:'assistant',text:'结果',goalId:goal.id,status:'received',recommendation:r};
     const saved={version:1,userId:'u_app_b',cursor:1,activeGoalId:goal.id,conversationId:null,goals:{[goal.id]:goal},messages:{[m.eventId]:m},drafts:{'goal:g_expiry':'保留未发送的补充'}};
     const dom=installDomStub({storage:{'along.agent.v1':JSON.stringify(config),'along.event-workspace.v1:u_app_b':JSON.stringify(saved)}});
     document.visibilityState='visible';installEventBridge();
-    await import(`../web/app.mjs?recommendation-expiry=${realNow()}`);await settle();assert.match(dom.app.innerHTML,/推荐已就绪/);
+    await import(`../web/app.mjs?recommendation-expiry=${realNow()}`);await settle();await dom.click({action:'event-task-detail',taskId:'t_g_expiry'});assert.match(dom.app.innerHTML,/推荐已就绪/);
     now+=2000;await dom.tick(3000);await settle();assert.match(dom.app.innerHTML,/资料已过期/);
     assert.doesNotMatch(dom.app.innerHTML,/>适合考虑</);
     now-=2000;await dom.tick(3000);await settle();assert.match(dom.app.innerHTML,/推荐已就绪/);
@@ -548,7 +552,7 @@ test('a recommendation notification waits for its own message through offline an
     notification:{event_id:'reply_race',kind:'recommendation_ready',revision:1},
     message:{id:'msg_race',eventId:'reply_race',role:'assistant',direction:'outbound',text:'结果已就绪',seq:2}}}];
   await dom.tick(3000);await settle();
-  assert.match(dom.app.innerHTML,/周末徒步方案/);assert.match(dom.app.innerHTML,/agent-composer/);
+  assert.match(dom.app.innerHTML,/周末徒步方案/);assert.doesNotMatch(dom.app.innerHTML,/agent-composer/);
   assert.ok(scrolled.includes('event-message-reply_race'));assert.equal(receipts.length,1);assert.equal(receipts[0].eventId,'reply_race');
   assert.ok(requests.some(r=>r.path==='/sync'));
 });
@@ -566,7 +570,7 @@ test('a completed research task result opens the matching sourced recommendation
   document.getElementById=id=>dom.app.innerHTML.includes('id="'+id+'"')?{focus(){},scrollIntoView:()=>scrolled.push(id)}:null;
   await import(`../web/app.mjs?completed-research-result=${Date.now()}`);await settle();
   await dom.fireWindow('along-notification-open',{detail:{userId:'u_app_b',goalId:goal.id,taskId:'t_research_done',eventId:result.eventId,kind:'task_result',revision:2}});
-  assert.match(dom.app.innerHTML,/周末徒步方案/);assert.match(dom.app.innerHTML,/agent-composer/);assert.ok(scrolled.includes('event-message-'+result.eventId));
+  assert.match(dom.app.innerHTML,/周末徒步方案/);assert.doesNotMatch(dom.app.innerHTML,/agent-composer/);assert.ok(scrolled.includes('event-message-'+result.eventId));
   assert.equal(receipts.length,1);assert.equal(receipts[0].taskId,'t_research_done');
   assert.equal(JSON.parse(localStorage.getItem('along.event-workspace.v1:u_app_b')).goals[goal.id].tasks.find(t=>t.id==='t_outing').status,'open');
 });
@@ -586,7 +590,7 @@ test('goal chat contains direct dialogue while background recommendations stay i
   window.AlongAgentBridge.notification=async(name,value)=>{if(name==='eventTaskOpened')receipts.push(value);return {};};
   document.getElementById=id=>dom.app.innerHTML.includes('id="'+id+'"')?{focus(){},scrollIntoView:()=>scrolled.push(id)}:null;
   await import(`../web/app.mjs?direct-chat-boundary=${Date.now()}`);await settle();
-  assert.match(dom.app.innerHTML,/周末徒步方案/);
+  assert.doesNotMatch(dom.app.innerHTML,/recommendation-card/);
   await dom.click({action:'event-chat'});
   assert.match(dom.app.innerHTML,/这是我本人发的消息/);assert.match(dom.app.innerHTML,/这是给你的直接答复/);
   assert.doesNotMatch(dom.app.innerHTML,/内部验收补排完成流水|后台推荐任务完成|周末徒步方案/);
@@ -599,9 +603,9 @@ test('goal chat contains direct dialogue while background recommendations stay i
 
 
 test('leaving an opened notification lets the goal show a newer background recommendation',async()=>{
-  const goal={id:'g_focus',domain:'custom',status:'active',revision:1,title:'原目标',metric:null,context:[],tasks:[]};
+  const goal={id:'g_focus',domain:'custom',status:'active',revision:1,title:'原目标',metric:null,context:[],tasks:[{id:'t_g_focus',goalId:'g_focus',status:'open',content:'研究方案',revision:1}]};
   const r=recommendation();r.title='旧方案';
-  const m={eventId:'reply_old',role:'assistant',text:'旧结果',goalId:goal.id,audience:'background',status:'received',recommendation:r,notificationEventId:'reply_old'};
+  const m={eventId:'reply_old',taskId:'t_g_focus',role:'assistant',text:'旧结果',goalId:goal.id,audience:'background',status:'received',recommendation:r,notificationEventId:'reply_old'};
   const saved={version:1,conversationVersion:1,recommendationsVersion:1,userId:'u_app_b',cursor:1,activeGoalId:goal.id,conversationId:null,goals:{[goal.id]:goal},messages:{reply_old:m},drafts:{}};
   const dom=installDomStub({storage:{'along.agent.v1':JSON.stringify(config),'along.event-workspace.v1:u_app_b':JSON.stringify(saved)}});
   document.visibilityState='visible';const state={syncItems:[]};installEventBridge(state);
@@ -611,9 +615,11 @@ test('leaving an opened notification lets the goal show a newer background recom
   await dom.fireWindow('along-notification-open',{detail:{userId:'u_app_b',goalId:goal.id,eventId:'reply_old',kind:'recommendation_ready'}});
   assert.match(dom.app.innerHTML,/旧方案/);
   const newer=recommendation();newer.title='新方案';
-  state.syncItems=[{seq:2,userId:'u_app_b',kind:'message',goalId:goal.id,payload:{audience:'background',recommendation:newer,snapshot:{goal:{...goal,currentRevision:1},revision:{goalId:goal.id,revision:1,title:goal.title,status:'active'},tasks:[]},message:{id:'msg_new',eventId:'reply_new',role:'assistant',direction:'outbound',text:'新结果',seq:2,audience:'background'}}}];
+  state.syncItems=[{seq:2,userId:'u_app_b',kind:'message',goalId:goal.id,taskId:'t_g_focus',payload:{audience:'background',recommendation:newer,snapshot:{goal:{...goal,currentRevision:1},revision:{goalId:goal.id,revision:1,title:goal.title,status:'active'},tasks:goal.tasks.map(t=>({...t,currentRevision:t.revision}))},message:{id:'msg_new',eventId:'reply_new',role:'assistant',direction:'outbound',text:'新结果',seq:2,audience:'background'}}}];
   await dom.tick(3000);await settle();
   await dom.click({action:'event-chat'});await dom.click({action:'agent-back'});
+  assert.doesNotMatch(dom.app.innerHTML,/recommendation-card/);
+  await dom.click({action:'event-task-detail',taskId:'t_g_focus'});
   assert.match(dom.app.innerHTML,/新方案/);assert.doesNotMatch(dom.app.innerHTML,/旧方案/);
 });
 
@@ -621,15 +627,15 @@ test('leaving an opened notification lets the goal show a newer background recom
 test('weather then access expiry updates offline cards independently and retains the draft',async()=>{
   const realNow=Date.now;let now=realNow();Date.now=()=>now;
   try {
-    const goal={id:'g_weather',domain:'custom',status:'active',revision:1,title:'原目标',metric:null,context:[],tasks:[]};
+    const goal={id:'g_weather',domain:'custom',status:'active',revision:1,title:'原目标',metric:null,context:[],tasks:[{id:'t_g_weather',goalId:'g_weather',status:'open',content:'研究方案',revision:1}]};
     const r=recommendation();r.retrievedAt=new Date(now-1000).toISOString();
     r.validUntil=new Date(now+1000).toISOString();
     r.sources=r.sources.map(s=>({...s,retrievedAt:r.retrievedAt,expiresAt:new Date(now+(s.id==='source_weather'?1000:5000)).toISOString()}));
-    const m={eventId:'reply_weather',role:'assistant',text:'结果',goalId:goal.id,status:'received',recommendation:r};
+    const m={eventId:'reply_weather',taskId:'t_g_weather',role:'assistant',text:'结果',goalId:goal.id,status:'received',recommendation:r};
     const saved={version:1,userId:'u_app_b',cursor:1,activeGoalId:goal.id,conversationId:null,goals:{[goal.id]:goal},messages:{[m.eventId]:m},drafts:{'goal:g_weather':'保留我的路线偏好'}};
     const dom=installDomStub({storage:{'along.agent.v1':JSON.stringify(config),'along.event-workspace.v1:u_app_b':JSON.stringify(saved)}});
     document.visibilityState='visible';installEventBridge();
-    await import(`../web/app.mjs?weather-expiry=${realNow()}`);await settle();
+    await import(`../web/app.mjs?weather-expiry=${realNow()}`);await settle();await dom.click({action:'event-task-detail',taskId:'t_g_weather'});
     assert.match(dom.app.innerHTML,/推荐已就绪/);
     window.AlongAgentBridge.request=async()=>{throw Error('offline');};
     now+=2000;await dom.tick(3000);await settle();
