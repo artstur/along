@@ -29,8 +29,9 @@ test('the three home modules keep sources last and put plans only inside the bou
   assert.ok(html.indexOf('周末安排')<html.indexOf('动态任务'));
   assert.ok(html.indexOf('动态任务')<html.indexOf('连接数据源'));
   assert.doesNotMatch(html,/recommendation-card|依据来源|已记录 2 次执行/);
-  assert.match(html,/执行时间/);assert.match(html,/定时任务/);assert.match(html,/data-action="event-task-detail" data-task-id="research_task"/);
+  assert.match(html,/执行时间/);assert.match(html,/定时任务/);assert.match(html,/class="task-detail-link" data-action="event-task-detail" data-task-id="research_task"/);
   await dom.click({action:'event-task-detail',taskId:'research_task'});
+  assert.match(dom.app.innerHTML,/class="content event-task-detail"/);
   assert.match(dom.app.innerHTML,/已记录 2 次执行/);assert.match(dom.app.innerHTML,/已整理路线方案/);
   assert.match(dom.app.innerHTML,/周末徒步方案/);assert.match(dom.app.innerHTML,/依据来源/);
   assert.doesNotMatch(dom.app.innerHTML,/不属于这项任务的方案|连接数据源|agent-composer/);
