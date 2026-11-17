@@ -1177,18 +1177,18 @@ async function openEventNotification(route,synced=false) {
   }
   const goal=eventWorkspace.view().goals[route.goalId];
   if (!goal) return;
-  if (pendingRecommendationOpen?.route.eventId===route.eventId) pendingRecommendationOpen=null;
   if (!synced&&route.taskId&&!goal.tasks.some(t=>t.id===route.taskId)) {
     void eventWorkspace.sync();return;
   }
   const linkedTaskId=route.taskId??recommendationMessage?.taskId;
   const task=goal.tasks.find(t=>t.id===linkedTaskId&&t.status!=='cancelled');
-  localSelection=null;waitingForSavedGoal=false;
-  eventWorkspace.select(goal.id);
   const recommendation=Boolean(recommendationMessage?.recommendation);
   // A result can never cross a task boundary merely because the goal matches.
   const matchesResult=!recommendation||recommendationMessage.taskId===task?.id;
-  if (recommendation&&!matchesResult) return;
+  if (recommendation&&!matchesResult||recommendationMessage?.taskId&&route.taskId&&recommendationMessage.taskId!==route.taskId) return;
+  if (pendingRecommendationOpen?.route.eventId===route.eventId) pendingRecommendationOpen=null;
+  localSelection=null;waitingForSavedGoal=false;
+  eventWorkspace.select(goal.id);
   focusedEventRecommendation=recommendation&&matchesResult?recommendationMessage.eventId:null;
   selectedEventTaskId=task?.id??null;
   screen=task&&goal.status==='active'?'task':'home';render();

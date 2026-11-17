@@ -59,3 +59,16 @@ test('recommendation notifications open the exact task detail and retain its sou
   assert.match(dom.app.innerHTML,/agent-composer/);assert.match(dom.app.innerHTML,/我的草稿/);
   assert.doesNotMatch(dom.app.innerHTML,/后台结果/);
 });
+
+test('independent: mismatched recommendation route cannot navigate to another goal before being rejected',async()=>{
+ const goal=id=>({id,domain:'custom',status:'active',revision:1,title:'目标'+id,metric:null,context:[],tasks:[{id:'a_'+id,goalId:id,status:'open',content:'研究甲',revision:1},{id:'b_'+id,goalId:id,status:'open',content:'研究乙',revision:1}]});
+ const one=goal('one'),two=goal('two');const m={eventId:'rec_result',role:'assistant',text:'后台方案',goalId:'two',taskId:'a_two',audience:'background',recommendation:recommendation(),notificationEventId:'rec_result'};
+ const cache={version:1,recommendationsVersion:1,conversationVersion:1,executionVersion:1,userId:'ui_independent',cursor:1,activeGoalId:'one',conversationId:null,goals:{one,two},messages:{rec_result:m},drafts:{}};
+ const config={baseURL:'https://localhost:4176',fingerprint:'A'.repeat(64),token:'b'.repeat(64)};
+ const dom=installDomStub({storage:{'along.agent.v1':JSON.stringify(config),'along.event-workspace.v1:ui_independent':JSON.stringify(cache)}});
+ const receipts=[];window.AlongAgentBridge={request:async r=>r.path==='/connection/status'?{along:true,ready:true,eventProtocol:1,userId:'ui_independent'}:r.path==='/sync'?{items:[]}:{acked:0},notification:async(n,v)=>{if(n==='eventTaskOpened')receipts.push(v);return {};}};
+ await import('../web/app.mjs?independent-route');await new Promise(r=>setTimeout(r,30));
+ assert.match(dom.app.innerHTML,/<h1>目标one<\/h1>/);
+ await dom.fireWindow('along-notification-open',{detail:{userId:'ui_independent',goalId:'two',taskId:'b_two',eventId:'rec_result',kind:'recommendation_ready'}});
+ assert.equal(receipts.length,0);assert.match(dom.app.innerHTML,/<h1>目标one<\/h1>/);
+});
