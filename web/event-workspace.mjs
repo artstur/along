@@ -328,7 +328,11 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
       const replayConversation=state.conversationVersion!==1;
       const replaySources=state.dataSourcesVersion!==1;
       const replay=state.recommendationsVersion!==1||replayConversation||replaySources;
-      const after=replayConversation?state.conversationReplayAfter??0:replaySources?state.dataSourcesReplayAfter??0:replay?state.recommendationReplayAfter??0:state.cursor;
+      // An older migration may already be part-way through. A newly added projection
+      // still needs its earlier pages, so all pending migrations share the earliest cursor.
+      const replayCursors=[...(state.recommendationsVersion!==1?[state.recommendationReplayAfter??0]:[]),
+        ...(replayConversation?[state.conversationReplayAfter??0]:[]),...(replaySources?[state.dataSourcesReplayAfter??0]:[])];
+      const after=replay?Math.min(...replayCursors):state.cursor;
       const page=await agentCall(config,'/sync',{after_seq:after,limit:50,conversation_version:1,
         ...(onNotifications?{notificationFallback:true,notificationReceipts:receipts}:{})});
       if(disposed) return;

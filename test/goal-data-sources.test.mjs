@@ -52,6 +52,26 @@ test('an old cache replays sources once while preserving its acknowledged cursor
   assert.equal(calls.find(c=>c.path==='/sync').body.after_seq,10);
 });
 
+test('a new source migration starts before an interrupted older conversation replay',async()=>{
+  const goal=safeWorkspaceGoal(snapshot('g_okx',[]));
+  const saved={version:1,recommendationsVersion:1,conversationReplayAfter:5,userId:config.userId,cursor:10,
+    activeGoalId:goal.id,conversationId:null,goals:{[goal.id]:goal},messages:{},drafts:{'goal:g_okx':'保留草稿'}};
+  installDomStub({storage:{['along.event-workspace.v1:'+config.userId]:JSON.stringify(saved)}});
+  const requested=[];
+  window.AlongAgentBridge={request:async input=>{
+    if(input.path!=='/sync')return {acked:1};
+    requested.push(input.body.after_seq);
+    return {items:input.body.after_seq===0?[{seq:1,userId:config.userId,kind:'goal_updated',goalId:goal.id,payload:{snapshot:snapshot()}}]:[]};
+  }};
+  const ws=createEventWorkspace({config});await ws.sync();
+  assert.deepEqual(requested,[0]);
+  assert.deepEqual(ws.view().goals.g_okx.dataSources,[source]);
+  assert.equal(ws.view().cursor,10);
+  const cache=JSON.parse(localStorage.getItem('along.event-workspace.v1:'+config.userId));
+  assert.equal(cache.drafts['goal:g_okx'],'保留草稿');
+  assert.equal(cache.dataSourcesVersion,1);assert.equal(cache.conversationVersion,1);
+});
+
 test('the real goal page renders OKX setup instead of unrelated Apple Health and never claims authorization',async()=>{
   const dom=installDomStub({storage:{'along.agent.v1':JSON.stringify(config)}});
   const items=[{seq:1,userId:config.userId,kind:'goal_updated',goalId:'g_okx',payload:{snapshot:snapshot()}}];
