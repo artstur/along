@@ -15,11 +15,14 @@ import {findDailyGrant} from './daily-delegation.mjs';
 import {HostError, upstream, statusForError} from './host-error.mjs';
 import {createApnsProvider} from './apns.mjs';
 import {taskNotifications} from './task-notifications.mjs';
+import {createOkxConnection} from './okx-connection.mjs';
+import {validateOkxSourceRequest,requireOkxGoal} from './source-access.mjs';
 import {createBridge, readBridgeToken} from './along-bridge.mjs';
 import {agentHealthSnapshot,cleanHealthContext,cleanPlanningContext,validateReassessment,SLEEP_REMINDER_CRITERIA,DAILY_ACTIONS_CRITERIA,parseDailyActionReply} from '../web/contextual-planning.mjs';
 
 const dir = process.env.ALONG_AGENT_STATE_DIR||join(homedir(), '.along', 'agent-host');
 mkdirSync(dir, {recursive:true, mode:0o700});
+const okxConnection=createOkxConnection({dir:join(dir,'okx-connections')});
 function pruneExpiredPlans() {
   try {pruneDailyActions(dir);} catch {console.warn('Along 未能清理已过期的安排索引');}
 }
@@ -284,6 +287,21 @@ const server=createServer({key:readFileSync(key),cert:readFileSync(cert)},async(
     }
     if (!authorized(req)) return respond(res,401,{error:'请先配对这台 Mac'});
     const recipient=tokenHash.toString('hex');
+    if(req.method==='POST'&&path==='/sources/okx') {
+      requireEventIngest();requireBridgeCredential();
+      const who=boundPairing(),input=validateOkxSourceRequest(await body(req));
+      const allowed=async()=>{
+        if(identity!==who)return false;
+        const detail=await upstream(()=>bridge.call(`/along-source/api/goals/${encodeURIComponent(input.goalId)}`,{method:'GET',identity:who}));
+        requireOkxGoal(detail,who,input.goalId);
+        return identity===who;
+      };
+      if(!await allowed())throw new HostError('配对已变化，请重新打开连接',403);
+      const {goalId,...command}=input;
+      const result=await okxConnection.handle({userId:who.userId,goalId,input:command,stillAuthorized:allowed});
+      if(identity!==who)throw new HostError('配对已变化，请重新打开连接',403);
+      return respond(res,200,result);
+    }
     if (req.method==='POST'&&path==='/super-agent/daily-delegation') {
       const input=await body(req);
       return respond(res,200,{grant:findDailyGrant(dir,tokenHash.toString('hex'),input?.goalKey,input?.anchors)});

@@ -94,7 +94,7 @@ test('new execution history replays from zero even when recommendation replay is
   assert.equal(cache.executionVersion,1);assert.equal(cache.cursor,10);
 });
 
-test('the real goal page renders OKX setup instead of unrelated Apple Health and never claims authorization',async()=>{
+test('the real goal page renders an OKX connection button without claiming authorization',async()=>{
   const dom=installDomStub({storage:{'along.agent.v1':JSON.stringify(config)}});
   const items=[{seq:1,userId:config.userId,kind:'goal_updated',goalId:'g_okx',payload:{snapshot:snapshot()}}];
   window.AlongAgentBridge={request:async input=>{
@@ -105,8 +105,7 @@ test('the real goal page renders OKX setup instead of unrelated Apple Health and
   }};
   await import(`../web/app.mjs?sources=${Date.now()}`);await settle();
   assert.match(dom.app.innerHTML,/OKX/);
-  assert.match(dom.app.innerHTML,/href="https:\/\/www.okx.com\/account\/my-api"/);
-  assert.match(dom.app.innerHTML,/前往 OKX 设置/);
+  assert.match(dom.app.innerHTML,/data-action="event-okx-connect"/);
   assert.match(dom.app.innerHTML,/尚未连接/);
   assert.match(dom.app.innerHTML,/&lt;script&gt;bad\(\)&lt;\/script&gt;/);
   assert.doesNotMatch(dom.app.innerHTML,/Apple Health|event-health-connect|已授权|已连接/);
@@ -120,4 +119,23 @@ test('a custom goal without a recommended source has no default health connector
   await import(`../web/app.mjs?no-sources=${Date.now()}`);await settle();
   assert.match(dom.app.innerHTML,/OKEX交易复盘/);
   assert.doesNotMatch(dom.app.innerHTML,/Apple Health|event-health-connect|前往 OKX 设置/);
+});
+
+test('OKX connection button invokes native secure flow for this goal and trusts only its returned status',async()=>{
+  const dom=installDomStub({storage:{'along.agent.v1':JSON.stringify(config)}});
+  const calls=[];let connected=false;
+  window.AlongAgentBridge={source:async(action,goalId)=>{
+    calls.push({action,goalId});if(action==='connect')connected=true;
+    return connected?{provider:'okx',state:'connected',lastSyncedAt:'2026-11-17T12:00:00Z',summary:{tradingEquityUsd:'100',assetCount:1,positionCount:0}}:{provider:'okx',state:'disconnected'};
+  },request:async input=>input.path==='/connection/status'
+    ?{along:true,ready:true,runtime:'dsh-superagent',eventProtocol:1,userId:config.userId}
+    :input.path==='/sync'?{items:input.body.after_seq?[]:[{seq:1,userId:config.userId,kind:'goal_updated',goalId:'g_okx',payload:{snapshot:snapshot()}}]}:{acked:1}};
+  await import(`../web/app.mjs?okx-connect=${Date.now()}`);await settle();
+  assert.match(dom.app.innerHTML,/data-action="event-okx-connect"/);
+  assert.doesNotMatch(dom.app.innerHTML,/已连接/);
+  await dom.click({action:'event-okx-connect'});await settle();
+  assert.deepEqual(calls.find(c=>c.action==='connect'),{action:'connect',goalId:'g_okx'});
+  assert.match(dom.app.innerHTML,/已连接/);
+  assert.match(dom.app.innerHTML,/管理连接/);
+  assert.doesNotMatch(JSON.stringify([...dom.store]),/tradingEquityUsd|apiKey|secretKey|passphrase/);
 });

@@ -30,6 +30,9 @@ struct AlongHealthApp: App {
                     HealthSyncSheet(bridge: bridge)
                         .interactiveDismissDisabled(bridge.busy)
                 }
+                .sheet(item: $bridge.okxConnection, onDismiss: { bridge.finishOkx() }) { connection in
+                    OKXConnectionSheet(goalID: connection.goalID, onClose: { bridge.okxConnection = nil })
+                }
                 .onChange(of: scenePhase) { _, phase in
                     if phase == .active { bridge.resumeForeground() }
                     if phase == .background { bridge.pauseForeground() }
@@ -49,6 +52,10 @@ enum HealthImportAdmission {
 
 @MainActor
 final class AlongBridgeModel: ObservableObject {
+    struct OkxPresentation: Identifiable { let id = UUID(); let goalID: String }
+    @Published var okxConnection: OkxPresentation?
+    private var okxRequest: (id: String, goalID: String, view: WKWebView)?
+
     @Published var showSheet = false
     @Published var selection: Set<HealthMetric> = []
     @Published var preview: HealthSummary?
@@ -442,7 +449,7 @@ enum AlongConnectionStore {
 
 struct AlongWebView: UIViewRepresentable {
     @ObservedObject var bridge: AlongBridgeModel
-    private let site = URL(string: "along://app/index.html?build=73")!
+    private let site = URL(string: "along://app/index.html?build=74")!
 
     func makeCoordinator() -> Coordinator { Coordinator(bridge: bridge) }
 
@@ -534,6 +541,11 @@ struct AlongWebView: UIViewRepresentable {
           agentPending.set(id, {resolve, reject});
           window.webkit.messageHandlers.alongAgent.postMessage({id, operation: 'connection', action, value});
         }),
+        source: (action, goalId) => new Promise((resolve, reject) => {
+          const id = newId();
+          agentPending.set(id, {resolve, reject});
+          window.webkit.messageHandlers.alongAgent.postMessage({id, operation: 'source', action, goalId});
+        }),
         dailyReminderStatus: value => window.AlongAgentBridge.notification('dailyReminderStatus', value),
         pendingGoalReminder: goalKey => window.AlongAgentBridge.notification('upcomingGoalReminder', {goalKey}),
         notification: (action, value = null) => new Promise((resolve, reject) => {
@@ -604,6 +616,25 @@ struct AlongWebView: UIViewRepresentable {
             } else if message.name == "alongHealthClear" {
                 Task { @MainActor in bridge.clearHealth(id: id, webView: webView) }
             } else {
+                if body["operation"] as? String == "source" {
+                    guard origin.protocol == "along", origin.host == "app",
+                          let goalID = body["goalId"] as? String,
+                          goalID.range(of: #"^g_[A-Za-z0-9_-]{1,100}$"#, options: .regularExpression) != nil,
+                          let action = body["action"] as? String, ["status", "connect"].contains(action) else {
+                        Self.deliverAlongResult(id: id, result: ["ok": false, "error": "请在 Along App 中连接数据源"], webView: webView)
+                        return
+                    }
+                    Task { @MainActor in
+                        if action == "connect" { bridge.beginOkx(id: id, goalID: goalID, webView: webView) }
+                        else {
+                            let result: [String: Any]
+                            do { result = ["ok": true, "value": try await Self.okxStatus(goalID: goalID)] }
+                            catch { result = ["ok": false, "error": "无法读取 OKX 连接状态"] }
+                            Self.deliverAlongResult(id: id, result: result, webView: webView)
+                        }
+                    }
+                    return
+                }
                 if body["operation"] as? String == "notification" {
                     if ["upcomingGoalReminder","eventTaskSync","eventTaskOpened","pendingLegacyNotification","legacyNotificationOpened"].contains(body["action"] as? String ?? ""), origin.protocol != "along" || origin.host != "app" {
                         Self.deliverAlongResult(id: id, result: ["ok":false,"error":"请在 Along 中查看提醒"], webView: webView)
@@ -906,7 +937,17 @@ struct AlongWebView: UIViewRepresentable {
             webView.evaluateJavaScript("window.__alongAgentBridgeFinish(...\(json))")
         }
 
-        static func agentRequest(_ input: [String: Any], background: Bool = false, privateNotificationRequest: Bool = false) async throws -> [String: Any] {
+        static func okxStatus(goalID: String) async throws -> [String: Any] {
+            guard let saved = AlongConnectionStore.load() else { throw AgentBridgeError.invalidConfiguration }
+            var input: [String: Any] = saved.mapValues { $0 as Any }
+            input["path"] = "/sources/okx"
+            input["body"] = ["action": "status", "goalId": goalID]
+            let value = try await agentRequest(input, privateSourceRequest: true)
+            guard AlongConnectionStore.load() == saved else { throw AgentBridgeError.invalidConfiguration }
+            return value
+        }
+
+        static func agentRequest(_ input: [String: Any], background: Bool = false, privateNotificationRequest: Bool = false, privateSourceRequest: Bool = false) async throws -> [String: Any] {
             guard let base = input["baseURL"] as? String, let components = URLComponents(string: base),
                   components.scheme == "https", let host = components.host,
                   host.split(separator: ".").count == 4,
@@ -921,7 +962,7 @@ struct AlongWebView: UIViewRepresentable {
                   let path = input["path"] as? String,
                   // 新链路端点（docs/stage-a-tech-design.md §2.4.2）：全部 POST，语义与旧路径一致——仅网络转发。
                   (["/pair", "/connection/verify", "/connection/status", "/goal/event", "/super-agent/tasks", "/super-agent/tasks/status", "/super-agent/daily-delegation",
-                   "/super-agent/goals", "/super-agent/goals/status", "/events", "/sync", "/sync/ack"].contains(path) || (privateNotificationRequest && ["/notifications/device","/notifications/scheduled"].contains(path))),
+                   "/super-agent/goals", "/super-agent/goals/status", "/events", "/sync", "/sync/ack"].contains(path) || (privateNotificationRequest && ["/notifications/device","/notifications/scheduled"].contains(path)) || (privateSourceRequest && path == "/sources/okx")),
                   let body = input["body"] as? [String: Any],
                   let url = URL(string: base + path) else { throw AgentBridgeError.invalidConfiguration }
             var request = URLRequest(url: url)
@@ -1268,6 +1309,29 @@ struct HealthSyncSheet: View {
                         .disabled(bridge.busy || bridge.selection.count == HealthMetric.allCases.count)
                 }
             }
+        }
+    }
+}
+
+@MainActor
+extension AlongBridgeModel {
+    func beginOkx(id: String, goalID: String, webView: WKWebView) {
+        guard okxRequest == nil, !showSheet else {
+            AlongWebView.Coordinator.deliverAlongResult(id: id, result: ["ok": false, "error": "请先关闭当前连接页面"], webView: webView)
+            return
+        }
+        okxRequest = (id, goalID, webView)
+        okxConnection = OkxPresentation(goalID: goalID)
+    }
+
+    func finishOkx() {
+        guard let pending = okxRequest else { return }
+        okxRequest = nil
+        Task { @MainActor in
+            let result: [String: Any]
+            do { result = ["ok": true, "value": try await AlongWebView.Coordinator.okxStatus(goalID: pending.goalID)] }
+            catch { result = ["ok": false, "error": "无法读取连接状态，请检查 Mac 连接后重试"] }
+            AlongWebView.Coordinator.deliverAlongResult(id: pending.id, result: result, webView: pending.view)
         }
     }
 }

@@ -124,6 +124,29 @@ async function waitFor(predicate,label,timeout=6_000) {
   assert.ok(false,`等待超时：${label}`);
 }
 
+test('OKX route is pairing-bound and refuses foreign or unrecommended goals before any connector access',async t=>{
+  const dir=mkdtempSync(join(tmpdir(),'along-okx-route-'));
+  const agent=await stubAlongAgent();
+  const token='e'.repeat(64),userId='u_aaaa1111';
+  writeFileSync(join(dir,'pairing.json'),JSON.stringify({hash:sha256hex(token),user_id:userId,device_id:'d_aaaa1111'}),{mode:0o600});
+  writeFileSync(join(dir,'bridge-token'),BRIDGE_TOKEN,{mode:0o600});
+  const detail={goal:{id:'g_okx',userId,status:'active',currentRevision:1},revision:{goalId:'g_okx',userId,status:'active',revision:1},dataSources:[{provider:'okx',status:'recommended'}]};
+  agent.script.set('/along-source/api/goals/g_okx',()=>({body:detail}));
+  const host=await spawnHost({dir,agentPort:agent.port,eventIngest:true});
+  t.after(async()=>{await host.stop();await agent.close();rmSync(dir,{recursive:true,force:true});});
+  const call=(body,headers={authorization:`Bearer ${token}`})=>phoneCall(host.port,'/sources/okx',{method:'POST',headers,body});
+  assert.equal((await call({action:'status',goalId:'g_okx'},{})).status,401);
+  assert.equal((await call({action:'status',goalId:'g_okx',user_id:'u_other'})).status,400);
+  assert.deepEqual((await call({action:'status',goalId:'g_okx'})).json,{provider:'okx',state:'disconnected'});
+  const forwarded=agent.calls.find(c=>c.path==='/along-source/api/goals/g_okx');
+  assert.equal(forwarded.headers['x-along-user'],userId);
+  detail.goal.userId='u_other';
+  assert.equal((await call({action:'status',goalId:'g_okx'})).status,403);
+  detail.goal.userId=userId;detail.dataSources=[];
+  assert.equal((await call({action:'connect',goalId:'g_okx',credentials:{apiKey:'fake',secretKey:'fake',passphrase:'fake'},site:'global'})).status,403);
+  assert.doesNotMatch(JSON.stringify(agent.calls),/apiKey|secretKey|passphrase/);
+});
+
 // 场景一：旧 pairing.json（仅 hash）真实进程启动 → 幂等升级、鉴权门、自报身份拒绝、
 // BC-07-05 透传不泄露、桥接/情境凭证只在本机与 Along Agent 之间走（BC-07-04/05、AGENTS.md §5）。
 test('真实 Host：旧绑定升级 + 鉴权门 + 自报身份拒绝 + 归属拒绝透传 + 凭证不出 Mac',async t=>{
