@@ -115,6 +115,7 @@ test('the real app discovers the new protocol, uses events during ongoing work, 
   assert.equal(sent.length,2,'a second message is allowed while the agent is still working');
   assert.equal(sent[1].body.causation_id,sent[0].body.event_id);
   const snapshot={goal:{id:'g_app_b',domain:'custom',status:'active',currentRevision:1},revision:{goalId:'g_app_b',revision:1,title:'改善睡眠',status:'active'},
+    dataSources:[{provider:'apple-health',status:'recommended',reason:'用睡眠摘要评估这个目标'}],
     tasks:[{id:'t_app_b',goalId:'g_app_b',content:'睡前放下手机',status:'open',currentRevision:1}]};
   current=[{seq:++seq,userId:'u_app_b',kind:'message',goalId:'g_app_b',payload:{snapshot,conversation_id:sent[0].body.event_id,
     message:{id:'msg:u_app_b:'+sent[0].body.event_id,eventId:sent[0].body.event_id,role:'user',direction:'inbound',text:'我想改善睡眠',seq:1}}}];
@@ -261,7 +262,7 @@ test('saved goal inventory excludes source data, demo records, drafts and stale 
   assert.doesNotMatch(after.app.innerHTML,/<optgroup label="本机已存目标"|value="local:/);
   assert.match(after.app.innerHTML,/<h1>已设定的目标<\/h1>/);
   assert.match(after.app.innerHTML,/已设定的任务/);
-  assert.match(after.app.innerHTML,/所选健康摘要变化后/);
+  assert.doesNotMatch(after.app.innerHTML,/Apple Health|event-health-connect/,'独立保存的健康摘要不能把无关联目标变成健康目标');
   assert.equal(after.storage.get('along.health.v1'),seed['along.health.v1']);
 });
 test('saved goal inventory preserves an accepted task or validated layout even without a goal proposal',async()=>{
