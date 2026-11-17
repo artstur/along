@@ -5,7 +5,8 @@ import {recommendation} from './recommendation-fixture.mjs';
 const config={baseURL:'https://localhost:4176',fingerprint:'A'.repeat(64),token:'b'.repeat(64)};
 let instance=0;
 async function fixture({records=true}={}) {
-  const goal={id:'goal_detail',domain:'custom',status:'active',revision:1,title:'周末安排',metric:null,context:[],tasks:[
+  const goal={id:'goal_detail',domain:'custom',status:'active',revision:1,title:'周末安排',metric:null,context:[],
+    dataSources:[{provider:'apple-health',status:'recommended',reason:'使用活动摘要安排周末运动'}],tasks:[
     {id:'research_task',goalId:'goal_detail',status:'open',content:'查天气后推荐周末路线',revision:1,scheduledAt:'2099-01-02T11:00:00Z',
       reminderPlan:{state:'scheduled',source:'agent',repeat:'weekly',weekday:5,timezone:'Asia/Shanghai',explanation:'周五晚准备'},
       ...(records?{execution:{version:1,count:2,records:[{id:'business_run_one',kind:'research',executedAt:'2098-12-26T11:02:00Z',outcome:'researched',summary:'已整理路线方案'}]}}:{})},

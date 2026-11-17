@@ -4,6 +4,7 @@ import {EXPERIMENT, startExperiment, routeHealthEvent, acceptAgentSuggestion, ag
 import {goalChangeText} from './goal-agent-core.mjs';
 import {createEventWorkspace} from './event-workspace.mjs';
 import {recommendationCard} from './recommendations.mjs';
+import {dataSourceProvider} from './data-sources.mjs';
 import {AGENT_KEY, GOALS_KEY, CONVERSATIONS_KEY, readStored, agentCall, loadNativeConnection, saveNativeConnection} from './agent-client.mjs';
 import {ADAPTIVE_LAYOUTS_KEY, customGoalEntries, findInitialCustomGoalCandidate, goalDomain, isCustomGoalKey, safeAdaptiveLayout, validateAdaptiveLayout} from './adaptive-ui.mjs';
 import {GOAL_SUPER_AGENT_RUNS_KEY, SUPER_AGENT_RUNS_KEY, createFailedGoalSuperAgentRun, createFailedSuperAgentRun,
@@ -1152,10 +1153,20 @@ function experimentPanel() {
 function lab() {
   return `<div class="app-shell"><header class="topbar"><div class="topbar-inner">${brand()}<span class="topbar-caption">目标变化实验</span></div></header><main class="content lab-content">${backButton('back-home','返回目标')}<h1>当进度变化，下一步会怎样变？</h1><p class="lab-intro">这是与真实健康数据隔离的模拟实验。Along 计算进度，再判断是否需要更新建议。</p>${experimentPanel()}</main></div>`;
 }
-function eventHealthConnection(goal) {
-  if (!goal||goal.domain==='finance') return '';
-  const connected=state.source==='healthkit'&&state.snapshot?.contextReviewAllowed;
-  return `<section class="connection-section" aria-label="连接数据源"><div class="section-heading"><h2>连接数据源</h2></div><div class="connection-card"><div class="connection-symbol" aria-hidden="true">♥</div><div class="connection-copy"><div class="connection-name"><strong>Apple Health</strong></div><p>${connected?'所选健康摘要变化后，Along 会自动跟进。':'连接所选健康摘要，让 Along 随变化自动跟进。'}</p></div><button class="agent-action connection-agent-action" data-action="event-health-connect">${connected?'管理':'连接'}</button></div></section>`;
+function eventDataSources(goal) {
+  if (!goal) return '';
+  const sources=goal.dataSources.length?goal.dataSources:goal.domain==='health'
+    ?[{provider:'apple-health',status:'recommended',reason:'使用所选健康摘要跟进这个目标。'}]:[];
+  if (!sources.length) return '';
+  return `<section class="connection-section" aria-label="连接数据源"><div class="section-heading"><h2>连接数据源</h2></div>${sources.map(source=>{
+    const provider=dataSourceProvider(source.provider);
+    const health=source.provider==='apple-health';
+    const connected=health&&state.source==='healthkit'&&state.snapshot?.contextReviewAllowed;
+    const detail=health?(connected?'所选健康摘要变化后，Along 会自动跟进。':'连接所选健康摘要，让 Along 随变化自动跟进。'):provider.detail;
+    const action=health?`<button class="agent-action connection-agent-action" data-action="event-health-connect">${connected?'管理':'连接'}</button>`
+      :`<a class="agent-action connection-agent-action" href="${provider.url}" target="_blank" rel="noopener noreferrer">${provider.action}</a>`;
+    return `<div class="connection-card"><div class="connection-symbol" aria-hidden="true">${provider.symbol}</div><div class="connection-copy"><div class="connection-name"><strong>${provider.name}</strong><span class="source-tag">Agent 推荐</span></div><p>${esc(source.reason)}</p><p>${detail}</p></div>${action}</div>`;
+  }).join('')}</section>`;
 }
 async function syncEventNotifications(value,binding) {
   if (binding!==eventWorkspaceBinding) return;
@@ -1310,7 +1321,7 @@ function eventWorkspacePage() {
   const history=messages.map(message=>`<div ${message.notificationEventId?`id="event-message-${esc(message.notificationEventId)}"`: ''} class="agent-message ${message.role==='user'?'user':'assistant'}"><p>${esc(message.text)}</p>${message.status==='pending'?'<p class="agent-disclaimer">待同步</p>':message.status==='rejected'||message.status==='failed'?'<p class="agent-disclaimer">发送未完成，请通过聊天重新说明。</p>':''}</div>`).join('');
   const content=chat?`${backButton('agent-back','返回目标')}<div class="agent-title"><h1>${esc(goal?.title||'说说你想做什么')}</h1></div>${connection}<div class="agent-messages" role="log" aria-live="polite">${history||'<p class="agent-empty">说说你的想法，Along 会和你一起理清下一步。</p>'}</div>`
     :goal&&screen==='task'?eventTaskDetail(goal,scopedMessages)
-    :goal?`${connection}<section class="goal-card"><h1>${esc(goal.title)}</h1>${goal.metric?`<p class="goal-note">${esc(goal.metric.target)} ${esc(goal.metric.unit)} · ${esc(goal.metric.period)}</p>`:''}${goal.context.length?`<p class="goal-note">${goal.context.map(item=>esc(typeof item==='string'?item:item.text)).join('；')}</p>`:''}<div class="card-actions"><button class="agent-action" data-action="event-chat">聊聊这个目标</button></div></section><section class="task-section"><div class="section-heading"><h2>动态任务</h2></div><div class="task-list">${goal.tasks.filter(task=>task.status!=='cancelled').map(eventTaskCard).join('')||'<p class="agent-empty">通过聊天安排下一步。</p>'}</div></section>${eventHealthConnection(goal)}`:'';
+    :goal?`${connection}<section class="goal-card"><h1>${esc(goal.title)}</h1>${goal.metric?`<p class="goal-note">${esc(goal.metric.target)} ${esc(goal.metric.unit)} · ${esc(goal.metric.period)}</p>`:''}${goal.context.length?`<p class="goal-note">${goal.context.map(item=>esc(typeof item==='string'?item:item.text)).join('；')}</p>`:''}<div class="card-actions"><button class="agent-action" data-action="event-chat">聊聊这个目标</button></div></section><section class="task-section"><div class="section-heading"><h2>动态任务</h2></div><div class="task-list">${goal.tasks.filter(task=>task.status!=='cancelled').map(eventTaskCard).join('')||'<p class="agent-empty">通过聊天安排下一步。</p>'}</div></section>${eventDataSources(goal)}`:'';
   return `<div class="app-shell ${chat?'agent-shell':''}"><header class="topbar"><div class="topbar-inner">${brand()}</div></header><main class="content ${chat?'agent-page':''}"><div class="${chat?'agent-scroll':''}">${goalPicker}${content}</div>${chat?`<div class="agent-composer-dock"><form id="agent-form" class="agent-composer"><textarea name="message" rows="1" placeholder="说说你的想法" maxlength="800" data-draft-scope="${esc(view.draftScope)}" required>${esc(eventWorkspace.draft())}</textarea><button class="agent-send" aria-label="发送" ${agentBusy?'disabled':''}>↑</button></form><p class="agent-disclaimer">Along · 一起，慢慢向前</p></div>`:''}</main></div>`;
 }
 function renderEventUpdate() {
