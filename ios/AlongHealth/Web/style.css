@@ -381,9 +381,23 @@ footer { padding: 0 0 26px; color: #aaa; text-align: center; font-size: 10px; }
 .agent-message:has(.recommendation-card) { max-width:100%; width:100%; padding:0; border:0; margin-right:0; }
 
 .event-task-footer { display:flex; align-items:center; gap:12px; margin-top:12px; }
-.event-task-footer .agent-action { margin-left:auto; }
+.event-task-footer .task-detail-link { margin-left:auto; }
 .task-schedule-tag { display:inline-block; color:#666; font-size:11px; padding:3px 8px; border:1px solid #e5e5e3; border-radius:6px; }
 .task-execution-list { margin:0; padding:0; list-style:none; }
 .task-execution-list li { padding:12px 0; border-bottom:1px solid #eee; font-size:13px; }
 .task-execution-list p { margin:5px 0 0; color:#888; font-size:11px; }
 .event-task-card strong { font-size:14px; line-height:1.6; }
+
+.task-detail-link { appearance:none; border:0; background:transparent; color:#999; font-size:12px; font-weight:400; line-height:1.5; padding:4px 0; min-height:32px; cursor:pointer; text-decoration:underline; text-underline-offset:3px; }
+.task-detail-link:hover { color:#777; }
+.task-detail-link:focus-visible { outline:2px solid #aaa; outline-offset:4px; border-radius:2px; }
+.event-task-detail .goal-card { padding:20px; }
+.event-task-detail .goal-card h1 { font-size:20px; line-height:1.45; margin:8px 0 10px; }
+.event-task-detail .goal-card p { font-size:14px; line-height:1.65; margin:8px 0; }
+.event-task-detail .goal-card .goal-note { font-size:12px; }
+.event-task-detail .task-section { margin-top:22px; }
+.event-task-detail .section-heading { margin-bottom:12px; }
+.event-task-detail .section-heading h2 { font-size:16px; line-height:1.5; }
+.event-task-detail .recommendation-card { padding:18px 16px; border-radius:16px; }
+.event-task-detail .recommendation-heading h2 { font-size:17px; line-height:1.5; }
+.event-task-detail .recommendation-card p { margin:10px 0; line-height:1.65; }
