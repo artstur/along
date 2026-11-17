@@ -49,6 +49,7 @@ let checkingHealthHost=false;
 let agentConnection = {status:agentConfig.token?'checking':'unconfigured',error:''};
 let eventWorkspace=null,eventWorkspaceBinding='';
 let focusedEventRecommendation=null;
+let selectedEventTaskId=null;
 let pendingRecommendationOpen=null;
 let localSelection=null,waitingForSavedGoal=false;
 let lastNotificationProjection='',lastNotificationCheck=0;
@@ -948,7 +949,7 @@ function home() {
         ${healthReviewDetails()}
       </section>`;
   const connectionContent=connection?`<section class="connection-section" aria-label="连接来源">
-        <div class="section-heading"><h2>连接</h2><span>连接和任务相关的数据源</span></div>
+        <div class="section-heading"><h2>连接数据源</h2><span>连接和任务相关的数据源</span></div>
         <div class="connection-card"><div class="connection-symbol" aria-hidden="true">${isHealthConnection ? '♥' : '¥'}</div><div class="connection-copy"><div class="connection-name"><strong>${esc(connection.name)}</strong><span class="source-tag ${connection.kind}">${esc(connection.label)}</span></div><p>${esc(connection.detail)}${esc(sourceTime)}</p></div><button class="agent-action connection-agent-action" data-action="${isHealthConnection ? connection.actionId : connection.kind === 'demo' ? 'finance-event' : 'connect-finance'}">${esc(connection.action)}</button></div>
         ${connection.metrics?.length ? `<div class="connection-metrics">${connection.metrics.map(item=>`<div><span>${esc(item.label)}</span><strong>${esc(item.value)}</strong></div>`).join('')}</div>` : ''}
         ${activeGoal === 'health' && (state.source === 'demo' || hasRealHealthData()) ? `<button class="minor-action" data-action="clear-health-data">${hasRealHealthData() ? '清除本机健康摘要' : '退出健康演示数据'}</button>` : ''}
@@ -1154,7 +1155,7 @@ function lab() {
 function eventHealthConnection(goal) {
   if (!goal||goal.domain==='finance') return '';
   const connected=state.source==='healthkit'&&state.snapshot?.contextReviewAllowed;
-  return `<section class="connection-section"><div class="connection-card"><div class="connection-symbol" aria-hidden="true">♥</div><div class="connection-copy"><div class="connection-name"><strong>Apple Health</strong></div><p>${connected?'所选健康摘要变化后，Along 会自动跟进。':'连接所选健康摘要，让 Along 随变化自动跟进。'}</p></div><button class="agent-action connection-agent-action" data-action="event-health-connect">${connected?'管理':'连接'}</button></div></section>`;
+  return `<section class="connection-section" aria-label="连接数据源"><div class="section-heading"><h2>连接数据源</h2></div><div class="connection-card"><div class="connection-symbol" aria-hidden="true">♥</div><div class="connection-copy"><div class="connection-name"><strong>Apple Health</strong></div><p>${connected?'所选健康摘要变化后，Along 会自动跟进。':'连接所选健康摘要，让 Along 随变化自动跟进。'}</p></div><button class="agent-action connection-agent-action" data-action="event-health-connect">${connected?'管理':'连接'}</button></div></section>`;
 }
 async function syncEventNotifications(value,binding) {
   if (binding!==eventWorkspaceBinding) return;
@@ -1180,19 +1181,21 @@ async function openEventNotification(route,synced=false) {
   if (!synced&&route.taskId&&!goal.tasks.some(t=>t.id===route.taskId)) {
     void eventWorkspace.sync();return;
   }
-  const task=goal.tasks.find(t=>t.id===route.taskId&&t.status!=='cancelled');
+  const linkedTaskId=route.taskId??recommendationMessage?.taskId;
+  const task=goal.tasks.find(t=>t.id===linkedTaskId&&t.status!=='cancelled');
   localSelection=null;waitingForSavedGoal=false;
   eventWorkspace.select(goal.id);
-  const recommendation=Boolean(recommendationMessage?.recommendation)||(route.kind==='recommendation_ready'&&Boolean(recommendationMessage));
-  focusedEventRecommendation=recommendation?recommendationMessage?.eventId:null;
-  screen=goal.status==='active'&&(recommendationMessage?.audience==='background'||task&&!recommendation)?'home':'agent';render();
-  if (task&&goal.status==='active'&&!recommendation) {
-    const row=document.getElementById('event-task-'+task.id);
-    if (!row) return;
-    row.focus?.({preventScroll:true});
-    row?.scrollIntoView?.({block:'center'});
+  const recommendation=Boolean(recommendationMessage?.recommendation);
+  // A result can never cross a task boundary merely because the goal matches.
+  const matchesResult=!recommendation||recommendationMessage.taskId===task?.id;
+  if (recommendation&&!matchesResult) return;
+  focusedEventRecommendation=recommendation&&matchesResult?recommendationMessage.eventId:null;
+  selectedEventTaskId=task?.id??null;
+  screen=task&&goal.status==='active'?'task':'home';render();
+  if (task) {
+    const target=document.getElementById(recommendation&&matchesResult?'event-message-'+route.eventId:'event-task-'+task.id);
+    target?.focus?.({preventScroll:true});target?.scrollIntoView?.({block:'center'});
   }
-  if (!task||recommendation) document.getElementById('event-message-'+route.eventId)?.scrollIntoView?.({block:'center'});
   await window.AlongAgentBridge.notification('eventTaskOpened',{eventId:route.eventId,userId:route.userId,
     goalId:goal.id,taskId:task?.id??null});
 }
@@ -1233,7 +1236,7 @@ function localRecordPage(choice,title,picker,connection) {
 }
 function taskReminderLine(task) {
   const plan=task.reminderPlan;
-  const next=task.scheduledAt?esc(new Date(task.scheduledAt).toLocaleString('zh-CN',plan?.timezone?{timeZone:plan.timezone,timeZoneName:'short'}:{})):'';
+  const next=task.scheduledAt?esc(eventTaskStamp(task.scheduledAt,plan?.timezone)):'';
   if (!plan) return next?`<p>${next}</p>`:'';
   if (task.status!=='open') return '';
   if (plan.state==='needs_time') return `<p>提醒时间待补 · ${esc(plan.question)}</p>`;
@@ -1244,6 +1247,40 @@ function taskReminderLine(task) {
     hour:'2-digit',minute:'2-digit',hourCycle:'h23',...(plan.timezone?{timeZone:plan.timezone,timeZoneName:'short'}:{})}));
   const timing=future?`下次 ${next} · ${frequency}`:plan.repeat==='once'?`计划于 ${next}`:`${frequency} ${clock}`;
   return `<p>${plan.source==='agent'?'Agent 安排':'你指定的提醒'} · ${timing}</p><p>${esc(plan.explanation)}</p>`;
+}
+function eventTaskStamp(value,timezone) {
+  const zone=timezone?{timeZone:timezone}:{};
+  const year=new Intl.DateTimeFormat('en-US',{year:'numeric',...zone});
+  const date=new Date(value);
+  const stamp=formatStamp(value,{...(year.format(date)!==year.format(new Date())?{year:'numeric'}:{}),
+    month:'long',day:'numeric',hour:'2-digit',minute:'2-digit',hourCycle:'h23',...zone});
+  const localZone=Intl.DateTimeFormat().resolvedOptions().timeZone;
+  return timezone&&timezone!==localZone?`${stamp}（${timezone==='Asia/Shanghai'?'北京时间':timezone}）`:stamp;
+}
+function eventTaskTime(task) {
+  if (!task.scheduledAt) return '待安排';
+  const plan=task.reminderPlan;
+  if (plan?.state==='scheduled'&&['daily','weekly'].includes(plan.repeat)&&Date.parse(task.scheduledAt)<=Date.now()) {
+    const day=plan.repeat==='daily'?'每天':'每周'+'一二三四五六日'[plan.weekday-1];
+    return day+' '+new Date(plan.wallTime??task.scheduledAt).toLocaleTimeString('zh-CN',{
+      hour:'2-digit',minute:'2-digit',hourCycle:'h23',...(plan.timezone?{timeZone:plan.timezone,timeZoneName:'short'}:{})});
+  }
+  return eventTaskStamp(task.scheduledAt,task.reminderPlan?.timezone);
+}
+function isEventTimedTask(task) {
+  return task.status==='open'&&Boolean(task.scheduledAt)&&task.reminderPlan?.state==='scheduled';
+}
+function eventTaskCard(task) {
+  return `<article class="task-row event-task-card" tabindex="-1" id="event-task-${esc(task.id)}"><div><strong>${esc(task.content)}</strong><p>执行时间 · ${esc(eventTaskTime(task))}</p><div class="event-task-footer">${isEventTimedTask(task)?'<span class="task-schedule-tag">定时任务</span>':''}<button class="agent-action" data-action="event-task-detail" data-task-id="${esc(task.id)}">查看详情</button></div></div><span class="task-row-status">${task.status==='done'?'已完成':'待完成'}</span></article>`;
+}
+function eventTaskDetail(goal,messages) {
+  const task=goal.tasks.find(t=>t.id===selectedEventTaskId&&t.status!=='cancelled');
+  if (!task) return `${backButton('event-task-back','返回动态任务')}<section class="goal-card"><h1>任务已更新</h1><p>请返回查看最新安排。</p></section>`;
+  const candidates=messages.filter(m=>m.goalId===goal.id&&m.taskId===task.id&&m.recommendation);
+  const result=candidates.find(m=>m.eventId===focusedEventRecommendation)??candidates.at(-1);
+  const execution=task.execution;
+  const history=execution?.records??[];
+  return `${backButton('event-task-back','返回动态任务')}<section class="goal-card" tabindex="-1" id="event-task-${esc(task.id)}"><p class="goal-note">${esc(goal.title)}</p><h1>${esc(task.content)}</h1><p>执行时间 · ${esc(eventTaskTime(task))}</p>${isEventTimedTask(task)?'<span class="task-schedule-tag">定时任务</span>':''}${taskReminderLine(task)}</section><section class="task-section"><div class="section-heading"><h2>已记录 ${execution?.count??0} 次执行</h2></div>${history.length?`<ol class="task-execution-list">${history.map(record=>`<li><strong>${esc(record.summary??(record.kind==='research'?'已整理推荐方案':'已确认完成'))}</strong><p>${esc(eventTaskStamp(record.executedAt,task.reminderPlan?.timezone))}</p></li>`).join('')}</ol>`:'<p class="goal-note">暂无可核实的执行记录</p>'}</section>${result?`<section class="task-section" id="event-message-${esc(result.notificationEventId??result.eventId)}">${recommendationCard(result.recommendation,{eventId:result.eventId})}</section>`:''}`;
 }
 function recommendationValidity(view) {
   const now=Date.now();
@@ -1270,12 +1307,10 @@ function eventWorkspacePage() {
   const connection=connectionError?`<details class="agent-setup"><summary>连接需处理 · ${esc(connectionError)}</summary><form id="host-address-form"><label>Along 服务地址<input name="baseURL" type="url" value="${esc(agentConfig.baseURL||'')}" required></label><button class="button">验证并更新</button></form></details>`:'';
   const goalPicker=`<div class="goal-switch"><label for="event-goal-select">当前目标</label><div class="goal-switch-actions"><div class="select-wrap"><select id="event-goal-select" aria-label="切换目标"><option value="" ${!localSelection&&!view.activeGoalId?'selected':''}>新对话</option>${options}${localChoices.length?`<optgroup label="本机已存目标">${localChoices.map(l=>`<option value="local:${esc(l.key)}" ${localSelection?.key===l.key?'selected':''}>${esc(l.title)}</option>`).join('')}</optgroup>`:''}</select></div><button class="goal-add-button" data-action="new-goal">新建</button></div></div>`;
   if (selectedLocal) return localRecordPage(localSelection,selectedLocal.title,goalPicker,connection);
-  const history=messages.map(message=>`<div ${message.notificationEventId?`id="event-message-${esc(message.notificationEventId)}"`: ''} class="agent-message ${message.role==='user'?'user':'assistant'}">${message.recommendation?recommendationCard(message.recommendation,{eventId:message.eventId}):`<p>${esc(message.text)}</p>`}${message.status==='pending'?'<p class="agent-disclaimer">待同步</p>':message.status==='rejected'||message.status==='failed'?'<p class="agent-disclaimer">发送未完成，请通过聊天重新说明。</p>':''}</div>`).join('');
-  const candidates=scopedMessages.filter(m=>m.recommendation);
-  const latestRecommendation=candidates.find(m=>m.eventId===focusedEventRecommendation)??candidates.at(-1);
-  const recommendation=latestRecommendation?`<section class="task-section" ${latestRecommendation.notificationEventId?`id="event-message-${esc(latestRecommendation.notificationEventId)}"`: ''}>${recommendationCard(latestRecommendation.recommendation,{eventId:latestRecommendation.eventId})}</section>`:'';
+  const history=messages.map(message=>`<div ${message.notificationEventId?`id="event-message-${esc(message.notificationEventId)}"`: ''} class="agent-message ${message.role==='user'?'user':'assistant'}"><p>${esc(message.text)}</p>${message.status==='pending'?'<p class="agent-disclaimer">待同步</p>':message.status==='rejected'||message.status==='failed'?'<p class="agent-disclaimer">发送未完成，请通过聊天重新说明。</p>':''}</div>`).join('');
   const content=chat?`${backButton('agent-back','返回目标')}<div class="agent-title"><h1>${esc(goal?.title||'说说你想做什么')}</h1></div>${connection}<div class="agent-messages" role="log" aria-live="polite">${history||'<p class="agent-empty">说说你的想法，Along 会和你一起理清下一步。</p>'}</div>`
-    :goal?`${connection}<section class="goal-card"><h1>${esc(goal.title)}</h1>${goal.metric?`<p class="goal-note">${esc(goal.metric.target)} ${esc(goal.metric.unit)} · ${esc(goal.metric.period)}</p>`:''}${goal.context.length?`<p class="goal-note">${goal.context.map(item=>esc(typeof item==='string'?item:item.text)).join('；')}</p>`:''}<div class="card-actions"><button class="agent-action" data-action="event-chat">聊聊这个目标</button></div></section>${eventHealthConnection(goal)}${recommendation}<section class="task-section"><div class="section-heading"><h2>动态任务</h2></div><div class="task-list">${goal.tasks.filter(task=>task.status!=='cancelled').map(task=>`<div class="task-row" tabindex="-1" id="event-task-${esc(task.id)}"><div><strong>${esc(task.content)}</strong>${taskReminderLine(task)}</div><span class="task-row-status">${task.status==='done'?'已完成':'待完成'}</span></div>`).join('')||'<p class="agent-empty">通过聊天安排下一步。</p>'}</div></section>`:'';
+    :goal&&screen==='task'?eventTaskDetail(goal,scopedMessages)
+    :goal?`${connection}<section class="goal-card"><h1>${esc(goal.title)}</h1>${goal.metric?`<p class="goal-note">${esc(goal.metric.target)} ${esc(goal.metric.unit)} · ${esc(goal.metric.period)}</p>`:''}${goal.context.length?`<p class="goal-note">${goal.context.map(item=>esc(typeof item==='string'?item:item.text)).join('；')}</p>`:''}<div class="card-actions"><button class="agent-action" data-action="event-chat">聊聊这个目标</button></div></section><section class="task-section"><div class="section-heading"><h2>动态任务</h2></div><div class="task-list">${goal.tasks.filter(task=>task.status!=='cancelled').map(eventTaskCard).join('')||'<p class="agent-empty">通过聊天安排下一步。</p>'}</div></section>${eventHealthConnection(goal)}`:'';
   return `<div class="app-shell ${chat?'agent-shell':''}"><header class="topbar"><div class="topbar-inner">${brand()}</div></header><main class="content ${chat?'agent-page':''}"><div class="${chat?'agent-scroll':''}">${goalPicker}${content}</div>${chat?`<div class="agent-composer-dock"><form id="agent-form" class="agent-composer"><textarea name="message" rows="1" placeholder="说说你的想法" maxlength="800" data-draft-scope="${esc(view.draftScope)}" required>${esc(eventWorkspace.draft())}</textarea><button class="agent-send" aria-label="发送" ${agentBusy?'disabled':''}>↑</button></form><p class="agent-disclaimer">Along · 一起，慢慢向前</p></div>`:''}</main></div>`;
 }
 function renderEventUpdate() {
@@ -1449,7 +1484,7 @@ app.addEventListener('change', event => {
       const key=value.slice(6);
       if (localGoalEntries().some(l=>l.key===key)) {localSelection={key};screen='home';render();}
     } else {
-      localSelection=null;focusedEventRecommendation=null;eventWorkspace.select(value||null);screen=value?'home':'agent';render();
+      localSelection=null;selectedEventTaskId=null;focusedEventRecommendation=null;eventWorkspace.select(value||null);screen=value?'home':'agent';render();
     }
     return;
   }
@@ -1481,13 +1516,17 @@ app.addEventListener('click', event => {
     } else if (action==='local-task-back'&&localSelection) {localSelection={key:localSelection.key};render();}
     else if (action==='local-task'&&localSelection&&localTasks(localSelection.key).some(t=>t.id===actionTarget.dataset.taskId)) {
       localSelection={key:localSelection.key,taskId:actionTarget.dataset.taskId};render();
-    } else if (action==='event-chat') {focusedEventRecommendation=null;screen='agent';render();}
+    } else if (action==='event-task-detail') {
+      const task=eventWorkspace.view().goals[eventWorkspace.view().activeGoalId]?.tasks.find(t=>t.id===actionTarget.dataset.taskId&&t.status!=='cancelled');
+      if (task) {selectedEventTaskId=task.id;focusedEventRecommendation=null;screen='task';render();}
+    } else if (action==='event-task-back') {selectedEventTaskId=null;focusedEventRecommendation=null;screen='home';render();}
+    else if (action==='event-chat') {selectedEventTaskId=null;focusedEventRecommendation=null;screen='agent';render();}
     else if (action==='event-recommendation-feedback') {
       if (eventWorkspace.prepareRecommendationFeedback(actionTarget.dataset.eventId)) {focusedEventRecommendation=null;screen='agent';render();}
     }
     else if (action==='event-health-connect') {void connectHealth();}
     else if (action==='agent-back') {
-      focusedEventRecommendation=null;
+      selectedEventTaskId=null;focusedEventRecommendation=null;
       if (!eventWorkspace.view().activeGoalId) eventWorkspace.leaveConversation();
       screen='home';render();
     }
