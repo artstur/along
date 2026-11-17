@@ -224,7 +224,7 @@ async function handleAlongNewLink(req,res,path) {
       isCurrent:()=>identity===who,
       status:goalId=>okxConnection.handle({userId:who.userId,goalId,input:{action:'status'}}),
       readGoal:goalId=>upstream(()=>bridge.call(`/along-source/api/goals/${encodeURIComponent(goalId)}`,{method:'GET',identity:who})),
-      disconnect:goalId=>okxConnection.handle({userId:who.userId,goalId,input:{action:'disconnect'},stillAuthorized:()=>identity===who}),
+      disconnect:(goalId,revokeIf)=>okxConnection.handle({userId:who.userId,goalId,input:{action:'disconnect'},stillAuthorized:()=>identity===who,revokeIf}),
     });
     return respond(res,200,notifications.decorate(who,result,input));
   }

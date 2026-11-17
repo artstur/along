@@ -39,9 +39,12 @@ export async function reconcileOkxSources(page,who,{status,readGoal,disconnect,i
   for(const goalId of candidates) {
     if(!isCurrent())return;
     if((await status(goalId)).state!=='connected')continue;
-    const detail=await readGoal(goalId);
-    requireOwnedSourceGoal(detail,who,goalId);
-    try {requireOkxGoal(detail,who,goalId);continue;}catch{/* Confirmed owner, current source revoked. */}
-    if(isCurrent())await disconnect(goalId);
+    // Run the current-goal lookup inside the connector's queue, so a reconnect
+    // completes after revocation rather than being deleted by an older lookup.
+    if(isCurrent())await disconnect(goalId,async()=>{
+      const detail=await readGoal(goalId);
+      requireOwnedSourceGoal(detail,who,goalId);
+      try {requireOkxGoal(detail,who,goalId);return false;}catch{return isCurrent();}
+    });
   }
 }

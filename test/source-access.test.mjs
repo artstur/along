@@ -16,7 +16,7 @@ test('revocation clears only a current owned connection and never trusts histori
   const old=goal();old.dataSources=[];
   const page={items:[{kind:'goal_updated',goalId,payload:{snapshot:old}}]};
   let current=goal(),cleared=[];
-  const deps={status:async()=>({state:'connected'}),readGoal:async()=>current,disconnect:async id=>cleared.push(id),isCurrent:()=>true};
+  const deps={status:async()=>({state:'connected'}),readGoal:async()=>current,disconnect:async(id,revokeIf)=>{if(await revokeIf())cleared.push(id);},isCurrent:()=>true};
   await reconcileOkxSources(page,who,deps);assert.deepEqual(cleared,[]);
   current.dataSources=[];
   await reconcileOkxSources(page,who,deps);assert.deepEqual(cleared,[goalId]);

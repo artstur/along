@@ -170,7 +170,7 @@ export function createOkxConnection({dir,fetchImpl=fetch,now=Date.now,timeoutMs=
   }
   return {async handle(context={}){
     if(!record(context))fail('invalid_request');
-    const {userId,goalId,input,stillAuthorized}=context;
+    const {userId,goalId,input,stillAuthorized,revokeIf}=context;
     if(!identity(userId)||!identity(goalId))fail('invalid_request');
     const command=requestInput(input),key=createHash('sha256').update(JSON.stringify([userId,goalId])).digest('hex'),queueKey=root+':'+key;
     const operation=(QUEUES.get(queueKey)??Promise.resolve()).catch(()=>{}).then(async()=>{
@@ -182,6 +182,10 @@ export function createOkxConnection({dir,fetchImpl=fetch,now=Date.now,timeoutMs=
       }
       if(command.action==='status'){await authorized(stillAuthorized);return saved?connected(saved):disconnected();}
       if(command.action==='disconnect'){
+        if(revokeIf!==undefined){
+          if(typeof revokeIf!=='function')fail('invalid_request');
+          if(await revokeIf()!==true)return null; // Internal conditional cleanup, not a public action.
+        }
         await authorized(stillAuthorized);
         try{unlinkSync(join(root,key+'.json'));}catch(error){if(error?.code!=='ENOENT')fail('vault_unavailable');}
         return disconnected();

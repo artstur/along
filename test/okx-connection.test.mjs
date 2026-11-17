@@ -5,6 +5,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createHmac} from 'node:crypto';
 import {createOkxConnection,OkxConnectionError} from '../host/okx-connection.mjs';
+import {reconcileOkxSources} from '../host/source-access.mjs';
 
 const CREDENTIALS={apiKey:'synthetic-key-A',secretKey:'synthetic-secret-A',passphrase:'synthetic-passphrase-A'};
 const USER='u_00112233',GOAL='g_44556677',NOW=1_794_953_600_000,SERVER=NOW+50_000;
@@ -149,6 +150,25 @@ test('same-goal operations serialize across instances while a distinct goal can 
   assert.equal(other.state,'connected');assert.equal(disconnected,false);release();
   assert.equal((await connecting).state,'connected');assert.equal((await disconnecting).state,'disconnected');
   assert.equal((await f.handle(f.make(),{action:'status'})).state,'disconnected');assert.equal(f.vaultFiles().length,1);
+});
+
+test('conditional revocation shares the goal queue so an older lookup cannot delete a reconnect',async t=>{
+  const f=fixture(t),connection=f.make();await f.connect(connection);
+  const withdrawn={goal:{id:GOAL,userId:USER,status:'active',currentRevision:1},revision:{goalId:GOAL,userId:USER,status:'active',revision:1},dataSources:[]};
+  let entered,release;
+  const waiting=new Promise(resolve=>{entered=resolve;}),pending=new Promise(resolve=>{release=resolve;});
+  const revoking=reconcileOkxSources({items:[{kind:'goal_updated',goalId:GOAL,payload:{snapshot:withdrawn}}]}, {userId:USER},{
+    status:()=>f.handle(connection,{action:'status'}),readGoal:async()=>{entered();await pending;return withdrawn;},
+    disconnect:(_id,revokeIf)=>f.handle(connection,{action:'disconnect'},{revokeIf}),isCurrent:()=>true,
+  });
+  await waiting;
+  let reconnected=false;
+  const reconnecting=f.connect(f.make()).then(value=>{reconnected=true;return value;});
+  await Promise.resolve();assert.equal(reconnected,false);
+  release();await revoking;await reconnecting;
+  assert.equal((await f.handle(connection,{action:'status'})).state,'connected');
+  assert.equal(await f.handle(connection,{action:'disconnect'},{revokeIf:async()=>false}),null);
+  assert.equal((await f.handle(connection,{action:'status'})).state,'connected');
 });
 
 test('timeouts abort the actual fetch and expose only fixed safe errors',async t=>{
