@@ -262,6 +262,7 @@ npm run build   # 产出 dist/（GitHub Pages）与 ios/AlongHealth/Web/（App �
 **推送 `main` 不会自动部署：**
 
 - GitHub Pages：手动触发工作流（GitHub Actions → Deploy GitHub Pages → Run workflow，或 `gh workflow run pages.yml --ref main`），依次执行 `npm ci`、`npm run check`、`npm run build` 并发布 `dist/`。
+  工作流固定使用 `macos-15-intel`，在 ARM macOS 队列容量不足时保留真实 Swift/Keychain 回归。执行机排队或分配失败不代表页面已部署；以 Pages 成功回执与线上资源比对为验收依据。
 - iPhone：先 `npm run build`，再在 Xcode 里重新构建并安装。
 
 ## 新协议任务通知与到期复查
