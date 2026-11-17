@@ -57,6 +57,8 @@ test('only fresh, explicit and still relevant notices owned by this device are s
   f.pages[2].payload.snapshot.tasks[0].status='cancelled';
   f.pages[3].payload.snapshot.goal.status='archived';
   f.pages[4].payload.snapshot.tasks[0].status='done';
+  f.pages[4].payload.calculation_receipt_id='calc_'+'a'.repeat(40);
+  f.pages[4].payload.snapshot.tasks[0].execution={version:1,count:1,records:[{kind:'calculation',outcome:'calculated',calculationReceiptId:f.pages[4].payload.calculation_receipt_id}]};
   assert.equal(service.decorate(f.who,{items:[before]}).items[0].remoteNotifications,false);
   await service.dispatch();
   assert.deepEqual(f.sent.map(item=>item.eventId),['event:5']);
@@ -144,7 +146,7 @@ test('APNs refusal after a phone sync can hand off on an empty page until the ph
   assert.deepEqual(sync(['event:1']).notificationFallback,[]);
   assert.equal(next.decorate(f.who,{items:f.pages}).items[0].remoteNotifications,true);
 });
-test('a newer recommendation supersedes a queued retry without dropping an independent task result',async t=>{
+test('a newer task revision supersedes both queued recommendation and task-result retries',async t=>{
   const f=fixture(t);
   let offline=true;
   const one=taskNotifications({...f.options,send:async(...args)=>{
@@ -160,7 +162,7 @@ test('a newer recommendation supersedes a queued retry without dropping an indep
   f.pages.push(updated);
   f.tick(4000);offline=false;
   await one.dispatch();
-  assert.deepEqual(f.sent.map(n=>n.eventId),['event:2','event:3']);
+  assert.deepEqual(f.sent.map(n=>n.eventId),['event:3']);
 });
 test('an actual iOS scheduling receipt suppresses the same due occurrence; an unseen next-day task gets a remote alert',async t=>{
   const f=fixture(t),one=taskNotifications(f.options);
@@ -338,4 +340,25 @@ test('classification-only history never becomes a new Host alert and still advan
   f.pages.push(classified,f.item(2));await service.dispatch();
   assert.deepEqual(f.sent.map(r=>r.eventId),['event:2']);
   await taskNotifications(f.options).dispatch();assert.equal(f.sent.length,1);
+});
+
+test('finished Agent results notify only for the exact current result evidence and stay suppressed after cancellation',async t=>{
+ const f=fixture(t),service=taskNotifications(f.options);service.register(f.who,f.input);
+ const result=(seq,kind='task_result')=>{
+  const item=f.item(seq,kind),task=item.payload.snapshot.tasks[0];task.status='done';
+  if(kind==='task_result'){
+   item.payload.calculation_receipt_id='calc_'+'c'.repeat(40);
+   task.execution={version:1,count:1,records:[{kind:'calculation',outcome:'calculated',calculationReceiptId:item.payload.calculation_receipt_id}]};
+  }else{
+   item.payload.recommendation={version:1,sources:[{id:'same_task_source'}]};
+   task.execution={version:1,count:1,records:[{kind:'research',outcome:'researched',recommendationEventId:item.payload.notification.event_id}]};
+  }
+  return item;
+ };
+ const good=result(1),research=result(2,'recommendation_ready'),missing=result(3),old=result(4),wrong=result(5),cancelled=result(6);
+ delete missing.payload.calculation_receipt_id;old.payload.notification.revision=1;wrong.payload.snapshot.tasks[0].execution.records[0].calculationReceiptId='calc_'+'d'.repeat(40);cancelled.payload.snapshot.tasks[0].status='cancelled';
+ // Separate goals prevent one synthetic snapshot from intentionally superseding another route.
+ for(const item of [good,research,missing,old,wrong,cancelled]){const goalId='g_result_'+item.seq;item.goalId=goalId;item.payload.snapshot.goal.id=goalId;item.payload.snapshot.tasks[0].goalId=goalId;}
+ f.pages.push(good,research,missing,old,wrong,cancelled);await service.dispatch();
+ assert.deepEqual(f.sent.map(r=>r.eventId),['event:1','event:2']);
 });

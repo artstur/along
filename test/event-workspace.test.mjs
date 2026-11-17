@@ -307,12 +307,13 @@ test('a rejected APNs alert is handed back on an empty page after sync ack, surv
 });
 test('a completed or revised recommendation is suppressed while a completed task can still report its result',async()=>{
   const at=new Date().toISOString(), page=[change(1,'测试',3)];
-  Object.assign(page[0].payload.snapshot.tasks[0],{status:'done',currentRevision:2});
+  const calc='calc_'+'f'.repeat(40);
+  Object.assign(page[0].payload.snapshot.tasks[0],{status:'done',currentRevision:2,execution:{version:1,count:1,records:[{id:'done_calculation',kind:'calculation',outcome:'calculated',executedAt:at,calculationReceiptId:calc}]}});
   const fallback=[
     {kind:'recommendation_ready',eventId:'old_goal',goalId:'g_sleep',revision:2,createdAt:at},
     {kind:'recommendation_ready',eventId:'old_task',goalId:'g_sleep',taskId:'t_sleep',revision:1,createdAt:at},
     {kind:'recommendation_ready',eventId:'done_task',goalId:'g_sleep',taskId:'t_sleep',revision:2,createdAt:at},
-    {kind:'task_result',eventId:'done_result',goalId:'g_sleep',taskId:'t_sleep',revision:2,createdAt:at}];
+    {kind:'task_result',eventId:'done_result',goalId:'g_sleep',taskId:'t_sleep',revision:2,createdAt:at,evidence:{kind:'calculation',id:calc}}];
   const batches=[];setup(input=>input.path==='/sync/ack'?{}:{items:page.filter(i=>i.seq>input.body.after_seq),notificationFallback:fallback.map(r=>({...r,userId:config.userId}))});
   const ws=createEventWorkspace({config,onNotifications:async b=>batches.push(b)});
   await ws.sync();assert.deepEqual(batches[0].results.map(r=>r.eventId),['done_result']);
@@ -470,4 +471,29 @@ test('an older acknowledged cache hydrates host execution history once without r
   await workspace.sync();
   assert.deepEqual(calls.filter(c=>c.path==='/sync').map(c=>c.body.after_seq),[0,50]);
   const cache=JSON.parse(localStorage.getItem(key));assert.equal(cache.cursor,50);assert.equal(cache.executionVersion,1);
+});
+
+test('host calculation receipts and typed trigger labels survive cache normalization without becoming authorization',()=>{
+ const wire=snapshot(),receipt='calc_'+'a'.repeat(40),task=wire.tasks[0];
+ task.trigger={version:1,kind:'event',actor:'agent',capability:'calculation',state:'waiting',label:'数据源连接并可读取后执行',conditions:[{kind:'source_ready',provider:'okx',capability:'trading_account_summary'}],notifyBefore:false};
+ task.execution={version:1,count:1,records:[{id:'calc_execution',kind:'calculation',outcome:'calculated',executedAt:'2026-11-18T00:00:00Z',summary:'计算结果：1990 CNY',calculationReceiptId:receipt}]};
+ assert.deepEqual(safeWorkspaceGoal(wire).tasks[0].trigger,task.trigger);assert.deepEqual(safeWorkspaceGoal(wire).tasks[0].execution,task.execution);
+ const valid=task.trigger;
+ for(const trigger of [{...valid,label:'x'.repeat(241)},{...valid,actor:'user'},{...valid,kind:'script'},{...valid,conditions:[{kind:'source_ready',provider:'foreign',capability:'credentials'}]}]){
+  task.trigger=trigger;const normalized=safeWorkspaceGoal(wire).tasks[0];assert.equal(normalized.trigger,undefined);assert.equal(normalized.content,task.content);
+ }
+});
+
+test('the capability projection replays once into an acknowledged cache without new alerts, lost drafts or cursor regression',async()=>{
+ const wire=snapshot(),old=safeWorkspaceGoal(wire),key='along.event-workspace.v1:'+config.userId,receipt='calc_'+'e'.repeat(40);
+ const saved={version:1,recommendationsVersion:1,conversationVersion:1,dataSourcesVersion:1,executionVersion:1,userId:config.userId,cursor:50,goals:{g_sleep:old},messages:{},drafts:{'goal:g_sleep':'keep this draft'},activeGoalId:'g_sleep',conversationId:null,returnGoalId:null};
+ installDomStub({storage:{[key]:JSON.stringify(saved)}});
+ wire.tasks[0].trigger={version:1,kind:'immediate',actor:'agent',capability:'calculation',state:'settled',label:'立即执行',conditions:[],notifyBefore:false};
+ wire.tasks[0].status='done';wire.tasks[0].execution={version:1,count:1,records:[{id:'new_calc_projection',kind:'calculation',outcome:'calculated',executedAt:new Date().toISOString(),summary:'计算结果：7 CNY',calculationReceiptId:receipt}]};
+ const calls=[],alerts=[];
+ window.AlongAgentBridge={request:async input=>{calls.push(input);if(input.path==='/sync/ack')return{};return {items:input.body.after_seq===0?[{seq:5,userId:config.userId,goalId:'g_sleep',taskId:'t_sleep',kind:'task_updated',createdAt:new Date().toISOString(),remoteNotifications:false,payload:{snapshot:wire,calculation_receipt_id:receipt,notification:{kind:'task_result',event_id:'old_calculation',revision:1}}}]:[]};}};
+ const workspace=createEventWorkspace({config,onNotifications:async batch=>alerts.push(...batch.results)});await workspace.sync();
+ assert.equal(calls.find(c=>c.path==='/sync').body.after_seq,0);assert.equal(workspace.view().cursor,50);assert.equal(workspace.view().goals.g_sleep.tasks[0].execution.count,1);assert.equal(workspace.view().goals.g_sleep.tasks[0].trigger.kind,'immediate');
+ assert.equal(JSON.parse(localStorage.getItem(key)).drafts['goal:g_sleep'],'keep this draft');assert.deepEqual(alerts,[]);
+ const restarted=createEventWorkspace({config});await restarted.sync();assert.equal(calls.filter(c=>c.path==='/sync').at(-1).body.after_seq,50);assert.equal(restarted.view().goals.g_sleep.tasks[0].execution.records[0].calculationReceiptId,receipt);
 });
