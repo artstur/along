@@ -137,7 +137,7 @@ export function safeWorkspaceGoal(snapshot) {
   });
   validateGoalReply({reply:'目标已同步',proposal:{title:revision.title,target:metric?.target??null,
     task:cleanTasks[0]?.content||'通过聊天安排下一步',reason:'已校验的目标状态'}},goal.domain,'');
-  const layout=safeAdaptiveLayout({version:1,title:revision.title,summary:goal.domain==='finance'?'理财使用演示数据':'按你的目标持续调整',
+  const layout=safeAdaptiveLayout({version:1,title:revision.title,summary:'按你的目标持续调整',
     modules:[],tasks:cleanTasks.filter(task=>task.status==='open').slice(0,6).map(task=>({id:task.id,when:task.scheduledAt||'下一步',
       title:'下一步',detail:task.content,state:'planned'})),questions:[],connections:[]},goal.domain);
   if (!layout) throw Error('目标页面校验失败');
@@ -435,7 +435,8 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
     if (onNotifications&&!disposed) {
       // Reconcile only a complete sync. A torn page, stale connection or offline cache must never withdraw other tasks.
       const active=Object.values(state.goals).filter(g=>g.status==='active');
-      const reminders=active.flatMap(g=>g.tasks.filter(t=>t.status==='open'&&(Date.parse(t.scheduledAt)>Date.now()||recurringPlan(t)))
+      const reminders=active.flatMap(g=>g.tasks.filter(t=>t.status==='open'&&(!t.trigger||t.trigger.actor==='user'||t.trigger.notifyBefore===true)&&
+        (Date.parse(t.scheduledAt)>Date.now()||recurringPlan(t)))
         .map(t=>({goalId:g.id,taskId:t.id,revision:t.revision,scheduledAt:new Date(t.scheduledAt).toISOString(),body:t.content,
           ...(recurringPlan(t)?{repeat:t.reminderPlan.repeat,timezone:t.reminderPlan.timezone,
             ...(t.reminderPlan.wallTime?{wallTime:t.reminderPlan.wallTime}:{}),
