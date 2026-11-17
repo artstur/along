@@ -16,13 +16,15 @@ import {HostError, upstream, statusForError} from './host-error.mjs';
 import {createApnsProvider} from './apns.mjs';
 import {taskNotifications} from './task-notifications.mjs';
 import {createOkxConnection} from './okx-connection.mjs';
+import {createSourceJournal,createHostSourceEventBridge} from './source-event-bridge.mjs';
 import {validateOkxSourceRequest,requireOkxGoal,requireOwnedSourceGoal,reconcileOkxSources} from './source-access.mjs';
 import {createBridge, readBridgeToken} from './along-bridge.mjs';
 import {agentHealthSnapshot,cleanHealthContext,cleanPlanningContext,validateReassessment,SLEEP_REMINDER_CRITERIA,DAILY_ACTIONS_CRITERIA,parseDailyActionReply} from '../web/contextual-planning.mjs';
 
 const dir = process.env.ALONG_AGENT_STATE_DIR||join(homedir(), '.along', 'agent-host');
 mkdirSync(dir, {recursive:true, mode:0o700});
-const okxConnection=createOkxConnection({dir:join(dir,'okx-connections')});
+const sourceJournal=createSourceJournal({dir:join(dir,'source-events')});
+const okxConnection=createOkxConnection({dir:join(dir,'okx-connections'),sourceJournal});
 function pruneExpiredPlans() {
   try {pruneDailyActions(dir);} catch {console.warn('Along 未能清理已过期的安排索引');}
 }
@@ -398,10 +400,17 @@ const server=createServer({key:readFileSync(key),cert:readFileSync(cert)},async(
     return respond(res,404,{error:'未找到接口'});
   } catch(error) { respond(res,statusForError(error),{error:error.message}); }
 });
+let lastSourceWarning=0;
+const sourceEvents=createHostSourceEventBridge({journal:sourceJournal,connection:okxConnection,bridge,endpoint:superAgentURL,
+  identity:()=>eventIngest&&bridgeToken&&pairingRegistered?identity:null,
+  onError:()=>{if(Date.now()-lastSourceWarning>60_000){lastSourceWarning=Date.now();console.warn('Along 源状态同步暂不可用，将保留待发状态稍后重试');}},
+});
+const sourceEventTimer=setInterval(()=>sourceEvents.pump(),3000);sourceEventTimer.unref();
 server.listen(port,lanHost,()=>{
   console.log(`Along 服务: https://${lanHost}:${port}`);
   console.log(`证书指纹 SHA-256: ${fingerprint}`);
   console.log(`一次性配对码: ${code} (15 分钟有效)`);
   console.log('仅用于可信任的同一 Wi-Fi；退出请按 Ctrl+C。');
 });
+server.on('close',()=>{clearInterval(sourceEventTimer);sourceEvents.close();});
 process.on('SIGINT',()=>server.close(()=>process.exit(0)));
