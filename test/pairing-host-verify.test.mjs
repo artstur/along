@@ -144,6 +144,7 @@ test('OKX route is pairing-bound and refuses foreign or unrecommended goals befo
   assert.equal((await call({action:'status',goalId:'g_okx'})).status,403);
   detail.goal.userId=userId;detail.dataSources=[];
   assert.equal((await call({action:'connect',goalId:'g_okx',credentials:{apiKey:'fake',secretKey:'fake',passphrase:'fake'},site:'global'})).status,403);
+  assert.deepEqual((await call({action:'disconnect',goalId:'g_okx'})).json,{provider:'okx',state:'disconnected'});
   assert.doesNotMatch(JSON.stringify(agent.calls),/apiKey|secretKey|passphrase/);
 });
 

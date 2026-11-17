@@ -50,7 +50,7 @@ let checkingHealthHost=false;
 let agentConnection = {status:agentConfig.token?'checking':'unconfigured',error:''};
 let eventWorkspace=null,eventWorkspaceBinding='';
 const okxStates=new Map();
-const okxPending=new Set();
+const okxPending=new Map();
 let focusedEventRecommendation=null;
 let selectedEventTaskId=null;
 let pendingRecommendationOpen=null;
@@ -1177,11 +1177,13 @@ function eventDataSources(goal) {
 function queueOkxStatus(goalId) {
   if(!window.AlongAgentBridge?.source||okxPending.has(goalId)||okxStates.has(goalId))return;
   const binding=eventWorkspaceBinding;
-  okxPending.add(goalId);
+  const request={};
+  okxPending.set(goalId,request);
+  const current=()=>binding===eventWorkspaceBinding&&okxPending.get(goalId)===request;
   void Promise.resolve().then(()=>window.AlongAgentBridge.source('status',goalId)).then(value=>{
-    if(binding===eventWorkspaceBinding)okxStates.set(goalId,{state:value?.provider==='okx'&&value.state==='connected'?'connected':'disconnected'});
-  }).catch(()=>{if(binding===eventWorkspaceBinding)okxStates.set(goalId,{error:true});}).finally(()=>{
-    if(binding===eventWorkspaceBinding){okxPending.delete(goalId);render();}
+    if(current())okxStates.set(goalId,{state:value?.provider==='okx'&&value.state==='connected'?'connected':'disconnected'});
+  }).catch(()=>{if(current())okxStates.set(goalId,{error:true});}).finally(()=>{
+    if(current()){okxPending.delete(goalId);render();}
   });
 }
 async function connectOkx() {
@@ -1189,12 +1191,15 @@ async function connectOkx() {
   const goal=eventWorkspace?.view().goals[goalId];
   if(!goal?.dataSources.some(s=>s.provider==='okx'))return;
   if(!window.AlongAgentBridge?.source){notice('请在 iPhone Along App 中连接 OKX');return;}
-  const binding=eventWorkspaceBinding;
+  if(okxPending.get(goalId)?.connect)return;
+  const binding=eventWorkspaceBinding,request={connect:true};
+  okxPending.set(goalId,request);
+  const current=()=>binding===eventWorkspaceBinding&&okxPending.get(goalId)===request;
   try {
     const value=await window.AlongAgentBridge.source('connect',goalId);
-    if(binding===eventWorkspaceBinding)okxStates.set(goalId,{state:value?.provider==='okx'&&value.state==='connected'?'connected':'disconnected'});
-  }catch{if(binding===eventWorkspaceBinding)notice('无法打开连接，请检查 Mac 连接后重试');}
-  if(binding===eventWorkspaceBinding)render();
+    if(current())okxStates.set(goalId,{state:value?.provider==='okx'&&value.state==='connected'?'connected':'disconnected'});
+  }catch{if(current())notice('无法打开连接，请检查 Mac 连接后重试');}
+  if(current()){okxPending.delete(goalId);render();}
 }
 async function syncEventNotifications(value,binding) {
   if (binding!==eventWorkspaceBinding) return;

@@ -16,7 +16,7 @@ import {HostError, upstream, statusForError} from './host-error.mjs';
 import {createApnsProvider} from './apns.mjs';
 import {taskNotifications} from './task-notifications.mjs';
 import {createOkxConnection} from './okx-connection.mjs';
-import {validateOkxSourceRequest,requireOkxGoal} from './source-access.mjs';
+import {validateOkxSourceRequest,requireOkxGoal,requireOwnedSourceGoal,reconcileOkxSources} from './source-access.mjs';
 import {createBridge, readBridgeToken} from './along-bridge.mjs';
 import {agentHealthSnapshot,cleanHealthContext,cleanPlanningContext,validateReassessment,SLEEP_REMINDER_CRITERIA,DAILY_ACTIONS_CRITERIA,parseDailyActionReply} from '../web/contextual-planning.mjs';
 
@@ -220,6 +220,12 @@ async function handleAlongNewLink(req,res,path) {
     const afterSeq=Number.isInteger(input?.after_seq)&&input.after_seq>=0?input.after_seq:0;
     const limit=Number.isInteger(input?.limit)?Math.min(Math.max(input.limit,1),200):50;
     const result=await readSyncPage(who,afterSeq,limit,input?.conversation_version===1?1:0);
+    await reconcileOkxSources(result,who,{
+      isCurrent:()=>identity===who,
+      status:goalId=>okxConnection.handle({userId:who.userId,goalId,input:{action:'status'}}),
+      readGoal:goalId=>upstream(()=>bridge.call(`/along-source/api/goals/${encodeURIComponent(goalId)}`,{method:'GET',identity:who})),
+      disconnect:goalId=>okxConnection.handle({userId:who.userId,goalId,input:{action:'disconnect'},stillAuthorized:()=>identity===who}),
+    });
     return respond(res,200,notifications.decorate(who,result,input));
   }
   if (path==='/sync/ack') {
@@ -293,7 +299,8 @@ const server=createServer({key:readFileSync(key),cert:readFileSync(cert)},async(
       const allowed=async()=>{
         if(identity!==who)return false;
         const detail=await upstream(()=>bridge.call(`/along-source/api/goals/${encodeURIComponent(input.goalId)}`,{method:'GET',identity:who}));
-        requireOkxGoal(detail,who,input.goalId);
+        if(input.action==='disconnect')requireOwnedSourceGoal(detail,who,input.goalId);
+        else requireOkxGoal(detail,who,input.goalId);
         return identity===who;
       };
       if(!await allowed())throw new HostError('配对已变化，请重新打开连接',403);

@@ -12,6 +12,7 @@
 - 请求固定官方域名、GET 路径、禁止重定向、有超时/大小限制。先获取服务器时间，签名读取 `/api/v5/account/config`，实际 perm 必须恰为 read_only；拒绝 trade/withdraw 或无法验证权限的密钥。再读取 `/api/v5/account/balance` 和 `/api/v5/account/positions`。
 - 仅成功读取后保存凭证并返回 `{provider:'okx',state:'connected',lastSyncedAt,summary:{tradingEquityUsd,assetCount,positionCount}}`。未连接为 `{provider:'okx',state:'disconnected'}`。摘要明确为交易账户权益，不把它称为所有账户总资产。
 - 连接失败保留既有有效连接但表单展示失败；刷新失败必须可见且不假装本次同步成功。断开删除该目标凭证。并发操作串行化，身份/目标变化后拒绝应用过期结果。原生表单关闭或成功后清空凭证。
+- 目标归档或推荐来源撤回后，后续目标同步核实当前状态并删除连接凭证；历史重放不能误删重新推荐后的连接。同所有者的纯断开操作允许在归档或撤回后执行，敏感读取仍要求有效目标及推荐。较旧的状态查询不得覆盖更新的连接结果。
 - 本次账户摘要供 App 展示；完整交易历史与 Agent 策略分析为后续工作，不因连接成功宣称已完成。
 
 ## 验证与交付

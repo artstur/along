@@ -139,3 +139,19 @@ test('OKX connection button invokes native secure flow for this goal and trusts 
   assert.match(dom.app.innerHTML,/管理连接/);
   assert.doesNotMatch(JSON.stringify([...dom.store]),/tradingEquityUsd|apiKey|secretKey|passphrase/);
 });
+
+test('a delayed disconnected status cannot overwrite a newer successful connection',async()=>{
+  const dom=installDomStub({storage:{'along.agent.v1':JSON.stringify(config)}});
+  let oldStatus;
+  window.AlongAgentBridge={source:(action)=>action==='status'?new Promise(resolve=>{oldStatus=resolve;}):Promise.resolve({provider:'okx',state:'connected'}),
+    request:async input=>input.path==='/connection/status'
+      ?{along:true,ready:true,runtime:'dsh-superagent',eventProtocol:1,userId:config.userId}
+      :input.path==='/sync'?{items:input.body.after_seq?[]:[{seq:1,userId:config.userId,kind:'goal_updated',goalId:'g_okx',payload:{snapshot:snapshot()}}]}:{acked:1}};
+  await import(`../web/app.mjs?late-okx-status=${Date.now()}`);await settle();
+  assert.equal(typeof oldStatus,'function');
+  await dom.click({action:'event-okx-connect'});await settle();
+  assert.match(dom.app.innerHTML,/管理连接/);
+  oldStatus({provider:'okx',state:'disconnected'});await settle();
+  assert.match(dom.app.innerHTML,/管理连接/);
+  assert.doesNotMatch(dom.app.innerHTML,/尚未连接/);
+});
