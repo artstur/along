@@ -1248,7 +1248,7 @@ function taskReminderLine(task) {
 function recommendationValidity(view) {
   const now=Date.now();
   return view.messages.filter(m=>m.goalId===view.activeGoalId&&m.recommendation).map(m=>
-    `${m.eventId}:${Date.parse(m.recommendation.validUntil)<=now||m.recommendation.sources.some(s=>Date.parse(s.expiresAt)<=now)}`).join('|');
+    `${m.eventId}:${Date.parse(m.recommendation.validUntil)<=now}:${m.recommendation.sources.map(s=>Date.parse(s.expiresAt)<=now).join(',')}`).join('|');
 }
 function refreshRecommendationValidity() {
   if (eventWorkspace&&recommendationValidity(eventWorkspace.view())!==renderedRecommendationValidity) renderEventUpdate();
