@@ -59,3 +59,14 @@ test('provider date metadata is visibly unverified rather than asserted publicat
   const html=recommendationCard(r);
   assert.match(html,/日期线索（待核实）/);assert.doesNotMatch(html,/发布于/);
 });
+
+
+test('expired weather retains route candidates without marking the whole hiking plan expired',()=>{
+  const r=recommendation(),now=Date.parse('2099-01-01T07:00:00Z');
+  const html=recommendationCard(r,{eventId:'reply_weather',now});
+  assert.match(html,/天气待更新/);
+  assert.doesNotMatch(html,/资料已过期|需重新核实|>适合考虑</);
+  assert.match(html,/合成公园路线/);assert.match(html,/官方公开步道约3公里/);
+  assert.match(html,/路线候选保留/);assert.match(html,/data-event-id="reply_weather"/);
+  assert.match(html,/上次核对/);
+});
