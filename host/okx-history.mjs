@@ -25,7 +25,7 @@ export const hasOkxHistory=h=>!!h&&(h.fills.length>0||h.bills.length>0||h.stream
 export function validOkxHistory(h,observedAt=h?.windowEnd){
   if(!exact(h,['version','windowStart','windowEnd','streams','fills','bills'])||h.version!==1||!date(h.windowStart)||!date(h.windowEnd)||!date(observedAt))return false;
   const start=Date.parse(h.windowStart),end=Date.parse(h.windowEnd);
-  if(start>=end||end-start>94*86400000||end>Date.parse(observedAt)+1000||!Array.isArray(h.streams)||h.streams.length!==7||
+  if(start>=end||end-start>90*86400000+1||end>Date.parse(observedAt)+1000||!Array.isArray(h.streams)||h.streams.length!==7||
     !Array.isArray(h.fills)||h.fills.length>3000||!Array.isArray(h.bills)||h.bills.length>2000||Buffer.byteLength(JSON.stringify(h))>2*1024*1024)return false;
   const streamKeys=new Set();
   for(const s of h.streams){
@@ -41,10 +41,11 @@ export function validOkxHistory(h,observedAt=h?.windowEnd){
     if(!exact(f,FILL_KEYS)||!FILL_KEYS.every(k=>typeof f[k]==='string')||!id(f.billId)||!tradeId(f.tradeId)||!optionalId(f.ordId)||
       !OKX_HISTORY_TYPES.includes(f.instType)||!identifier(f.instId)||!['buy','sell'].includes(f.side)||!['','net','long','short'].includes(f.posSide)||
       !['fillPx','fillSz','fillPnl','fee'].every(k=>numeric(f[k]))||!(f.feeCcy===''||currency(f.feeCcy))||
-      !timestamp(f.ts,start,end)||!text(f.tag,/^[A-Za-z0-9_-]{0,32}$/)||seenFills.has(f.billId))return false;
+      f.fillPx.startsWith('-')||f.fillSz.startsWith('-')||!timestamp(f.ts,start,end)||!text(f.tag,/^[A-Za-z0-9_-]{0,32}$/)||seenFills.has(f.billId))return false;
     seenFills.add(f.billId);typeCounts.set(f.instType,(typeCounts.get(f.instType)??0)+1);
   }
   if([...typeCounts.values()].some(n=>n>500))return false;
+  if(h.streams.some(s=>(s.kind==='fills'?(typeCounts.get(s.instType)??0):h.bills.length)>s.pages*100))return false;
   for(const b of h.bills){
     if(!exact(b,BILL_KEYS)||!BILL_KEYS.every(k=>typeof b[k]==='string')||!id(b.billId)||!(b.instType===''||OKX_HISTORY_TYPES.includes(b.instType))||
       !(b.instId===''||identifier(b.instId))||!text(b.type,/^[0-9]{1,4}$/)||!text(b.subType,/^[0-9]{0,4}$/)||!currency(b.ccy)||

@@ -82,7 +82,7 @@ struct OKXDeviceHistory: Codable, Equatable, Sendable {
               let inst = row["instId"], matches(inst, fill ? #"^[A-Z0-9_-]+$"# : #"^[A-Z0-9_-]*$"#, max: 80),
               let type = row["instType"], types.contains(type) || !fill && type.isEmpty else { return false }
         let numeric = fill ? ["fillPx", "fillSz", "fillPnl", "fee"] : ["pnl", "fee", "balChg", "sz", "px"]
-        guard numeric.allSatisfy({ row[$0].map(decimal) == true }) else { return false }
+        guard numeric.allSatisfy({ row[$0].map(decimal) == true }), !fill || !["fillPx", "fillSz"].contains(where: { row[$0]?.hasPrefix("-") == true }) else { return false }
         let ccy = row[fill ? "feeCcy" : "ccy"] ?? ""
         guard matches(ccy, fill ? #"^[A-Z0-9]*$"# : #"^[A-Z0-9]+$"#, max: 24) else { return false }
         if fill {
@@ -102,7 +102,7 @@ struct OKXDeviceHistory: Codable, Equatable, Sendable {
               let data = try? JSONSerialization.data(withJSONObject: obj), data.count <= 2 * 1024 * 1024,
               let h = try? JSONDecoder().decode(Self.self, from: data), h.version == 1,
               let startDate = date(h.windowStart), let endDate = date(h.windowEnd), endDate > startDate,
-              endDate.timeIntervalSince(startDate) <= 90 * 86400 + 1, h.streams.count == 7,
+              endDate.timeIntervalSince(startDate) <= 90 * 86400 + 0.001, h.streams.count == 7,
               h.fills.count <= 3000, h.bills.count <= 2000 else { return nil }
         let expected = Set(types.map { "fills:" + $0 } + ["bills:ALL"])
         guard Set(h.streams.map { $0.kind + ":" + $0.instType }) == expected,

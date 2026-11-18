@@ -32,12 +32,17 @@ test('strict history admission rejects duplicate identities, credentials, unsafe
   h=history();h.fills[0].ts=String(Date.parse(END)+1);cases.push(h);h=history();h.streams.pop();cases.push(h);
   h=history();h.streams[0].status='unavailable';cases.push(h);h=history();h.fills[0].fillPx='NaN';cases.push(h);
   h=history();h.windowStart='2025-01-01T00:00:00Z';cases.push(h);h=history();h.fills[0].billId=Number(h.fills[0].billId);cases.push(h);
+  h=history();h.fills=Array.from({length:101},(_,i)=>fill({billId:String(1000+i)}));cases.push(h);
+  h=history();h.streams.find(s=>s.instType==='SWAP').pages=0;cases.push(h);
+  h=history();h.windowStart=new Date(Date.parse(h.windowEnd)-91*86400000).toISOString();cases.push(h);
+  h=history();h.fills[0].fillSz='-1';cases.push(h);h=history();h.fills[0].fillPx='-1';cases.push(h);
   for(const x of cases){assert.equal(validOkxHistory(x),false);assert.throws(()=>okxPerformanceReport(x),/invalid_okx_history/);}
 });
 test('empty completed history is evidence of no observed rows, while sample/group caps are explicit',()=>{
   const empty=okxPerformanceReport(history({fills:[],bills:[]}));assert.equal(empty.coverage.complete,true);assert.equal(empty.totals.fills,0);
   const rows=Array.from({length:101},(_,i)=>fill({billId:String(1000+i),instId:'COIN'+i+'-USDT'}));
-  const r=okxPerformanceReport(history({fills:rows,bills:[]}));assert.equal(r.groups.fills.length,100);assert.equal(r.coverage.groupsTruncated,true);assert.equal(r.coverage.complete,false);assert.equal(r.sampleFills.length,10);
+  const h=history({fills:rows,bills:[]});h.streams.find(s=>s.instType==='SWAP').pages=2;
+  const r=okxPerformanceReport(h);assert.equal(r.groups.fills.length,100);assert.equal(r.coverage.groupsTruncated,true);assert.equal(r.coverage.complete,false);assert.equal(r.sampleFills.length,10);
 });
 test('digest retains original summary-only compatibility and binds every admitted history change',()=>{
   const summary={tradingEquityUsd:1,assetCount:2,positionCount:3},h=history(),d=okxDataDigest(summary,h);
