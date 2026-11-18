@@ -69,6 +69,10 @@ private actor API {
         case "/api/v5/account/config":rows=[["perm":permission]]
         case "/api/v5/account/balance":rows=[["totalEq":"1234.56","details":[["ccy":"BTC"],["ccy":"USDT"]]]]
         case "/api/v5/account/positions":rows=[["pos":"1"]]
+        case "/api/v5/trade/fills-history":
+            let type=URLComponents(url:request.url!,resolvingAgainstBaseURL:false)!.queryItems!.first(where:{$0.name=="instType"})!.value!
+            rows=type=="SPOT" ? [["billId":"80000000000000000001","tradeId":"9001","ordId":"9002","instType":"SPOT","instId":"BTC-USDT","side":"buy","posSide":"net","fillPx":"12.345678901234567890","fillSz":"1","fillPnl":"0","fee":"-0.0001","feeCcy":"BTC","ts":String(Int64(clock.now().timeIntervalSince1970*1000)),"tag":"strategyA"]] : []
+        case "/api/v5/account/bills-archive":rows=[]
         default:fatalError("unexpected external endpoint")
         }
         return(try JSONSerialization.data(withJSONObject:["code":"0","data":rows]),HTTPURLResponse(url:request.url!,statusCode:200,httpVersion:nil,headerFields:nil)!)
@@ -134,8 +138,8 @@ private actor API {
 @MainActor private final class World {
     let clock=Clock(),pair=Pair(),api:API,keys:Keys,storage:Records,host:Host
     init(keys:Keys?=nil,storage:Records?=nil,host:Host?=nil){self.keys=keys ?? Keys();self.storage=storage ?? Records();self.host=host ?? Host();api=API(clock)}
-    func coordinator()->PhoneSourceCoordinator{
-        let client=OKXDeviceClient(transport:{[api]request,limit in try await api.response(request,limit)},now:{[clock]in clock.now()})
+    func coordinator(history:Bool=false)->PhoneSourceCoordinator{
+        let client=OKXDeviceClient(transport:{[api]request,limit in try await api.response(request,limit)},now:{[clock]in clock.now()},includeHistory:history,historyDelayNanoseconds:0)
         return PhoneSourceCoordinator(client:client,transport:{[host]in try await host.call($0)},keychain:keys,storage:storage,connection:{[pair]in pair.value},protectedDataAvailable:{[pair]in pair.unlocked},now:{[clock]in clock.now()})
     }
 }
@@ -350,6 +354,49 @@ private actor API {
         v.keys.deletionFails=false
         check(try await vc.disconnect(goalID:"g_fixture"),"disconnected","received")
         precondition(v.host.rotations==1 && v.host.records["g_fixture"]!.phase=="disconnected")
+        // Real production history collection commits with summary and the same durable
+        // event; status never exposes raw history. Restart retains exact event identity.
+        let historyWorld=World(),historyCoordinator=historyWorld.coordinator(history:true)
+        check(try await connected(historyCoordinator),"connected","received")
+        let storedHistory=historyWorld.storage.record()["history"] as! [String:Any]
+        precondition(OKXDeviceHistory.decode(storedHistory)?.fills.count==1)
+        let sameCredentials=historyWorld.keys.values.count
+        historyWorld.host.offline=true
+        historyWorld.clock.advance(70)
+        check(try await historyCoordinator.refresh(goalID:"g_fixture"),"connected","pending")
+        let historyPending=historyWorld.storage.record()["pending"] as! [[String:Any]]
+        let queuedID=historyPending.first!["event_id"] as! String
+        precondition((historyPending.first!["body"] as! [String:Any])["history"] != nil)
+        let restartedHistory=historyWorld.coordinator(history:true)
+        historyWorld.host.offline=false
+        check(try await restartedHistory.status(goalID:"g_fixture"),"connected","received")
+        precondition(historyWorld.host.records["g_fixture"]!.events[queuedID] != nil && historyWorld.keys.values.count==sameCredentials)
+        check(try await restartedHistory.disconnect(goalID:"g_fixture"),"disconnected","received")
+        precondition(historyWorld.storage.record()["history"]==nil && historyWorld.keys.values.isEmpty)
+
+        let migrated=World(),oldScalar=migrated.coordinator()
+        _=try await connected(oldScalar)
+        let oldKeyAccounts=Set(migrated.keys.values.keys)
+        let upgraded=migrated.coordinator(history:true)
+        check(try await upgraded.refresh(goalID:"g_fixture"),"connected","received")
+        precondition(migrated.host.rotations==1 && Set(migrated.keys.values.keys)==oldKeyAccounts && migrated.storage.record()["history"] != nil)
+        let rejectedHistory=World(),rejectedCoordinator=rejectedHistory.coordinator(history:true)
+        _=try await connected(rejectedCoordinator);rejectedHistory.host.terminal="stale"
+        do{_=try await rejectedCoordinator.refresh(goalID:"g_fixture");fatalError("terminal history receipt must invalidate grant")}catch{precondition(error as?PhoneSourceCoordinatorError == .authorizationChanged)}
+        let stoppedText=String(data:try JSONSerialization.data(withJSONObject:rejectedHistory.storage.record()),encoding:.utf8)!
+        precondition(!stoppedText.contains("\"history\"") && !stoppedText.contains("80000000000000000001") && rejectedHistory.keys.values.isEmpty)
+
+        // Old HealthKit/scalar users retain64KiB; OKX explicitly opts into a
+        // bounded larger durable queue. Backpressure never drops its older event.
+        let big:[String:Any]=["event_id":"history-event","body":["data":String(repeating:"x",count:70000)]]
+        var queue:[String:Any]=["pending":[]]
+        do{try DeviceEventQueue.append(big,to:&queue);fatalError("default queue must keep its64KiB limit")}catch{}
+        try DeviceEventQueue.append(big,to:&queue,maxEventBytes:2_300_000,maxPendingBytes:100000)
+        do{try DeviceEventQueue.append(["event_id":"second-history","body":big["body"]!],to:&queue,maxEventBytes:2_300_000,maxPendingBytes:100000);fatalError("queue budget must reject without discarding")}catch{}
+        precondition((queue["pending"] as! [[String:Any]]).count==1)
+        precondition(DeviceEventQueue.advance(&queue,receipt:["event_id":"history-event","status":"stale"],maxHeldBytes:5000) == .held)
+        precondition((queue["held"] as! [[String:Any]]).isEmpty)
+        print("history persistence, offline restart, same-event receipt, privacy, revoke and byte-budget passed")
         print("phone source crash recovery, same-id delivery, scoped secrets, terminal receipts, revocation races and foreground backoff passed")
     }
 }

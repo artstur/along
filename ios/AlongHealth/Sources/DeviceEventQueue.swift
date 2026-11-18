@@ -15,22 +15,26 @@ enum DeviceEventQueue {
         }
     }
 
-    static func append(_ event: [String: Any], to state: inout [String: Any], maxPending: Int = 200) throws {
+    static func append(_ event: [String: Any], to state: inout [String: Any], maxPending: Int = 200, maxEventBytes: Int = 64 * 1024, maxPendingBytes: Int? = nil) throws {
         guard let id = event["event_id"] as? String, !id.isEmpty else { throw QueueError.invalidEvent }
         let bytes = try JSONSerialization.data(withJSONObject: event, options: [.sortedKeys])
-        guard bytes.count <= 64 * 1024 else { throw QueueError.invalidEvent }
+        guard maxEventBytes > 0, maxEventBytes <= 2_300_000, bytes.count <= maxEventBytes else { throw QueueError.invalidEvent }
         var pending = state["pending"] as? [[String: Any]] ?? []
         if let prior = pending.first(where: { $0["event_id"] as? String == id }) {
             guard try JSONSerialization.data(withJSONObject: prior, options: [.sortedKeys]) == bytes else { throw QueueError.conflict }
             return
         }
         guard pending.count < maxPending else { throw QueueError.full }
+        if let maxPendingBytes {
+            guard maxPendingBytes > 0, maxPendingBytes <= 8 * 1024 * 1024,
+                  try JSONSerialization.data(withJSONObject: pending + [event], options: [.sortedKeys]).count <= maxPendingBytes else { throw QueueError.full }
+        }
         pending.append(event)
         state["pending"] = pending
     }
 
     @discardableResult
-    static func advance(_ state: inout [String: Any], receipt: [String: Any]) -> Receipt {
+    static func advance(_ state: inout [String: Any], receipt: [String: Any], maxHeldBytes: Int? = nil) -> Receipt {
         var pending = state["pending"] as? [[String: Any]] ?? []
         guard let first = pending.first else { return .retry }
         let result = disposition(event: first, receipt: receipt)
@@ -38,7 +42,11 @@ enum DeviceEventQueue {
         if result == .held {
             var held = state["held"] as? [[String: Any]] ?? []
             held.append(["event": first, "receipt": receipt])
-            state["held"] = Array(held.suffix(100))
+            held = Array(held.suffix(100))
+            if let maxHeldBytes {
+                while !held.isEmpty && ((try? JSONSerialization.data(withJSONObject: held).count) ?? Int.max) > maxHeldBytes { held.removeFirst() }
+            }
+            state["held"] = held
         }
         pending.removeFirst()
         state["pending"] = pending
