@@ -544,7 +544,7 @@ test('a finance goal from the real event workspace is not falsely labeled as dem
 
 test('execution-v1 ACKed private history replays the same result and current proof without losing drafts or repeating an alert',async()=>{
  const wire=snapshot(),goal=safeWorkspaceGoal(wire),key='along.event-workspace.v1:'+config.userId,event='followup_due_history';
- const seed={version:1,recommendationsVersion:1,conversationVersion:1,dataSourcesVersion:1,taskCapabilityVersion:1,executionVersion:1,userId:config.userId,cursor:109,activeGoalId:goal.id,conversationId:null,returnGoalId:null,goals:{[goal.id]:goal},messages:{},drafts:{'goal:g_sleep':'保留策略草稿'},notificationReceipts:[event]};
+ const seed={version:1,recommendationsVersion:1,conversationVersion:1,dataSourcesVersion:1,taskCapabilityVersion:1,executionVersion:1,executionReplayAfter:80,userId:config.userId,cursor:109,activeGoalId:goal.id,conversationId:null,returnGoalId:null,goals:{[goal.id]:goal},messages:{},drafts:{'goal:g_sleep':'保留策略草稿'},notificationReceipts:[event]};
  installDomStub({storage:{[key]:JSON.stringify(seed)}});wire.tasks[0].status='done';wire.tasks[0].execution={version:1,count:1,records:[{id:'actual_history_exec',kind:'research',executedAt:new Date().toISOString(),outcome:'researched',recommendationEventId:event}]};
  const calls=[],notices=[];window.AlongAgentBridge={request:async input=>{
   calls.push(input);if(input.path==='/sync')return {items:input.body.after_seq===0?[{seq:109,userId:config.userId,goalId:goal.id,taskId:'t_sleep',kind:'message',createdAt:new Date().toISOString(),remoteNotifications:false,payload:{snapshot:wire,task_execution_revision:1,notification:{kind:'task_result',event_id:event,revision:1},message:{id:'history_msg',eventId:event,role:'assistant',direction:'outbound',text:'合成历史成本与规则缺口',seq:1,audience:'background'}}}]:[]};if(input.path==='/sync/ack')return {acked:input.body.seqs.length};throw Error(input.path);
@@ -554,4 +554,13 @@ test('execution-v1 ACKed private history replays the same result and current pro
  assert.equal(w.draft(),'保留策略草稿');assert.equal(notices.flatMap(x=>x.results).length,0);assert.equal(JSON.parse(localStorage.getItem(key)).cursor,109);assert.equal(JSON.parse(localStorage.getItem(key)).executionVersion,2);
  await w.sync();assert.deepEqual(calls.filter(c=>c.path==='/sync').map(c=>c.body.after_seq),[0,109]);assert.equal(calls.some(c=>c.path==='/events'),false);
  const restored=createEventWorkspace({config});assert.equal(restored.view().messages.find(x=>x.eventId===event).notificationRevision,1);assert.equal(restored.draft(),'保留策略草稿');assert.equal(restored.view().goals[goal.id].tasks[0].execution.count,1);
+});
+
+test('only this projection version can resume its interrupted execution replay cursor',async()=>{
+ const goal=safeWorkspaceGoal(snapshot()),key='along.event-workspace.v1:'+config.userId;
+ for(const marker of [undefined,1,2]){
+  const saved={version:1,recommendationsVersion:1,conversationVersion:1,dataSourcesVersion:1,taskCapabilityVersion:1,executionVersion:1,executionReplayAfter:40,...(marker?{executionReplayVersion:marker}:{}),userId:config.userId,cursor:109,activeGoalId:goal.id,conversationId:null,goals:{[goal.id]:goal},messages:{},drafts:{}};
+  installDomStub({storage:{[key]:JSON.stringify(saved)}});const after=[];window.AlongAgentBridge={request:async r=>{if(r.path==='/sync'){after.push(r.body.after_seq);return {items:[]};}if(r.path==='/sync/ack')return {acked:0};throw Error(r.path);}};
+  const w=createEventWorkspace({config});await w.sync();assert.equal(after[0],marker===2?40:0);const cache=JSON.parse(localStorage.getItem(key));assert.equal(cache.executionVersion,2);assert.equal(cache.executionReplayVersion,undefined);
+ }
 });
