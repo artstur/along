@@ -1,7 +1,7 @@
 import {createHash,randomBytes} from 'node:crypto';
 import {constants,openSync,closeSync,readFileSync,writeFileSync,mkdirSync,lstatSync,fstatSync,chmodSync,renameSync,unlinkSync,fsyncSync} from 'node:fs';
 import {resolve,join} from 'node:path';
-import {validOkxHistory,okxDataDigest} from './okx-history.mjs';
+import {validOkxHistory,okxDataDigest,hasOkxHistory} from './okx-history.mjs';
 
 const QUEUES=new Map(),ID=/^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$/,GRANT=/^[a-f0-9]{64}$/;
 const validId=x=>typeof x==='string'&&ID.test(x);
@@ -31,7 +31,7 @@ export function createDeviceSourceGateway({dir,journal,now=Date.now}={}) {
   function scope(userId,goalId){if(!validId(userId??'')||!validId(goalId??''))fail('invalid_request');return join(root,hash([userId,goalId,'okx'])+'.json');}
   function directory(){mkdirSync(root,{recursive:true,mode:0o700});const s=lstatSync(root);if(!s.isDirectory()||s.isSymbolicLink()||!owner(s))fail('storage_unavailable');chmodSync(root,0o700);}
   function validMetadata(m,r){return exact(m,['connectionId','version','state','observedAt','digest','capabilities'])&&m.connectionId===r.grantId&&Number.isSafeInteger(m.version)&&m.version>0&&m.version===r.sequence&&['ready','disconnected','revoked','unavailable'].includes(m.state)&&iso(m.observedAt)&&(m.state!=='ready'||typeof m.digest==='string'&&/^[a-f0-9]{64}$/.test(m.digest))&&
-    (m.capabilities===undefined||JSON.stringify(m.capabilities)===JSON.stringify(r.history?['trading_account_summary','trading_history']:['trading_account_summary']));}
+    (m.capabilities===undefined||['["trading_account_summary"]','["trading_account_summary","trading_history"]'].includes(JSON.stringify(m.capabilities)));}
   function validRecord(r,userId,goalId){
     return r?.version===1&&r.userId===userId&&r.goalId===goalId&&validId(r.deviceId??'')&&GRANT.test(r.grantId??'')&&['pending','connected','disconnected'].includes(r.state)&&Number.isSafeInteger(r.sequence)&&r.sequence>=0&&
       object(r.opens)&&Object.keys(r.opens).length<=2048&&Object.entries(r.opens).every(([id,o])=>validId(id)&&exact(o,['grantId','deviceId'])&&GRANT.test(o.grantId??'')&&validId(o.deviceId??''))&&
@@ -39,8 +39,9 @@ export function createDeviceSourceGateway({dir,journal,now=Date.now}={}) {
       validOrder(r.openOrder,r.opens)&&validOrder(r.eventOrder,r.events)&&
       (r.sourceStamp===null||stamp(r.sourceStamp))&&['pending','accepted','stale'].includes(r.admission)&&r.provenance==='ios-native-device-report'&&
       (r.metadata===null?r.state==='pending':validMetadata(r.metadata,r))&&
-      (r.history===undefined||validOkxHistory(r.history,r.observedAt)&&r.metadata?.capabilities?.includes('trading_history'))&&
-      (r.state!=='connected'||r.metadata?.state==='ready'&&validSummary(r.summary)&&digest(r.summary,r.history)===r.metadata.digest&&iso(r.observedAt)&&r.observedAt===r.metadata.observedAt&&r.permission==='read_only');
+      (r.history===undefined||validOkxHistory(r.history,r.observedAt))&&
+      (r.state!=='connected'||r.metadata?.state==='ready'&&validSummary(r.summary)&&digest(r.summary,r.history)===r.metadata.digest&&iso(r.observedAt)&&r.observedAt===r.metadata.observedAt&&r.permission==='read_only'&&
+        (r.metadata.capabilities===undefined&&!r.history||JSON.stringify(r.metadata.capabilities)===JSON.stringify(hasOkxHistory(r.history)?['trading_account_summary','trading_history']:['trading_account_summary'])));
   }
   function read(userId,goalId){let fd;try{directory();fd=openSync(scope(userId,goalId),constants.O_RDONLY|constants.O_NOFOLLOW);const s=fstatSync(fd);if(!s.isFile()||s.nlink!==1||!owner(s)||(s.mode&0o077)!==0||s.size>16*1024*1024)fail('storage_unavailable');const r=JSON.parse(readFileSync(fd,'utf8'));if(!validRecord(r,userId,goalId))fail('storage_unavailable');return r;}catch(e){if(e?.code==='ENOENT')return null;if(e instanceof DeviceSourceError)throw e;fail('storage_unavailable');}finally{if(fd!==undefined)closeSync(fd);}}
   function write(r){
@@ -152,7 +153,7 @@ export function createDeviceSourceGateway({dir,journal,now=Date.now}={}) {
           await absent(next,{stillAuthorized,sequence:command.sequence});return receipt('accepted');
         }
         await authorized(stillAuthorized);
-        const metadata={connectionId:r.grantId,version:command.sequence,state:'ready',observedAt:command.observedAt,digest:digest(command.summary,command.history),...(command.history?{capabilities:['trading_account_summary','trading_history']}: {})};
+        const metadata={connectionId:r.grantId,version:command.sequence,state:'ready',observedAt:command.observedAt,digest:digest(command.summary,command.history),...(command.history?{capabilities:hasOkxHistory(command.history)?['trading_account_summary','trading_history']:['trading_account_summary']}: {})};
         if(command.history)next.history=copy(command.history);else delete next.history;
         Object.assign(next,{state:'connected',summary:{...command.summary},observedAt:command.observedAt,sourceStamp:null,metadata,admission:'pending',permission:'read_only',provenance:'ios-native-device-report'});
         write(next); // An admitted native fact is durable before it can enter the common source journal.

@@ -208,7 +208,8 @@ export function createSourceEventBridge({journal,connection,bridge,endpoint,iden
    let canRead;try{canRead=!!providers[provider]&&await allowed(who,request.goal_id,provider);}catch(e){report(e);}
    if(!active(who))return;
    const known=journal.current(who.userId,request.goal_id,provider);
-   if(canRead===false||known&&(known.generation!==request.generation||['revoked','disconnected'].includes(known.state)))result.state='denied';
+   if(canRead===false||known&&(known.generation!==request.generation||['revoked','disconnected'].includes(known.state)||
+     !(known.capabilities??['trading_account_summary']).includes(request.capability)))result.state='denied';
    else if(canRead===true)try{
     const value=await snapshot(who,request.goal_id,provider),stamp=value?.sourceStamp;
     if(!value||!validSourceStamp(stamp))result.state='unavailable';
@@ -230,7 +231,7 @@ export function createSourceEventBridge({journal,connection,bridge,endpoint,iden
    if(result.state==='ready'){
     const allowedNow=await allowed(who,request.goal_id,provider),current=journal.current(who.userId,request.goal_id,provider);
     if(!active(who))return;
-    if(!allowedNow||current?.state!=='ready'||current.generation!==result.generation||current.revision!==result.revision||current.reference!==result.reference){
+    if(!allowedNow||current?.state!=='ready'||current.generation!==result.generation||current.revision!==result.revision||current.reference!==result.reference||!(current.capabilities??['trading_account_summary']).includes(request.capability)){
      result={request_id:request.request_id,state:'denied',generation:request.generation,revision:request.revision,observed_at:new Date(now()).toISOString(),reference:ref};
     }
    }

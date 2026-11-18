@@ -12,12 +12,14 @@ const date=x=>typeof x==='string'&&x.length<=40&&/^\d{4}-\d\d-\d\dT/.test(x)&&Nu
 const currency=x=>text(x,/^[A-Z0-9]{1,24}$/);
 const identifier=x=>text(x,/^[A-Z0-9_-]{1,80}$/);
 const id=x=>text(x,/^[0-9]{1,64}$/);
+const tradeId=x=>x===''||text(x,/^-?[0-9]{1,64}$/);
 const optionalId=x=>x===''||id(x);
 const timestamp=(x,start,end)=>text(x,/^[0-9]{13}$/)&&Number(x)>=start&&Number(x)<=end;
 const canonical=x=>Array.isArray(x)?'['+x.map(canonical).join(',')+']':plain(x)?'{'+Object.keys(x).sort().map(k=>JSON.stringify(k)+':'+canonical(x[k])).join(',')+'}':JSON.stringify(x);
 export const okxDataDigest=(summary,history)=>createHash('sha256').update(history===undefined
   ?JSON.stringify([summary.tradingEquityUsd,summary.assetCount,summary.positionCount])
   :canonical({summary,history})).digest('hex');
+export const hasOkxHistory=h=>!!h&&(h.fills.length>0||h.bills.length>0||h.streams.some(s=>s.status==='complete'));
 
 /** Exact normalized private contract. Provider responses, URLs and secrets are never accepted. */
 export function validOkxHistory(h,observedAt=h?.windowEnd){
@@ -36,7 +38,7 @@ export function validOkxHistory(h,observedAt=h?.windowEnd){
   }
   const seenFills=new Set(),seenBills=new Set(),typeCounts=new Map();
   for(const f of h.fills){
-    if(!exact(f,FILL_KEYS)||!FILL_KEYS.every(k=>typeof f[k]==='string')||!id(f.billId)||!optionalId(f.tradeId)||!optionalId(f.ordId)||
+    if(!exact(f,FILL_KEYS)||!FILL_KEYS.every(k=>typeof f[k]==='string')||!id(f.billId)||!tradeId(f.tradeId)||!optionalId(f.ordId)||
       !OKX_HISTORY_TYPES.includes(f.instType)||!identifier(f.instId)||!['buy','sell'].includes(f.side)||!['','net','long','short'].includes(f.posSide)||
       !['fillPx','fillSz','fillPnl','fee'].every(k=>numeric(f[k]))||!(f.feeCcy===''||currency(f.feeCcy))||
       !timestamp(f.ts,start,end)||!text(f.tag,/^[A-Za-z0-9_-]{0,32}$/)||seenFills.has(f.billId))return false;

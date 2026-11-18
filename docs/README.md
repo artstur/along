@@ -9,6 +9,7 @@
 | 两工程分工、当前能力与待验事项 | [架构与开发入口](agent-architecture.md) | 实现状态的导航，不替代逐端验收 |
 | 一条命令启动、事件聊天与自动生效 | [阶段 B](stage-b-tech-design.md) | 含运行步骤及当时的最小闭环验收 |
 | 授权健康摘要、可靠补传与自动跟进 | [阶段 C](stage-c-tech-design.md) | 自动测试、合成模型与真机证据分列 |
+| iPhone OKX 只读成交、账单与复盘口径 | [历史接入契约](okx-trade-history.md) | 明细私有、窗口与分页覆盖、分币种确定性报告 |
 | iPhone 安装、桥接、HealthKit 与签名 | [iPhone README](../ios/README.md) | 系统和设备要求以当前工具链为准 |
 | Agent 运行时、派工及长期记忆 | [Along Agent 当前运行图](https://github.com/artstur/along-superagent/blob/main/docs/along/009-current-runtime.md) | 在独立 Agent 仓库维护 |
 

@@ -58,3 +58,19 @@ test('strict native admission never upgrades a malformed/credential-bearing hist
   await assert.rejects(f.publish(1,{history:h}),e=>e.code==='invalid_request');await f.pump.pump();assert.ok(!f.state.events.some(e=>e.capabilities.includes('trading_history')));
   assert.equal((await f.handle({action:'status'})).state,'pending');
 });
+test('journal revocation of history remains readable across repeated recovery and permits a new connection',async t=>{
+  const f=await fixture(t);await f.publish(1,{history:history()});
+  const stamp=f.journal.prepareAbsent({userId:WHO.userId,goalId:GOAL,state:'revoked'});
+  f.journal.commitAbsent({userId:WHO.userId,goalId:GOAL,stamp});
+  assert.equal((await f.handle({action:'status'})).state,'disconnected');f.restart();
+  assert.equal((await f.handle({action:'status'})).state,'disconnected');
+  const next=await f.handle({action:'open',requestId:'reopen_history',expectedGrantId:f.grantId});
+  assert.equal(next.state,'pending');assert.notEqual(next.grantId,f.grantId);
+});
+test('all history endpoints failing cannot advertise a ready history capability or fulfill a queued history read',async t=>{
+  const f=await fixture(t);const h=history({fills:[],bills:[]});h.streams=h.streams.map(s=>({...s,status:'unavailable',reason:'api_unavailable',pages:0}));
+  await f.publish(1,{history:h});await f.pump.pump();f.restart();
+  assert.deepEqual(f.state.events.at(-1).capabilities,['trading_account_summary']);
+  assert.equal((await f.read('trading_history','unavailable_history')).state,'denied');
+  assert.deepEqual((await f.read('trading_account_summary','available_summary')).data,SUMMARY);
+});
