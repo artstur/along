@@ -5,6 +5,8 @@ const event=x=>typeof x==='string'&&/^[A-Za-z0-9_.:-]{1,200}$/.test(x);
 export function resultEvidence(payload) {
   if(receipt(payload?.calculation_receipt_id))return {kind:'calculation',id:payload.calculation_receipt_id};
   const r=payload?.recommendation,n=payload?.notification;
+  if(n?.kind==='task_result'&&event(n.event_id)&&Number.isSafeInteger(payload.task_execution_revision)&&payload.task_execution_revision>0)
+    return {kind:'research',id:n.event_id};
   return r?.version===1&&Array.isArray(r.sources)&&r.sources.length>0&&event(n?.event_id)
     ?{kind:'research',id:n.event_id}:undefined;
 }
@@ -24,4 +26,18 @@ export function taskResultRelevant(route,goal,task) {
     execution.records.some(r=>e.kind==='calculation'
       ?r.kind==='calculation'&&r.outcome==='calculated'&&r.calculationReceiptId===e.id
       :r.kind==='research'&&r.outcome==='researched'&&r.recommendationEventId===e.id);
+}
+
+// Unlike legacy open-task alerts, a plain private body always needs a durable execution link.
+export function taskResultBodyRelevant(message,goal,task) {
+  const e=message?.resultEvidence;
+  if(message?.role!=='assistant'||message.status!=='received'||message.audience!=='background'||
+    message.goalId!==goal?.id||message.taskId!==task?.id||!validResultEvidence(e)||
+    !event(message.notificationEventId)||message.notificationEventId!==message.eventId||
+    !Number.isSafeInteger(message.notificationRevision)||message.notificationRevision<1)return false;
+  if(!taskResultRelevant({goalId:message.goalId,taskId:message.taskId,revision:message.notificationRevision,kind:'task_result',evidence:e},goal,task))return false;
+  const x=task.execution;
+  return x?.version===1&&Number.isSafeInteger(x.count)&&x.count>0&&Array.isArray(x.records)&&x.records.some(r=>
+    e.kind==='calculation'?r.kind==='calculation'&&r.outcome==='calculated'&&r.calculationReceiptId===e.id:
+      r.kind==='research'&&r.outcome==='researched'&&r.recommendationEventId===e.id);
 }

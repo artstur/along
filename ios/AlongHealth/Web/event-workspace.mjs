@@ -11,7 +11,7 @@ const record = value => value!==null && typeof value==='object' && !Array.isArra
 const text = (value,max) => typeof value==='string' && value.trim().length>0 && value.length<=max;
 const version = value => Number.isSafeInteger(value) && value>=0;
 const time = value => typeof value==='string' && Number.isFinite(Date.parse(value));
-const empty = userId => ({version:1,recommendationsVersion:1,conversationVersion:1,dataSourcesVersion:1,executionVersion:1,taskCapabilityVersion:1,userId,cursor:0,goals:{},messages:{},drafts:{},activeGoalId:null,conversationId:null,returnGoalId:null});
+const empty = userId => ({version:1,recommendationsVersion:1,conversationVersion:1,dataSourcesVersion:1,executionVersion:2,taskCapabilityVersion:1,userId,cursor:0,goals:{},messages:{},drafts:{},activeGoalId:null,conversationId:null,returnGoalId:null});
 
 function absoluteReminderTime(value) {
   if (!time(value)||!/^\d{4}-\d\d-\d\dT(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)$/.test(value)) return false;
@@ -160,7 +160,9 @@ function safeMessage(message,item) {
     ...(item.goalId&&id(item.taskId)?{taskId:item.taskId}:{}),
     ...(message.role==='assistant'&&item.goalId&&safeRecommendation(item.payload.recommendation)?{recommendation:safeRecommendation(item.payload.recommendation)}:{}),
     notificationEventId:eventId(item.payload.notification?.event_id)&&['recommendation_ready','task_result'].includes(item.payload.notification.kind)
-      ?item.payload.notification.event_id:undefined,status:'received'};
+      ?item.payload.notification.event_id:undefined,
+    ...(version(item.payload.notification?.revision)?{notificationRevision:item.payload.notification.revision}:{}),
+    ...(resultEvidence(item.payload)?{resultEvidence:resultEvidence(item.payload)}:{}),status:'received'};
 }
 
 const freshResult = value => {
@@ -211,6 +213,8 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
           const r=message.role==='assistant'&&message.goalId&&safeRecommendation(message.recommendation);
           if (r) message.recommendation=r; else delete message.recommendation;
         }
+        if(message.resultEvidence!==undefined&&!validResultEvidence(message.resultEvidence))delete message.resultEvidence;
+        if(message.notificationRevision!==undefined&&!version(message.notificationRevision))delete message.notificationRevision;
         if (message.taskId!==undefined&&(!id(message.taskId)||!saved.goals[message.goalId]?.tasks.some(t=>t.id===message.taskId))) delete message.taskId;
         if (message.conversationId!==undefined&&!id(message.conversationId)) {
           // Older versions used the receipt's own event ID when the sender supplied no conversation.
@@ -232,7 +236,7 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
       if (saved.recommendationsVersion!==1&&(!version(saved.recommendationReplayAfter)||saved.recommendationReplayAfter>saved.cursor)) saved.recommendationReplayAfter=0;
       if (saved.conversationVersion!==1&&(!version(saved.conversationReplayAfter)||saved.conversationReplayAfter>saved.cursor)) saved.conversationReplayAfter=0;
       if (saved.taskCapabilityVersion!==1&&(!version(saved.taskCapabilityReplayAfter)||saved.taskCapabilityReplayAfter>saved.cursor)) saved.taskCapabilityReplayAfter=0;
-      if (saved.executionVersion!==1&&(!version(saved.executionReplayAfter)||saved.executionReplayAfter>saved.cursor)) saved.executionReplayAfter=0;
+      if (saved.executionVersion!==2&&(!version(saved.executionReplayAfter)||saved.executionReplayAfter>saved.cursor)) saved.executionReplayAfter=0;
       if (saved.dataSourcesVersion!==1&&(!version(saved.dataSourcesReplayAfter)||saved.dataSourcesReplayAfter>saved.cursor)) saved.dataSourcesReplayAfter=0;
       state=saved;
       if (migratedReceipt) {
@@ -363,11 +367,11 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
       // Replay once from the durable outbox, preserving the acknowledged cursor and drafts.
       const replayConversation=state.conversationVersion!==1;
       const replaySources=state.dataSourcesVersion!==1;
-      const replay=state.recommendationsVersion!==1||replayConversation||replaySources||state.executionVersion!==1||state.taskCapabilityVersion!==1;
+      const replay=state.recommendationsVersion!==1||replayConversation||replaySources||state.executionVersion!==2||state.taskCapabilityVersion!==1;
       // An older migration may already be part-way through. A newly added projection
       // still needs its earlier pages, so all pending migrations share the earliest cursor.
       const replayCursors=[...(state.recommendationsVersion!==1?[state.recommendationReplayAfter??0]:[]),
-        ...(replayConversation?[state.conversationReplayAfter??0]:[]),...(replaySources?[state.dataSourcesReplayAfter??0]:[]),...(state.executionVersion!==1?[state.executionReplayAfter??0]:[]),...(state.taskCapabilityVersion!==1?[state.taskCapabilityReplayAfter??0]:[])];
+        ...(replayConversation?[state.conversationReplayAfter??0]:[]),...(replaySources?[state.dataSourcesReplayAfter??0]:[]),...(state.executionVersion!==2?[state.executionReplayAfter??0]:[]),...(state.taskCapabilityVersion!==1?[state.taskCapabilityReplayAfter??0]:[])];
       const after=replay?Math.min(...replayCursors):state.cursor;
       const page=await agentCall(config,'/sync',{after_seq:after,limit:50,conversation_version:1,
         ...(onNotifications?{notificationFallback:true,notificationReceipts:receipts}:{})});
@@ -385,7 +389,7 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
       if (receipts.length) next.notificationReceipts=next.notificationReceipts.filter(id=>!receipts.includes(id));
       if (page.items.length===0) {
         if (page.nextCursor!==undefined) throw Error('同步分页游标不正确');
-        if (replay) {next.recommendationsVersion=1;next.conversationVersion=1;next.dataSourcesVersion=1;next.executionVersion=1;next.taskCapabilityVersion=1;delete next.taskCapabilityReplayAfter;delete next.recommendationReplayAfter;delete next.conversationReplayAfter;delete next.dataSourcesReplayAfter;delete next.executionReplayAfter;}
+        if (replay) {next.recommendationsVersion=1;next.conversationVersion=1;next.dataSourcesVersion=1;next.executionVersion=2;next.taskCapabilityVersion=1;delete next.taskCapabilityReplayAfter;delete next.recommendationReplayAfter;delete next.conversationReplayAfter;delete next.dataSourcesReplayAfter;delete next.executionReplayAfter;}
         if (replay||fallbacks.length||receipts.length) save(next);
         break;
       }
@@ -423,8 +427,8 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
       restoreSelection(next);
       next.cursor=Math.max(next.cursor,previous);next.pendingAck=seqs;
       if (replay) {
-        if (page.nextCursor===undefined) {next.recommendationsVersion=1;next.conversationVersion=1;next.dataSourcesVersion=1;next.executionVersion=1;next.taskCapabilityVersion=1;delete next.taskCapabilityReplayAfter;delete next.recommendationReplayAfter;delete next.conversationReplayAfter;delete next.dataSourcesReplayAfter;delete next.executionReplayAfter;}
-        else {next.recommendationReplayAfter=previous;if(replayConversation)next.conversationReplayAfter=previous;if(replaySources)next.dataSourcesReplayAfter=previous;if(state.executionVersion!==1)next.executionReplayAfter=previous;if(state.taskCapabilityVersion!==1)next.taskCapabilityReplayAfter=previous;}
+        if (page.nextCursor===undefined) {next.recommendationsVersion=1;next.conversationVersion=1;next.dataSourcesVersion=1;next.executionVersion=2;next.taskCapabilityVersion=1;delete next.taskCapabilityReplayAfter;delete next.recommendationReplayAfter;delete next.conversationReplayAfter;delete next.dataSourcesReplayAfter;delete next.executionReplayAfter;}
+        else {next.recommendationReplayAfter=previous;if(replayConversation)next.conversationReplayAfter=previous;if(replaySources)next.dataSourcesReplayAfter=previous;if(state.executionVersion!==2)next.executionReplayAfter=previous;if(state.taskCapabilityVersion!==1)next.taskCapabilityReplayAfter=previous;}
       }
       save(next);onChange();
       // Cache commit precedes ack. A failed ack is retried before pulling further, without replaying data.
