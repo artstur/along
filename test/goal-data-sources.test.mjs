@@ -91,7 +91,7 @@ test('new execution history replays from zero even when recommendation replay is
   assert.deepEqual(requested,[0]);
   assert.equal(ws.view().goals.g_okx.tasks[0].execution.count,1);
   const cache=JSON.parse(localStorage.getItem('along.event-workspace.v1:'+config.userId));
-  assert.equal(cache.executionVersion,1);assert.equal(cache.cursor,10);
+  assert.equal(cache.executionVersion,2);assert.equal(cache.cursor,10);
 });
 
 test('the real goal page renders an OKX connection button without claiming authorization',async()=>{
