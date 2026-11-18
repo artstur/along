@@ -37,10 +37,59 @@ function summaryWindowReason(window) {
   return null;
 }
 
+// Mirrors Along Agent health-context.ts: optional typed aggregates, never arbitrary HealthKit payloads.
+function summaryContextReason(summary) {
+  const context = summary.context;
+  if (context === undefined) return null;
+  if (!isRecord(context) || summary.summarizer_version !== 'along-health-v1') return '摘要上下文类型或来源无效';
+  const boundedTime = value => textBetween(value, 1, 64) && isTime(value);
+  const number = (value, max) => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= max;
+  const count = value => number(value, 10000) && Number.isInteger(value);
+  const keysWithin = (value, keys) => Object.keys(value).every(key => keys.includes(key));
+  let observedTimes;
+  if (summary.type === 'sleep') {
+    const fields = ['windowDays', 'daysWithData', 'averageThroughAt', 'latestWindowOpen', 'averageMinutes',
+      'latestNightMinutes', 'previousNightMinutes', 'latestSleepStartAt', 'latestWakeAt'];
+    if (!keysWithin(context, fields) || context.windowDays !== 7 || !Number.isInteger(context.daysWithData)
+      || context.daysWithData < 0 || context.daysWithData > 7 || !boundedTime(context.averageThroughAt)
+      || typeof context.latestWindowOpen !== 'boolean') return '睡眠汇总上下文无效';
+    for (const key of ['averageMinutes', 'latestNightMinutes', 'previousNightMinutes']) {
+      if (context[key] !== undefined && context[key] !== null && !number(context[key], 1440)) return '睡眠汇总分钟无效';
+    }
+    for (const key of ['latestSleepStartAt', 'latestWakeAt']) {
+      if (context[key] !== undefined && context[key] !== null && !boundedTime(context[key])) return '睡眠观测时间无效';
+    }
+    const start = context.latestSleepStartAt, end = context.latestWakeAt;
+    if (start && end && Date.parse(start) > Date.parse(end)) return '睡眠观测起止倒置';
+    if (isRecord(summary.window) && 'start' in summary.window && [start, end].some(value => value &&
+      (Date.parse(value) < Date.parse(summary.window.start) || Date.parse(value) > Date.parse(summary.window.end)))) {
+      return '睡眠观测不在对应统计窗内';
+    }
+    observedTimes = [context.averageThroughAt, start, end];
+  } else if (summary.type === 'workout') {
+    const fields = ['windowDays', 'weekStartAt', 'todayMinutes', 'todayCount', 'yesterdayMinutes', 'latestWorkoutAt', 'patterns'];
+    if (!keysWithin(context, fields) || context.windowDays !== 28 || !boundedTime(context.weekStartAt)
+      || !number(context.todayMinutes, 40320) || !count(context.todayCount) || !number(context.yesterdayMinutes, 40320)
+      || !boundedTime(context.latestWorkoutAt) || !Array.isArray(context.patterns) || context.patterns.length > 40) return '运动汇总上下文无效';
+    const patternFields = ['activity', 'weekday', 'hour', 'count', 'recentCount', 'averageMinutes', 'lastObservedAt'];
+    const activity = /^(?:yoga|walking|hiking|running|cycling|swimming|pilates|strength_training|hiit|traditionalStrengthTraining|traditional_strength_training|functionalStrengthTraining|functional_strength_training|highIntensityIntervalTraining|high_intensity_interval_training|healthkit_activity_[0-9]+)$/;
+    for (const pattern of context.patterns) {
+      if (!isRecord(pattern) || !keysWithin(pattern, patternFields) || typeof pattern.activity !== 'string' || !activity.test(pattern.activity)
+        || !Number.isInteger(pattern.weekday) || pattern.weekday < 1 || pattern.weekday > 7
+        || !Number.isInteger(pattern.hour) || pattern.hour < 0 || pattern.hour > 23 || !count(pattern.count)
+        || !count(pattern.recentCount) || pattern.recentCount > pattern.count || !number(pattern.averageMinutes, 40320)
+        || !boundedTime(pattern.lastObservedAt)) return '运动模式汇总无效';
+    }
+    observedTimes = [context.weekStartAt, context.latestWorkoutAt, ...context.patterns.map(pattern => pattern.lastObservedAt)];
+  } else return '该摘要类型不支持上下文';
+  if (observedTimes.some(value => value && Date.parse(value) > Date.parse(summary.metric_version))) return '汇总观测晚于采集时间';
+  return null;
+}
+
 function summaryReason(summary) {
   if (!isRecord(summary)) return 'summary 不是对象';
   const keys = Object.keys(summary).sort();
-  const allowed = ['availability', 'metric_version', 'statistic', 'summarizer_version', 'timezone', 'type', 'unit', 'value', 'window'];
+  const allowed = ['availability', 'context', 'metric_version', 'statistic', 'summarizer_version', 'timezone', 'type', 'unit', 'value', 'window'];
   for (const key of keys) if (!allowed.includes(key)) return `摘要带了多余字段 ${key}`;
   if (!textBetween(summary.type, 1, 64) || !textBetween(summary.metric_version, 1, 64)) return '摘要类型或版本无效';
   if (summary.unit !== undefined && !textBetween(summary.unit, 1, 16)) return '摘要单位无效';
@@ -49,6 +98,8 @@ function summaryReason(summary) {
   if (!textBetween(summary.summarizer_version, 1, 64)) return '摘要器版本无效';
   if (!AVAILABILITIES.includes(summary.availability)) return '摘要可用性无效';
   if (summary.value!==undefined&&summary.value!==null&&(typeof summary.value!=='number'||!Number.isFinite(summary.value))) return '摘要只能包含有限数值';
+  const contextReason = summaryContextReason(summary);
+  if (contextReason) return contextReason;
   const windowReason = summaryWindowReason(summary.window);
   if (windowReason) return windowReason;
   if (summary.summarizer_version==='along-health-v1'&&HEALTH_SUMMARY_TYPES.includes(summary.type)) {

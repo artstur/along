@@ -215,7 +215,33 @@ struct HealthSummary {
         }
     }
 
-    // Only scalar aggregates cross the event boundary. The read revision is separate from the observation window.
+    // Forward only the selected, already-authorized aggregate context. Raw HealthKit samples stay on device.
+    private func eventContext(for metric: HealthMetric) -> [String: Any]? {
+        let source: [String: Any]?
+        let fields: Set<String>
+        switch metric {
+        case .sleep:
+            source = sleepSummary
+            fields = ["windowDays", "daysWithData", "averageThroughAt", "latestWindowOpen", "averageMinutes",
+                      "latestNightMinutes", "previousNightMinutes", "latestSleepStartAt", "latestWakeAt"]
+        case .workout:
+            source = workoutSummary
+            fields = ["windowDays", "weekStartAt", "todayMinutes", "todayCount", "yesterdayMinutes", "latestWorkoutAt"]
+        default:
+            return nil
+        }
+        guard let source else { return nil }
+        var context = source.filter { fields.contains($0.key) && !($0.value is NSNull) }
+        if metric == .workout, let patterns = source["patterns"] as? [[String: Any]] {
+            let patternFields: Set<String> = ["activity", "weekday", "hour", "count", "recentCount", "averageMinutes", "lastObservedAt"]
+            context["patterns"] = patterns.prefix(40).map { pattern in
+                pattern.filter { patternFields.contains($0.key) && !($0.value is NSNull) }
+            }
+        }
+        return context.isEmpty ? nil : context
+    }
+
+    // The read revision, observation window and actual observed sleep times retain distinct meanings.
     func eventSummaries(calendar: Calendar = .current) -> [[String: Any]] {
         let iso = ISO8601DateFormatter(); iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let day = calendar.dateInterval(of: .day, for: capturedAt)!
@@ -244,10 +270,12 @@ struct HealthSummary {
             }
             if statistic == "latest", let observed = readingDates[metric] { start = observed; end = observed }
             let available = value?.isFinite == true
-            return ["type": type, "unit": unit, "statistic": statistic,
+            var event: [String: Any] = ["type": type, "unit": unit, "statistic": statistic,
                     "value": available ? value! as Any : NSNull(), "availability": available ? "ok" : "unavailable",
                     "window": ["start": iso.string(from: start), "end": iso.string(from: end)],
                     "timezone": calendar.timeZone.identifier, "metric_version": iso.string(from: capturedAt), "summarizer_version": "along-health-v1"]
+            if let context = eventContext(for: metric) { event["context"] = context }
+            return event
         }
     }
 
