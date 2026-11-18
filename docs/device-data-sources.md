@@ -39,3 +39,13 @@ Host gateway 作为并行 source journal 的缓存适配器，不另建 Agent so
 可信配对的 `context` 额外返回 `currentGrantId`（未建立作用域为 null）。手机先将该值与稳定 requestId 一起持久化，`open` 必须显式携带 `expectedGrantId:null|64hex`。已记录 requestId 优先返回原 grant，不再轮换；未知 requestId 只有 expectedGrantId 严格等于当前 grant 才能创建新授权，否则拒绝为 stale_authorization。晚到旧 open 不得撤回较新的连接。
 
 Host 的 opens 按实际插入顺序保留最近 2048 项；每次新 grant 清空 events，当前 grant 的 events 同样按插入顺序保留最近 2048 项。达到上限只淘汰最早记录，不永久阻断新连接或正常同步。被淘汰旧 open 以原 expectedGrantId 重试会因授权条件不匹配被拒绝；被淘汰旧事件以原序号重试返回 stale，不能恢复旧状态。验收同时覆盖延迟 open、跨重启、超过 2048 次轮换／事件，以及被淘汰记录重放。
+
+## 健康事件保留已授权上下文汇总
+
+健康数据在前台由原生重新采集，事件通道按实际内容变化去重。HealthSummary已有的睡眠时段、近7天参考和运动活动/时段汇总，过去只进入网页快照，事件协议仅传7个标量。这会使Agent知道睡眠总时长却缺少判断用户“2点前入睡”的观测依据。
+
+本修复在既有schema_version 1的每条health summary增加可选context，旧value/unit/statistic/window不变。仅选中的sleep/workout且已授权contextReview时从原生现成summary提取白名单。sleep保留windowDays、daysWithData、averageThroughAt、latestWindowOpen、averageMinutes、latestNightMinutes、previousNightMinutes、latestSleepStartAt和latestWakeAt；缺值省略。workout保留windowDays、weekStartAt、todayMinutes、todayCount、yesterdayMinutes、latestWorkoutAt和最多40项patterns，每项只有activity、weekday、hour、count、recentCount、averageMinutes、lastObservedAt。原始HK样本、样本ID和任意字典不进入事件。
+
+统计窗口结束与实际醒来分开，最新夜与前一夜有明确字段。标量回退前一夜时，不补造最新夜起止；latestWindowOpen仍描述最新观察窗，不能反推为回退统计窗的状态。缺时段时保持未知。相同标量但时段改变会形成新内容；仅metric_version变化继续静默。授权收窄、配对变化与持久同event_id重试沿原有队列约束。接收方先兼容可选context，再交付原生新包。网页event-envelope镜像与Agent同样严格校验字段、聚合数值上界、类型/producer绑定、观测时刻不晚于采集及睡眠时段所属窗口；既有标量事件继续有效。
+
+验收使用真实HealthModels.swift及HealthEventOutbox源码编译执行，覆盖时段与统计窗区别、白名单/数量上界、旧无context事件、选择收窄和内容去重。修复前回归失败，修复后同命令通过且回退修复再失败；正式手机仅验证自然前台采集与真实事件，不造健康样本或正式消息。
