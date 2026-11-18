@@ -91,7 +91,7 @@ private actor Fixture {
 }
 
 private func client(_ fixture: Fixture, maxBytes: Int = 512 * 1024) -> OKXDeviceClient {
-    OKXDeviceClient(transport: { request, limit in try await fixture.handle(request, limit) }, now: { testNow }, maxResponseBytes: maxBytes)
+    OKXDeviceClient(transport: { request, limit in try await fixture.handle(request, limit) }, now: { testNow }, maxResponseBytes: maxBytes, includeHistory: false)
 }
 private func expect(_ expected: OKXDeviceClientError, _ scenario: String) async {
     let fixture = Fixture(scenario)

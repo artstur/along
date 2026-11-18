@@ -314,7 +314,8 @@ const server=createServer({key:readFileSync(key),cert:readFileSync(cert)},async(
       await ensurePairingRegistered();
       if(identity!==who||!authorized(req))throw new HostError('配对已变化',403);
       if(!pairingRegistered)throw new HostError('配对身份尚未登记到 Along，请稍后重试',503);
-      const input=await body(req);
+      // Private normalized history is bounded separately; ordinary browser routes keep32KiB.
+      const input=await readJsonBody(req,Math.ceil(2.2*1024*1024));
       if(identity!==who||!authorized(req))throw new HostError('配对已变化',403);
       const result=await deviceSourceRoute(input);
       return respond(res,result.status,result.value);

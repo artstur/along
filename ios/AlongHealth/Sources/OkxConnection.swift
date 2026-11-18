@@ -2,7 +2,7 @@ import SwiftUI
 import CoreFoundation
 
 /// Credentials remain on iPhone; the native collector persists them in Keychain.
-/// Only the scoped account summary is delivered to the pinned, paired Host.
+/// Only the scoped account summary and normalized history are delivered to the pinned, paired Host.
 @MainActor
 struct OKXConnectionSheet: View {
     let goalID: String
@@ -41,7 +41,7 @@ struct OKXConnectionSheet: View {
                             LabeledContent("资产种类", value: String(summary.assetCount))
                             LabeledContent("持仓数量", value: String(summary.positionCount))
                         }
-                        Button("刷新账户摘要") { start(.refresh) }
+                        Button(busy ? "正在读取摘要、成交与账单…" : "刷新摘要、成交与账单") { start(.refresh) }
                             .disabled(busy)
                         Button("断开连接", role: .destructive) { start(.disconnect) }
                             .disabled(busy)
@@ -72,7 +72,7 @@ struct OKXConnectionSheet: View {
                     } header: {
                         Text("连接只读账户")
                     } footer: {
-                        Text("在 OKX 仅勾选读取权限，完成后回到 Along 填写三项凭证。iPhone 会核实实际权限并读取交易账户摘要。凭证只存本机钥匙串，摘要经原配对连接发送至 Mac，供 Agent 按目标读取。")
+                        Text("在 OKX 仅勾选读取权限，完成后回到 Along 填写三项凭证。iPhone 会核实实际权限，只读采集账户摘要和近三个月成交、账单。历史分页达到上限或接口不可用时，会明确保留覆盖限制。凭证只存本机钥匙串，数据经原配对连接发送至 Mac，供 Agent 按目标读取。")
                     }
                     .disabled(busy)
                 }

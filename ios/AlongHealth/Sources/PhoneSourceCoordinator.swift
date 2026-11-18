@@ -316,11 +316,16 @@ enum PhoneSourceCoordinatorError: String, LocalizedError {
         let eventID = "source-" + UUID().uuidString.lowercased()
         let summary: [String: Any] = ["tradingEquityUsd": observation.summary.tradingEquityUsd, "assetCount": observation.summary.assetCount, "positionCount": observation.summary.positionCount]
         let observedAt = Self.iso(observation.capturedAt)
-        let body: [String: Any] = ["action": "publish", "provider": "okx", "goalId": operation.goal, "grantId": grant,
+        var body: [String: Any] = ["action": "publish", "provider": "okx", "goalId": operation.goal, "grantId": grant,
                                    "eventId": eventID, "sequence": sequence, "observedAt": observedAt, "permission": "read_only", "summary": summary]
+        if let history = observation.history {
+            let value = try history.dictionary()
+            guard OKXDeviceHistory.decode(value) != nil else { throw PhoneSourceCoordinatorError.invalidResponse }
+            body["history"] = value; next["history"] = value
+        } else { next.removeValue(forKey: "history") }
         next["sequence"] = sequence; next["phase"] = "connected"; next["summary"] = summary; next["lastSyncedAt"] = observedAt
         next["lastCollectedAt"] = Self.iso(now())
-        do { try DeviceEventQueue.append(["event_id": eventID, "body": body], to: &next) }
+        do { try DeviceEventQueue.append(["event_id": eventID, "body": body], to: &next, maxEventBytes: 2_300_000, maxPendingBytes: 8 * 1024 * 1024) }
         catch { throw PhoneSourceCoordinatorError.storageUnavailable }
         if let credentials {
             do { try keychain.save(credentials, account: account) }
@@ -347,7 +352,8 @@ enum PhoneSourceCoordinatorError: String, LocalizedError {
         do {
         if state["phase"] as? String != "revoking" {
             state["phase"] = "revoking"
-            state.removeValue(forKey: "summary"); state.removeValue(forKey: "lastSyncedAt")
+            state["held"] = Self.heldMetadata(state["held"] as? [[String: Any]] ?? [])
+            state.removeValue(forKey: "summary"); state.removeValue(forKey: "history"); state.removeValue(forKey: "lastSyncedAt")
             state["pending"] = []
             state["deletionAccounts"] = Self.accounts(state)
             if let grant = state["grantId"] as? String {
@@ -398,15 +404,25 @@ enum PhoneSourceCoordinatorError: String, LocalizedError {
         blockedScopes.insert(operation.scope)
         state["phase"] = "stopped"
         state.removeValue(forKey: "receivedSequence")
-        state.removeValue(forKey: "summary"); state.removeValue(forKey: "lastSyncedAt")
+        state.removeValue(forKey: "summary"); state.removeValue(forKey: "history"); state.removeValue(forKey: "lastSyncedAt")
         var held = state["held"] as? [[String: Any]] ?? []
         held.append(contentsOf: (state["pending"] as? [[String: Any]] ?? []).map { ["event": $0, "receipt": ["status": "stale"]] })
-        state["held"] = Array(held.suffix(100)); state["pending"] = []
+        state["held"] = Self.heldMetadata(Array(held.suffix(100))); state["pending"] = []
         state["deletionAccounts"] = Self.accounts(state)
         do { try save(state, operation); try cleanup(&state, operation) }
         catch PhoneSourceCoordinatorError.storageUnavailable {
             try eraseAfterPersistenceFailure(state, operation)
             throw PhoneSourceCoordinatorError.storageUnavailable
+        }
+    }
+    private static func heldMetadata(_ held: [[String: Any]]) -> [[String: Any]] {
+        held.map { record in
+            var next = record
+            if var event = record["event"] as? [String: Any], var body = event["body"] as? [String: Any] {
+                body.removeValue(forKey: "history"); body.removeValue(forKey: "summary")
+                event["body"] = body; next["event"] = event
+            }
+            return next
         }
     }
     private func eraseAfterPersistenceFailure(_ state: [String: Any], _ operation: Operation) throws {
@@ -440,7 +456,7 @@ enum PhoneSourceCoordinatorError: String, LocalizedError {
             let receipt = try await call(body, operation)
             try checkRecord(state, operation)
             var next = state
-            let disposition = DeviceEventQueue.advance(&next, receipt: receipt)
+            let disposition = DeviceEventQueue.advance(&next, receipt: receipt, maxHeldBytes: 2_300_000)
             if disposition == .retry { throw PhoneSourceCoordinatorError.hostUnavailable }
             if disposition == .held {
                 state = next
@@ -508,7 +524,7 @@ enum PhoneSourceCoordinatorError: String, LocalizedError {
     private static func account(_ state: [String: Any], grant: String) -> String { hash(["okx", state["userId"] as? String ?? "", state["deviceId"] as? String ?? "", state["goalId"] as? String ?? "", state["binding"] as? String ?? "", grant]) }
     private static func accounts(_ state: [String: Any]) -> [String] { Array(Set((state["deletionAccounts"] as? [String] ?? []) + ((state["credentialAccount"] as? String).map { [$0] } ?? []))) }
     private static func validState(_ state: [String: Any], _ operation: Operation) -> Bool {
-        let fields: Set<String> = ["version", "provider", "goalId", "binding", "userId", "deviceId", "site", "requestId", "expectedGrantId", "phase", "sequence", "pending", "held", "deletionAccounts", "grantId", "previousGrantId", "credentialAccount", "summary", "lastSyncedAt", "receivedSequence", "lastAttemptAt", "lastCollectedAt"]
+        let fields: Set<String> = ["version", "provider", "goalId", "binding", "userId", "deviceId", "site", "requestId", "expectedGrantId", "phase", "sequence", "pending", "held", "deletionAccounts", "grantId", "previousGrantId", "credentialAccount", "summary", "history", "lastSyncedAt", "receivedSequence", "lastAttemptAt", "lastCollectedAt"]
         guard Set(state.keys).isSubset(of: fields), integer(state["version"]) == 1, state["provider"] as? String == "okx", state["goalId"] as? String == operation.goal,
               state["binding"] as? String == operation.binding, let user = state["userId"] as? String, validID(user),
               let device = state["deviceId"] as? String, validID(device), let request = state["requestId"] as? String, validID(request),
@@ -527,6 +543,7 @@ enum PhoneSourceCoordinatorError: String, LocalizedError {
             guard validHash(grant), state["credentialAccount"] as? String == account(state, grant: grant) else { return false }
         } else if state["credentialAccount"] != nil || state["grantId"] != nil || ["collecting", "connected"].contains(state["phase"] as? String ?? "") { return false }
         if state["phase"] as? String == "connected", (!validSummary(state["summary"]) || !validDate(state["lastSyncedAt"])) { return false }
+        if let history = state["history"], OKXDeviceHistory.decode(history) == nil { return false }
         return pending.allSatisfy { event in
             guard Set(event.keys) == ["event_id", "body"], let id = event["event_id"] as? String, validID(id),
                   let body = event["body"] as? [String: Any], body["eventId"] as? String == id,
@@ -535,8 +552,10 @@ enum PhoneSourceCoordinatorError: String, LocalizedError {
                   let seq = integer(body["sequence"]), seq > 0, seq <= sequence else { return false }
             let common: Set<String> = ["action", "provider", "goalId", "grantId", "eventId", "sequence"]
             if body["action"] as? String == "disconnect" { return Set(body.keys) == common }
-            return body["action"] as? String == "publish" && Set(body.keys) == common.union(["observedAt", "permission", "summary"]) &&
-                body["permission"] as? String == "read_only" && validDate(body["observedAt"]) && validSummary(body["summary"])
+            let keys = common.union(["observedAt", "permission", "summary"]).union(body["history"] == nil ? [] : ["history"])
+            return body["action"] as? String == "publish" && Set(body.keys) == keys &&
+                body["permission"] as? String == "read_only" && validDate(body["observedAt"]) && validSummary(body["summary"]) &&
+                (body["history"] == nil || OKXDeviceHistory.decode(body["history"]!) != nil)
         }
     }
     private static func validSummary(_ value: Any?) -> Bool {
@@ -587,7 +606,7 @@ enum PhoneSourceCoordinatorError: String, LocalizedError {
     func load(scope: String) throws -> [String: Any]? {
         do {
             let url = try url(scope), attributes = try FileManager.default.attributesOfItem(atPath: url.path)
-            guard attributes[.type] as? FileAttributeType == .typeRegular, (attributes[.size] as? NSNumber)?.intValue ?? Int.max <= 1024 * 1024 else { throw PhoneSourceCoordinatorError.storageUnavailable }
+            guard attributes[.type] as? FileAttributeType == .typeRegular, (attributes[.size] as? NSNumber)?.intValue ?? Int.max <= 16 * 1024 * 1024 else { throw PhoneSourceCoordinatorError.storageUnavailable }
             let data = try Data(contentsOf: url)
             guard let state = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw PhoneSourceCoordinatorError.storageUnavailable }
             return state
@@ -595,7 +614,7 @@ enum PhoneSourceCoordinatorError: String, LocalizedError {
     }
     func save(_ state: [String: Any], scope: String) throws {
         let data = try JSONSerialization.data(withJSONObject: state, options: [.sortedKeys])
-        guard data.count <= 1024 * 1024 else { throw PhoneSourceCoordinatorError.storageUnavailable }
+        guard data.count <= 16 * 1024 * 1024 else { throw PhoneSourceCoordinatorError.storageUnavailable }
         try data.write(to: url(scope), options: [.atomic, .completeFileProtection])
     }
     func scopes() throws -> [String] { try FileManager.default.contentsOfDirectory(at: directory(), includingPropertiesForKeys: nil).filter { $0.pathExtension == "json" }.map { $0.deletingPathExtension().lastPathComponent } }

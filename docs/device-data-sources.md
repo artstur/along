@@ -10,9 +10,9 @@ Apple Health 保留现有 HealthKit 权限、七类摘要和 wire 协议；提�
 
 ## OKX 采集与迁移
 
-凭证仅在 iPhone 原生表单输入并保存至 WhenUnlockedThisDeviceOnly、非同步的 Keychain，按本人/目标/provider/配对/授权grant隔离。只允许固定官方 HTTPS GET time/config/balance/positions，禁止重定向和任意域，限制超时/响应大小，校时后 HMAC-SHA256 签名。实际 `perm` 必须恰为 read_only，读取与验证全部成功后才保存连接。
+凭证仅在 iPhone 原生表单输入并保存至 WhenUnlockedThisDeviceOnly、非同步的 Keychain，按本人/目标/provider/配对/授权grant隔离。只允许固定官方 HTTPS GET time/config/balance/positions/fills-history/bills-archive，禁止重定向和任意域，限制超时/响应大小，校时后 HMAC-SHA256 签名。实际 `perm` 必须恰为 read_only，读取与验证全部成功后才保存连接。
 
-首个能力继续使用已约定的 `okx + trading_account_summary`（交易权益、资产数、持仓数），不冒充完整交易历史或已完成策略分析。界面区分本机已读取、Mac已接收、Agent源事实/按需读取结果已记录、Agent实际任务产出。手机收到publish回执只显示Mac已接收，不称Agent已同步或已执行。
+保留 `okx + trading_account_summary`（交易权益、资产数、持仓数）；新手机还采集有界历史并提供 `trading_history`，保留真实窗口、分页覆盖、币种和缺失数据。Host 对明细生成确定性费用与普通交易分量报告，Agent 按目标解读；不把部分窗口称完整策略收益。见[历史接入契约](okx-trade-history.md)。界面区分本机已读取、Mac已接收、Agent源事实/按需读取结果已记录、Agent实际任务产出。手机收到publish回执只显示Mac已接收，不称Agent已同步或已执行。
 
 旧 Mac vault 不向手机下载密钥；迁移时只清理该作用域的旧凭证。旧 `/sources/okx` connect/refresh 不再收真实密钥，返回升级提示；纯断开继续允许清理。采集事实的 provenance 为 iOS 原生设备报告，不能称 Host 独立向 OKX 验证。
 
@@ -24,7 +24,7 @@ POST `/sources/device`，沿用原配对 TLS/鉴权；仅本地 App 原生代码
 - open：携带先在手机持久化的稳定requestId，重试同一requestId取得同一grantId。它立即替换/撤回旧授权，Host journal提交disconnected使旧ready不可读，不是候选保留。新Key失败不恢复旧连接；界面正常只在未连接状态可发起open。旧Mac vault必须由设备gateway作用域接管，禁止后续adopt恢复。
 - publish：`{action,provider,goalId,grantId,eventId,sequence,observedAt,permission:'read_only',summary:{tradingEquityUsd,assetCount,positionCount}}`。同 eventId/同内容为 duplicate，冲突拒绝；旧 grant/sequence 返回 stale，不修改新连接。当前目标/推荐/配对仍有效才保存。
 - disconnect：`{action,provider,goalId,grantId,eventId,sequence}`。本机先持久撤回、删除凭证、丢弃旧代际摘要，再将稳定撤回事件补传。Host 同所有者可清理已归档目标，旧 grant 的断开不能删除新的连接。
-- 回执含匹配 event_id、status accepted/duplicate/stale/rejected；accepted/duplicate确认Host接收，stale/rejected/conflict放入held后移出队首，未知/不匹配回执仍保留原id重试。不得换id复活旧授权。schema 严格白名单，拒绝任何凭据、签名、请求头、UID或任意数据字典。
+- 回执含匹配 event_id、status accepted/duplicate/stale/rejected；accepted/duplicate确认Host接收，stale/rejected/conflict放入held后移出队首，未知/不匹配回执仍保留原id重试。不得换id复活旧授权。schema 严格白名单，拒绝任何凭据、签名、请求头、UID或任意数据字典。新版publish可携带严格规范化的私有history，记录绑定同grant/sequence/event并参与digest；旧三字段事件继续有效。
 
 Host gateway 作为并行 source journal 的缓存适配器，不另建 Agent source 状态：先将实际接收的admitted metadata/规范摘要/稳定事件与序号原子落盘，再调用统一recordVerifiedState并保存返回的Host stamp；重启以相同metadata重放对账。只有open立即撤回旧epoch保留prepareAbsent/commitAbsent，native ready不再走旧vault的prepareReady/commitSaved。metadata固定为connectionId=grantId、version=sequence、state、observedAt及ready时的digest；retired的disconnected/revoked重放返回stale属于安全终态，不能恢复旧summary。提供现有 source-event-bridge 要求的 `sourceSnapshot({userId,goalId,stillAuthorized})` 和 `handle(disconnect)` 接口。source generation/revision 由既有 Host journal 管理；手机 grantId/sequence 只负责设备授权与投递排序，两者不得混用。Agent 继续用 /source-events → /source-reads → /source-read-results 及既有 ready/generation/revision/reference 契约。
 
