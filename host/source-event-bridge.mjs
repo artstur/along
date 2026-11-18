@@ -3,6 +3,7 @@ import {createHash,randomBytes} from 'node:crypto';
 import {constants,openSync,closeSync,readFileSync,writeFileSync,mkdirSync,lstatSync,fstatSync,chmodSync,renameSync,unlinkSync,fsyncSync} from 'node:fs';
 import {resolve,join} from 'node:path';
 import {requireOkxGoal} from './source-access.mjs';
+import {validOkxHistory,okxDataDigest,okxPerformanceReport} from './okx-history.mjs';
 
 const ID=/^[A-Za-z0-9][A-Za-z0-9_-]{0,100}$/;
 const OPAQUE=/^[A-Za-z0-9_-]{1,160}$/;
@@ -14,12 +15,12 @@ const iso=x=>typeof x==='string'&&Number.isFinite(Date.parse(x));
 const clone=x=>JSON.parse(JSON.stringify(x));
 const key=(userId,goalId,provider='okx')=>createHash('sha256').update(JSON.stringify([userId,goalId,provider])).digest('hex');
 const stampOf=s=>s?{generation:s.generation,revision:s.revision,reference:s.reference,occurredAt:s.occurredAt}:null;
-export const sourceDigest=summary=>createHash('sha256').update(JSON.stringify([summary.tradingEquityUsd,summary.assetCount,summary.positionCount])).digest('hex');
+export const sourceDigest=okxDataDigest;
 export const validSourceStamp=s=>exact(s,['generation','revision','reference','occurredAt'])&&positive(s.generation)&&positive(s.revision)&&OPAQUE.test(s.reference??'')&&iso(s.occurredAt);
 const summary=x=>exact(x,['tradingEquityUsd','assetCount','positionCount'])&&Object.keys(x).length===3&&Number.isFinite(x.tradingEquityUsd)&&Number.isSafeInteger(x.assetCount)&&x.assetCount>=0&&Number.isSafeInteger(x.positionCount)&&x.positionCount>=0;
 const event=(row,state)=>({event_id:'source_'+createHash('sha256').update(JSON.stringify([row.userId,row.goalId,row.provider??'okx',state.generation,state.revision,state.reference,state.state])).digest('hex').slice(0,40),
  goal_id:row.goalId,provider:row.provider??'okx',generation:state.generation,revision:state.revision,state:state.state,
- capabilities:state.state==='ready'&&(row.provider??'okx')==='okx'?['trading_account_summary']:[],occurred_at:state.occurredAt,reference:state.reference});
+ capabilities:state.state==='ready'&&(row.provider??'okx')==='okx'?(state.capabilities??['trading_account_summary']):[],occurred_at:state.occurredAt,reference:state.reference});
 export class SourceBridgeError extends Error{constructor(code){super('Host source bridge unavailable');this.name='SourceBridgeError';this.code=code;}}
 const fail=code=>{throw new SourceBridgeError(code);};
 
@@ -47,9 +48,10 @@ export function createSourceJournal({dir,now=Date.now}={}){
   /** Called only after a trusted producer's admission/storage commit, never with UI/model claims.
    * lookup reconciliation can repeat this exact fact after a crash between that commit and journalling. */
   recordVerifiedState(identity,goalId,provider,metadata){
-   if(!identity||!ID.test(identity.userId??'')||!ID.test(identity.deviceId??'')||!exact(metadata,['connectionId','version','state','observedAt','digest'])||
+   if(!identity||!ID.test(identity.userId??'')||!ID.test(identity.deviceId??'')||!exact(metadata,['connectionId','version','state','observedAt','digest','capabilities'])||
       !OPAQUE.test(metadata.connectionId??'')||!positive(metadata.version)||!STATES.has(metadata.state)||!iso(metadata.observedAt)||
-      metadata.state==='ready'&&!/^[a-f0-9]{64}$/.test(metadata.digest??''))fail('invalid_verified_fact');
+      metadata.state==='ready'&&!/^[a-f0-9]{64}$/.test(metadata.digest??'')||metadata.capabilities!==undefined&&
+      (metadata.state!=='ready'||!Array.isArray(metadata.capabilities)||!['["trading_account_summary"]','["trading_account_summary","trading_history"]'].includes(JSON.stringify(metadata.capabilities))))fail('invalid_verified_fact');
    const db=read(),row=getRow(db,identity.userId,goalId,provider),old=row.current,versions=row.producerVersions??={},retired=row.retired??[];
    const seen=Object.hasOwn(versions,metadata.connectionId)?versions[metadata.connectionId]:0;
    if(metadata.version<seen||retired.includes(metadata.connectionId))return{status:'stale',sourceStamp:stampOf(old),state:old?.state??'unavailable'};
@@ -67,7 +69,7 @@ export function createSourceJournal({dir,now=Date.now}={}){
    const sameEpoch=old?.connectionId===metadata.connectionId&&!['disconnected','revoked'].includes(metadata.state);
    const generation=sameEpoch?old.generation:row.generation+1,revision=row.revision+1;
    if(!positive(generation)||!positive(revision))fail('version_exhausted');
-   const current={generation,revision,reference:'src_'+randomBytes(20).toString('hex'),occurredAt:timestamp(),state:metadata.state,connectionId:metadata.connectionId,producerVersion:metadata.version,...(metadata.state==='ready'?{digest:metadata.digest}:{})};
+   const current={generation,revision,reference:'src_'+randomBytes(20).toString('hex'),occurredAt:timestamp(),state:metadata.state,connectionId:metadata.connectionId,producerVersion:metadata.version,...(metadata.state==='ready'?{digest:metadata.digest,...(metadata.capabilities?{capabilities:[...metadata.capabilities]}:{})}:{})};
    publish(row,current);write(db);return{status:'accepted',sourceStamp:stampOf(current),state:current.state};
   },
   prepareReady({userId,goalId,operation,digest,priorStamp}){
@@ -124,7 +126,7 @@ export function createSourceJournal({dir,now=Date.now}={}){
  };
 }
 
-const requestValid=r=>exact(r,['request_id','goal_id','provider','capability','generation','revision','max_age_seconds'])&&ID.test(r.request_id??'')&&ID.test(r.goal_id??'')&&r.provider==='okx'&&r.capability==='trading_account_summary'&&positive(r.generation)&&positive(r.revision)&&Number.isSafeInteger(r.max_age_seconds)&&r.max_age_seconds>=1&&r.max_age_seconds<=86400;
+const requestValid=r=>exact(r,['request_id','goal_id','provider','capability','generation','revision','max_age_seconds'])&&ID.test(r.request_id??'')&&ID.test(r.goal_id??'')&&r.provider==='okx'&&['trading_account_summary','trading_history'].includes(r.capability)&&positive(r.generation)&&positive(r.revision)&&Number.isSafeInteger(r.max_age_seconds)&&r.max_age_seconds>=1&&r.max_age_seconds<=86400;
 /** A bounded pump in the existing Host process. Adapters read admitted, persisted producer records.
  * The vault adapter is compatibility only; native producers never copy credentials back to it. */
 export function createSourceEventBridge({journal,connection,bridge,endpoint,identity,isAuthorized,readGoals,adapters,now=Date.now,onError=()=>{}}={}){
@@ -144,11 +146,11 @@ export function createSourceEventBridge({journal,connection,bridge,endpoint,iden
   const value=await providers[provider].lookup(who,goalId,{metadataOnly:false});
   if(!active(who)||!value)return null;
   if(value.metadata){
-   if(value.metadata.state==='ready'&&(!summary(value.summary)||sourceDigest(value.summary)!==value.metadata.digest))fail('invalid_source_snapshot');
+   if(value.metadata.state==='ready'&&(!summary(value.summary)||value.history!==undefined&&!validOkxHistory(value.history,value.metadata.observedAt)||sourceDigest(value.summary,value.history)!==value.metadata.digest))fail('invalid_source_snapshot');
    const recorded=journal.recordVerifiedState(who,goalId,provider,value.metadata);
    const current=journal.current(who.userId,goalId,provider);
    if(recorded.state!=='ready'||current?.connectionId!==value.metadata.connectionId||current.producerVersion!==value.metadata.version)return null;
-   return{sourceStamp:recorded.sourceStamp,observedAt:value.metadata.observedAt,summary:value.summary};
+   return{sourceStamp:recorded.sourceStamp,observedAt:value.metadata.observedAt,summary:value.summary,...(value.history?{history:value.history}:{})};
   }
   return value;
  }
@@ -213,11 +215,13 @@ export function createSourceEventBridge({journal,connection,bridge,endpoint,iden
     else if(stamp.generation!==request.generation)result.state='denied';
     else if(stamp.revision<request.revision)result.state='stale';
     else{
-     result={...result,generation:stamp.generation,revision:stamp.revision,reference:stamp.reference,observed_at:value.observedAt};
-     const age=Number(now())-Date.parse(value.observedAt);
-     if(!summary(value.summary)||!Number.isFinite(age)||age<0)result.state='unavailable';
+     const history=request.capability==='trading_history';
+     const observation=history?value.history?.windowEnd:value.observedAt;
+     result={...result,generation:stamp.generation,revision:stamp.revision,reference:stamp.reference,observed_at:observation??value.observedAt};
+     const age=Number(now())-Date.parse(observation);
+     if(!summary(value.summary)||history&&!validOkxHistory(value.history,value.observedAt)||!Number.isFinite(age)||age<0)result.state='unavailable';
      else if(age>request.max_age_seconds*1000)result.state='stale';
-     else{result.state='ready';result.data={...value.summary};}
+     else{result.state='ready';result.data=history?okxPerformanceReport(value.history):{...value.summary};}
     }
    }catch(e){report(e);}
    if(!active(who))return;
