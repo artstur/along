@@ -6,11 +6,11 @@
 
 | 文件 | 内容 |
 | --- | --- |
-| `Dockerfile.host` | host 镜像：node:22-bookworm-slim + openssl（启动现场生成自签证书必需，`host/agent-host.mjs:45`）；携带 `host/` 全目录 + host→web 共享闭包 7 个文件（`goal-agent-core`、`adaptive-ui`、`super-agent`、`contextual-planning`、`loop`、`health`、`task-results`，2026-11-20 按 `grep -rn "from '../web/" host/*.mjs` 实测，平铺保持 `../web/*` 相对路径） |
+| `Dockerfile.host` | Host 镜像包含 Node 22、生成证书所需的 OpenSSL、锁文件锁定的 npm 生产依赖、Host 模块与 web 共享依赖。 |
 | `Dockerfile.agent` | agent 镜像：node:24-bookworm-slim + `@deepseek-ai/dsh@0.2.2-rc.5`（版本写死 pin，engines node>=24.9.0）；携带 `deploy/agent-runner.mjs`（M3）与其 import 的 `web/{super-agent,goal-agent-core,contextual-planning}.mjs`；经 `additional_contexts` 预置 along bundle |
 | `docker-compose.yml` | 编排：host 443→4176、agent `agent:3088` 仅 compose 内网（不发布端口）、bind 卷 `../../data/host:/data`、compose secrets（runner-token 两服务共用） |
 | `env.example` | environment 段非敏感参考值（必改项：`ALONG_TLS_CN` 换真实域名） |
-| `.dockerignore` | 主 context 白名单：只放 `host/`、`web/`、`deploy/` 进构建上下文，其余（.git、node_modules、dist、out、output、任何将来落进仓库的密钥/状态文件）永不进镜像层 |
+| `../.dockerignore` | 两个主构建上下文都用仓库根目录的白名单，只放行 npm 清单、Host 模块及任务协议、web 模块和 runner 入口。 |
 | `agent-runner.mjs` | 内网 HTTP runner，使用 Along 专用 DSH profile；模块自检 `node --check deploy/agent-runner.mjs` |
 
 ## 路径基准（配错 = 静默降级，§3.1）
@@ -39,32 +39,47 @@ docker compose -f deploy/docker-compose.yml up -d
 2. `docker exec along-host sh -c 'ls -l /data/users.json'`：可见（卷没挂错、多用户形态生效）。
 3. 宿主机 `curl -k https://127.0.0.1/health`：200。
 4. `docker exec along-agent node -e "fetch('http://127.0.0.1:3088/health').then(r=>r.json()).then(console.log)"`：返回 ready。
-5. 通过 runner 发送一次无私密内容的任务，确认返回 `done`。此步骤覆盖实际读取模型凭证、启动 DSH 和接收模型结果。
+5. 通过 runner 发送一次无私密内容的任务，并查询该请求直到返回 `done`。此步骤覆盖实际读取模型凭证、启动 DSH 和接收模型结果。
 
    ```sh
-   docker exec along-agent node -e '
-     const {readFileSync} = require("node:fs");
-     const {randomUUID} = require("node:crypto");
-     const requestId = randomUUID();
-     fetch("http://127.0.0.1:3088/run", {
+   docker exec -i along-agent node <<'NODE'
+   const {readFileSync} = require("node:fs");
+   const {randomUUID} = require("node:crypto");
+   const {setTimeout: delay} = require("node:timers/promises");
+   const base = "http://127.0.0.1:3088";
+   const userId = "smoke";
+   const requestId = randomUUID();
+   const headers = {"runner-token": readFileSync(process.env.ALONG_RUNNER_TOKEN_FILE, "utf8").trim()};
+
+   async function readRun(path, options) {
+     const response = await fetch(base + path, {...options, signal: AbortSignal.timeout(15000)});
+     const {run} = await response.json();
+     if (!response.ok || run?.requestId !== requestId) throw Error("Invalid run");
+     return run;
+   }
+
+   async function smoke() {
+     let run = await readRun("/run", {
        method: "POST",
-       headers: {
-         "content-type": "application/json",
-         "runner-token": readFileSync(process.env.ALONG_RUNNER_TOKEN_FILE, "utf8").trim()
-       },
+       headers: {...headers, "content-type": "application/json"},
        body: JSON.stringify({
-         userId: "smoke", requestId, kind: "task",
+         userId, requestId, kind: "task",
          input: {requestId, task: {title: "列出一项简单的晨间整理任务"}}
        })
-     }).then(async response => {
-       const {run} = await response.json();
-       if (!response.ok || run?.status !== "done" || !run.result?.summary) process.exitCode = 1;
-       console.log(process.exitCode ? "DSH smoke failed" : "DSH smoke passed");
-     }).catch(() => {
-       console.log("DSH smoke failed");
-       process.exitCode = 1;
      });
-   '
+     const deadline = Date.now() + 31 * 60000;
+     while (run.status === "working" && Date.now() < deadline) {
+       await delay(3000);
+       run = await readRun("/run/" + requestId, {headers: {...headers, "x-along-user": userId}});
+     }
+     if (run.status !== "done" || !run.result?.summary) throw Error("Run did not complete");
+     console.log("DSH smoke passed");
+   }
+   smoke().catch(() => {
+     console.log("DSH smoke failed");
+     process.exitCode = 1;
+   });
+   NODE
    ```
 
 日志红线自查（§3.7）：`docker logs` 里不出现请求体、运行内容（用户消息/模型输出）、配对码与凭证；`users.json` 存在时启动横幅不打通用码。
@@ -78,13 +93,13 @@ docker compose -f deploy/docker-compose.yml up -d
 
 ## V-1 预置（Tier 2 验证项，验收 #9）
 
-along bundle 以 **git 跟踪文件的源码形态**预置进镜像 `/opt/along-superagent/`（`src/`、`prompts/`、`skills/`、`locale/`、`scripts/`、`cordis.patch.yml`、`package.json`、`pnpm-lock.yaml`、构建配置）。`lib/` 是 tsdown 构建产物且被 `.gitignore`（fresh clone 不存在），COPY 它会让部署机构建硬失败，所以镜像里**不含 lib**——Tier 1（目标聊天链路）不依赖 bundle，不受影响。
+镜像从相邻 checkout 复制 Along bundle 的源码到 `/opt/along-superagent/`。其中 `src/`、`prompts/`、`skills/`、`locale/`、`scripts/` 各自保留目录，包清单、锁文件和构建配置保留在根目录。V-1 在独立临时容器内构建 `lib/`。
 
-V-1 验证可在独立的临时容器里构建和加载 bundle，使用同一镜像：
+V-1 先在独立的临时容器里构建 bundle：
 
 ```sh
 docker run --rm --entrypoint sh -w /opt/along-superagent along-agent:local \
-  -c 'corepack pnpm install --frozen-lockfile && corepack pnpm build'
+  -c 'corepack pnpm install --frozen-lockfile && corepack pnpm build && test -f lib/index.js'
 ```
 
 ## 凭证红线（AGENTS.md §5）

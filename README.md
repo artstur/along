@@ -202,7 +202,7 @@ iPhone App 的签名、安装与 HealthKit 读取口径见 [ios/README.md](ios/R
 | `ALONG_CONTEXT_REVIEW_TOKEN_FILE` | 未设置 | 本机情境评估服务的凭据文件 |
 | `CODEX_BIN` | `~/.local/bin/codex`，否则 PATH 中的 `codex` | 健康变化任务提案使用的 Codex |
 | `ALONG_TLS_DAYS` / `ALONG_TLS_CN` | `30` / `Along Local Agent` | 自签证书天数与 CN，只在生成证书时生效（云端用 `3650` + 域名） |
-| `ALONG_DSH_RUNNER_URL` | 未设置 | 设置后 DSH 分支改走云端 agent runner（`deploy/agent-runner.mjs`）；未设置走 Mac 本地 bridge |
+| `ALONG_DSH_RUNNER_URL` | 未设置 | 设置后 DSH 分支走云端 Runner，Host 启动前要求有效的 `users.json`；未设置走 Mac 本地 bridge |
 | `ALONG_RUNNER_TOKEN_FILE` | 未设置 | runner 内网令牌文件；设置了 `ALONG_DSH_RUNNER_URL` 就必须配，缺失拒绝启动 |
 | `ALONG_PAIR_FAIL_LIMIT` | `10` | 公网配对失败窗口上限。满窗时停止验码，可将上限调低 |
 

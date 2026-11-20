@@ -20,6 +20,20 @@
 
 本轮修复上述 P1，并接好云端配对后的 DSH 选择与就绪检查。验收以 §5 与 §6.4 的实际流程为准。
 
+### `b29483d` 审核后的修复与验收
+
+修复云端双用户候选版的运行恢复、配对和部署缺陷，保住已使用 Mac 版的配对、运行和通知状态。沿用现有表单、运行轮询、结果校验和两种部署形态。本轮在本地用临时状态和模型替身验证，ECS、真实模型密钥和双真机验收仍按 §6.4 执行。
+
+| 范围 | 实现 | 验收 |
+| --- | --- | --- |
+| 云端目标与任务 | Runner 接单后立即返回可查询的 `working` 记录，完成后按原 `userId+requestId` 返回终态。保留接单时间、原始校验情境和在途去重。Host 提交和查询共用原有校验。App 恢复同一连接下的目标运行。不确定是否收到首个回执时按原编号查询，有限期内明确收敛。 | 用受控延迟的模型替身跑真实 Host 和 Runner，先收到 `working`，再读到 `done` 或 `blocked`。同号不会再次拉起模型。复开 App 后可继续查询并只生效一次，迟到的旧连接结果不能写回。 |
+| Runner 请求解码 | 按既有 64 KiB 字节上限收集请求，合并后统一解码 UTF-8。 | 中文字符跨分块仍原样送到模型，超上限请求仍被拒绝。 |
+| 配对 | 云端 Runner 已配置时，缺失或无效用户表阻止启动。Mac 通用码保留成功即耗尽、五次失败锁定和 15 分钟时限。CLI 发码与 Host 消费码、记录失败共用跨进程互斥，绑定持久化失败不启用新 token。 | 缺用户表的云端不监听、不打印通用码。已配对 Mac 的本地码不能重新配对。临时目录中验证两进程并发不会丢发码或复活已消费的码。 |
+| Mac 升级与来源同步 | 将旧 Kimi 运行和 APNs 登记归到唯一已验证的本地绑定，保留现有新记录和通知游标。来源工作按用户独立串行。 | 带旧文件启动，原请求继续可查且旧通知队列可投递。两用户同时进泵，各自推进，同一用户不重复执行。 |
+| 构建与手册 | 将 Docker 白名单放置在实际构建上下文，保留 Agent 源码目录结构。迁移手册先读新版绑定表，证书轮换重建容器并读回指纹。D19 明确云端可公网配对及本地约束。 | 核对构建输入及 COPY 路径，跑 Compose 配置和两项目检查。若有 Docker daemon，再构建镜像并验证容器启动。 |
+
+本地验收通过。Along `npm run check` 623 项（含 Compose 配置），Along Agent `pnpm check` 1,848 项。iOS 模拟器构建通过，Web 缓存与原生页面标记同为 83，安装版本为 74。固定版本 DSH 接本地模型替身，两个用户均从 `working` 查到终态。Linux 容器启动、真实模型与双真机验收留在 §6.4。
+
 ## 1. 范围（明确不做什么）
 
 - **不做**公网注册、计费、管理后台、动态扩缩容：用户数固定为 2，身份由服务端静态用户表（`users.json`）+ 每用户配对码提供（SD-2）。
@@ -146,9 +160,9 @@ secrets:
   model-credentials: {file: ../../secrets/model-credentials}
 ```
 
-- **卷与持久化**：host 全部状态在 `/opt/along/data/host`（compose 经 `../../data/host` bind mount 到容器 `/data`，0700，对应 `ALONG_AGENT_STATE_DIR`，`host/agent-host.mjs:26`；该目录在 git 仓库**外层**，杜绝误提交）；agent 容器无状态（headless 一次性进程 + runner 内存缓存），无卷。APNs key、模型凭证、runner 内网令牌用 compose `secrets`（文件来源 `/opt/along/secrets/*`，0600，同样在仓库外层），密钥只进服务端，不进镜像、不进 git。**路径必须与 §6.4 布局一致**：file secret 指向不存在的文件是 `docker compose up` 的硬错误（起不来，不会静默降级）；但 `volumes` 指向空目录只会静默落空——若 `/data` 挂到了别的空目录，`users.json` 不可见，host 会以本地单用户模式启动并往 docker logs 打通用码（§3.2 的设计恰好掩盖异常），冒烟时必须核对第 5 步的启动横幅与 `users.json` 可见性。不部署远程通知时按 compose 注释删除 apns-key 的三处引用。
+- **卷与持久化**：host 全部状态在 `/opt/along/data/host`（compose 经 `../../data/host` bind mount 到容器 `/data`，0700，对应 `ALONG_AGENT_STATE_DIR`，`host/agent-host.mjs:26`；该目录在 git 仓库**外层**，杜绝误提交）；agent 容器无状态（headless 一次性进程 + runner 内存缓存），无卷。APNs key、模型凭证、runner 内网令牌用 compose `secrets`（文件来源 `/opt/along/secrets/*`，0600，同样在仓库外层），密钥只进服务端，不进镜像、不进 git。**路径按 §6.4 布局**：secret 文件缺失会让 Compose 启动失败。Host 配置了云端 Runner 且 `/data/users.json` 缺失或无效时，在监听前退出。不部署远程通知时按 Compose 注释移除 APNs 三处引用。
 - **TLS 证书**：host 启动时若卷内无证书则 openssl 现场生成（既有逻辑 `host/agent-host.mjs:37-43`），CN/Days 由 M4 的 env 控制；指纹从 `docker logs along-host` 读取，作为配对表单的指纹输入。证书与卷同生命周期，重启不换。
-- **监督与重启**：`restart: unless-stopped` 取代 `tools/activate.mjs` 的「任一退出整体退出」前台监督（`tools/activate.mjs:289-290`）；healthcheck 失败由 Docker 重启。
+- **监督与重启**：`restart: unless-stopped` 在容器主进程退出时由 Docker 重启。健康检查只报告健康状态。
 - **端口占用 preflight**：443（对外）、3088（容器内）不得与宿主机其他服务冲突；ECS 安全组只开 22/443。
 
 ### 3.2 多用户模型与数据隔离
@@ -156,11 +170,11 @@ secrets:
 - **用户模型**：`users.json`（host 状态目录，0600，静态由部署者写入）声明用户：`[{"userId":"u_xxxxxxxx","label":"…"}]`。无注册入口、无自助建号（D1 修订见 §7 SD-2）。`u_` 前缀沿用现有身份形状（`host/agent-host.mjs:54`）。
 - **配对**：复用现有表单和 `/pair`，已连接设备也可从连接区重新配对。云端成功响应附带 DSH 运行时提示，Mac 的响应继续只含 token。
   - 发码：部署者在服务器上执行 `docker exec along-host node host/pair-code.mjs <userId>` → 为该用户生成 8 位一次性码（15 分钟有效，写入状态目录 `pairing-codes.json`，0600），通过私下渠道发给对应的人。
-  - 码状态机（写死，实施者不得自行发明）：`pairing-codes.json`（0600，原子写替换）承载顶层 `failures:[ISO 时间戳]`（全局失败滑动窗口）与码数组 `[code,userId,expiresAt]`；`/pair` 处理器**每次调用重读该文件**（不在启动时缓存，CLI 与 server 靠文件交接）；**单次有效 = 配对成功即从文件删除该码**。**并发约束**：该文件的读-改-写（失败计数追加、删码、清空窗口）必须在同一**同步段**内完成——沿用现状 host 的同步 fs 风格（temp 写 + `renameSync` 原子替换，参照 `host/daily-action-history.mjs:18-25`、`host/kimi-code-agent.mjs:158-165`），不得改用异步 fs：并发 `/pair` 下异步读-改-写会丢计数，攻击者可用并发请求稀释窗口绕过限速。
+  - **码状态**：`pairing-codes.json`（0600，原子替换）保存全局失败时间戳和 `[code,userId,expiresAt]` 数组。发码 CLI 和 Host 复用已有 `proper-lockfile` 锁，持锁读、改、写。配对成功即消费验证码。锁争用超时返回 503，管理员可稍后重试。
   - **公网全局失败窗口**：每次 `/pair` 先剔除 15 分钟前的失败和已过期码。窗口已有 `ALONG_PAIR_FAIL_LIMIT` 次失败时，所有提交在比对验证码前统一返回 403，保留尚有效的码。低于限额时，失败追加时间戳，成功消费命中的码并清空失败窗口。默认限额 10，可调低。管理员用发码命令重新开启窗口，未到期的其他用户码保留原有效期。
-  - 通用码禁用：`users.json` 存在（云端形态）时启动**不生成、不打印**通用配对码（跳过 `host/agent-host.mjs:44-45` 的内存码与 `:435-439` 的码横幅）——多用户下通用码无归属，且避免码持久落入 docker logs（§3.7）；`users.json` 不存在（本地形态）保持现状。
-  - `/pair` 校验码→用户（码与 userId 绑定），签发 64hex token，把 `{hash,user_id,device_id}` **按用户 upsert** 进 `pairings.json`（数组，每用户一条；同一用户换手机覆盖自己的旧绑定、user_id 不变——保留现有语义，`host/agent-host.mjs:301-302`）。`users.json` 同样**每次 `/pair` 重读**（M1 实现决定，§4）：发码和验码的用户范围即时更新；启动横幅是否打通用码仍按启动时的 `users.json` 存在性决定。码有效但用户已移出表 → 403 且**不消费码、不计失败**，部署者改回后同一码仍可配对。
-  - 本地兼容：`users.json` 不存在时，Mac 继续走启动通用码路径，由原有代码决定配对。已有单对象 `pairing.json` 启动时迁移成 `pairings.json`，保留身份和 token 哈希。
+  - **云端启动保护**：配置 `ALONG_DSH_RUNNER_URL` 时必须有可读、有效的 `users.json` 和 Runner 令牌。多用户形态只认每用户码，启动不生成或打印通用码。
+  - `/pair` 按码解析用户，持久化 `{hash,user_id,device_id}` 后再更换现役绑定并返回 token。多用户 Host 每次验码重新读用户表。管理员移除用户后，该用户的待配对码不被消费；表缺失或损坏时暂拒配对。绑定文件写入失败时保留当前绑定，云端已消费的码由管理员重发。
+  - **本地兼容**：未配置云端 Runner 且启动时无用户表，Mac 使用 15 分钟启动码。成功一次或错误五次后锁定，重启后重新发码。旧 `pairing.json` 迁移成 `pairings.json`，保留身份和 token 哈希。
 - **鉴权**：`authorized()` 从「比对单例 tokenHash」改为「在 pairings 表中按 SHA-256 查找」，返回该请求的绑定 `{userId,deviceId,hash}`；未命中一律 401（文案不变）。
 - **每请求身份**：M2 把 `identity` 单例改为每请求解析：`/sources/*`、`/notifications/*`、`/events`、`/sync` 的 `identity===who` 复查改为「该绑定仍然在表中且 device/user 一致」。单例守卫实体分布在三个文件，必须一并改，漏一处隔离即落空：`host/device-source-routes.mjs:9、15、19、24、29、43-45`（`createDeviceSourceRoute` 的 `who=identity()` 与多处 `identity()!==who`；`deviceAwareSourceConnection.who(args)` 比较 `identity()` 与 `args.userId`，且被无请求语境的后台路径复用）与 `host/source-event-bridge.mjs:142、249、256-261`（`active=who=>identity()===who`、`pump()` 直接取 `identity()`、宿主桥的归属复查）；后台泵（source 事件、通知派发）按绑定列表逐用户处理。请求体自称 user_id/device_id 的拒绝不变（`host/agent-host.mjs:176-179`）。
 - **数据隔离清单**：
@@ -203,9 +217,10 @@ secrets:
 
 - **Tier 1（云端 v1，本轮实现并验收）**：目标聊天链路上云，旧链路语义。
   - **agent 容器** = `node:24` + `@deepseek-ai/dsh@0.2.2-rc.5`（版本写死在 `deploy/Dockerfile.agent`）+ `deploy/agent-runner.mjs`（极小 HTTP 服务，仅 compose 内网监听 3088）。
-  - **runner 契约**：`POST /run {userId,requestId,kind:'goal'|'task',input}` → 按「一次调用一个 dsh headless 进程」执行，解析 stdout 最终 JSON，返回与运行时无关的运行信封 `{run:{requestId,status:'done'|'blocked',result:{...}}}`；`GET /run/:requestId`（带 `x-along-user`）→ 该用户自己的运行缓存（键 `${userId}:${requestId}`，LRU 上限 200）；`GET /health`（compose healthcheck 匿名可达，其余端点必须带令牌）。鉴权=`runner-token` 头。dsh 进程超时对齐 `AGENT_RUN_TIMEOUT_MS`（`web/super-agent.mjs:7`）。**运行信封的 `runtime` 字段固定取 `'dsh-superagent'`**：白名单两种值都收（`web/super-agent.mjs:172-176`），但照抄 Kimi 信封会把云端 run 错标成 `kimi-code-swarm`（`host/kimi-code-agent.mjs:264` 即取 `KIMI_RUNTIME`），UI 文案与事件追踪全错——验收 #3 显式断言该值。runner 对 dsh 的 stdout/stderr 与请求体只解析、不落日志（§3.7）。**M3 实现拍板**（已实现于 `deploy/agent-runner.mjs`）：dsh 调用形态为固定版本 headless CLI，配合只规划配置与独立临时目录（提交任务 → stdout 输出最终答案 → exit 0/1），二进制可经 `ALONG_DSH_BIN` 替换（测试替身/M5 冒烟），端口与监听地址 `ALONG_RUNNER_PORT`（默认 3088）/`ALONG_RUNNER_HOST`（默认 0.0.0.0，仅容器内网）；同一 `userId+requestId` 的 POST 幂等命中缓存、不重复拉起进程；dsh 失败（拉起失败/非零退出/超时/输出不是 JSON）一律落 `blocked` 终态并缓存；任务（kind='task'）信封与 Kimi version 2 同构（`task`+单条 DSH Headless assignment 携带 summary）；host 侧回执 requestId 与本次请求不符 → 502（不把别人的运行当本次结果）。
+  - **Runner 契约**：`POST /run {userId,requestId,kind,input}` 立即返回 `{run}`，新记录状态为 `working`，同键重提交返回原记录。`GET /run/:requestId` 使用 `x-along-user` 查询同一个运行的在途或终态，两个端点都使用 `runner-token`。已完成记录 LRU 上限为 200。在途记录独立保留，接单时间与请求身份贯穿同一轮。DSH 无结果、超时或输出无效时落 `blocked`。`GET /health` 供 Compose 探活。
   - **提示词契约归一共享层**：把 `GOAL_OUTPUT_INSTRUCTIONS`（目标输出 JSON 形状，现内嵌 `host/kimi-code-agent.mjs:38-40`）上移到 `web/goal-agent-core.mjs` 导出，Kimi 与 runner 共用；情境评估复用既有 `REASSESSMENT_INSTRUCTIONS`（`web/contextual-planning.mjs`，两条运行时已共用）。这落实「两条运行时对同一契约必须同结论、归一放共享层」的既有纪律（`docs/bugfix-goal-prompt.md` §7）。
   - **Host 分流与校验**：设置 `ALONG_DSH_RUNNER_URL` 时，DSH 的目标、任务、状态和连接检查走 runner；未设置时继续使用 Mac bridge。提交和查询都校验回执类型和请求编号；目标回执再经过现有的目标、布局和情境变更校验。已校验的情境输入只在 Host 与 runner 之间传递，客户端只收到最小运行信封。校验通过的目标聊天由 Host 标记后在客户端自动生效，健康情境重评沿用单独的结果路径。
+  - **客户端恢复**：同一云端连接的在途目标即使换页或重开 App，也按原编号查询。首回执丢失后，只有 Runner 确认记录不存在且接单宽限已过，才立即提示重发。临时网络错误继续遵循运行超时。
   - **执行边界**：runner 通过 stdin 把提示交给固定版本的 `dsh --profile along-headless`，使用显式模块集且无模型可见工具。每次调用新建私有工作目录和 DSH home，完成后清理。云端 agent 容器根文件系统只读，临时目录位于有上限的 tmpfs，运行子进程只接收必要的环境变量及模型密钥。
   - **开关语义不变**：云端 v1 `ALONG_EVENT_INGEST` 不设置（off）→ 新链路端点 503、旧链路 DSH 分支正常（`host/agent-host.mjs:162-167`）；情境评估凭证/桥接凭证不配置 → 相关守卫自然跳过（`:71-75`）。
 - **Tier 2（新链路数据面上云，验证项 V-1，不在本轮验收范围）**：验证 along bundle 能否在 `@deepseek-ai/dsh` CLI 下以 profile/bundle 层路径挂载方式加载（npm 版 CLI 拒绝插件管理请求，须走层路径；能否承载长驻 webserver + along.sqlite + 投递泵待验证）。验证通过则 compose 增加 bridge token secret、`ALONG_EVENT_INGEST=on`、`ALONG_SUPERAGENT_URL` 指向 agent 长驻服务；验证不通过则新链路数据面留在 Mac 本地模式，云端维持 Tier 1。两种结果都只动配置与开关，不改协议（BC-09-03/04 回退语义原样适用）。
@@ -261,7 +276,7 @@ secrets:
 ### M5 Docker 编排与部署产物
 
 - **目标**：两个镜像 + compose 编排可构建可启动：`deploy/Dockerfile.host`（node:22-bookworm-slim + openssl，COPY host/ 与共享的 web/*.mjs——镜像必须携带 host→web 的**完整 import 闭包**且平铺保持仓库布局。本轮以 `grep -rn "from '../web/" host/*.mjs` 实测闭包为准：`goal-agent-core.mjs`、`adaptive-ui.mjs`（→goal-agent-core）、`super-agent.mjs`、`contextual-planning.mjs`、`loop.mjs`（→health.mjs、goal-agent-core）、`health.mjs`（→contextual-planning）、`task-results.mjs`（`host/task-notifications.mjs:4` 直接导入，不在其他任何共享文件的依赖链里，漏掉即启动 MODULE_NOT_FOUND）；闭包随代码演进会变，M5 施工时以当次 grep 为准，上述文件均已登记在 `tools/build.mjs:2`）、`deploy/Dockerfile.agent`（node:24 + `@deepseek-ai/dsh@0.2.2-rc.5` pin；经 compose `additional_contexts` 引 `../../along-superagent`（基准=project directory deploy/，§3.1 施工修正），把 along bundle 复制进镜像为 V-1 预置，§3.1/§6.4）、`deploy/docker-compose.yml`（§3.1）、`deploy/env.example`、`deploy/README.md`（构建与本地冒烟）。
-- **涉及文件**：新增 `deploy/Dockerfile.host`、`deploy/Dockerfile.agent`、`deploy/docker-compose.yml`、`deploy/env.example`、`deploy/README.md`、`deploy/.dockerignore`。模块内自检：`node --check deploy/agent-runner.mjs`、`docker compose -f deploy/docker-compose.yml config` 通过；`npm run check` 保持绿（deploy/ 不在 check 目录规则内）。
+- **涉及文件**：新增 `deploy/Dockerfile.host`、`deploy/Dockerfile.agent`、`deploy/docker-compose.yml`、`deploy/env.example`、`deploy/README.md`、仓库根 `.dockerignore`。Host 镜像用锁文件安装生产依赖，Agent 镜像保留相邻 bundle 的各源目录。模块内自检：`node --check deploy/agent-runner.mjs`、`docker compose -f deploy/docker-compose.yml config` 通过；`npm run check` 保持绿（deploy/ 不在 check 目录规则内）。
 - **依赖**：M3、M4。
 
 ### M6 iOS 连接地址迁移与版本联动
@@ -285,7 +300,7 @@ secrets:
 2. **每用户隔离（M2）**：stub 上游断言 `/sync`、`/events` 转发头 `x-along-user` 等于请求者绑定；A、B 并发 `/goal/event` 都推进（各自锁），同一用户并发第二条得 429；`notification-device.<userId>.json` 互不覆盖；Kimi 运行键 `${userId}:${requestId}`，B 查 A 的 requestId 报「运行记录不存在」；**跨用户断言**：A 的绑定查不到 B 的每日委托索引（键含 pair 哈希，`host/daily-action-history.mjs:33-51`），A 的事件不会推到 B 的设备（ingest 对 `item.userId!==who.userId` 拒绝，`host/task-notifications.mjs:152`）。以上在 `test/host-multi-user-isolation.test.mjs` 断言。
 3. **runner 契约（M3）**：`ALONG_DSH_RUNNER_URL` 指向 stub runner → `/super-agent/goals` 返回的 run 过 `normalizeGoalRun`；非法 JSON/校验失败 → `status:'blocked'` 终态不重试；run 信封通过 `safeGoalSuperAgentRun` 且 `runtime==='dsh-superagent'` 显式断言（不得误标 `kimi-code-swarm`）；不设该 env → 走 bridge 的现有测试全绿（两条运行时同契约回归）。
 4. **TLS 参数（M4）**：`ALONG_TLS_CN=along.example.com ALONG_TLS_DAYS=3650` 启动 → cert.pem 的 CN 与 notAfter 符合、指纹打印；不设 env → 30 天 `CN=Along Local Agent` 与现状一致。
-5. **编排（M5）**：`docker compose -f deploy/docker-compose.yml config` 校验通过；两镜像在 Linux 上构建成功；`compose up` 后 host `/health` 200、agent `/health` 200、`docker logs along-host` 可读出证书指纹且启动横幅为 `https://0.0.0.0:4176`（`ALONG_AGENT_HOST=0.0.0.0` 生效——容器内无 en0，缺 env 会回退绑 127.0.0.1 导致 443 映射打不通，`host/agent-host.mjs:68`）；**路径一致性断言**：容器内 `/data/users.json` 与 Runbook 第 4 步写入的 `/opt/along/data/host/users.json` 是同一文件（`../../data/host` 基准 = deploy/ 目录，§3.1），否则 host 以本地单用户模式启动且往日志打通用码（§3.2）；**可选路径断言**：按 compose 注释删除 apns-key 三处引用后 `compose up` 仍成功（file secret 缺失不删引用则是硬错误）；secrets 文件内容不出现在任何镜像层（`docker history` 抽查）与日志；`deploy/env.example` 只含非敏感示例值（无真实凭证）；`docker logs` 中不出现请求体、运行内容（用户消息/模型输出）、配对码与凭证（§3.7）。
+5. **编排（M5）**：`docker compose -f deploy/docker-compose.yml config` 校验通过；两镜像在 Linux 上构建成功；`compose up` 后 host `/health` 200、agent `/health` 200、`docker logs along-host` 可读出证书指纹且启动横幅为 `https://0.0.0.0:4176`（`ALONG_AGENT_HOST=0.0.0.0` 生效——容器内无 en0，缺 env 会回退绑 127.0.0.1 导致 443 映射打不通，`host/agent-host.mjs:68`）；**路径一致性断言**：容器内 `/data/users.json` 与 Runbook 第 4 步写入的 `/opt/along/data/host/users.json` 是同一文件（`../../data/host` 基准 = deploy/ 目录，§3.1），缺失或无效时 Host 拒绝启动（§3.2）；**可选路径断言**：按 compose 注释删除 apns-key 三处引用后 `compose up` 仍成功（file secret 缺失不删引用则是硬错误）；secrets 文件内容不出现在任何镜像层（`docker history` 抽查）与日志；`deploy/env.example` 只含非敏感示例值（无真实凭证）；`docker logs` 中不出现请求体、运行内容（用户消息/模型输出）、配对码与凭证（§3.7）。
 6. **iOS（M6）**：编译真实 Swift 的 `ios-connection-migration` 测试断言：`https://along.example.com` 通过；`http://`、带 user:password、带 path/query、非法域名段、非私网数字 IP 全部拒绝；私网 IPv4 行为不变。
 7. **真机端到端（上线验收，§6.4 之后）**：两台 iPhone 各自配对并验证就绪，每人通过聊天新建目标、再修改已有目标，两次结果都在校验通过后自动生效，两台设备看不到对方的会话和目标。已有 Mac 配对的手机走一次切到云端并切回 Mac 的流程。
 8. **红线回归**：`test/along-bridge.test.mjs`、`test/source-event-bridge.test.mjs`（loopback 守卫）、`test/device-source-gateway.test.mjs`、`test/goal-agent-core.test.mjs`、`test/adaptive-ui.test.mjs`、`test/event-queue.test.mjs` 全部不改语义通过——证明校验与守卫零放宽。
@@ -300,20 +315,20 @@ secrets:
 | --- | --- | --- |
 | headless 规划配置或模型凭证错误 | 目标聊天失败 | runner 启动时读入密钥。按 deploy/README.md 通过经过认证的 runner 进行一次真实模型冒烟，确认终态和结构化结果 |
 | along bundle 在 npm CLI 下无法加载（V-1 失败） | 新链路数据面不上云 | 设计已按 Tier 1 收敛：云端 v1 只依赖 goal 聊天链路，不依赖 bundle；Mac 本地模式保留全部能力 |
-| 证书 3650 天后过期/需换域名 | 全体掉线需重配对 | 换证书=删卷内 cert/key.pem → 重启 → 重新发码配对（Runbook §6.4 步骤 10）；3650 天远超本次部署预期 |
-| runner 无持久化，host/agent 容器重启丢失进行中运行 | 用户看到一次失败重试 | 与现状「Mac 进程重启丢 Kimi 会话指针」同级；一次性进程语义下重发消息即可，状态落 `blocked` 终态不悬挂（`web/super-agent.mjs:181-186` 30 分钟兜底不变） |
+| 证书 3650 天后过期或需要换域名 | 全体掉线需重配对 | 按 §6.4 步骤 10 保留旧证书备份、重建 Host 并核对新指纹 |
+| Runner 进程重启丢失内存中的运行 | 原运行无法续查 | App 通过原编号查询至终态或超时。必要时通过聊天重发 |
 | 云主机持有配对哈希与每日委托索引 | 服务器被读 | 状态目录 0700/文件 0600 + ECS 加密盘（Runbook 步骤 1）；哈希不可逆；无原始健康样本、无 OKX 密钥、无模型凭证明文落盘（全在 secrets） |
 | 两用户共用 DeepSeek API Key | 计费和额度共用 | Runner 进程为每轮分配独立临时目录，模型计费仍归同一账号 |
 | `network` 内 runner 被宿主机其他进程访问 | 内网凭证泄露 | runner 只监听容器内网；宿主机上只有 docker0 桥，无发布端口；runner-token 校验兜底 |
 | 公网配对失败达到上限 | 已发出的有效码暂时不可用 | 满窗时停止验码，等待失败记录离开窗口或由管理员重新发码开启窗口 |
-| 管理员发码进程与 Host 同时更新配对状态 | 同一文件的原子替换不能串行化两个进程的读改写 | 此项仍需跨进程状态写入协调；现有自动化覆盖各用户顺序发码和 Host 内部并发 |
-| compose 相对路径与部署目录错位（挂错卷/secret 缺失） | secret 缺失=up 硬错误起不来；卷挂空目录=静默单用户模式 | §3.1 写死基准（project directory=deploy/，`../../` 指仓库外层）；Runbook 第 5 步冒烟核对启动横幅与 `users.json` 可见性；验收 #5 断言 |
+| 管理员发码进程与 Host 同时更新配对状态 | 并发状态写入 | 共用跨进程锁，锁内完成读改写 |
+| Compose 路径错位或 secret 缺失 | Host 或 Compose 拒绝启动 | 固定 §6.4 路径，冒烟核对容器内 `/data/users.json` 与启动横幅 |
 
 ### 6.2 Mac 本地数据怎么迁
 
 云端 v1 **不迁移业务历史库**（along.sqlite 属 Tier 2 数据面；云端 v1 目标空间在手机本地延续——`web/app.mjs` 的 `along.goal-*` 键不受换地址影响；`persistAgentConfig`（`web/app.mjs:110-117`）在 token/指纹变化时清背景模板缓存**并撤销健康目标的每日委托授权**（`revokeDaily()`，见下文第 5 条））。需要迁移/重建的是：
 
-1. **用户身份**：读取 Mac 上现役 `pairing.json` 的 `user_id`（直接 `npm run agent-host` 用户在 `~/.along/agent-host/`，`npm run activate` 用户在 `~/.along/phone-test/host/`，两处都查），写进云端 `users.json` 作为用户 A 的固定 userId——保住既有身份连续性；用户 B 用新 `u_` 号。
+1. **用户身份**：从实际在用的 Mac 状态目录读取 `pairings.json` 中现役绑定的 `user_id`，仅把该值写入云端 `users.json`。直接 `npm run agent-host` 默认用 `~/.along/agent-host/`，`npm run activate` 默认用 `~/.along/phone-test/host/`。旧版还未迁移时可读 `pairing.json` 的 `user_id`。旧文件只有哈希时，先用当前 Host 启动完成迁移再读。用户 B 使用新 `u_` 号。
 2. **可选历史快照**：如需在云端可见旧聊天记录，仅迁移手机本地数据（换地址自动保留）；服务器侧 `device-sources/`、`okx-connections/`、`source-events/` 仅在回退 Mac 模式时有用，云端 v1 用不上，**拷贝不移动**（原 Mac 数据保留，回退零成本）。
 3. **通知登记**：新端重新登记（App 首次连接后自动上报 APNs token，`/notifications/device`，云端 v1 也可先不配 APNs key）。
 4. **健康事件 outbox**：切换前在旧端把待同步队列清空（打开 App 等同步完成），换址后 outbox 按新绑定重建（§3.4）；云端 v1 该链路 503，原始摘要仍只在手机与 Mac。
@@ -329,18 +344,18 @@ secrets:
 
 > **2026-11-20 定稿**：命令以本节与 deploy/README.md 为准。真实模型冒烟经过配置好的 runner，覆盖模型凭证、规划配置和隔离工作目录。
 
-前置：一台 ECS（建议 2C4G 起，Ubuntu 22.04/24.04）、一个域名、两台已装当前候选 App 的 iPhone（`CFBundleVersion=73`）。
+前置：一台 ECS（建议 2C4G 起，Ubuntu 22.04/24.04）、一个域名、两台已装当前候选 App 的 iPhone（`CFBundleVersion=74`）。
 
 1. **主机初始化**：安装 Docker（≥24）与 compose v2；安全组只开 22/443；建议启用 ECS 云盘加密；`mkdir -p /opt/along/{data/host,secrets}`（`deploy/` 由第 2 步 clone 自带；这两个目录在 git 仓库**外层**，compose 经 `../../` 相对路径引用，基准=compose 文件所在目录 deploy/，§3.1）并收紧权限：`chmod 700 /opt/along/data/host /opt/along/secrets`（默认 umask 建出的是 0755，与 §3.1 的 0700 声明不符；第 3 步的密钥文件另须 0600）。
 2. **取代码**：`git clone` 本仓库与 `along-superagent` 保持相邻布局（`/opt/along/along` + `/opt/along/along-superagent`）；`cd /opt/along/along`。
 3. **写密钥**（全部 0600，绝不进 git/镜像；路径写死 `/opt/along/secrets/`，与 compose `../../secrets/…` 解析结果一致，§3.1；写完 `chmod 600 /opt/along/secrets/*`）：`/opt/along/secrets/runner-token`（`openssl rand -hex 32`）、`/opt/along/secrets/model-credentials`（一行纯 DeepSeek API Key，末尾可有换行）、可选 `/opt/along/secrets/apns-key.p8`（从 Mac 环境变量同值迁移，并同步记下 `ALONG_APNS_TEAM_ID`/`ALONG_APNS_KEY_ID` 两个非敏感值写入 compose env——`host/apns.mjs:8-14` 要求三件齐全才会创建 provider，只挂文件不配 env 通知会静默失效；不部署远程通知则不写该文件，并按 §3.1 注释删除三处引用）。
-4. **写用户表**：**绝对路径** `/opt/along/data/host/users.json`（写相对路径会落进仓库目录而卷内为空，host 将以本地单用户模式启动并打通用码——§3.1 已列此静默失败模式，验收 #5 有路径一致性断言兜底）：`[{"userId":"<Mac 旧配对 user_id>","label":"A"},{"userId":"u_<新8hex>","label":"B"}]`，写完 `chmod 600`。
-5. **构建与启动**：`docker compose -f deploy/docker-compose.yml build`（构建口径统一由 compose 的 `build` 段承载：context `..` 以 deploy/ 为基准解析到仓库根，agent 经 `additional_contexts: {along: ../../along-superagent}` 预置 bundle（相对路径以 project directory 为基准，与手工 --build-context 从 cwd 解析不同）——手工等价命令（cwd=仓库根 `/opt/along/along`）`docker build --build-context along=../along-superagent -f deploy/Dockerfile.agent . -t along-agent:local`，位置参数必须是 `.`（仓库根），写 `..` 会以 `/opt/along` 为 context 导致 COPY 找不到 host/ 且把相邻仓库与 secrets/ 整包送进 context）；`docker compose -f deploy/docker-compose.yml up -d`（若不部署远程通知，先按 §3.1 注释删除 apns-key 三处引用再 up，否则 file secret 缺失直接报错）；冒烟：`docker logs along-host` 看到 `Along 服务: https://0.0.0.0:4176` + 证书指纹 + 证书到期时间（M4 起横幅打印到期，`host/agent-host.mjs:538`；`ALONG_AGENT_HOST=0.0.0.0` 必须生效：容器内没有 en0，缺 env 会回退绑 127.0.0.1、443 映射打不通，`host/agent-host.mjs:68`；多用户形态下横幅**不打印**配对码，发码走第 7 步），`docker exec along-host sh -c 'ls /data/users.json'` 可见（挂错卷会静默变成单用户模式，§3.1），`docker exec along-agent node -e "fetch('http://127.0.0.1:3088/health').then(r=>r.json()).then(console.log)"` 返回 ready；按 [部署冒烟](../deploy/README.md#冒烟验收-5runbook-64-第-5-步) 通过已认证的 runner 完成一次真实模型调用。
+4. **写用户表**：按 §6.2 读取 Mac 用户 A 的现役 `user_id`，在 `/opt/along/data/host/users.json` 写入 `[{"userId":"<Mac 的 user_id>","label":"A"},{"userId":"u_<新8hex>","label":"B"}]` 并 `chmod 600`。写入其他路径会导致云端 Host 拒绝启动。
+5. **构建与启动**：`docker compose -f deploy/docker-compose.yml build`（构建口径统一由 compose 的 `build` 段承载：context `..` 以 deploy/ 为基准解析到仓库根，agent 经 `additional_contexts: {along: ../../along-superagent}` 预置 bundle（相对路径以 project directory 为基准，与手工 --build-context 从 cwd 解析不同）——手工等价命令（cwd=仓库根 `/opt/along/along`）`docker build --build-context along=../along-superagent -f deploy/Dockerfile.agent . -t along-agent:local`，位置参数必须是 `.`（仓库根），写 `..` 会以 `/opt/along` 为 context 导致 COPY 找不到 host/ 且把相邻仓库与 secrets/ 整包送进 context）；`docker compose -f deploy/docker-compose.yml up -d`（若不部署远程通知，先按 §3.1 注释删除 apns-key 三处引用再 up，否则 file secret 缺失直接报错）；冒烟：`docker logs along-host` 看到 `Along 服务: https://0.0.0.0:4176` + 证书指纹 + 证书到期时间（M4 起横幅打印到期，`host/agent-host.mjs:538`；`ALONG_AGENT_HOST=0.0.0.0` 必须生效：容器内没有 en0，缺 env 会回退绑 127.0.0.1、443 映射打不通，`host/agent-host.mjs:68`；多用户形态下横幅**不打印**配对码，发码走第 7 步），`docker exec along-host sh -c 'ls /data/users.json'` 可见（挂错卷会阻止 Host 启动，§3.1），`docker exec along-agent node -e "fetch('http://127.0.0.1:3088/health').then(r=>r.json()).then(console.log)"` 返回 ready；按 [部署冒烟](../deploy/README.md#冒烟验收-5runbook-64-第-5-步) 通过已认证的 runner 完成一次真实模型调用。
 6. **DNS**：域名 A 记录指向 ECS 公网 IP；`openssl s_client` 抽查 443 返回自签证书且 CN=域名。
 7. **发码配对**：对每个用户 `docker exec along-host node host/pair-code.mjs u_xxx` → 把「`https://<域名>` + `docker logs` 里的证书指纹 + 8 位码」私下发给对应的人（一人一码，15 分钟）。
 8. **切换前旧端收尾**：在 iPhone 上连旧 Mac 服务打开 App，等健康/事件同步清空待发队列，旧 Mac 服务可停可不停。
 9. **iPhone 配对**：已有连接的设备从当前连接区选择重新配对。填写新域名、指纹和验证码，App 将新 token 保存至 Keychain。两台设备分别确认连接就绪、通过聊天修改目标后自动生效，以及互相看不到对方会话。换端会撤销每日委托授权，需要继续使用时在新端重新授权。
-10. **观察与回退锚点**：观察 24h（`docker compose logs -f`）；异常即按 §6.3 回退（改回 Mac 地址重新配对，Mac 服务原样在跑）。**换证书/换域名**：更新 `ALONG_TLS_CN` → 删 `data/host/cert.pem key.pem` → `docker compose restart host` → 重发两码重新配对。
+10. **观察与回退锚点**：用 `docker compose -f deploy/docker-compose.yml logs -f` 观察 24 小时。异常按 §6.3 切回 Mac。换证书或域名时更新 Compose 中的 `ALONG_TLS_CN`，用 `docker compose -f deploy/docker-compose.yml stop host` 停止 Host，将 `/opt/along/data/host/cert.pem` 和 `/opt/along/data/host/key.pem` 一起移到权限为 0700 的备份目录。执行 `docker compose -f deploy/docker-compose.yml up -d --no-deps --force-recreate host`，通过 DNS、TLS 握手和 Host 日志核对新域名、到期时间和指纹后重新发码。
 
 ## 7. 方案内决策记录（SD）
 

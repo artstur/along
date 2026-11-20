@@ -39,7 +39,7 @@ const docsIndex=read('docs','README.md');
 const design=read('docs','cloud-deploy-multi-user.md');
 const hostSrc=read('host','agent-host.mjs');
 const ADJACENT=resolve(ROOT,'../along-superagent');
-const decisions=readFileSync(join(ADJACENT,'docs','along','000-decisions.md'),'utf8');
+const decisionsFile=join(ADJACENT,'docs','along','000-decisions.md');
 
 // 按标题切片；to 标题缺失时取到文末。
 function section(text,start,end) {
@@ -56,8 +56,6 @@ const readmePrivacy=section(readme,'## 隐私与安全','## 项目结构');
 const runbook=section(design,'### 6.4 上线 Runbook','## 7. 方案内决策记录');
 const risks=section(design,'### 6.1 风险清单','### 6.2');
 const m7=section(design,'### M7 文档、决策与 Runbook 终稿','## 5. 验收标准');
-const d1=section(decisions,'## D1 ','## D2 ');
-const d19=section(decisions,'## D19 ');
 
 test('AGENTS.md §4：状态目录三形态与云端部署条目（§2.3 修正 2）',()=>{
   // 三形态口径：直接 agent-host 默认 / activate / 云端挂载卷，与设计文档 §2.3-2 的可执行口径一致。
@@ -177,6 +175,14 @@ test('Runbook 冒烟期望与 host 启动横幅实现一致',()=>{
   assert.ok(hostSrc.includes('if (code) console.log(`一次性配对码'),'host 横幅未按条件打印通用码');
 });
 
+test('Runbook uses the current binding table and recreates the Host after certificate changes',()=>{
+  const migration=section(design,'### 6.2 Mac 本地数据怎么迁','### 6.3');
+  assert.match(migration,/读取 `pairings\.json` 中现役绑定的 `user_id`/);
+  assert.match(runbook,/\/opt\/along\/data\/host\/cert\.pem.*\/opt\/along\/data\/host\/key\.pem/);
+  assert.match(runbook,/docker compose -f deploy\/docker-compose\.yml up -d --no-deps --force-recreate host/);
+  assert.doesNotMatch(runbook,/docker compose restart host/);
+});
+
 test('修正 3 无落点：AGENTS/README/docs 索引无不准确的全局锁表述，设计文档 §2.1 承载修正',()=>{
   // §2.3-3 判定该不准确表述在 AGENTS.md/README/docs/README.md 无落点（全库 grep 无命中）。
   for (const [name,text] of [['AGENTS.md',agents],['README.md',readme],['docs/README.md',docsIndex]]) {
@@ -194,10 +200,13 @@ test('设计文档 §4-M7 施工记录：SD-6 确认与遗留点已记录',()=>{
   assert.ok(m7.includes('bugfix-goal-prompt.md'),'施工记录未记录遗留点');
 });
 
-test('along-superagent 决策记录：追加 D19 扩展条目且 D1 原文未被改写',()=>{
+test('along-superagent 决策记录：D1 保留本地约束，D19 明确云端接入边界', {skip:!existsSync(decisionsFile)},()=>{
+  const decisions=readFileSync(decisionsFile,'utf8');
+  const d1=section(decisions,'## D1 ','## D2 ');
+  const d19=section(decisions,'## D19 ');
   assert.ok(decisions.includes('## D19 云端单机 2 用户部署（扩展 D1）'),'缺少 D19 条目');
-  assert.ok(d19.includes('不是推翻'),'D19 未声明扩展而非推翻 D1');
-  assert.ok(d19.includes('「业务对象仍保留 `user_id` 归属检查」原样保留'),'D19 未保留 user_id 归属检查口径');
+  assert.match(d19,/公网.*443|443.*公网/);
+  assert.match(d19,/`user_id` 归属检查/);
   assert.ok(d19.includes('不建设注册、计费'),'D19 未保留 D1 的不建设边界');
   assert.ok(d19.includes('docs/cloud-deploy-multi-user.md'),'D19 未指向设计文档');
   // D19 追加在决策区（被替代的设计表之前）。
