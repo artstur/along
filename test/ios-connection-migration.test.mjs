@@ -287,10 +287,12 @@ for (baseURL, path, fp, tk, expected) in cases {
 
 test('native rebuild linkage: bundled page cache marker and bundle version both moved',()=>{
   // SD-5 / AGENTS.md §2：iOS 原生改动 → AlongShellView.swift 的 build= 与 Info.plist 的 CFBundleVersion 必动。
-  assert.match(swiftSource,/index\.html\?build=82/,'App 内置页面缓存标记要升到 82');
-  assert.doesNotMatch(swiftSource,/index\.html\?build=80/,'不能停留在旧缓存标记 80');
+  const webEntry=readFileSync(new URL('../web/index.html',import.meta.url),'utf8');
+  const cacheVersion=webEntry.match(/app\.mjs\?v=(\d+)/)?.[1];
+  assert.ok(Number(cacheVersion)>=83,'云端运行恢复需要新页面缓存');
+  assert.match(swiftSource,new RegExp(`index\\.html\\?build=${cacheVersion}\\b`),'App 内置页面标记必须与 Web 同步');
   const plist=readFileSync(new URL('../ios/AlongHealth/Info.plist',import.meta.url),'utf8');
-  assert.match(plist,/<key>CFBundleVersion<\/key>\s*<string>73<\/string>/,'发版重装信号 CFBundleVersion 要升到 73');
+  assert.ok(Number(plist.match(/<key>CFBundleVersion<\/key>\s*<string>(\d+)<\/string>/)?.[1])>=74,'发版重装信号 CFBundleVersion 必须提高');
   const pbxproj=readFileSync(new URL('../ios/AlongHealth.xcodeproj/project.pbxproj',import.meta.url),'utf8');
   assert.doesNotMatch(pbxproj,/CURRENT_PROJECT_VERSION/,'pbxproj 不得出现 CURRENT_PROJECT_VERSION 覆盖 Info.plist 的 CFBundleVersion');
 });

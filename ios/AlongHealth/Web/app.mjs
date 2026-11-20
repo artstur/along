@@ -10,7 +10,7 @@ import {AGENT_KEY, GOALS_KEY, CONVERSATIONS_KEY, readStored, agentCall, loadNati
 import {ADAPTIVE_LAYOUTS_KEY, customGoalEntries, findInitialCustomGoalCandidate, goalDomain, isCustomGoalKey, safeAdaptiveLayout, validateAdaptiveLayout} from './adaptive-ui.mjs';
 import {GOAL_SUPER_AGENT_RUNS_KEY, SUPER_AGENT_RUNS_KEY, createFailedGoalSuperAgentRun, createFailedSuperAgentRun,
   createGoalSuperAgentRequest, createPendingGoalSuperAgentRun, createPendingSuperAgentRun, createSuperAgentRequest,
-  safeGoalSuperAgentRun, safeSuperAgentRun, withRunError, AGENT_RUN_TIMEOUT_MS, AGENT_RUNTIME_KEY, DSH_RUNTIME, KIMI_RUNTIME, agentRuntimeLabel, safeAgentRuntime, newId} from './super-agent.mjs';
+  safeGoalSuperAgentRun, safeSuperAgentRun, withRunError, AGENT_RUN_TIMEOUT_MS, AGENT_RUNTIME_KEY, CLOUD_RUN_NOT_FOUND, DSH_RUNTIME, KIMI_RUNTIME, agentRuntimeLabel, safeAgentRuntime, newId} from './super-agent.mjs';
 import {AGENT_NOTIFICATION_LEDGER_KEY, goalRunNotification, taskRunNotification, healthProposalNotification,
   notificationWasDelivered, recordNotificationDelivered} from './agent-notifications.mjs';
 import {PLANNING_STATE_KEY,cleanDailyDelegation,validateDailyActions,agentHealthSnapshot,cleanPlanningContext,healthContextChanges,createPlanningContext,validateReassessment,buildBackgroundReviewRequest} from './contextual-planning.mjs';
@@ -241,15 +241,14 @@ function reviewFor(key) {
 // - 有内容可恢复（写下的消息、没跑完的运行）：回到那一页，用户写下的东西
 //   不能因为重启就再也看不见。
 // - 什么都没有的草稿不是目标：回到健康目标，别让首页渲染出一个幽灵自定义目标。
-// - 上次停在一个还没拿到结果的请求上：那次请求在 App 关掉时就没有下文了，
-//   落成明确终态，别把用户锁在一页禁用的输入框上。
+// - 云端可按原编号找回首个回执。Mac 上未得到回执的草稿落成明确终态。
 const draftKey=isCustomGoalKey(activeGoal)&&!goalCustom[activeGoal]&&!goalLayouts[activeGoal]?activeGoal:null;
 if (draftKey&&!eventConnection()) {
   const draftRunKey=Object.keys(goalSuperAgentRuns).find(key=>key.startsWith(`${draftKey}:`));
   const draftRun=draftRunKey?goalSuperAgentRuns[draftRunKey]:null;
   if ((conversations[draftKey]?.length||0)>0 || draftRun) {
     screen='agent';
-    if (draftRun && draftRun.actual!==true && draftRun.status==='working') {
+    if (draftRun && draftRun.actual!==true && draftRun.status==='working' && !cloudGoalConnection(agentConfig,draftRun.runtime)) {
       goalSuperAgentRuns={...goalSuperAgentRuns,[draftRunKey]:{...draftRun,status:'blocked',statusLabel:'需要重发',
         error:'App 关闭时这次请求没有收到结果；要继续请再发一次。'}};
       saveGoalSuperAgentRuns();
@@ -723,6 +722,10 @@ function untrustedGoalRequest(goalKey,value) {
 }
 const untrustedGoalReason = value => typeof value?.error==='string'&&value.error?value.error:'宿主返回了无法识别的目标编排记录';
 const goalSuperAgentRequests=new Set();
+const CLOUD_RECEIPT_RECOVERY_MS=15_000;
+function cloudGoalConnection(config,runtime) {
+  return config.runtime===DSH_RUNTIME&&runtime===DSH_RUNTIME;
+}
 function saveGoalRun(goalKey,run) {
   goalSuperAgentRuns={...goalSuperAgentRuns,[goalRunKey(goalKey,run?.runtime||agentRuntime)]:run};
   saveGoalSuperAgentRuns();
@@ -769,19 +772,28 @@ async function submitSuperAgentGoal(goalKey,message,history) {
   const pending=createPendingGoalSuperAgentRun(request,Date.now(),request.runtime);
   saveGoalRun(goalKey,pending);
   goalSuperAgentRequests.add(request.requestId);
+  let awaitingReceipt=true;
   try {
     const response=await agentCall(config,'/super-agent/goals',request);
+    awaitingReceipt=false;
     if (goalRequestIsCurrent(goalKey,config,pending)) applyGoalRun(goalKey,response?.run,pending);
   } catch(error) {
     if (!goalRequestIsCurrent(goalKey,config,pending)) return;
+    if (awaitingReceipt&&cloudGoalConnection(config,request.runtime)) {
+      saveGoalRun(goalKey,withRunError(pending,error.message));
+      return;
+    }
     saveGoalRun(goalKey,createFailedGoalSuperAgentRun(request,error.message,Date.now(),request.runtime));
     throw error;
   } finally { goalSuperAgentRequests.delete(request.requestId); }
 }
 async function refreshSuperAgentGoal(goalKey=activeGoal) {
   const current=currentGoalSuperAgentRun(goalKey);
-  if (!current?.actual || current.status!=='working' || goalSuperAgentRequests.has(current.requestId) || !agentConfig.token) return;
   const config=agentConfig;
+  if (current?.status!=='working'||goalSuperAgentRequests.has(current.requestId)||!config.token) return;
+  const recovering=current.actual!==true;
+  const cloud=cloudGoalConnection(config,current.runtime);
+  if (recovering&&!cloud) return;
   goalSuperAgentRequests.add(current.requestId);
   try {
     const run=await agentCall(config,'/super-agent/goals/status',{requestId:current.requestId,runtime:current.runtime});
@@ -791,7 +803,10 @@ async function refreshSuperAgentGoal(goalKey=activeGoal) {
     else if (screen==='home'&&activeGoal===goalKey) render();
   } catch(error) {
     if (!goalRequestIsCurrent(goalKey,config,current)) return;
-    saveGoalRun(goalKey,withRunError(current,error.message));
+    const waitingForAdmission=recovering&&Number.isFinite(current.createdAt)&&Date.now()-current.createdAt<CLOUD_RECEIPT_RECOVERY_MS;
+    const missing=cloud&&error.message===CLOUD_RUN_NOT_FOUND&&!waitingForAdmission;
+    const updated=withRunError(current,error.message);
+    saveGoalRun(goalKey,missing?{...updated,status:'blocked',statusLabel:'需要重发'}:updated);
     // 读不到状态也要让用户看见：否则错误只存在存储里，界面一直转圈。
     if (screen==='agent'&&activeGoal===goalKey) renderAgentUpdate();
     else if (screen==='home'&&activeGoal===goalKey) render();
@@ -2807,5 +2822,10 @@ setInterval(() => {
   if (document.visibilityState==='hidden') return;
   if (eventWorkspace) {refreshRecommendationValidity();void eventWorkspace.sync();return;}
   for (const key of healthGoalKeys()) void reviewFor(key).refreshHealthReview();
-  if (screen==='agent') void refreshSuperAgentGoal(activeGoal);
+  if (nativeConnectionRestored&&cloudGoalConnection(agentConfig,agentRuntime)) {
+    const runtimeSuffix=`:${DSH_RUNTIME}`;
+    for (const [key,run] of Object.entries(goalSuperAgentRuns)) {
+      if (key.endsWith(runtimeSuffix)&&run?.status==='working') void refreshSuperAgentGoal(key.slice(0,-runtimeSuffix.length));
+    }
+  } else if (screen==='agent') void refreshSuperAgentGoal(activeGoal);
 },3_000);
