@@ -19,7 +19,7 @@ function fixture(t) {
   const who={userId:'u_test',deviceId:'d_test'};
   let clock=Date.UTC(2026,9,11,1);
   const pages=[],sent=[];
-  const options={dir,now:()=>clock,identity:()=>who,
+  const options={dir,userId:'u_test',binding:()=>who,now:()=>clock,
     readPage:async (_,cursor)=>({items:pages.filter(item=>item.seq>cursor)}),
     send:async (device,route)=>{sent.push(route);return 'accepted';}};
   const input={token:'ab'.repeat(32),environment:'development',expectedUserId:who.userId};
@@ -45,7 +45,7 @@ test('offline retry, duplicate event, process restart and repeated phone sync pr
   await taskNotifications(f.options).dispatch();
   assert.deepEqual(f.sent,[{userId:'u_test',goalId:'g_test',taskId:'t_test',kind:'recommendation_ready',eventId:'event:1',revision:2}]);
   assert.deepEqual(two.decorate(f.who,{items:f.pages}),receipt);
-  assert.equal(statSync(join(f.dir,'notification-device.json')).mode&0o777,0o600);
+  assert.equal(statSync(join(f.dir,'notification-device.u_test.json')).mode&0o777,0o600);
 });
 test('only fresh, explicit and still relevant notices owned by this device are sent',async t=>{
   const f=fixture(t),service=taskNotifications(f.options);

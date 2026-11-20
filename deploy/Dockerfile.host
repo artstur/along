@@ -1,0 +1,15 @@
+# Along 云端 host 镜像（docs/cloud-deploy-multi-user.md §4 M5 / §3.1）。
+# node:22 系（package.json engines >=22.19）；slim 里没有 openssl，而 host 启动即用
+# execFileSync('openssl') 现场生成自签证书（host/agent-host.mjs:45），必须装 openssl。
+FROM node:22-bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends openssl && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+# host/ 整目录（内部互相 import；schemas/task-reply.schema.json 由 codex-agent.mjs 按相对路径读）。
+COPY host/ host/
+# host→web 共享 import 闭包，按 tools/build.mjs 同款平铺布局进镜像。闭包以
+# `grep -rn "from '../web/" host/*.mjs` 实测（2026-11-20）：goal-agent-core、adaptive-ui、
+# super-agent、contextual-planning、loop、health、task-results 共 7 个；闭包随代码演进会变，
+# 改 host→web 引用后同步改这里。
+COPY web/goal-agent-core.mjs web/adaptive-ui.mjs web/super-agent.mjs web/contextual-planning.mjs web/loop.mjs web/health.mjs web/task-results.mjs web/
+EXPOSE 4176
+CMD ["node", "host/agent-host.mjs"]

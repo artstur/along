@@ -175,12 +175,12 @@ test('a genuinely late unknown open cannot revoke a newer grant; known intent re
 test('actual route preflight delay cannot allow an old open to rotate the grant after a newer request',async t=>{
  const f=fixture(t);let release,entered,first=true;
  const gate=new Promise(r=>{release=r;}),started=new Promise(r=>{entered=r;});
- const route=createDeviceSourceRoute({gateway:f.gateway,identity:()=>SCOPE,readGoal:async()=>{
+ const route=createDeviceSourceRoute({gateway:f.gateway,stillBound:()=>true,readGoal:async()=>{
   if(first){first=false;entered();await gate;}
   return {goal:{id:SCOPE.goalId,userId:SCOPE.userId,status:'active',currentRevision:1},revision:{goalId:SCOPE.goalId,userId:SCOPE.userId,status:'active',revision:1},dataSources:[{provider:'okx',status:'recommended'}]};
  }});
- const late=route({action:'open',provider:'okx',goalId:SCOPE.goalId,requestId:'slow_route_open',expectedGrantId:null});await started;
- const current=await route({action:'open',provider:'okx',goalId:SCOPE.goalId,requestId:'fast_route_open',expectedGrantId:null});await f.publish(current.value.grantId);
+ const late=route({action:'open',provider:'okx',goalId:SCOPE.goalId,requestId:'slow_route_open',expectedGrantId:null},SCOPE);await started;
+ const current=await route({action:'open',provider:'okx',goalId:SCOPE.goalId,requestId:'fast_route_open',expectedGrantId:null},SCOPE);await f.publish(current.value.grantId);
  const before=f.journal.actual.current(SCOPE.userId,SCOPE.goalId);release();await error(late,'stale_authorization');
  assert.equal((await f.handle({action:'status'})).grantId,current.value.grantId);assert.equal((await f.handle({action:'status'})).state,'connected');assert.deepEqual(f.journal.actual.current(SCOPE.userId,SCOPE.goalId),before);
 });

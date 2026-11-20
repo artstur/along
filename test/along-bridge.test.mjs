@@ -131,7 +131,12 @@ function newLinkContext(overrides={}) {
   // handleAlongNewLink 再被逐请求调用——和生产里「模块加载一次 + 每请求进路由」一致。
   const handle=vm.runInNewContext(`(()=>{${newLinkSource}\nreturn handleAlongNewLink})()`,{
     process:{env:{...(overrides.env??{})}},
-    dir:'/unused',authorized:()=>true,createApnsProvider:()=>null,
+    dir:'/unused',
+    // 每请求身份（M2）：绑定由 authorized 按请求自己的 token 在绑定表中命中返回；
+    // overrides.identity 为 null 表示「没有绑定」（resolveBinding 按 403 拒绝）。
+    authorized:overrides.identity===null?()=>null:()=>({user_id:USER_A,device_id:DEVICE_A,hash:'x'.repeat(64)}),
+    pairings:[{hash:'x'.repeat(64),user_id:USER_A,device_id:DEVICE_A}],
+    createApnsProvider:()=>null,
     taskNotifications:()=>({decorate:(_,page)=>page}),setInterval:()=>({unref(){}}),reconcileOkxSources,
     HostError,
     respond:(res,status,data)=>{const outcome={status,data:JSON.parse(JSON.stringify(data))};respondLog.push(outcome);return outcome;},
@@ -139,7 +144,6 @@ function newLinkContext(overrides={}) {
     upstream:fn=>fn(),
     bridge,
     bridgeToken:overrides.bridgeToken===undefined?TOKEN:overrides.bridgeToken,
-    identity:overrides.identity===undefined?{userId:USER_A,deviceId:DEVICE_A}:overrides.identity,
     console:{warn:()=>{}},
   });
   return {calls,respondLog,handle,
@@ -184,7 +188,7 @@ test('BC-07-05（Host 侧）：Along Agent 的归属拒绝按原状态码透传�
 
 test('配对身份幂等注册：启动/首次调用都会把 {user_id,device_id} 交给 /along-source/api/pairing',async()=>{
   const fresh=newLinkContext({env:{ALONG_EVENT_INGEST:'on'},identity:null});
-  // identity 为 null 时启动注册不动，新端点按 403 拒绝（配对身份缺失）。
+  // authorized 未命中（没有绑定）时新端点按 403 拒绝（配对身份缺失）。
   await assert.rejects(()=>fresh.run('/sync',{}),error=>error.status===403&&/重新配对/.test(error.message));
   const link=newLinkContext({env:{ALONG_EVENT_INGEST:'on'}});
   await new Promise(resolve=>setImmediate(resolve));
@@ -214,50 +218,8 @@ test('/sync 与 /sync/ack 把绑定身份带进回环调用，ack 序号非法�
     options:{value:{seqs:[3,4]},identity:{userId:USER_A,deviceId:DEVICE_A}}});
 });
 
-// ---- 旧 pairing.json 的幂等升级：仅 hash 的文件启动时补齐 user_id/device_id，配对 token 不变（§2.4.1）----------
-
-function pairingSlice(directory) {
-  const start=hostSource.indexOf("const pairingPath=join(dir,'pairing.json')");
-  const end=hostSource.indexOf('let busy = false;');
-  return vm.runInNewContext(`${hostSource.slice(start,end)}\n({tokenHash,identity})`,{
-    dir:directory,join,readFileSync,writeFileSync,
-    randomBytes:()=>Buffer.from('12345678','hex'),Buffer,console,
-  });
-}
-
-test('旧 pairing.json（仅 hash）启动时补齐服务端绑定身份，重复启动不换号',()=>{
-  const directory=mkdtempSync(join(tmpdir(),'along-pairing-'));
-  try {
-    const file=join(directory,'pairing.json');
-    const hash='ab'.repeat(32);
-    writeFileSync(file,JSON.stringify({hash}));
-    const first=pairingSlice(directory);
-    assert.equal(first.tokenHash.toString('hex'),hash,'配对 token 不变、手机无感');
-    assert.match(first.identity.userId,/^u_[0-9a-f]{8}$/);
-    assert.match(first.identity.deviceId,/^d_[0-9a-f]{8}$/);
-    const saved=JSON.parse(readFileSync(file,'utf8'));
-    assert.deepEqual({hash:saved.hash,user_id:saved.user_id,device_id:saved.device_id},
-      {hash,user_id:first.identity.userId,device_id:first.identity.deviceId});
-    const second=JSON.parse(JSON.stringify(pairingSlice(directory).identity));
-    assert.deepEqual(second,{userId:first.identity.userId,deviceId:first.identity.deviceId},'幂等：第二次启动不换号');
-  } finally { rmSync(directory,{recursive:true,force:true}); }
-});
-
-test('pairing.json 缺 hash 或带齐身份时按原样对待',()=>{
-  const directory=mkdtempSync(join(tmpdir(),'along-pairing-'));
-  try {
-    const file=join(directory,'pairing.json');
-    writeFileSync(file,JSON.stringify({}));
-    const empty=pairingSlice(directory);
-    assert.equal(empty.tokenHash,null);
-    assert.equal(empty.identity,null,'没有有效配对就没有绑定身份，等下一次 /pair 生成');
-    const complete={hash:'cd'.repeat(32),user_id:USER_A,device_id:DEVICE_A};
-    writeFileSync(file,JSON.stringify(complete));
-    const bound=JSON.parse(JSON.stringify(pairingSlice(directory).identity));
-    assert.deepEqual(bound,{userId:USER_A,deviceId:DEVICE_A});
-    assert.deepEqual(JSON.parse(readFileSync(file,'utf8')),complete,'已升级过的文件不再重写');
-  } finally { rmSync(directory,{recursive:true,force:true}); }
-});
+// 旧 pairing.json 的幂等升级测试随 M1 迁到 test/host-multi-user-pairing.test.mjs：
+// 配对逻辑收敛进 host/pairing.mjs 后可直接 import 断言，不再需要 VM 源码切片。
 
 test('新链路路由行必须 await：未 await 的异步处理函数会把设计内错误变成未处理拒绝、打崩进程',()=>{
   // P0 回归锚（agent-host.mjs 路由区）：handleAlongNewLink 是 async，路由行若写成
@@ -282,6 +244,9 @@ test('ALONG_EVENT_INGEST=on 时旧 /super-agent/goals|tasks 的 DSH 分支 409�
     respond:(res,status,data)=>({status,data}),upstream:fn=>fn(),
     cleanGoal:v=>v,cleanSnapshot:v=>v??{},clientText:s=>s,requestId:s=>s,normalizeGoalRun:r=>r,
     agentHealthSnapshot:v=>v?.context,
+    // 每请求身份（M2）：Kimi 运行键带 userId 前缀，路由把请求自己的绑定传给 kimiAgent。
+    who:{userId:'u_aaaa1111',deviceId:'d_aaaa1111'},
+    dshRunnerURL:null, // M3 云端 runner 分支：切片里保持关闭（runner 路径由 host-runner-agreement 覆盖）。
     kimiAgent:{startGoal:async input=>{seen.push(['kimi-goal',input]);return {};},startTask:async input=>{seen.push(['kimi-task',input]);return {};}},
     superAgentCall:async (path,{value})=>{seen.push(['dsh',path,value]);return {};},
   };

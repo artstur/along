@@ -33,7 +33,7 @@ test('starts a real swarm session and maps child sessions into Along agents',asy
   };
   try {
     const agent=new KimiCodeAgent({token:'secret-token',statePath,workspace:'/along',fetchImpl});
-    const response=await agent.startGoal({requestId:'along-goal-health-test',goal:{domain:'health',title:'运动',target:120},snapshot:{},message:'做一个计划',history:[]});
+    const response=await agent.startGoal({requestId:'along-goal-health-test',goal:{domain:'health',title:'运动',target:120},snapshot:{},message:'做一个计划',history:[]},'u_aaaa1111');
     assert.equal(response.run.runtime,'kimi-code-swarm');
     assert.equal(response.run.status,'done');
     assert.equal(response.run.agents.length,3);
@@ -71,7 +71,7 @@ test('the Kimi runtime refuses a target the user did not ask for',async()=>{
   };
   try {
     const agent=new KimiCodeAgent({token:'secret-token',statePath,workspace:'/along',fetchImpl});
-    const response=await agent.startGoal({requestId:'along-goal-health-target',goal:{domain:'health',title:'运动',target:120},snapshot:{},message:'这周运动目标改为 150 分钟',history:[]});
+    const response=await agent.startGoal({requestId:'along-goal-health-target',goal:{domain:'health',title:'运动',target:120},snapshot:{},message:'这周运动目标改为 150 分钟',history:[]},'u_aaaa1111');
     assert.notEqual(response.run.result?.proposal?.target,160);
     assert.equal(response.run.status,'blocked');
     assert.equal(response.run.result,null);
@@ -98,7 +98,7 @@ test('a swarm item that is not text never becomes a "[object Object]" agent',asy
   };
   try {
     const agent=new KimiCodeAgent({token:'secret-token',statePath,workspace:'/along',fetchImpl});
-    const response=await agent.startGoal({requestId:'along-goal-health-dirty-item',goal:{domain:'health',title:'运动',target:120},snapshot:{},message:'做一个计划',history:[]});
+    const response=await agent.startGoal({requestId:'along-goal-health-dirty-item',goal:{domain:'health',title:'运动',target:120},snapshot:{},message:'做一个计划',history:[]},'u_aaaa1111');
     assert.doesNotMatch(JSON.stringify(response),/\[object Object\]/,'脏文本不能混进运行记录');
     assert.equal(response.run.agents[0].name,'Kimi Subagent 1','角色不是文本时用兜底名');
     assert.equal(response.run.agents[0].objective,'并行规划子任务','说明不是文本时用兜底说明');

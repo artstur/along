@@ -72,7 +72,7 @@ test('pending questions are normalised the same way on both runtimes',async()=>{
   const {statePath,fetchImpl}=kimiServer({...result,layout:{...layout,questions:'还有问题吗？'}});
   try {
     const agent=new KimiCodeAgent({token:'secret-token',statePath,workspace:'/along',fetchImpl});
-    const response=await agent.startGoal({requestId:'along-goal-questions',goal:{domain:'health',title:'运动',target:120},snapshot:{},message:'做一个计划',history:[]});
+    const response=await agent.startGoal({requestId:'along-goal-questions',goal:{domain:'health',title:'运动',target:120},snapshot:{},message:'做一个计划',history:[]},'u_aaaa1111');
     assert.equal(response.run.status,'done','同一份模型输出在两条运行时上都要有结果');
     assert.deepEqual(response.run.result.layout.questions,[]);
   } finally { rmSync(statePath,{force:true}); }
@@ -83,7 +83,7 @@ test('a fake proposal title never becomes the goal title',async()=>{
   const {statePath,fetchImpl}=kimiServer(fake);
   try {
     const agent=new KimiCodeAgent({token:'secret-token',statePath,workspace:'/along',fetchImpl});
-    const response=await agent.startGoal({requestId:'along-goal-fake-title',goal:{domain:'health',title:'运动',target:120},snapshot:{},message:'做一个计划',history:[]});
+    const response=await agent.startGoal({requestId:'along-goal-fake-title',goal:{domain:'health',title:'运动',target:120},snapshot:{},message:'做一个计划',history:[]},'u_aaaa1111');
     assert.notEqual(response.run.result?.proposal?.title,'[object Object]','假标题不能变成用户的目标标题');
     assert.equal(response.run.status,'blocked','非字符串标题要和 DSH 运行时一样被拒绝');
     assert.equal(response.run.result,null);

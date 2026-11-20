@@ -128,8 +128,10 @@ export function createSourceJournal({dir,now=Date.now}={}){
 
 const requestValid=r=>exact(r,['request_id','goal_id','provider','capability','generation','revision','max_age_seconds'])&&ID.test(r.request_id??'')&&ID.test(r.goal_id??'')&&r.provider==='okx'&&['trading_account_summary','trading_history'].includes(r.capability)&&positive(r.generation)&&positive(r.revision)&&Number.isSafeInteger(r.max_age_seconds)&&r.max_age_seconds>=1&&r.max_age_seconds<=86400;
 /** A bounded pump in the existing Host process. Adapters read admitted, persisted producer records.
- * The vault adapter is compatibility only; native producers never copy credentials back to it. */
-export function createSourceEventBridge({journal,connection,bridge,endpoint,identity,isAuthorized,readGoals,adapters,now=Date.now,onError=()=>{}}={}){
+ * The vault adapter is compatibility only; native producers never copy credentials back to it.
+ * 每用户隔离（docs/cloud-deploy-multi-user.md §3.2 M2）：泵按调用方给定的绑定逐用户跑
+ * （宿主按绑定表迭代），stillBound(who) 复查该绑定是否仍是现役绑定。 */
+export function createSourceEventBridge({journal,connection,bridge,endpoint,stillBound,isAuthorized,readGoals,adapters,now=Date.now,onError=()=>{}}={}){
  const url=new URL(endpoint);if(!['http:','https:'].includes(url.protocol)||!['localhost','127.0.0.1','[::1]'].includes(url.hostname)||url.username||url.password||url.search||url.hash||url.pathname!=='/')fail('private_loopback_required');
  const providers=adapters??{okx:{
   authorized:isAuthorized,listGoals:readGoals,
@@ -139,7 +141,7 @@ export function createSourceEventBridge({journal,connection,bridge,endpoint,iden
  }};
  for(const [provider,a] of Object.entries(providers))if(provider!=='okx'||!a||!['authorized','listGoals','lookup'].every(k=>typeof a[k]==='function'))fail('invalid_source_adapter');
  let busy=false,closed=false;
- const active=who=>!closed&&identity()===who;
+ const active=who=>!closed&&stillBound(who);
  const report=e=>{try{onError(e instanceof SourceBridgeError?e.code:'source_delivery_failed');}catch{}};
  const allowed=(who,goalId,provider)=>providers[provider].authorized(who,goalId);
  async function snapshot(who,goalId,provider){
@@ -246,19 +248,19 @@ export function createSourceEventBridge({journal,connection,bridge,endpoint,iden
   }
  }
  return {
-  async pump(){if(busy||closed)return;const who=identity();if(!who)return;busy=true;try{await reconcile(who);if(active(who)&&await flush(who))await readRequests(who);}catch(e){report(e);}finally{busy=false;}},
+  async pump(who){if(busy||closed||!who||!active(who))return;busy=true;try{await reconcile(who);if(active(who)&&await flush(who))await readRequests(who);}catch(e){report(e);}finally{busy=false;}},
   close(){closed=true;},
  };
 }
 
 /** Production wiring shared by the vault and later admitted-native-summary adapters. */
 export function createHostSourceEventBridge(options){
- const {bridge,identity}=options;
+ const {bridge,stillBound}=options;
  const authorized=async(who,goalId)=>{
-  if(identity()!==who)return false;
+  if(!stillBound(who))return false;
   const detail=await bridge.call('/along-source/api/goals/'+encodeURIComponent(goalId),{method:'GET',identity:who,timeout:5000});
   try{requireOkxGoal(detail,who,goalId);}catch(error){if(error?.status===403)return false;throw error;}
-  return identity()===who;
+  return stillBound(who);
  };
  const listGoals=async who=>{
   const result=[];let cursor;

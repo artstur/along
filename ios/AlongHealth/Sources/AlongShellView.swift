@@ -427,15 +427,30 @@ enum AlongConnectionStore {
     }
 #endif
 
+    // 配对主机：RFC1918 私网 IPv4，或合法 DNS 域名（云端部署，docs/cloud-deploy-multi-user.md M6）。
+    // 域名只认 ASCII 字母数字与连字符，末段必须含字母，防止把非私网数字 IP 当域名放行；
+    // https-only 与其余校验（凭证、path/query/fragment）仍由各调用处把关。
+    static func hostAccepted(_ host: String) -> Bool {
+        let labels = host.split(separator: ".", omittingEmptySubsequences: false)
+        if labels.count == 4,
+           labels.allSatisfy({ Int($0).map { (0...255).contains($0) } ?? false }),
+           host.hasPrefix("192.168.") || host.hasPrefix("10.") ||
+            ((Int(labels[0]) == 172) && (16...31).contains(Int(labels[1]) ?? 0)) {
+            return true
+        }
+        guard labels.count >= 2, host.count <= 253 else { return false }
+        for label in labels {
+            if label.isEmpty || label.count > 63 || label.first == "-" || label.last == "-" { return false }
+            if !label.allSatisfy({ c in ("a"..."z").contains(c) || ("A"..."Z").contains(c) || ("0"..."9").contains(c) || c == "-" }) { return false }
+        }
+        return labels.last!.contains { c in ("a"..."z").contains(c) || ("A"..."Z").contains(c) }
+    }
+
     private static func clean(_ value: [String: Any]) -> [String: String]? {
         guard let baseURL = value["baseURL"] as? String,
               let components = URLComponents(string: baseURL),
               components.scheme == "https", let host = components.host,
-              host.split(separator: ".").count == 4,
-              host.split(separator: ".").allSatisfy({ Int($0).map { (0...255).contains($0) } ?? false }),
-              (host.hasPrefix("192.168.") || host.hasPrefix("10.") ||
-               ((Int(host.split(separator: ".")[0]) == 172) &&
-                (16...31).contains(Int(host.split(separator: ".")[1]) ?? 0))),
+              hostAccepted(host),
               components.user == nil, components.password == nil,
               components.path.isEmpty, components.query == nil, components.fragment == nil,
               let fingerprint = value["fingerprint"] as? String,
@@ -443,13 +458,17 @@ enum AlongConnectionStore {
               let token = value["token"] as? String,
               token.count == 64, token.allSatisfy(\.isHexDigit)
         else { return nil }
-        return ["baseURL": baseURL, "fingerprint": fingerprint.uppercased(), "token": token.lowercased()]
+        var clean = ["baseURL": baseURL, "fingerprint": fingerprint.uppercased(), "token": token.lowercased()]
+        if value["runtime"] as? String == "dsh-superagent" {
+            clean["runtime"] = "dsh-superagent"
+        }
+        return clean
     }
 }
 
 struct AlongWebView: UIViewRepresentable {
     @ObservedObject var bridge: AlongBridgeModel
-    private let site = URL(string: "along://app/index.html?build=80")!
+    private let site = URL(string: "along://app/index.html?build=82")!
 
     func makeCoordinator() -> Coordinator { Coordinator(bridge: bridge) }
 
@@ -944,11 +963,7 @@ struct AlongWebView: UIViewRepresentable {
         static func agentRequest(_ input: [String: Any], background: Bool = false, privateNotificationRequest: Bool = false, privateSourceRequest: Bool = false) async throws -> [String: Any] {
             guard let base = input["baseURL"] as? String, let components = URLComponents(string: base),
                   components.scheme == "https", let host = components.host,
-                  host.split(separator: ".").count == 4,
-                  host.split(separator: ".").allSatisfy({ Int($0).map { (0...255).contains($0) } ?? false }),
-                  (host.hasPrefix("192.168.") || host.hasPrefix("10.") ||
-                   ((Int(host.split(separator: ".")[0]) == 172) &&
-                    (16...31).contains(Int(host.split(separator: ".")[1]) ?? 0))),
+                  AlongConnectionStore.hostAccepted(host),
                   components.user == nil, components.password == nil,
                   components.path.isEmpty, components.query == nil, components.fragment == nil,
                   let fingerprint = input["fingerprint"] as? String,

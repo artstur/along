@@ -194,7 +194,8 @@ test('真实 Host：旧绑定升级 + 鉴权门 + 自报身份拒绝 + 归属拒
   t.after(async()=>{ await host.stop(); await agent.close(); rmSync(dir,{recursive:true,force:true}); });
   const oldPhoneToken='e'.repeat(64);
   const bearer={authorization:`Bearer ${oldPhoneToken}`};
-  const pairingFile=()=>JSON.parse(readFileSync(join(dir,'pairing.json'),'utf8'));
+  // M1 起绑定表是 pairings.json（数组）；本场景是本地单绑定，取第一条。
+  const pairingFile=()=>existsSync(join(dir,'pairings.json'))?JSON.parse(readFileSync(join(dir,'pairings.json'),'utf8'))[0]:null;
 
   await waitFor(()=>agent.calls.some(item=>item.path==='/along-source/api/pairing'),'启动注册');
   const upgraded=pairingFile();
@@ -315,7 +316,7 @@ test('真实 Host：/pair 生成绑定，重启后重新配对 user_id 不变、
   writeFileSync(join(dir,'bridge-token'),BRIDGE_TOKEN,{mode:0o600});
   const host=await spawnHost({dir,agentPort:agent.port,eventIngest:true});
   t.after(async()=>{ await host.stop(); await agent.close(); rmSync(dir,{recursive:true,force:true}); });
-  const pairingFile=()=>existsSync(join(dir,'pairing.json'))?JSON.parse(readFileSync(join(dir,'pairing.json'),'utf8')):null;
+  const pairingFile=()=>existsSync(join(dir,'pairings.json'))?JSON.parse(readFileSync(join(dir,'pairings.json'),'utf8'))[0]:null;
 
   await new Promise(resolve=>setTimeout(resolve,300));
   assert.equal(agent.calls.filter(item=>item.path==='/along-source/api/pairing').length,0,'没有绑定就没有启动注册');

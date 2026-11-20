@@ -47,7 +47,9 @@ async function fixture(t,options={}){
  });
  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));t.after(()=>new Promise(resolve=>server.close(resolve)));
  const endpoint='http://127.0.0.1:'+server.address().port,bridge=createBridge({url:endpoint,token:TOKEN});
- const makePump=(c=connection,j=journal,extra={})=>createHostSourceEventBridge({journal:j,connection:c,bridge,endpoint,identity:()=>state.who,now:()=>state.now,onError:code=>state.errors.push(code),...extra});
+ const makePump=(c=connection,j=journal,extra={})=>createHostSourceEventBridge({journal:j,connection:c,bridge,endpoint,
+  stillBound:who=>Boolean(state.who)&&who.userId===state.who.userId&&who.deviceId===state.who.deviceId,
+  now:()=>state.now,onError:code=>state.errors.push(code),...extra});
  const pump=makePump();t.after(()=>pump.close());
  const connect=(c=connection,goalId=GOAL)=>c.handle({userId:WHO.userId,goalId,input:{action:'connect',site:'global',credentials:CREDENTIALS},stillAuthorized:()=>state.goals.get(goalId)===true});
  const request=(id='read_1',current=journal.current(WHO.userId,GOAL),goalId=GOAL)=>({request_id:id,goal_id:goalId,provider:'okx',capability:'trading_account_summary',generation:current.generation,revision:current.revision,max_age_seconds:1800});
@@ -55,26 +57,26 @@ async function fixture(t,options={}){
 }
 
 test('verified vault save emits only bound metadata over the private bridge; summaries require a specific authorized request',async t=>{
- const f=await fixture(t);await f.connect();await f.pump.pump();
+ const f=await fixture(t);await f.connect();await f.pump.pump(WHO);
  assert.equal(f.state.events.length,1);const event=f.state.events[0];
  assert.deepEqual(Object.keys(event).sort(),['capabilities','event_id','generation','goal_id','occurred_at','provider','reference','revision','state']);
  assert.equal(event.goal_id,GOAL);assert.equal(event.provider,'okx');assert.equal(event.state,'ready');assert.deepEqual(event.capabilities,['trading_account_summary']);
  assert.match(event.reference,/^src_[a-f0-9]+$/);assert.equal(f.state.results.length,0);
  const wire=JSON.stringify(event),disk=readFileSync(join(f.dir,'events','journal.json'),'utf8');
  for(const value of [...Object.values(CREDENTIALS),'1234.56','vault']){assert.ok(!wire.includes(value));assert.ok(!disk.includes(value));}
- f.state.requests=[f.request()];await f.pump.pump();
+ f.state.requests=[f.request()];await f.pump.pump(WHO);
  assert.deepEqual(f.state.results[0].data,{tradingEquityUsd:1234.56,assetCount:1,positionCount:0});
  assert.equal(f.state.results[0].observed_at,new Date(NOW).toISOString());assert.equal(f.state.results[0].reference,event.reference);
- await f.pump.pump();assert.equal(f.state.events.length,1);assert.equal(f.state.results.length,1);
+ await f.pump.pump(WHO);assert.equal(f.state.events.length,1);assert.equal(f.state.results.length,1);
  assert.equal(statSync(join(f.dir,'events','journal.json')).mode&0o777,0o600);assert.equal(f.state.errors.length,0);
 });
 
 test('status and same-data refresh retries do not invent events; changed data advances revision without changing authorization epoch',async t=>{
- const f=await fixture(t);await f.connect();await f.pump.pump();const first=f.journal.current(WHO.userId,GOAL);
+ const f=await fixture(t);await f.connect();await f.pump.pump(WHO);const first=f.journal.current(WHO.userId,GOAL);
  for(let n=0;n<3;n++)await f.connection.handle({userId:WHO.userId,goalId:GOAL,input:{action:'status'}});
- f.state.now+=60_000;await f.connection.handle({userId:WHO.userId,goalId:GOAL,input:{action:'refresh'}});await f.pump.pump();
+ f.state.now+=60_000;await f.connection.handle({userId:WHO.userId,goalId:GOAL,input:{action:'refresh'}});await f.pump.pump(WHO);
  assert.equal(f.state.events.length,1);assert.equal(f.journal.current(WHO.userId,GOAL).reference,first.reference);
- f.state.now+=60_000;f.state.equity='1300';await f.connection.handle({userId:WHO.userId,goalId:GOAL,input:{action:'refresh'}});await f.pump.pump();
+ f.state.now+=60_000;f.state.equity='1300';await f.connection.handle({userId:WHO.userId,goalId:GOAL,input:{action:'refresh'}});await f.pump.pump(WHO);
  const last=f.journal.current(WHO.userId,GOAL);assert.equal(last.generation,first.generation);assert.ok(last.revision>first.revision);assert.equal(f.state.events.length,2);
 });
 
@@ -85,52 +87,52 @@ test('a saved vault survives an interruption before outbox commit and restarts w
  const persistedStamp=(await f.connection.handle({userId:WHO.userId,goalId:GOAL,input:{action:'status'}})).state;assert.equal(persistedStamp,'connected');
  const reopenedJournal=createSourceJournal({dir:join(f.dir,'events'),now:()=>f.state.now});
  const reopened=f.makeConnection(reopenedJournal,()=>{throw Error('recovery may not refresh network');}),pump=f.makePump(reopened,reopenedJournal);t.after(()=>pump.close());
- await pump.pump();assert.equal(f.state.events.length,1);const id=f.state.events[0].event_id;await pump.pump();assert.equal(f.state.events.length,1);assert.equal(f.state.events[0].event_id,id);
+ await pump.pump(WHO);assert.equal(f.state.events.length,1);const id=f.state.events[0].event_id;await pump.pump(WHO);assert.equal(f.state.events.length,1);assert.equal(f.state.events[0].event_id,id);
 });
 
 test('disconnect crash recovery invalidates old reads and a reconnect gets a later generation',async t=>{
- const f=await fixture(t);await f.connect();await f.pump.pump();const old=f.journal.current(WHO.userId,GOAL);
+ const f=await fixture(t);await f.connect();await f.pump.pump(WHO);const old=f.journal.current(WHO.userId,GOAL);
  let failOnce=true;const interrupted={...f.journal,commitAbsent(args){if(failOnce){failOnce=false;throw Error('synthetic disconnect interruption');}return f.journal.commitAbsent(args);}};
  await f.makeConnection(interrupted).handle({userId:WHO.userId,goalId:GOAL,input:{action:'disconnect'}});
  const reopenedJournal=createSourceJournal({dir:join(f.dir,'events'),now:()=>f.state.now}),reopened=f.makeConnection(reopenedJournal),pump=f.makePump(reopened,reopenedJournal);t.after(()=>pump.close());
- await pump.pump();assert.equal(f.state.events.at(-1).state,'disconnected');
- f.state.now+=1000;await f.connect(reopened);f.state.requests=[f.request('old_read',old)];await pump.pump();
+ await pump.pump(WHO);assert.equal(f.state.events.at(-1).state,'disconnected');
+ f.state.now+=1000;await f.connect(reopened);f.state.requests=[f.request('old_read',old)];await pump.pump(WHO);
  const latest=reopenedJournal.current(WHO.userId,GOAL);assert.ok(latest.generation>old.generation);assert.equal(f.state.results.at(-1).state,'denied');assert.equal(f.state.results.at(-1).generation,old.generation);assert.equal(f.state.results.at(-1).data,undefined);
  assert.throws(()=>reopenedJournal.recover({userId:WHO.userId,goalId:GOAL,stamp:{generation:old.generation,revision:old.revision,reference:old.reference,occurredAt:old.occurredAt},digest:old.digest}),/source bridge/);
  assert.equal(reopenedJournal.current(WHO.userId,GOAL).reference,latest.reference);
 });
 
 test('current goal withdrawal revokes credentials and old requests without using historical UI snapshots',async t=>{
- const f=await fixture(t);await f.connect();await f.pump.pump();const before=f.journal.current(WHO.userId,GOAL);
- f.state.goals.set(GOAL,false);f.state.requests=[f.request('withdrawn',before)];await f.pump.pump();
+ const f=await fixture(t);await f.connect();await f.pump.pump(WHO);const before=f.journal.current(WHO.userId,GOAL);
+ f.state.goals.set(GOAL,false);f.state.requests=[f.request('withdrawn',before)];await f.pump.pump(WHO);
  assert.equal(f.state.events.at(-1).state,'revoked');assert.deepEqual(f.state.events.at(-1).capabilities,[]);
  assert.equal((await f.connection.handle({userId:WHO.userId,goalId:GOAL,input:{action:'status'}})).state,'disconnected');assert.equal(f.state.results.at(-1).state,'denied');assert.equal(f.state.results.at(-1).data,undefined);
- const count=f.state.events.length;await f.pump.pump();assert.equal(f.state.events.length,count);
+ const count=f.state.events.length;await f.pump.pump(WHO);assert.equal(f.state.events.length,count);
 });
 
 test('stale pending reads recover after a real same-data refresh without a new source event or automatic network refresh',async t=>{
- const f=await fixture(t);await f.connect();await f.pump.pump();const old=f.journal.current(WHO.userId,GOAL),network=f.state.calls.length;
- f.state.now+=1900_000;f.state.requests=[f.request('stale_read')];await f.pump.pump();
+ const f=await fixture(t);await f.connect();await f.pump.pump(WHO);const old=f.journal.current(WHO.userId,GOAL),network=f.state.calls.length;
+ f.state.now+=1900_000;f.state.requests=[f.request('stale_read')];await f.pump.pump(WHO);
  assert.equal(f.state.results.at(-1).state,'stale');assert.equal(f.state.results.at(-1).data,undefined);assert.equal(f.state.calls.length,network);
- f.state.now+=1000;await f.pump.pump();assert.equal(f.state.results.length,1);
- await f.connection.handle({userId:WHO.userId,goalId:GOAL,input:{action:'refresh'}});await f.pump.pump();
+ f.state.now+=1000;await f.pump.pump(WHO);assert.equal(f.state.results.length,1);
+ await f.connection.handle({userId:WHO.userId,goalId:GOAL,input:{action:'refresh'}});await f.pump.pump(WHO);
  assert.equal(f.state.events.length,1);assert.equal(f.journal.current(WHO.userId,GOAL).reference,old.reference);
  assert.equal(f.state.results.at(-1).state,'ready');assert.equal(f.state.results.at(-1).observed_at,new Date(f.state.now).toISOString());assert.equal(f.state.results.length,2);
 });
 
 test('a same-generation read follows a newer revision only after that fact is flushed',async t=>{
- const f=await fixture(t);await f.connect();await f.pump.pump();const old=f.journal.current(WHO.userId,GOAL);
+ const f=await fixture(t);await f.connect();await f.pump.pump(WHO);const old=f.journal.current(WHO.userId,GOAL);
  f.state.now+=1000;f.state.equity='1400';await f.connection.handle({userId:WHO.userId,goalId:GOAL,input:{action:'refresh'}});
- f.state.requests=[f.request('follow_new',old)];await f.pump.pump();
+ f.state.requests=[f.request('follow_new',old)];await f.pump.pump(WHO);
  assert.equal(f.state.events.at(-1).revision,f.state.results.at(-1).revision);assert.ok(f.state.results.at(-1).revision>old.revision);assert.equal(f.state.results.at(-1).data.tradingEquityUsd,1400);
 });
 
 test('foreign goal and malformed requests never receive summary data; pairing changes cancel delivery',async t=>{
- const f=await fixture(t);await f.connect();await f.pump.pump();const current=f.journal.current(WHO.userId,GOAL);
- f.state.goals.set(OTHER,false);f.state.requests=[f.request('foreign',current,OTHER),{...f.request('bad'),url:'https://evil.invalid'}];await f.pump.pump();
+ const f=await fixture(t);await f.connect();await f.pump.pump(WHO);const current=f.journal.current(WHO.userId,GOAL);
+ f.state.goals.set(OTHER,false);f.state.requests=[f.request('foreign',current,OTHER),{...f.request('bad'),url:'https://evil.invalid'}];await f.pump.pump(WHO);
  assert.equal(f.state.results.length,1);assert.equal(f.state.results[0].state,'denied');assert.equal(f.state.results[0].data,undefined);assert.ok(f.state.errors.includes('invalid_read_request'));
- f.state.who=null;f.state.requests=[f.request('no_pair')];await f.pump.pump();assert.equal(f.state.results.length,1);
- assert.throws(()=>createSourceEventBridge({endpoint:'https://public.example',adapters:{},identity:()=>WHO}),/source bridge/);
+ f.state.who=null;f.state.requests=[f.request('no_pair')];await f.pump.pump(WHO);assert.equal(f.state.results.length,1);
+ assert.throws(()=>createSourceEventBridge({endpoint:'https://public.example',adapters:{},stillBound:()=>true}),/source bridge/);
 });
 
 // This source store is a synthetic admitted-native-summary seam, not an actual account or permission claim.
@@ -141,11 +143,11 @@ test('a persisted verified native producer can replace the vault adapter and rec
  writeFileSync(file,JSON.stringify({metadata,summary}),{mode:0o600});
  const adapter={listGoals:async()=>[GOAL],lookup:async(_who,_goal,{metadataOnly})=>{const record=JSON.parse(readFileSync(file,'utf8'));return metadataOnly?{metadata:record.metadata}:record;}};
  const pump=f.makePump(undefined,f.journal,{adapters:{okx:adapter}});t.after(()=>pump.close());
- await pump.pump();assert.equal(f.state.events.length,1);assert.equal(f.state.events[0].state,'ready');
+ await pump.pump(WHO);assert.equal(f.state.events.length,1);assert.equal(f.state.events[0].state,'ready');
  assert.ok(!readdirSync(f.dir).includes('vault'));
- f.state.requests=[f.request('native_read')];await pump.pump();assert.equal(f.state.results.at(-1).data.tradingEquityUsd,1250);
+ f.state.requests=[f.request('native_read')];await pump.pump(WHO);assert.equal(f.state.results.at(-1).data.tradingEquityUsd,1250);
  const current=f.journal.current(WHO.userId,GOAL);metadata.version=2;metadata.observedAt=new Date(f.state.now+1000).toISOString();writeFileSync(file,JSON.stringify({metadata,summary}),{mode:0o600});
- f.state.now+=1000;await pump.pump();assert.equal(f.state.events.length,1);assert.equal(f.journal.current(WHO.userId,GOAL).reference,current.reference);
+ f.state.now+=1000;await pump.pump(WHO);assert.equal(f.state.events.length,1);assert.equal(f.journal.current(WHO.userId,GOAL).reference,current.reference);
 });
 
 test('verified producer versions cannot revive retired connections or reverse new authorization; provider identities stay separated',t=>{
@@ -166,12 +168,12 @@ test('verified producer versions cannot revive retired connections or reverse ne
 });
 
 test('a temporary current-goal lookup failure stays unavailable and the same bound request can recover',async t=>{
- const f=await fixture(t);await f.connect();await f.pump.pump();f.state.requests=[f.request('goal_retry')];
+ const f=await fixture(t);await f.connect();await f.pump.pump(WHO);f.state.requests=[f.request('goal_retry')];
  let unavailable=true;
  const bridge={call(path,options){if(unavailable&&path==='/along-source/api/goals/'+GOAL)throw Error('synthetic transient goal service outage');return f.bridge.call(path,options);}};
  const pump=f.makePump(undefined,f.journal,{bridge});t.after(()=>pump.close());
- await pump.pump();assert.equal(f.state.results.at(-1).state,'unavailable');assert.equal(f.state.results.at(-1).data,undefined);assert.equal(f.state.requests.length,1);
- unavailable=false;await pump.pump();assert.equal(f.state.results.at(-1).state,'ready');assert.equal(f.state.results.at(-1).request_id,'goal_retry');
+ await pump.pump(WHO);assert.equal(f.state.results.at(-1).state,'unavailable');assert.equal(f.state.results.at(-1).data,undefined);assert.equal(f.state.requests.length,1);
+ unavailable=false;await pump.pump(WHO);assert.equal(f.state.results.at(-1).state,'ready');assert.equal(f.state.results.at(-1).request_id,'goal_retry');
 });
 
 test('goal authorization lost while obtaining an admitted snapshot blocks its ready result',async t=>{
@@ -179,21 +181,21 @@ test('goal authorization lost while obtaining an admitted snapshot blocks its re
  const metadata={connectionId:'native_race',version:1,state:'ready',observedAt:new Date(f.state.now).toISOString(),digest:sourceDigest(data)};
  const adapter={listGoals:async()=>[GOAL],lookup:async()=>{if(withdraw&&++reads===2)f.state.goals.set(GOAL,false);return{metadata,summary:data};}};
  const pump=f.makePump(undefined,f.journal,{adapters:{okx:adapter}});t.after(()=>pump.close());
- await pump.pump();f.state.requests=[f.request('race_read')];withdraw=true;await pump.pump();
+ await pump.pump(WHO);f.state.requests=[f.request('race_read')];withdraw=true;await pump.pump(WHO);
  assert.equal(f.state.results.at(-1).state,'denied');assert.equal(f.state.results.at(-1).data,undefined);
 });
 
 test('an unrelated event receipt cannot acknowledge the pending fact; only matching accepted or stale clears it',async t=>{
  let valid=false;
  const f=await fixture(t,{eventReceipt:value=>({event_id:valid?value.event_id:'unrelated_event',status:valid?'stale':'accepted'})});
- await f.connect();await f.pump.pump();assert.equal(f.journal.outbox(WHO.userId).length,1);assert.ok(f.state.errors.includes('invalid_source_receipt'));
- valid=true;await f.pump.pump();assert.equal(f.journal.outbox(WHO.userId).length,0);assert.equal(f.state.events[0].event_id,f.state.events[1].event_id);
+ await f.connect();await f.pump.pump(WHO);assert.equal(f.journal.outbox(WHO.userId).length,1);assert.ok(f.state.errors.includes('invalid_source_receipt'));
+ valid=true;await f.pump.pump(WHO);assert.equal(f.journal.outbox(WHO.userId).length,0);assert.equal(f.state.events[0].event_id,f.state.events[1].event_id);
 });
 
 test('a wrong read receipt remains retryable and a matching reused response acknowledges that exact request',async t=>{
  let valid=false;
  const f=await fixture(t,{keepRequests:true,readReceipt:value=>({request_id:valid?value.request_id:'unrelated_read',status:valid?'reused':'accepted'})});
- await f.connect();await f.pump.pump();f.state.requests=[f.request('receipt_read')];await f.pump.pump();
+ await f.connect();await f.pump.pump(WHO);f.state.requests=[f.request('receipt_read')];await f.pump.pump(WHO);
  assert.equal(f.state.results.length,1);assert.ok(f.state.errors.includes('invalid_read_receipt'));
- valid=true;await f.pump.pump();assert.equal(f.state.results.length,2);await f.pump.pump();assert.equal(f.state.results.length,2);
+ valid=true;await f.pump.pump(WHO);assert.equal(f.state.results.length,2);await f.pump.pump(WHO);assert.equal(f.state.results.length,2);
 });
