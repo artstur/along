@@ -251,6 +251,82 @@ test('polling a validated cloud completion respects a locally restricted request
   assert.doesNotMatch(dom.app.innerHTML,/data-action="accept-goal"/);
 });
 
+test('cloud chat recovers a lost submit receipt after restart without resending',async()=>{
+  const config={...CLOUD,runtime};
+  let request;
+  const dom=start(config,{request:async ({path,body})=>{
+    if (path==='/connection/status') return cloudStatus;
+    if (path==='/super-agent/goals') {request=body;throw Error('网络连接中断');}
+    throw Error(path);
+  }});
+  await import('../web/app.mjs?cloud-lost-receipt');
+  await dom.click({action:'edit-goal'});
+  await submit(dom,'agent-form',{message:'把目标调整成每周 180 分钟'});
+  assert.equal(read(dom,RUNS_KEY)['health:'+runtime].status,'working');
+  const calls=[];
+  const reopened=start(config,{request:async ({path,body})=>{
+    calls.push(path);
+    if (path==='/connection/status') return cloudStatus;
+    if (path==='/super-agent/goals/status') {
+      assert.equal(body.requestId,request.requestId);
+      return done(request);
+    }
+    throw Error(path);
+  }},Object.fromEntries(dom.store));
+  await import('../web/app.mjs?cloud-reopened-after-lost-receipt');
+  await settle();
+  await reopened.tick(3000);
+  await settle();
+  await reopened.tick(3000);
+  assert.equal(read(reopened,GOALS_KEY).health.target,180);
+  assert.equal(read(reopened,CONVERSATIONS_KEY).health.filter(item=>item.requestId===request.requestId).length,1);
+  assert.equal(calls.filter(path=>path==='/super-agent/goals/status').length,1);
+  assert.ok(!calls.includes('/super-agent/goals'));
+});
+
+test('an expired cloud submit without an acknowledgement stops after looking up its original request',async()=>{
+  const request={requestId:'req_never_admitted',goal:{domain:'health'},message:'每周练习三次'};
+  const dom=start({...CLOUD,runtime},{request:async ({path,body})=>{
+    if (path==='/connection/status') return cloudStatus;
+    assert.equal(path,'/super-agent/goals/status');
+    assert.equal(body.requestId,request.requestId);
+    throw Error('运行记录不存在');
+  }},{
+    [RUNS_KEY]:JSON.stringify({['health:'+runtime]:{...done(request),actual:false,status:'working',result:null,createdAt:Date.now()-60_000}}),
+  });
+  await import('../web/app.mjs?cloud-receipt-recovery-expired');
+  await settle();
+  await dom.tick(3000);
+  await settle();
+  assert.equal(read(dom,RUNS_KEY)['health:'+runtime].status,'blocked');
+});
+
+test('a cloud goal continues recovering on another goal screen after a temporary network error',async()=>{
+  const request={requestId:'req_cloud_accepted',goal:{domain:'health'},message:'每周练习三次'};
+  let polls=0;
+  const dom=start({...CLOUD,runtime},{request:async ({path,body})=>{
+    if (path==='/connection/status') return cloudStatus;
+    assert.equal(path,'/super-agent/goals/status');
+    assert.equal(body.requestId,request.requestId);
+    if (++polls===1) throw Error('网络连接中断');
+    return done(request);
+  }},{
+    [ACTIVE_KEY]:'finance',
+    [RUNS_KEY]:JSON.stringify({['health:'+runtime]:{...done(request),actual:false,status:'working',result:null,createdAt:Date.now()-60_000}}),
+  });
+  await import('../web/app.mjs?cloud-receipt-transient');
+  await settle();
+  await dom.tick(3000);
+  await settle();
+  assert.equal(polls,1);
+  assert.equal(read(dom,RUNS_KEY)['health:'+runtime].status,'working');
+  await dom.tick(3000);
+  await settle();
+  assert.equal(polls,2);
+  assert.equal(read(dom,GOALS_KEY).health.target,180);
+  assert.equal(dom.storage.get(ACTIVE_KEY),'finance');
+});
+
 test('a blocked or mismatched cloud run cannot change an existing goal',async()=>{
   let blocked=true;
   const dom=start(CLOUD,{request:async ({path,body})=>{

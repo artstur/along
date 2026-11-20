@@ -8,7 +8,7 @@ import {issuePairingCode, stateDir} from './pairing.mjs';
 const userId=process.argv[2];
 try {
   if (!userId) throw Error('用法：node host/pair-code.mjs <userId>（userId 须已在状态目录的 users.json 里）');
-  console.log(issuePairingCode(stateDir(),userId));
+  console.log(await issuePairingCode(stateDir(),userId));
 } catch (error) {
   console.error(error.message);
   process.exit(1);

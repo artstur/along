@@ -132,6 +132,7 @@ function newLinkContext(overrides={}) {
   const handle=vm.runInNewContext(`(()=>{${newLinkSource}\nreturn handleAlongNewLink})()`,{
     process:{env:{...(overrides.env??{})}},
     dir:'/unused',
+    localHost:true,
     // 每请求身份（M2）：绑定由 authorized 按请求自己的 token 在绑定表中命中返回；
     // overrides.identity 为 null 表示「没有绑定」（resolveBinding 按 403 拒绝）。
     authorized:overrides.identity===null?()=>null:()=>({user_id:USER_A,device_id:DEVICE_A,hash:'x'.repeat(64)}),

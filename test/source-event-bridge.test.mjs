@@ -13,6 +13,29 @@ const CREDENTIALS={apiKey:'synthetic-source-key',secretKey:'synthetic-source-sec
 const NOW=Date.parse('2026-11-18T01:00:00Z');
 const response=data=>new Response(JSON.stringify({code:'0',data}),{headers:{'content-type':'application/json'}});
 function temp(t){const dir=mkdtempSync(join(tmpdir(),'along-source-bridge-'));t.after(()=>rmSync(dir,{recursive:true,force:true}));return dir;}
+test('a slow source scan leaves another user free to pump without duplicating the first scan',async t=>{
+ const other={userId:'u_44556677',deviceId:'d_44556677'};
+ const journal=createSourceJournal({dir:temp(t)});
+ let started,release;
+ const entered=new Promise(resolve=>{started=resolve;});
+ const held=new Promise(resolve=>{release=resolve;});
+ const scans=[],reads=[];
+ const pump=createSourceEventBridge({journal,endpoint:'http://127.0.0.1',stillBound:who=>who===WHO||who===other,
+  bridge:{call:async(_path,{identity})=>{reads.push(identity.userId);return{requests:[]};}},
+  adapters:{okx:{authorized:async()=>true,lookup:async()=>null,listGoals:async who=>{
+   scans.push(who.userId);
+   if(who===WHO){started();await held;}
+   return [];
+  }}}});
+ const first=pump.pump(WHO);
+ await entered;
+ try{
+  await Promise.all([pump.pump(WHO),pump.pump(other)]);
+  assert.deepEqual(scans,[WHO.userId,other.userId]);
+  assert.deepEqual(reads,[other.userId]);
+ }finally{release();await first;pump.close();}
+ assert.deepEqual(reads,[other.userId,WHO.userId]);
+});
 async function fixture(t,options={}){
  const dir=temp(t),state={now:NOW,equity:'1234.56',perm:'read_only',requests:[],events:[],results:[],calls:[],errors:[],goals:new Map([[GOAL,true],[OTHER,true]]),who:WHO};
  const journal=createSourceJournal({dir:join(dir,'events'),now:()=>state.now});

@@ -2,18 +2,17 @@ import {createHash, randomBytes, randomInt, randomUUID, timingSafeEqual} from 'n
 import {readFileSync, renameSync, unlinkSync, writeFileSync} from 'node:fs';
 import {homedir} from 'node:os';
 import {join} from 'node:path';
+import {lock} from 'proper-lockfile';
+import {HostError} from './host-error.mjs';
 
 // 多用户配对（docs/cloud-deploy-multi-user.md §3.2，M1）。三个文件都在 host 状态目录：
 // - pairings.json：绑定表（数组，每用户一条 {hash,user_id,device_id}，0600）；旧单对象 pairing.json
 //   启动时幂等升级为一元数组。authorized() 在这张表里按 SHA-256 查找，返回请求自己的绑定。
 // - users.json：静态用户表（部署者写入，0600）：[{"userId":"u_xxxxxxxx","label":"…"}]。
-//   存在即多用户形态：启动不生成通用码，/pair 只认每用户一次性码；缺失即本地单用户形态，
-//   行为与今天一致（唯一例外见下面的失败窗口）。格式无效直接抛错，不静默降级成单用户模式
-//   （那会往容器日志里打通用码，§3.7）。
+//   配置云端 Runner 时必填。启动时存在用户表即选择多用户形态，不生成通用码。
 // - pairing-codes.json（0600，原子写替换）：顶层 failures:[ISO 时间戳]（全局失败滑动窗口）与
 //   码数组 [code,userId,expiresAt]。CLI（host/pair-code.mjs）与 server 靠这个文件交接，/pair
-//   每次调用重读，不在启动时缓存。读-改-写（失败计数追加、删码、清空窗口）必须在同一同步段
-//   内完成——并发 /pair 下异步读-改-写会丢计数，攻击者可用并发请求稀释窗口绕过限速。
+//   每次调用重读，不在启动时缓存。CLI 与 Host 获取同一个文件锁后才读、修改并替换状态文件。
 
 const USER_ID_RE=/^u_[0-9a-f]{8}$/,DEVICE_ID_RE=/^d_[0-9a-f]{8}$/,HASH_RE=/^[a-f0-9]{64}$/;
 export const CODE_TTL_MS=15*60_000;
@@ -34,11 +33,13 @@ export function loadUsers(dir) {
   let raw;
   try { raw=readFileSync(join(dir,'users.json'),'utf8'); }
   catch (error) { if (error.code==='ENOENT') return null; throw error; }
-  const users=JSON.parse(raw);
+  let users;
+  try {users=JSON.parse(raw);}
+  catch {throw Error('users.json 不是有效的 JSON');}
   if (!Array.isArray(users)||users.length===0) throw Error('users.json 必须是形如 [{"userId":"u_xxxxxxxx"}] 的非空数组');
   const seen=new Set();
   for (const item of users) {
-    if (!item||typeof item!=='object'||Array.isArray(item)||!USER_ID_RE.test(item.userId??'')) throw Error('users.json 的 userId 无效');
+    if (!item||typeof item!=='object'||Array.isArray(item)||typeof item.userId!=='string'||!USER_ID_RE.test(item.userId)) throw Error('users.json 的 userId 无效');
     if (seen.has(item.userId)) throw Error('users.json 的 userId 重复');
     seen.add(item.userId);
   }
@@ -75,9 +76,7 @@ export function loadPairings(dir) {
 
 // 原子写：temp 写 + renameSync 替换（参照 host/daily-action-history.mjs 的手法）。
 export function savePairings(dir,entries) {
-  const file=join(dir,'pairings.json'),temporary=file+'.'+randomUUID();
-  writeFileSync(temporary,JSON.stringify(entries),{mode:0o600,flag:'wx'});
-  renameSync(temporary,file);
+  writeJsonAtomically(join(dir,'pairings.json'),entries);
 }
 
 // 按表鉴权：服务端只存 SHA-256，逐条 timingSafeEqual，命中返回该请求自己的绑定，未命中 null。
@@ -101,9 +100,32 @@ function readCodeState(dir) {
 }
 
 function writeCodeState(dir,state) {
-  const file=join(dir,'pairing-codes.json'),temporary=file+'.'+randomUUID();
-  writeFileSync(temporary,JSON.stringify(state),{mode:0o600,flag:'wx'});
-  renameSync(temporary,file);
+  writeJsonAtomically(join(dir,'pairing-codes.json'),state);
+}
+
+function writeJsonAtomically(file,value) {
+  const temporary=file+'.'+randomUUID();
+  writeFileSync(temporary,JSON.stringify(value),{mode:0o600,flag:'wx'});
+  try {renameSync(temporary,file);}
+  catch (error) {
+    try { unlinkSync(temporary); } catch { /* Keep the write error. */ }
+    throw error;
+  }
+}
+
+async function withCodeStateLock(dir,operation) {
+  let release;
+  try {
+    // Lock the stable path even when the state file does not yet exist or is atomically replaced.
+    release=await lock(join(dir,'pairing-codes.json'),{
+      realpath:false,stale:10_000,retries:{retries:12,factor:1,minTimeout:50,maxTimeout:50},
+    });
+  } catch (error) {
+    if (error.code==='ELOCKED') throw new HostError('配对状态正在更新，请稍后重试',503);
+    throw error;
+  }
+  try { return operation(); }
+  finally { await release(); }
 }
 
 function pruneCodeState(state,now) {
@@ -115,49 +137,44 @@ function pruneCodeState(state,now) {
 
 // CLI 发码（host/pair-code.mjs）：确认用户后开启新失败窗口，保留所有未过期码。
 // 返回明文码，经 docker exec 终端交给部署者（输出不进容器日志，§3.7）。
-export function issuePairingCode(dir,userId,now=Date.now()) {
-  const users=loadUsers(dir);
-  if (!users) throw Error('users.json 不存在：多用户发码需要静态用户表');
-  if (!users.includes(userId)) throw Error(`users.json 中没有用户 ${userId}`);
-  const state=pruneCodeState(readCodeState(dir),now);
-  let code;
-  do { code=String(randomInt(10000000,99999999)); } while (state.codes.some(item=>item[0]===code));
-  state.codes.push([code,userId,now+CODE_TTL_MS]);
-  state.failures=[];
-  writeCodeState(dir,state);
-  return code;
+export function issuePairingCode(dir,userId,now) {
+  return withCodeStateLock(dir,()=>{
+    const users=loadUsers(dir);
+    if (!users) throw Error('users.json 不存在：多用户发码需要静态用户表');
+    if (!users.includes(userId)) throw Error(`users.json 中没有用户 ${userId}`);
+    const at=now??Date.now();
+    const state=pruneCodeState(readCodeState(dir),at);
+    let code;
+    do { code=String(randomInt(10000000,99999999)); } while (state.codes.some(item=>item[0]===code));
+    state.codes.push([code,userId,at+CODE_TTL_MS]);
+    state.failures=[];
+    writeCodeState(dir,state);
+    return code;
+  });
 }
 
 // /pair 先检查全局失败窗口，满窗时拒绝所有码且不写回。未命中则追加失败，命中则用后删码并清空窗口。
 // 码有效但用户已不在本次重读的 users.json 里 → 不消费、不计失败（部署者改表后同一码仍可用）。
-export function consumeUserCode(dir,code,now,limit,allowedUsers) {
-  const state=pruneCodeState(readCodeState(dir),now);
-  if (state.failures.length>=limit) return {ok:false};
-  const index=typeof code==='string'?state.codes.findIndex(item=>item[0]===code):-1;
-  if (index<0) {
-    state.failures.push(new Date(now).toISOString());
+export function consumeUserCode(dir,code,limit,now) {
+  return withCodeStateLock(dir,()=>{
+    let allowedUsers;
+    try {allowedUsers=loadUsers(dir);}
+    catch {throw new HostError('配对用户表未就绪，请稍后重试',503);}
+    if (!allowedUsers) throw new HostError('配对用户表未就绪，请稍后重试',503);
+    const at=now??Date.now();
+    const state=pruneCodeState(readCodeState(dir),at);
+    if (state.failures.length>=limit) return {ok:false};
+    const index=typeof code==='string'?state.codes.findIndex(item=>item[0]===code):-1;
+    if (index<0) {
+      state.failures.push(new Date(at).toISOString());
+      writeCodeState(dir,state);
+      return {ok:false};
+    }
+    const userId=state.codes[index][1];
+    if (!allowedUsers.includes(userId)) return {ok:false};
+    state.codes.splice(index,1);
+    state.failures=[];
     writeCodeState(dir,state);
-    return {ok:false};
-  }
-  const userId=state.codes[index][1];
-  if (allowedUsers&&!allowedUsers.includes(userId)) return {ok:false};
-  state.codes.splice(index,1);
-  state.failures=[];
-  writeCodeState(dir,state);
-  return {ok:true,userId};
-}
-
-// Mac 本地通用码未命中时记录有界失败计数。有效的启动码仍走本地核验路径。
-export function recordPairingFailure(dir,now,limit) {
-  const state=pruneCodeState(readCodeState(dir),now);
-  if (state.failures.length<limit) { state.failures.push(new Date(now).toISOString()); writeCodeState(dir,state); }
-  return {ok:false};
-}
-
-// 本地通用码命中：清空失败窗口（顺带清过期码，不动有效的每用户码）。
-export function clearPairingFailures(dir,now) {
-  const state=readCodeState(dir);
-  const codes=state.codes.filter(code=>Array.isArray(code)&&code[2]>now);
-  if (state.failures.length||codes.length!==state.codes.length) writeCodeState(dir,{failures:[],codes});
-  return {ok:true};
+    return {ok:true,userId};
+  });
 }

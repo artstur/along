@@ -1,7 +1,7 @@
 # Along 云端编排（docs/cloud-deploy-multi-user.md §3.1、§4 M5）。
 # 相对路径基准：compose v2 的 project directory = 本文件所在目录（deploy/）。
 # 因此 volumes/secrets 用 ../../ 指向仓库外层 /opt/along/{data,secrets}（§6.4 第 1 步布局），
-# build.context 用 .. 指向仓库根 /opt/along/along，additional_contexts 的 ../along-superagent
+# build.context 用 .. 指向仓库根 /opt/along/along，additional_contexts 的 ../../along-superagent
 # 即相邻仓库布局。全部相对路径与 §6.4 的绝对布局一一对应，不得混用其他基准。
 services:
   host:

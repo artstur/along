@@ -15,7 +15,7 @@ import {readFileSync} from 'node:fs';
 import {mkdir, mkdtemp, rm, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {dirname, join} from 'node:path';
-import {AGENT_RUN_TIMEOUT_MS, DSH_RUNTIME} from '../web/super-agent.mjs';
+import {AGENT_RUN_TIMEOUT_MS, CLOUD_RUN_NOT_FOUND, DSH_RUNTIME} from '../web/super-agent.mjs';
 import {GOAL_OUTPUT_INSTRUCTIONS} from '../web/goal-agent-core.mjs';
 import {REASSESSMENT_INSTRUCTIONS} from '../web/contextual-planning.mjs';
 
@@ -111,39 +111,39 @@ Return one final JSON object only: {"summary":"Chinese delivery summary","next":
 
 // 运行信封形状以 Kimi 运行时的 run 为准（须通过 web/super-agent.mjs 的
 // safeGoalSuperAgentRun / safeSuperAgentRun 白名单）。
+const runPhase={
+  working:{statusLabel:'DSH 正在编排',progress:12,eval:null},
+  done:{statusLabel:'DSH 已完成',progress:100,eval:{decision:'accept'}},
+  blocked:{statusLabel:'输出需要重试',progress:12,eval:{decision:'blocked'}},
+};
 function goalRunEnvelope(request,outcome) {
   const now=Date.now();
-  const done=outcome.status==='done';
+  const {status,result=null,error}=outcome;
   return {
     version:1,kind:'goal',actual:true,runtime:DSH_RUNTIME,requestId:request.requestId,
     source:{kind:'along',label:'Along 目标'},trigger:{kind:'goal',label:'DSH Headless'},
-    eval:{decision:done?'accept':'blocked'},ticket:null,mandate:MANDATE,
-    events:[{at:now,text:done?'DSH Headless 已返回编排结果':'DSH Headless 运行已停止'}],
-    status:outcome.status,statusLabel:done?'DSH 已完成':'输出需要重试',progress:done?100:12,
-    createdAt:now,updatedAt:now,
+    status,...runPhase[status],ticket:null,mandate:MANDATE,
+    events:[{at:now,text:runPhase[status].statusLabel}],
+    createdAt:request.createdAt,updatedAt:now,
     input:{goal:request.input.goal,message:request.input.message,
       snapshot:{planning:request.input.snapshot?.planning??null}},
-    assignments:[],agents:[],result:done?outcome.result:null,
-    ...(done?{}:{error:outcome.error}),
+    assignments:[],agents:[],result,...(error?{error}:{}),
   };
 }
 function taskRunEnvelope(request,outcome) {
   const now=Date.now();
-  const done=outcome.status==='done';
-  const result=done?outcome.result:null;
+  const {status,result=null,error}=outcome;
   const summary=typeof result?.summary==='string'?result.summary.trim().slice(0,300):'';
   return {
     version:2,actual:true,runtime:DSH_RUNTIME,requestId:request.requestId,
     source:{kind:'along',label:'Along 动态任务'},trigger:{kind:'task',label:'DSH Headless'},
-    eval:{decision:done?'accept':'blocked'},ticket:null,mandate:MANDATE,
-    events:[{at:now,text:done?'DSH Headless 已完成任务规划':'DSH Headless 运行已停止'}],
-    status:outcome.status,statusLabel:done?'DSH 已完成':'输出需要重试',progress:done?100:12,
-    createdAt:now,updatedAt:now,
+    status,...runPhase[status],ticket:null,mandate:MANDATE,
+    events:[{at:now,text:runPhase[status].statusLabel}],
+    createdAt:request.createdAt,updatedAt:now,
     task:request.input.task,
-    assignments:done?[{id:`dsh-${request.requestId}`,name:'DSH Headless',role:'Subagent',status:'done',
+    assignments:status==='done'?[{id:`dsh-${request.requestId}`,name:'DSH Headless',role:'Subagent',status:'done',
       objective:'规划该动态任务。',work:'已完成规划',progress:100,report:{summary:summary||'结果已返回'}}]:[],
-    result,
-    ...(done?{}:{error:outcome.error}),
+    result,...(error?{error}:{}),
   };
 }
 
@@ -210,8 +210,7 @@ function runDshProcess(prompt,cwd,env) {
   });
 }
 
-// 运行缓存（键 `${userId}:${requestId}`，LRU 上限 200，设计 §3.5）：POST 命中直接回既有结果
-// （重发消息幂等，§6.1），GET /run/:requestId 供宿主轮询与恢复读取。
+// 在途记录可立即查询，不受已完成记录的 LRU 淘汰影响。同键 POST 复用原记录。
 const cache=new Map();
 const inflight=new Map();
 const cacheKey=(userId,requestId)=>`${userId}:${requestId}`;
@@ -225,28 +224,34 @@ function cacheSet(key,run) {
   cache.delete(key);cache.set(key,run);
   if (cache.size>CACHE_LIMIT) cache.delete(cache.keys().next().value);
 }
-async function execute(kind,request) {
+function findRun(key) {
+  return inflight.get(key)??cacheGet(key);
+}
+function execute(kind,request) {
   const key=cacheKey(request.userId,request.requestId);
-  const cached=cacheGet(key);
-  if (cached) return cached;
-  let pending=inflight.get(key);
-  if (!pending) {
-    pending=(async()=>{
-      const outcome=await runDsh(kind==='goal'?goalPrompt(request.input):taskPrompt(request.input));
-      const run=kind==='goal'?goalRunEnvelope(request,outcome):taskRunEnvelope(request,outcome);
-      cacheSet(key,run);
-      return run;
-    })().finally(()=>inflight.delete(key));
-    inflight.set(key,pending);
-  }
+  const existing=findRun(key);
+  if (existing) return existing;
+  const envelope=kind==='goal'?goalRunEnvelope:taskRunEnvelope;
+  const pending=envelope(request,{status:'working'});
+  inflight.set(key,pending);
+  void Promise.resolve()
+    .then(()=>runDsh(kind==='goal'?goalPrompt(request.input):taskPrompt(request.input)))
+    .catch(()=>({status:'blocked',error:'DSH 无法完成规划'}))
+    .then(outcome=>cacheSet(key,envelope(request,outcome)))
+    .finally(()=>inflight.delete(key));
   return pending;
 }
 
 function respond(res,status,data) { res.writeHead(status,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'}).end(JSON.stringify(data)); }
 async function readBody(req) {
-  let raw='',size=0;
-  for await (const chunk of req) { size+=chunk.length; if (size>MAX_BODY) throw Error('请求体超过大小限制'); raw+=chunk; }
-  return raw?JSON.parse(raw):null;
+  const chunks=[];
+  let size=0;
+  for await (const chunk of req.iterator({destroyOnReturn:false})) {
+    size+=chunk.length;
+    if (size>MAX_BODY) throw Error('请求体超过大小限制');
+    chunks.push(chunk);
+  }
+  return size?JSON.parse(Buffer.concat(chunks,size).toString('utf8')):null;
 }
 const server=createServer(async(req,res)=>{
   try {
@@ -260,7 +265,7 @@ const server=createServer(async(req,res)=>{
       if (typeof body?.requestId!=='string'||!ID_PATTERN.test(body.requestId)) throw Error('requestId 无效');
       if (!['goal','task'].includes(body?.kind)) throw Error('kind 无效');
       if (!body?.input||typeof body.input!=='object'||Array.isArray(body.input)) throw Error('input 无效');
-      const run=await execute(body.kind,{userId:body.userId,requestId:body.requestId,input:body.input});
+      const run=execute(body.kind,{userId:body.userId,requestId:body.requestId,input:body.input,createdAt:Date.now()});
       return respond(res,200,{run});
     }
     const match=req.method==='GET'&&path.match(/^\/run\/([^/]+)$/);
@@ -268,8 +273,8 @@ const server=createServer(async(req,res)=>{
       const requestId=decodeURIComponent(match[1]);
       const userId=String(req.headers['x-along-user']??'');
       if (!ID_PATTERN.test(requestId)||!USER_PATTERN.test(userId)) throw Error('运行查询无效');
-      const run=cacheGet(cacheKey(userId,requestId));
-      if (!run) return respond(res,404,{error:'运行记录不存在'});
+      const run=findRun(cacheKey(userId,requestId));
+      if (!run) return respond(res,404,{error:CLOUD_RUN_NOT_FOUND});
       return respond(res,200,{run});
     }
     return respond(res,404,{error:'未找到接口'});

@@ -9,10 +9,13 @@ WORKDIR /app
 COPY deploy/agent-runner.mjs deploy/
 COPY web/goal-agent-core.mjs web/super-agent.mjs web/contextual-planning.mjs web/
 # V-1 预置（§3.5 Tier 2、验收 #9）：经 compose additional_contexts along=../../along-superagent
-# （基准=project directory deploy/，§3.1）把 along bundle 复制进镜像。只复制 git 跟踪的文件——
-# lib/ 是 tsdown 构建产物、被 .gitignore，
-# fresh clone 没有，COPY 它会让部署机构建直接失败；Tier 1（目标聊天链路）不依赖 bundle。
-# V-1 验证时先在容器内构建 lib（见 deploy/README.md「V-1 预置」）。
-COPY --from=along src/ prompts/ skills/ locale/ scripts/ package.json pnpm-lock.yaml tsdown.config.ts tsconfig.json cordis.patch.yml README.md /opt/along-superagent/
+# （基准=project directory deploy/，§3.1）从相邻 checkout 复制 bundle 源码。
+# 为每个目录保留原始路径；lib/ 从源码构建（见 deploy/README.md「V-1 预置」）。
+COPY --from=along src/ /opt/along-superagent/src/
+COPY --from=along prompts/ /opt/along-superagent/prompts/
+COPY --from=along skills/ /opt/along-superagent/skills/
+COPY --from=along locale/ /opt/along-superagent/locale/
+COPY --from=along scripts/ /opt/along-superagent/scripts/
+COPY --from=along package.json pnpm-lock.yaml tsdown.config.ts tsconfig.json cordis.patch.yml README.md /opt/along-superagent/
 EXPOSE 3088
 CMD ["node", "deploy/agent-runner.mjs"]

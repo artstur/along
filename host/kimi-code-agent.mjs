@@ -1,5 +1,5 @@
 import {homedir} from 'node:os';
-import {dirname, join} from 'node:path';
+import {dirname, join, resolve} from 'node:path';
 import {existsSync, mkdirSync, readFileSync, renameSync, writeFileSync} from 'node:fs';
 import {validateGoalReply, normalizeGoalReply, GOAL_OUTPUT_INSTRUCTIONS} from '../web/goal-agent-core.mjs';
 import {safeAdaptiveLayout, normalizeAdaptiveLayout} from '../web/adaptive-ui.mjs';
@@ -9,6 +9,8 @@ import {REASSESSMENT_INSTRUCTIONS,validateReassessment} from '../web/contextual-
 const DEFAULT_URL='http://127.0.0.1:58627';
 const DEFAULT_TOKEN_PATH=join(homedir(),'.kimi-code','server.token');
 const DEFAULT_STATE_PATH=join(homedir(),'.along','agent-host','kimi-runs.json');
+const LEGACY_USER_ID=/^u_[0-9a-f]{8}$/;
+const LEGACY_REQUEST_ID=/^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$/;
 // 一次 Kimi 运行最多等这么久；超过还没拿到结果就明确停住，不让 iPhone 永远转圈。
 export const KIMI_RUN_TIMEOUT_MS=AGENT_RUN_TIMEOUT_MS;
 
@@ -123,18 +125,57 @@ function goalResultFromOutput(output,domain,message,planning) {
   return {...validated,layout,...(planning?{reassessment}:{})};
 }
 
+// 原版的两个 Mac 入口共用一份未带身份的运行记录。只有两边的现役绑定能确定同一所有者时才迁移。
+export function localKimiMigration(dir,pairings,home=homedir()) {
+  const defaultDir=resolve(home,'.along','agent-host'),activatedDir=resolve(home,'.along','phone-test','host');
+  const current=resolve(dir),userId=pairings[0]?.user_id;
+  if (pairings.length!==1||!LEGACY_USER_ID.test(userId??'')||![defaultDir,activatedDir].includes(current)) return {};
+  const peer=current===defaultDir?activatedDir:defaultDir;
+  for (const name of ['pairings.json','pairing.json']) {
+    let saved;
+    try {saved=JSON.parse(readFileSync(join(peer,name),'utf8'));}
+    catch (error) {
+      if (error.code==='ENOENT') continue;
+      return {};
+    }
+    const bindings=name==='pairings.json'?saved:[saved];
+    if (!Array.isArray(bindings)||bindings.some(entry=>entry?.user_id!==userId)) return {};
+    break;
+  }
+  return {legacyUserId:userId,legacyStatePath:join(defaultDir,'kimi-runs.json')};
+}
+
+function readRuns(path) {
+  try {
+    const parsed=JSON.parse(readFileSync(path,'utf8'));
+    return parsed&&typeof parsed==='object'&&!Array.isArray(parsed)?parsed:{};
+  } catch(error) {
+    if (error.code!=='ENOENT') console.warn('Along：运行记录无法读取，已按空记录继续');
+    return {};
+  }
+}
+
 export class KimiCodeAgent {
-  constructor({baseURL=process.env.ALONG_KIMI_CODE_URL||DEFAULT_URL,token=process.env.ALONG_KIMI_CODE_TOKEN,tokenPath=DEFAULT_TOKEN_PATH,statePath=DEFAULT_STATE_PATH,workspace=process.cwd(),model=process.env.ALONG_KIMI_CODE_MODEL||'kimi-code/kimi-for-coding',fetchImpl=fetch}={}) {
+  constructor({baseURL=process.env.ALONG_KIMI_CODE_URL||DEFAULT_URL,token=process.env.ALONG_KIMI_CODE_TOKEN,tokenPath=DEFAULT_TOKEN_PATH,statePath=DEFAULT_STATE_PATH,workspace=process.cwd(),model=process.env.ALONG_KIMI_CODE_MODEL||'kimi-code/kimi-for-coding',fetchImpl=fetch,legacyUserId,legacyStatePath}={}) {
     this.baseURL=baseURL.replace(/\/$/,'');this.token=token;this.tokenPath=tokenPath;this.statePath=statePath;this.workspace=workspace;this.model=model;this.fetch=fetchImpl;
-    this.runs={};this.synthesisRequests=new Set();
+    this.runs=readRuns(this.statePath);this.synthesisRequests=new Set();
     // 状态文件坏了不能让整台服务起不来：解析失败就当成没有记录继续。
     // 这些记录只是「在跑的那次会话」的指针，Kimi 侧的会话本身还在。
-    try {
-      const parsed=JSON.parse(readFileSync(this.statePath,'utf8'));
-      this.runs=parsed&&typeof parsed==='object'&&!Array.isArray(parsed)?parsed:{};
-    } catch(error) {
-      if (error.code!=='ENOENT') console.warn(`Along：运行记录无法读取，已按空记录继续（${error.message}）`);
-      this.runs={};
+    if (LEGACY_USER_ID.test(legacyUserId??'')&&legacyStatePath) this.migrateRuns(legacyUserId,legacyStatePath);
+  }
+  migrateRuns(userId,legacyStatePath) {
+    const legacy=resolve(this.statePath)===resolve(legacyStatePath)?this.runs:readRuns(legacyStatePath);
+    let changed=false;
+    for (const [requestId,run] of Object.entries(legacy)) {
+      if (!LEGACY_REQUEST_ID.test(requestId)||run?.input?.requestId!==requestId||!['goal','task'].includes(run.kind)||
+          typeof run.sessionId!=='string'||!run.sessionId) continue;
+      const key=this.runKey(userId,requestId);
+      if (Object.hasOwn(this.runs,key)) continue;
+      this.runs[key]=run;changed=true;
+    }
+    if (changed) {
+      try {this.save();}
+      catch {console.warn('Along：旧版 Kimi 运行记录暂未写入');}
     }
   }
   authToken() {

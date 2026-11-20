@@ -1,4 +1,4 @@
-import {readFileSync,renameSync,writeFileSync} from 'node:fs';
+import {readFileSync,renameSync,unlinkSync,writeFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {HostError} from './host-error.mjs';
 import {taskResultRelevant,resultEvidence} from '../web/task-results.mjs';
@@ -70,19 +70,34 @@ function notification(item,who) {
 // 每用户一份登记（docs/cloud-deploy-multi-user.md §3.2 M2）：notification-device.<userId>.json，
 // 互不覆盖。binding() 解析该用户在绑定表中的现役绑定；stillBound(who) 复查请求捕获的绑定
 // 是否仍是现役绑定（同一用户重新配对会整条替换绑定，旧 device 的守卫随即失效）。
-export function taskNotifications({dir,userId,binding,readPage,send,now=Date.now}) {
+export function taskNotifications({dir,userId,binding,readPage,send,now=Date.now,migrateLegacy=false}) {
   if (!id(userId)) throw Error('通知登记用户无效');
   const file=join(dir,`notification-device.${userId}.json`);
   let state=null,busy=false,inFlight=null,afterFailure=0;
-  try {state=JSON.parse(readFileSync(file,'utf8'));} catch (error) {
-    if (error.code!=='ENOENT') console.warn('Along 远程通知登记需重新建立');
-  }
   function save(updated) {
     const temp=file+'.tmp';
     writeFileSync(temp,JSON.stringify(updated),{mode:0o600});
     renameSync(temp,file);
     state=updated;
   }
+  function restore() {
+    try {state=JSON.parse(readFileSync(file,'utf8'));return;}
+    catch (error) {
+      if (error.code!=='ENOENT') {console.warn('Along 远程通知登记需重新建立');return;}
+    }
+    const who=migrateLegacy?binding():null;
+    if (!who||who.userId!==userId) return;
+    const legacy=join(dir,'notification-device.json');
+    try {
+      const saved=JSON.parse(readFileSync(legacy,'utf8'));
+      if (!same(who,saved)) return;
+      save(saved);
+      unlinkSync(legacy);
+    } catch (error) {
+      if (error.code!=='ENOENT') console.warn('Along 未能迁移旧版远程通知登记');
+    }
+  }
+  restore();
   const start=who=>({...who,token:null,cursor:0,enabledAt:0,seen:[],queue:[],scheduled:[]});
   const stillBound=who=>{const current=binding();return Boolean(who&&current&&same(who,current));};
   const active=who=>Boolean(who&&same(who,state)&&stillBound(who)&&state?.token&&send);

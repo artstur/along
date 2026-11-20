@@ -9,6 +9,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {GOAL_OUTPUT_INSTRUCTIONS} from '../web/goal-agent-core.mjs';
+import {issuePairingCode} from '../host/pairing.mjs';
 import {REASSESSMENT_INSTRUCTIONS} from '../web/contextual-planning.mjs';
 import {safeGoalSuperAgentRun, safeSuperAgentRun, DSH_RUNTIME, KIMI_RUNTIME} from '../web/super-agent.mjs';
 
@@ -119,6 +120,22 @@ async function spawnRunner({dir,stdout,mode='ok',token='ab'.repeat(32)}) {
 }
 const runRequest=(port,path,args={})=>plainRequest(port,path,args);
 
+async function waitForCompletion(readRun,extract=response=>response.json.run) {
+  const deadline=Date.now()+5_000;
+  while (Date.now()<deadline) {
+    const response=await readRun();
+    assert.equal(response.status,200);
+    if (extract(response).status!=='working') return response;
+    await sleep(15);
+  }
+  assert.fail('Runner did not reach a terminal state');
+}
+function readCompletedRun(runner,userId,requestId) {
+  return waitForCompletion(()=>runRequest(runner.port,`/run/${requestId}`,{
+    headers:{'runner-token':runner.token,'x-along-user':userId},
+  }));
+}
+
 test('runner：合法目标输出 → 信封过 safeGoalSuperAgentRun，runtime 固定 dsh-superagent，缓存按 userId+requestId 隔离',async()=>{
   const dir=mkdtempSync(join(tmpdir(),'along-runner-goal-'));
   const runner=await spawnRunner({dir,stdout:JSON.stringify(goalOutput)});
@@ -126,7 +143,8 @@ test('runner：合法目标输出 → 信封过 safeGoalSuperAgentRun，runtime 
     const body={userId:USER_A,requestId:'along-goal-health-1',kind:'goal',input:goalInput};
     const first=await runRequest(runner.port,'/run',{method:'POST',body,headers:{'runner-token':runner.token}});
     assert.equal(first.status,200);
-    const run=first.json.run;
+    assert.equal(first.json.run.status,'working');
+    const {json:{run}}=await readCompletedRun(runner,body.userId,body.requestId);
     assert.equal(run.status,'done');
     // runtime 固定 'dsh-superagent'：不得照抄 Kimi 信封误标 kimi-code-swarm（验收 #3）。
     assert.equal(run.runtime,DSH_RUNTIME);
@@ -162,7 +180,8 @@ test('runner：任务输出 → 信封过 safeSuperAgentRun（version 2）',asyn
         input:{requestId:'along-health-task1',task:{id:'t1',title:'整理健康推荐',detail:'给出本周清单。',when:'今天',state:'temporary'},goal:goalInput.goal,context:{}}},
       headers:{'runner-token':runner.token}});
     assert.equal(response.status,200);
-    const run=response.json.run;
+    assert.equal(response.json.run.status,'working');
+    const {json:{run}}=await readCompletedRun(runner,USER_A,'along-health-task1');
     assert.equal(run.runtime,DSH_RUNTIME);
     assert.equal(safeSuperAgentRun(run)?.requestId,'along-health-task1','任务信封必须通过任务白名单');
     assert.equal(safeGoalSuperAgentRun(run),null,'goal 白名单不收 version 2 的任务信封');
@@ -185,7 +204,8 @@ test('runner：dsh 失败（退出码非零 / 无输出 / 输出不是 JSON）�
         body:{userId:USER_A,requestId:`along-goal-health-fail-${label.length}`,kind:'goal',input:goalInput},
         headers:{'runner-token':runner.token}});
       assert.equal(response.status,200);
-      const run=response.json.run;
+      assert.equal(response.json.run.status,'working');
+      const {json:{run}}=await readCompletedRun(runner,USER_A,`along-goal-health-fail-${label.length}`);
       assert.equal(run.status,'blocked',`${label} 必须落终态`);
       assert.match(run.error,pattern);
       assert.equal(run.result,null);
@@ -277,6 +297,8 @@ async function stubRunner({postRun=null,getStatus=null,expectedUser=null,expecte
 async function spawnHostWithRunner(dir,runnerPort) {
   const tokenFile=join(dir,'runner-token');
   writeFileSync(tokenFile,'cd'.repeat(32),{mode:0o600});
+  writeFileSync(join(dir,'users.json'),JSON.stringify([USER_A,USER_B].map(userId=>({userId}))),{mode:0o600});
+  const code=await issuePairingCode(dir,USER_A);
   const port=await freePort();
   const child=spawn(process.execPath,[HOST_FILE],{env:{
     ...process.env,
@@ -291,9 +313,7 @@ async function spawnHostWithRunner(dir,runnerPort) {
   child.stderr.on('data',data=>output.push(String(data)));
   const text=()=>output.join('');
   await waitReady(port,'host',path=>phoneCall(port,path));
-  // 本地单用户形态：从启动横幅取一次性配对码换 token。
-  const code=text().match(/一次性配对码: (\d{8})/)?.[1];
-  assert.ok(code,`启动横幅要有通用配对码：${text().slice(0,400)}`);
+  assert.doesNotMatch(text(),/一次性配对码/);
   const paired=await phoneCall(port,'/pair',{method:'POST',body:{code}});
   assert.equal(paired.status,200);
   const token=paired.json.token;
@@ -359,7 +379,7 @@ test('host：runner 返回校验失败的目标输出 → blocked 终态不重�
   } finally { await host.stop(); await runner.close(); rmSync(dir,{recursive:true,force:true}); }
 });
 
-test('cloud Host and runner validate the original contextual review at submit and lookup',async t=>{
+test('cloud Host acknowledges before completion and validates the original contextual review at lookup and replay',async t=>{
   const requestId='along-review-cloud-reassessment';
   const reassessment={decision:'keep',basedOnRevision:requestId,reason:'沿用已有计划',changes:[]};
   const input={...goalInput,requestId,runtime:DSH_RUNTIME,
@@ -378,15 +398,21 @@ test('cloud Host and runner validate the original contextual review at submit an
     try {
       const headers={authorization:`Bearer ${host.token}`};
       const submitted=await phoneCall(host.port,'/super-agent/goals',{method:'POST',body:input,headers});
-      const queried=await phoneCall(host.port,'/super-agent/goals/status',{method:'POST',
-        body:{requestId,runtime:DSH_RUNTIME,contextReview:true},headers});
+      assert.equal(submitted.status,200);
+      assert.equal(submitted.json.run.status,'working');
+      assert.equal(submitted.json.run.applyValidatedGoal,undefined);
+      assert.equal(submitted.json.run.input.snapshot,undefined);
+      const queried=await waitForCompletion(()=>phoneCall(host.port,'/super-agent/goals/status',{method:'POST',
+        body:{requestId,runtime:DSH_RUNTIME,contextReview:true},headers}),response=>response.json);
+      const replayed=await phoneCall(host.port,'/super-agent/goals',{method:'POST',body:input,headers});
       const wrongKind=await phoneCall(host.port,'/super-agent/tasks/status',{method:'POST',
         body:{requestId,runtime:DSH_RUNTIME},headers});
-      assert.equal(submitted.status,200);
       assert.equal(queried.status,200);
+      assert.equal(replayed.status,200);
       assert.equal(wrongKind.status,502,'任务查询只接收任务运行');
       assert.equal(wrongKind.json.input,undefined);
-      for (const run of [submitted.json.run,queried.json]) {
+      for (const run of [replayed.json.run,queried.json]) {
+        assert.equal(run.createdAt,submitted.json.run.createdAt);
         assert.equal(run.applyValidatedGoal,undefined);
         assert.equal(run.input.snapshot,undefined,'仅服务端使用情境上下文做校验');
         if (proposal) {
@@ -444,6 +470,7 @@ test('host：goals/status 与 tasks 两个端点同走 runner（x-along-user 用
 test('host：设置了 ALONG_DSH_RUNNER_URL 但缺 runner-token → 拒绝启动',()=>{
   const dir=mkdtempSync(join(tmpdir(),'along-host-runner-notoken-'));
   try {
+    writeFileSync(join(dir,'users.json'),JSON.stringify([USER_A,USER_B].map(userId=>({userId}))),{mode:0o600});
     const result=spawnSync(process.execPath,[HOST_FILE],{env:{...process.env,
       ALONG_AGENT_STATE_DIR:dir,ALONG_AGENT_HOST:'127.0.0.1',ALONG_DSH_RUNNER_URL:'http://127.0.0.1:3088'},
       encoding:'utf8'});

@@ -8,7 +8,7 @@ import {mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, statSync} 
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {loadUsers,loadPairings,findPairing,issuePairingCode,consumeUserCode,recordPairingFailure,clearPairingFailures,failLimitFromEnv,CODE_TTL_MS} from '../host/pairing.mjs';
+import {loadUsers,loadPairings,findPairing,issuePairingCode,consumeUserCode,failLimitFromEnv,CODE_TTL_MS} from '../host/pairing.mjs';
 
 // 多用户配对（docs/cloud-deploy-multi-user.md §4 M1，验收 #1）：
 // - pairings.json 多绑定表 + 旧单对象 pairing.json 幂等升级；users.json 静态用户表；
@@ -41,7 +41,7 @@ test('loadUsers：缺失返回 null（本地形态），格式无效抛错不静
     assert.equal(loadUsers(dir),null,'users.json 不存在 → 本地单用户形态');
     writeUsers(dir,[{userId:USER_A,label:'A'},{userId:USER_B}]);
     assert.deepEqual(loadUsers(dir),[USER_A,USER_B]);
-    for (const bad of [[],'x',[{userId:'nope'}],[{userId:USER_A},{userId:USER_A}],[{}],['not json']]) {
+    for (const bad of [[],'x',[{userId:'nope'}],[{userId:[USER_A]}],[{userId:USER_A},{userId:USER_A}],[{}],['not json']]) {
       writeFileSync(join(dir,'users.json'),typeof bad==='string'?bad:JSON.stringify(bad),{mode:0o600});
       assert.throws(()=>loadUsers(dir),'格式无效必须抛错，不能降级成单用户模式往日志打通用码');
     }
@@ -88,131 +88,116 @@ test('findPairing：按绑定表 SHA-256 查找，命中返回该请求自己的
   assert.equal(findPairing(entries,'9'.repeat(64)),null);
 });
 
-test('issuePairingCode：需要 users.json 且用户在表内；码 8 位、15 分钟有效、文件 0600、防撞码',()=>{
+test('issuePairingCode：需要 users.json 且用户在表内；码 8 位、15 分钟有效、文件 0600、防撞码',async()=>{
   const {dir,cleanup}=tempDir('along-issue-');
   try {
-    assert.throws(()=>issuePairingCode(dir,USER_A),/users\.json 不存在/);
+    await assert.rejects(issuePairingCode(dir,USER_A),/users\.json 不存在/);
     writeUsers(dir,[{userId:USER_A},{userId:USER_B}]);
-    assert.throws(()=>issuePairingCode(dir,'u_nope0000'),/没有用户/,'非 users.json 用户不发码');
+    await assert.rejects(issuePairingCode(dir,'u_nope0000'),/没有用户/,'非 users.json 用户不发码');
     const t0=1_000_000_000_000;
-    const code=issuePairingCode(dir,USER_A,t0);
+    const code=await issuePairingCode(dir,USER_A,t0);
     assert.match(code,/^\d{8}$/);
     assert.deepEqual(readCodes(dir),{failures:[],codes:[[code,USER_A,t0+CODE_TTL_MS]]});
     assert.equal(statSync(join(dir,'pairing-codes.json')).mode&0o777,0o600,'码文件 0600');
-    const second=issuePairingCode(dir,USER_B,t0+1);
+    const second=await issuePairingCode(dir,USER_B,t0+1);
     assert.notEqual(second,code);
     assert.equal(readCodes(dir).codes.length,2,'不同用户各持一码');
     // 过期码在发码时顺带清理
     writeFileSync(join(dir,'pairing-codes.json'),JSON.stringify(
       {failures:[],codes:[...readCodes(dir).codes,['11111111',USER_B,t0-1]]}),{mode:0o600});
-    issuePairingCode(dir,USER_A,t0+2);
+    await issuePairingCode(dir,USER_A,t0+2);
     const codes=readCodes(dir).codes;
     assert.equal(codes.some(item=>item[0]==='11111111'),false,'过期码已清理');
     assert.equal(codes.length,3,'未过期码全部保留');
   } finally {cleanup();}
 });
 
-test('consumeUserCode：公网失败窗口满时拒绝有效码，保留原码和失败次数',()=>{
+test('consumeUserCode：公网失败窗口满时拒绝有效码，保留原码和失败次数',async()=>{
   const {dir,cleanup}=tempDir('along-consume-');
   try {
     writeUsers(dir,[{userId:USER_A}]);
     const t0=1_000_000_000_000;
-    const code=issuePairingCode(dir,USER_A,t0);
+    const code=await issuePairingCode(dir,USER_A,t0);
     const limit=2;
-    assert.deepEqual(consumeUserCode(dir,'00000000',t0+1,limit,[USER_A]),{ok:false});
-    assert.deepEqual(consumeUserCode(dir,'00000000',t0+2,limit,[USER_A]),{ok:false});
+    assert.deepEqual(await consumeUserCode(dir,'00000000',limit,t0+1),{ok:false});
+    assert.deepEqual(await consumeUserCode(dir,'00000000',limit,t0+2),{ok:false});
     const full=readCodes(dir);
     assert.equal(full.failures.length,limit);
-    assert.deepEqual(consumeUserCode(dir,code,t0+3,limit,[USER_A]),{ok:false});
+    assert.deepEqual(await consumeUserCode(dir,code,limit,t0+3),{ok:false});
     assert.deepEqual(readCodes(dir),full,'窗口满时保留原码和失败次数');
-    assert.deepEqual(consumeUserCode(dir,'00000000',t0+4,limit,[USER_A]),{ok:false});
+    assert.deepEqual(await consumeUserCode(dir,'00000000',limit,t0+4),{ok:false});
     assert.deepEqual(readCodes(dir),full,'窗口满时也不追加失败时间');
   } finally {cleanup();}
 });
 
-test('issuePairingCode：管理员重开窗口、保留未过期码，两用户各自配对且码单次有效',()=>{
+test('issuePairingCode：管理员重开窗口、保留未过期码，两用户各自配对且码单次有效',async()=>{
   const {dir,cleanup}=tempDir('along-reopen-');
   try {
     const users=[USER_A,USER_B];
     writeUsers(dir,users.map(userId=>({userId})));
     const t0=1_000_000_000_000,limit=2;
-    const codeA=issuePairingCode(dir,USER_A,t0);
-    assert.deepEqual(consumeUserCode(dir,'00000000',t0+1,limit,users),{ok:false});
-    assert.deepEqual(consumeUserCode(dir,'00000000',t0+2,limit,users),{ok:false});
+    const codeA=await issuePairingCode(dir,USER_A,t0);
+    assert.deepEqual(await consumeUserCode(dir,'00000000',limit,t0+1),{ok:false});
+    assert.deepEqual(await consumeUserCode(dir,'00000000',limit,t0+2),{ok:false});
 
-    const codeB=issuePairingCode(dir,USER_B,t0+3);
+    const codeB=await issuePairingCode(dir,USER_B,t0+3);
     assert.deepEqual(readCodes(dir),{failures:[],codes:[[codeA,USER_A,t0+CODE_TTL_MS],[codeB,USER_B,t0+3+CODE_TTL_MS]]});
-    assert.deepEqual(consumeUserCode(dir,'00000000',t0+4,limit,users),{ok:false});
+    assert.deepEqual(await consumeUserCode(dir,'00000000',limit,t0+4),{ok:false});
     assert.equal(readCodes(dir).failures.length,1);
-    assert.deepEqual(consumeUserCode(dir,codeA,t0+5,limit,users),{ok:true,userId:USER_A});
+    assert.deepEqual(await consumeUserCode(dir,codeA,limit,t0+5),{ok:true,userId:USER_A});
     assert.deepEqual(readCodes(dir),{failures:[],codes:[[codeB,USER_B,t0+3+CODE_TTL_MS]]});
-    assert.deepEqual(consumeUserCode(dir,codeB,t0+6,limit,users),{ok:true,userId:USER_B});
+    assert.deepEqual(await consumeUserCode(dir,codeB,limit,t0+6),{ok:true,userId:USER_B});
     assert.deepEqual(readCodes(dir).codes,[]);
-    assert.deepEqual(consumeUserCode(dir,codeA,t0+7,limit,users),{ok:false},'同一码第二次无效');
+    assert.deepEqual(await consumeUserCode(dir,codeA,limit,t0+7),{ok:false},'同一码第二次无效');
   } finally {cleanup();}
 });
 
-test('consumeUserCode：满窗自然恢复时，过期配对码仍然无效',()=>{
+test('consumeUserCode：满窗自然恢复时，过期配对码仍然无效',async()=>{
   const {dir,cleanup}=tempDir('along-expired-code-');
   try {
     const users=[USER_A];
     writeUsers(dir,[{userId:USER_A}]);
     const t0=1_000_000_000_000,limit=1,expires=t0+CODE_TTL_MS;
-    const code=issuePairingCode(dir,USER_A,t0);
-    assert.deepEqual(consumeUserCode(dir,'00000000',t0,limit,users),{ok:false});
-    assert.deepEqual(consumeUserCode(dir,code,expires-1,limit,users),{ok:false},'窗口尚未恢复时拒绝尚未过期的码');
-    assert.deepEqual(consumeUserCode(dir,code,expires,limit,users),{ok:false},'原失败恰满 15 分钟，过期码仍按未命中处理');
+    const code=await issuePairingCode(dir,USER_A,t0);
+    assert.deepEqual(await consumeUserCode(dir,'00000000',limit,t0),{ok:false});
+    assert.deepEqual(await consumeUserCode(dir,code,limit,expires-1),{ok:false},'窗口尚未恢复时拒绝尚未过期的码');
+    assert.deepEqual(await consumeUserCode(dir,code,limit,expires),{ok:false},'原失败恰满 15 分钟，过期码仍按未命中处理');
     assert.deepEqual(readCodes(dir),{failures:[new Date(expires).toISOString()],codes:[]});
   } finally {cleanup();}
 });
 
-test('consumeUserCode：码有效但用户已不在 users.json → 403 语义、不消费、不计失败',()=>{
+test('consumeUserCode：码有效但用户已不在 users.json → 403 语义、不消费、不计失败',async()=>{
   const {dir,cleanup}=tempDir('along-consume-user-');
   try {
     writeUsers(dir,[{userId:USER_A}]);
     const t0=1_000_000_000_000;
-    const code=issuePairingCode(dir,USER_A,t0);
-    assert.deepEqual(consumeUserCode(dir,code,t0+1,10,[USER_B]),{ok:false});
+    const code=await issuePairingCode(dir,USER_A,t0);
+    writeUsers(dir,[{userId:USER_B}]);
+    assert.deepEqual(await consumeUserCode(dir,code,10,t0+1),{ok:false});
     const state=readCodes(dir);
     assert.deepEqual(state.codes,[[code,USER_A,t0+CODE_TTL_MS]],'码未被消费，改表后同一码仍可用');
     assert.deepEqual(state.failures,[],'有效码不计入失败窗口');
     writeUsers(dir,[{userId:USER_A},{userId:USER_B}]);
-    assert.deepEqual(consumeUserCode(dir,code,t0+2,10,[USER_A,USER_B]),{ok:true,userId:USER_A},'用户恢复后原码仍可配对');
+    assert.deepEqual(await consumeUserCode(dir,code,10,t0+2),{ok:true,userId:USER_A},'用户恢复后原码仍可配对');
   } finally {cleanup();}
 });
 
-test('失败窗口滑动：恰好 15 分钟前的失败不再计入（窗口与码 TTL 同步）',()=>{
+test('失败窗口滑动：恰好 15 分钟前的失败不再计入（窗口与码 TTL 同步）',async()=>{
   const {dir,cleanup}=tempDir('along-window-');
   try {
     const t0=1_000_000_000_000,windowMs=15*60_000;
-    recordPairingFailure(dir,t0,10);
-    recordPairingFailure(dir,t0+1,10);
+    writeUsers(dir,[{userId:USER_A}]);
+    await consumeUserCode(dir,'00000000',10,t0);
+    await consumeUserCode(dir,'00000000',10,t0+1);
     assert.equal(readCodes(dir).failures.length,2);
-    assert.deepEqual(recordPairingFailure(dir,t0+windowMs,10),{ok:false});
+    assert.deepEqual(await consumeUserCode(dir,'00000000',10,t0+windowMs),{ok:false});
     assert.deepEqual(readCodes(dir).failures,
       [new Date(t0+1).toISOString(),new Date(t0+windowMs).toISOString()],
       'now=t0+窗口：恰好 15 分钟前（t0）的失败已滑出，窗口内的保留并追加新失败');
-    assert.deepEqual(recordPairingFailure(dir,t0+1+windowMs,10),{ok:false});
+    assert.deepEqual(await consumeUserCode(dir,'00000000',10,t0+1+windowMs),{ok:false});
     assert.deepEqual(readCodes(dir).failures,
       [new Date(t0+windowMs).toISOString(),new Date(t0+1+windowMs).toISOString()],
       'now=t0+1+窗口：t0+1 的失败随之滑出，15 分钟前的失败一律不再计入');
-  } finally {cleanup();}
-});
-
-test('clearPairingFailures：本地通用码成功后清空失败窗口，保留未过期的每用户码',()=>{
-  const {dir,cleanup}=tempDir('along-clear-');
-  try {
-    writeUsers(dir,[{userId:USER_A}]);
-    const t0=1_000_000_000_000;
-    const code=issuePairingCode(dir,USER_A,t0+1);
-    recordPairingFailure(dir,t0+1,10);
-    writeFileSync(join(dir,'pairing-codes.json'),JSON.stringify(
-      {failures:readCodes(dir).failures,codes:[...readCodes(dir).codes,['99999999',USER_A,t0-1]]}),{mode:0o600});
-    assert.deepEqual(clearPairingFailures(dir,t0+2),{ok:true});
-    const after=readCodes(dir);
-    assert.deepEqual(after.failures,[],'失败窗口清空');
-    assert.deepEqual(after.codes,[[code,USER_A,t0+1+CODE_TTL_MS]],'未过期码保留、过期码清掉');
-    assert.deepEqual(clearPairingFailures(dir,t0+3),{ok:true},'幂等');
   } finally {cleanup();}
 });
 
@@ -410,7 +395,7 @@ test('多用户配对：CLI 发码 → 各自 /pair → 两 token 同时有效�
   } finally {cleanup();}
 });
 
-test('本地形态（无 users.json）：启动打印通用码、配对即建号、失败计数有界',async t=>{
+test('本地形态：连续五次配对失败锁住当前启动码',async t=>{
   const {dir,cleanup}=tempDir('along-local-pair-');
   try {
     const host=await spawnHost(t,{dir});
@@ -420,25 +405,13 @@ test('本地形态（无 users.json）：启动打印通用码、配对即建号
     const pairingsFile=()=>existsSync(join(dir,'pairings.json'))?JSON.parse(readFileSync(join(dir,'pairings.json'),'utf8')):null;
     assert.equal(pairingsFile(),null);
 
-    // 窗口内连续 11 次错误码：全部 403，失败窗口封顶（现状 5 次永久锁死被滑动窗口替代）。
-    for (let seed=1;seed<=11;seed++) {
+    for (let seed=1;seed<=5;seed++) {
       const wrong=await phoneCall(host.port,'/pair',{method:'POST',body:{code:unknownCode(seed*7)}});
       assert.equal(wrong.status,403,`错误码 #${seed} 403`);
     }
-    assert.equal(readCodes(dir).failures.length,10,'失败窗口统一写在 pairing-codes.json 并封顶');
-    assert.deepEqual(pairingsFile(),null,'配对码错误不产生绑定');
-
-    // 正确的通用码不受限速影响，仍然配对成功（现状下 5 次失败会锁死到重启）。
     const paired=await phoneCall(host.port,'/pair',{method:'POST',body:{code:universal}});
-    assert.equal(paired.status,200);
-    assert.match(paired.json.token,/^[a-f0-9]{64}$/);
-    const table=pairingsFile();
-    assert.equal(table.length,1,'本地形态整表一条绑定');
-    assert.match(table[0].user_id,/^u_[0-9a-f]{8}$/,'配对即建号');
-    assert.match(table[0].device_id,/^d_[0-9a-f]{8}$/);
-    assert.equal(table[0].hash,sha256hex(paired.json.token));
-    assert.deepEqual(readCodes(dir).failures,[],'成功后失败窗口清空');
-    assert.deepEqual((await phoneCall(host.port,'/connection/verify',
-      {method:'POST',headers:{authorization:`Bearer ${paired.json.token}`}})).json,{paired:true},'新配对 token 立即可用');
+    assert.equal(paired.status,403,'五次失败后连正确码也被拒绝');
+    assert.deepEqual(paired.json,{error:'配对码无效或已过期'});
+    assert.deepEqual(pairingsFile(),null,'拒绝后不产生绑定');
   } finally {cleanup();}
 });

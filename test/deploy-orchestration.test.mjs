@@ -13,7 +13,7 @@ import {parseDocument} from 'yaml';
 //   additional_contexts 以 project directory（deploy/）为基准写 ../../along-superagent（§3.1 施工修正）、
 //   restart/logging 轮转/healthcheck 指向真实存在的 /health 端点；
 // - 凭证红线（§3.3/§3.7）：compose/env.example 的环境值不含凭证形态的字符串，凭证只经 /run/secrets/* 文件路径；
-// - Dockerfile.host：node:22-bookworm-slim + openssl + host/ 全目录 + host→web 完整 import 闭包
+// - Dockerfile.host：Node 22、OpenSSL、锁定的生产依赖、Host 源码与 host→web 完整 import 闭包
 //   （闭包由测试当次实测计算，与 §4-M5 的「以当次 grep 为准」同口径，防镜像缺文件）；
 // - Dockerfile.agent：node:24-bookworm-slim + @deepseek-ai/dsh@0.2.2-rc.5 pin + runner 及其 web 闭包；
 //   ALONG_DSH_VERSION 与 pin 跨文件一致；along bundle 不含 lib/（构建产物）；
@@ -23,11 +23,6 @@ import {parseDocument} from 'yaml';
 // 两镜像可构建、compose up 后 /health 200、启动横幅与 docker logs 抽查、
 // file secret 缺失是 up 硬错误的行为。compose config 校验（验收 #5 第 1 条）在下面用
 // {skip} 门控：检测到可用 compose CLI 才跑，并可用 ALONG_COMPOSE_BIN 指定 standalone 二进制。
-// 已知边界（交付说明）：deploy/.dockerignore 的白名单内容在这里断言，但 BuildKit 对
-// context=仓库根、Dockerfile=deploy/Dockerfile.<name> 的构建查找链是
-// <dockerfile>.dockerignore → 仓库根 .dockerignore，plain 的 deploy/.dockerignore 不在其中
-// （buildkit frontend/dockerui/config.go：先读 bctx.filename+'.dockerignore'，缺失回落 context 根 .dockerignore），
-// 该文件当前并不生效——详见本轮交付说明，不在测试里为不生效的保证背书。
 
 const ROOT=fileURLToPath(new URL('../',import.meta.url));
 const DEPLOY_DIR=join(ROOT,'deploy');
@@ -41,6 +36,9 @@ const deployReadme=readFileSync(join(DEPLOY_DIR,'README.md'),'utf8');
 const runnerSrc=readFileSync(join(DEPLOY_DIR,'agent-runner.mjs'),'utf8');
 const hostSrc=readFileSync(join(ROOT,'host','agent-host.mjs'),'utf8');
 const ADJACENT=resolve(DEPLOY_DIR,'../../along-superagent');
+const BUNDLE_ROOT='/opt/along-superagent/';
+const bundleCopies=dockerAgent.split('\n').filter(line=>line.startsWith('COPY --from=along '))
+  .map(line=>line.trim().split(/\s+/).slice(2));
 
 function copyTokens(dockerfile) {
   return dockerfile.split('\n').filter(line=>line.startsWith('COPY '))
@@ -51,7 +49,7 @@ function copyWebFiles(dockerfile) {
     .map(token=>token.slice('web/'.length));
 }
 
-// import 闭包（BFS）：从 host/ 全部模块出发（镜像 COPY host/ 整目录，任意入口都可能在容器内被运行），
+// import 闭包（BFS）：从镜像携带的全部 host/ 顶层模块出发，
 // 沿 ./ 与 ../web/ 的静态与动态 import 展开；web 文件继续沿 ./ 展开 web→web 依赖。
 const IMPORT_RE=/(?:from|import\()\s*'([^']+\.(?:mjs|json))'/g;
 function webClosure() {
@@ -185,7 +183,8 @@ test('compose 按 §3.1 编排：443→4176、agent 仅内网、bind 卷与 secr
 test('Dockerfile.host：node:22-slim+openssl，COPY 的 web 文件与当次实测的 host→web import 闭包完全一致',()=>{
   assert.match(dockerHost,/FROM node:22-bookworm-slim/,'node:22 系（package.json engines >=22.19）');
   assert.match(dockerHost,/apt-get install[^\n]*openssl/,'slim 无 openssl，而 host 启动即 execFileSync openssl 生成证书（host/agent-host.mjs:46）');
-  assert.ok(dockerHost.split('\n').some(line=>line.startsWith('COPY host/ host/')),'host/ 整目录进镜像（schemas/task-reply.schema.json 按相对路径读）');
+  assert.match(dockerHost,/COPY package\.json package-lock\.json \.\/\nRUN npm ci --omit=dev --ignore-scripts/,'按锁文件安装 Host 运行依赖');
+  assert.ok(dockerHost.split('\n').some(line=>line==='COPY host/ host/'),'放行的 Host 模块与 schema 保留相对路径');
   assert.match(dockerHost,/CMD \["node", "host\/agent-host\.mjs"\]/,'容器入口 = agent-host');
   // 闭包以当次代码实测为准（§4-M5「闭包随代码演进会变，改 host→web 引用后同步改这里」）
   const copied=copyWebFiles(dockerHost).sort();
@@ -219,11 +218,13 @@ test('Dockerfile.agent：node:24-slim + dsh@0.2.2-rc.5 pin，runner 与其 web �
   assert.deepEqual(copyWebFiles(dockerAgent).sort(),[...runnerImports].sort(),
     'Dockerfile.agent COPY 的 web 文件必须等于 runner 当次实测 import 闭包（缺一个即容器内启动 MODULE_NOT_FOUND）');
   for (const file of runnerImports) assert.ok(existsSync(join(ROOT,'web',file)),`web/${file} 真实存在`);
-  // along bundle 预置（V-1）：lib/ 是 tsdown 构建产物且被 .gitignore，fresh clone 没有，COPY 会让部署机构建硬失败
-  const bundleLine=dockerAgent.split('\n').find(line=>line.startsWith('COPY --from=along'));
-  assert.ok(bundleLine,'经 additional_contexts along 预置 along bundle（§3.5 Tier 2 预置）');
-  const tokens=bundleLine.split(/\s+/).slice(2);
-  assert.ok(!tokens.some(token=>token.startsWith('lib')),'bundle 不得 COPY lib/（构建产物，fresh clone 不存在）');
+  // COPY 目录复制内容。独立目标保留 tsdown 和运行时依赖的目录层级。
+  const dirs=['src/','prompts/','skills/','locale/','scripts/'];
+  const files=['package.json','pnpm-lock.yaml','tsdown.config.ts','tsconfig.json','cordis.patch.yml','README.md'];
+  assert.deepEqual(bundleCopies,[
+    ...dirs.map(dir=>[dir,BUNDLE_ROOT+dir]),
+    [...files,BUNDLE_ROOT],
+  ]);
   // compose 记录用版本与 pin 一致（前面已断言值，这里再锁「两处同源」的文案约束）
   assert.equal(composeDoc.services.agent.environment.ALONG_DSH_VERSION,/dsh@([\w.\-]+)\b/.exec(dockerAgent)?.[1],
     'ALONG_DSH_VERSION 必须等于 Dockerfile 里的 dsh pin');
@@ -269,29 +270,33 @@ test('deploy/README.md：构建启动命令、五步冒烟、路径基准与静�
   assert.ok(deployReadme.includes('https://0.0.0.0:4176'),'启动横幅期望值（ALONG_AGENT_HOST=0.0.0.0 生效）');
   assert.ok(deployReadme.includes('/data/users.json'),'users.json 可见性冒烟（卷挂错会静默单用户模式）');
   assert.ok(deployReadme.includes('curl -k https://127.0.0.1/health'),'宿主机 443 探活');
-  assert.ok(deployReadme.includes('http://127.0.0.1:3088/run')&&deployReadme.includes('DSH smoke passed'),
-    '冒烟请求通过 runner 的鉴权、密钥注入和 DSH profile');
+  assert.ok(deployReadme.includes('readRun("/run",')&&deployReadme.includes('DSH smoke passed'),
+    '冒烟 POST 通过 runner 完成真实 DSH 运行');
+  assert.match(deployReadme,/readRun\("\/run\/" \+ requestId, .*"x-along-user": userId/,'冒烟轮询请求提交时的用户和编号');
   // 路径基准警告（§3.1 静默失败模式）
   assert.ok(deployReadme.includes('project directory'),'路径基准=project directory 写明');
   assert.ok(deployReadme.includes('单用户模式'),'卷挂空的静默失败模式写明（验收 #5 路径一致性断言的人工核对项）');
   // V-1 预置（验收 #9）：bundle 源码形态、lib 需容器内构建
   assert.ok(deployReadme.includes('corepack pnpm'),'V-1 验证前在容器内构建 lib 的步骤');
-  assert.ok(deployReadme.includes('不含 lib'),'镜像不含 lib/ 的口径写明');
+  assert.ok(deployReadme.includes('test -f lib/index.js'),'V-1 构建后核对实际产物');
   // 凭证红线（AGENTS.md §5）
   assert.ok(deployReadme.includes('0600'),'secret 文件 0600');
   assert.ok(deployReadme.includes('docker history'),'secrets 不进镜像层的抽查手段');
   assert.ok(deployReadme.includes('三处引用'),'不部署远程通知时删除 apns-key 三处引用的说明');
 });
 
-// ---- .dockerignore：白名单形态（§4-M5 交付物；生效性边界见文件头说明） --------------------------
+// ---- .dockerignore：在 Docker 实际读取的位置写构建上下文规则 --------------------------
 
-test('deploy/.dockerignore：白名单（* + 三个目录例外），不放行密钥/状态/产物目录',()=>{
-  const source=readFileSync(join(DEPLOY_DIR,'.dockerignore'),'utf8');
+test('两个 Docker 构建共享根目录白名单，目录中的任意文件不会整包放行',()=>{
+  for (const {build} of Object.values(composeDoc.services)) {
+    assert.equal(resolve(DEPLOY_DIR,build.context),resolve(ROOT));
+    assert.ok(!existsSync(join(ROOT,build.dockerfile+'.dockerignore')),'没有覆盖根目录白名单的 Dockerfile 专用规则');
+  }
+  const source=readFileSync(join(ROOT,'.dockerignore'),'utf8');
   const lines=source.split('\n').map(line=>line.trim()).filter(line=>line&&!line.startsWith('#'));
-  assert.equal(lines[0],'*','白名单必须以 * 开头');
-  const negations=lines.filter(line=>line.startsWith('!')).map(line=>line.slice(1)).sort();
-  assert.deepEqual(negations,['deploy/','host/','web/'],'只放行 host/、web/、deploy/ 三个目录');
-  assert.ok(lines.indexOf('*')<lines.findIndex(line=>line.startsWith('!')),'例外必须在 * 之后（顺序决定语义）');
+  assert.deepEqual(lines,[
+    '*','!package.json','!package-lock.json','!host/*.mjs','!host/schemas/task-reply.schema.json','!web/*.mjs','!deploy/agent-runner.mjs',
+  ]);
 });
 
 // ---- docker compose config（验收 #5 第 1 条；门控：本机有可用 compose CLI 才跑） --------------
@@ -331,11 +336,10 @@ test('docker compose config 校验通过；按注释删除 apns-key 三处引用
   } finally { rmSync(dir,{recursive:true,force:true}); }
 });
 
-// ---- along bundle 预置只含 git 跟踪文件（门控：需要相邻仓库） ----------------------------------
+// ---- along bundle 预置可从干净 checkout 构建（门控：需要相邻仓库） ----------------------------
 
-test('along bundle 的 COPY 清单全部是 along-superagent 的 git 跟踪文件且路径真实存在', {skip: existsSync(ADJACENT)?false:'需要相邻的 along-superagent 仓库（CI 只 checkout 本仓库）'},()=>{
-  const bundleLine=dockerAgent.split('\n').find(line=>line.startsWith('COPY --from=along'));
-  const tokens=bundleLine.split(/\s+/).slice(2,-1);
+test('along bundle 的 COPY 清单在沿用 Along Agent 的干净 checkout 时均存在', {skip: existsSync(ADJACENT)?false:'需要相邻的 along-superagent 仓库（CI 只 checkout 本仓库）'},()=>{
+  const tokens=bundleCopies.flatMap(copy=>copy.slice(0,-1));
   const tracked=spawnSync('git',['ls-files'],{cwd:ADJACENT,encoding:'utf8'});
   assert.equal(tracked.status,0,'git ls-files 可用');
   const trackedSet=new Set(tracked.stdout.split('\n').filter(Boolean));

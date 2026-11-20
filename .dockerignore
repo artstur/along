@@ -1,0 +1,8 @@
+# Both Compose builds use the repository root as their primary context.
+*
+!package.json
+!package-lock.json
+!host/*.mjs
+!host/schemas/task-reply.schema.json
+!web/*.mjs
+!deploy/agent-runner.mjs

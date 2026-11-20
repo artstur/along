@@ -11,6 +11,7 @@ import {fileURLToPath} from 'node:url';
 import {DSH_RUNTIME, KIMI_RUNTIME, safeGoalSuperAgentRun, AGENT_RUN_TIMEOUT_MS} from '../web/super-agent.mjs';
 import {GOAL_OUTPUT_INSTRUCTIONS} from '../web/goal-agent-core.mjs';
 import {REASSESSMENT_INSTRUCTIONS} from '../web/contextual-planning.mjs';
+import {issuePairingCode} from '../host/pairing.mjs';
 
 // M3 云端 agent 适配层（docs/cloud-deploy-multi-user.md §3.5/§4-M3）的配对测试。
 // 与 test/host-runner-agreement.test.mjs 互补，这里覆盖设计验收标准里对方未覆盖的面：
@@ -45,18 +46,21 @@ function freePort() {
     server.listen(0,'127.0.0.1',()=>{const port=server.address().port; server.close(()=>resolve(port));});
   });
 }
-function plainRequest(port,path,{method='GET',body,headers={}}={}) {
+function plainRequest(port,path,{method='GET',body,chunks,headers={}}={}) {
   return new Promise((resolve,reject)=>{
     const payload=body===undefined?null:JSON.stringify(body);
     const req=httpRequest({host:'127.0.0.1',port,path,method,agent:false,
       headers:{...(payload?{'content-type':'application/json','content-length':Buffer.byteLength(payload)}:{}),...headers}},
     res=>{
+      res.setEncoding('utf8');
       let text=''; res.on('data',chunk=>text+=chunk);
       res.on('end',()=>{let json=null; try{json=text?JSON.parse(text):null;}catch{json=null;} resolve({status:res.statusCode,text,json});});
     });
     req.on('error',reject);
-    if (payload) req.write(payload);
-    req.end();
+    if (chunks) {
+      req.write(chunks[0]);
+      setTimeout(()=>req.end(chunks[1]),40);
+    } else req.end(payload);
   });
 }
 function phoneCall(port,path,{method='GET',body,headers={}}={}) {
@@ -156,6 +160,53 @@ async function spawnMyRunner({dir,script=nodeFakeDsh,fixture={},env={}}) {
     output:()=>output.join(''),stop};
 }
 
+async function readCompletedRun(runner,userId,requestId) {
+  const deadline=Date.now()+5_000;
+  while (Date.now()<deadline) {
+    const response=await plainRequest(runner.port,`/run/${requestId}`,{
+      headers:{'runner-token':runner.token,'x-along-user':userId},
+    });
+    assert.equal(response.status,200);
+    if (response.json.run.status!=='working') return response;
+    await sleep(15);
+  }
+  assert.fail(`Run ${requestId} did not finish`);
+}
+
+async function submitAndRead(runner,body) {
+  const submitted=await plainRequest(runner.port,'/run',{method:'POST',body,headers:{'runner-token':runner.token}});
+  assert.equal(submitted.status,200);
+  return submitted.json.run.status==='working'?readCompletedRun(runner,body.userId,body.requestId):submitted;
+}
+
+test('runner acknowledges a split UTF-8 goal before model completion and keeps its original input',async()=>{
+  const dir=mkdtempSync(join(tmpdir(),'along-runner-split-utf8-'));
+  const promptFile=join(dir,'prompt');
+  const runner=await spawnMyRunner({dir,fixture:{promptFile,stdout:JSON.stringify(goalOutput)}});
+  try {
+    const message='学习中文，每周练习三次';
+    const payload=Buffer.from(JSON.stringify({userId:USER_A,requestId:'split-utf8',kind:'goal',input:{...goalInput,message}}));
+    const split=payload.indexOf(Buffer.from(message))+1;
+    const response=await plainRequest(runner.port,'/run',{
+      method:'POST',chunks:[payload.subarray(0,split),payload.subarray(split)],
+      headers:{'runner-token':runner.token,'content-type':'application/json'},
+    });
+    assert.equal(response.status,200);
+    assert.equal(response.json.run.input.message,message);
+    assert.equal(response.json.run.status,'working');
+    assert.equal(response.json.run.result,null);
+    const completed=await readCompletedRun(runner,USER_A,'split-utf8');
+    assert.equal(completed.json.run.status,'done');
+    assert.equal(completed.json.run.createdAt,response.json.run.createdAt);
+    assert.ok(readFileSync(promptFile,'utf8').includes(message));
+    const oversized=await plainRequest(runner.port,'/run',{
+      method:'POST',body:{...goalInput,message:'中'.repeat(23_000)},headers:{'runner-token':runner.token},
+    });
+    assert.equal(oversized.status,400);
+    assert.match(oversized.json.error,/大小限制/);
+  } finally {await runner.stop();rmSync(dir,{recursive:true,force:true});}
+});
+
 test('runner：缺失、读取失败或多行模型密钥时拒绝启动',()=>{
   const dir=mkdtempSync(join(tmpdir(),'along-runner-model-key-'));
   const tokenFile=join(dir,'runner-token');
@@ -188,9 +239,8 @@ test('runner：并发请求从独立目录启动无工具 profile，仅传递模
     ALONG_APNS_KEY_FILE:join(dir,'unrelated-apns-key'),
   }});
   try {
-    const responses=await Promise.all([USER_A,USER_B].map(userId=>plainRequest(runner.port,'/run',{
-      method:'POST',body:{userId,requestId:'isolated-run-1',kind:'goal',input:goalInput},
-      headers:{'runner-token':runner.token},
+    const responses=await Promise.all([USER_A,USER_B].map(userId=>submitAndRead(runner,{
+      userId,requestId:'isolated-run-1',kind:'goal',input:goalInput,
     })));
     assert.ok(responses.every(response=>response.json?.run?.status==='done'));
     const probes=readFileSync(probeFile,'utf8').trim().split('\n').map(line=>JSON.parse(line));
@@ -229,9 +279,8 @@ test('runner：子进程非零退出或结果含内部凭证时，丢弃其结�
     const dir=mkdtempSync(join(tmpdir(),'along-runner-output-rejection-'));
     const runner=await spawnMyRunner({dir,fixture});
     try {
-      const response=await plainRequest(runner.port,'/run',{
-        method:'POST',body:{userId:USER_A,requestId:'reject-result',kind:'goal',input:goalInput},
-        headers:{'runner-token':runner.token},
+      const response=await submitAndRead(runner,{
+        userId:USER_A,requestId:'reject-result',kind:'goal',input:goalInput,
       });
       assert.equal(response.json.run.status,'blocked');
       assert.equal(response.json.run.result,null);
@@ -249,10 +298,8 @@ test('runner：围栏 JSON 也能解析成 done；prompt 真的带共享契约�
   const runner=await spawnMyRunner({dir,fixture:{stdout:fenced,promptFile}});
   try {
     // 1) 围栏 + 前后散文：runner 仍解析出最终 JSON（dsh 的最终答案是文本里嵌 JSON）。
-    const goal=await plainRequest(runner.port,'/run',{method:'POST',
-      body:{userId:USER_A,requestId:'contract-goal-1',kind:'goal',
-        input:{...goalInput,message:'RUNNER-MSG-MARK-7f3a9'}},
-      headers:{'runner-token':runner.token}});
+    const goal=await submitAndRead(runner,{userId:USER_A,requestId:'contract-goal-1',kind:'goal',
+      input:{...goalInput,message:'RUNNER-MSG-MARK-7f3a9'}});
     assert.equal(goal.status,200);
     const run=goal.json.run;
     assert.equal(run.status,'done');
@@ -264,20 +311,16 @@ test('runner：围栏 JSON 也能解析成 done；prompt 真的带共享契约�
     assert.ok(prompt.includes('Required JSON shape:'),'目标 prompt 必须带 GOAL_OUTPUT_INSTRUCTIONS');
     assert.ok(prompt.includes('Return one final JSON object only'));
     // 2) 带情境评估快照 → 走 REASSESSMENT_INSTRUCTIONS 分支，不再带目标输出契约。
-    const review=await plainRequest(runner.port,'/run',{method:'POST',
-      body:{userId:USER_A,requestId:'contract-goal-2',kind:'goal',
-        input:{...goalInput,snapshot:{planning:{revisionId:'rev-1'}}}},
-      headers:{'runner-token':runner.token}});
+    const review=await submitAndRead(runner,{userId:USER_A,requestId:'contract-goal-2',kind:'goal',
+      input:{...goalInput,snapshot:{planning:{revisionId:'rev-1'}}}});
     assert.equal(review.status,200);
     prompt=readFileSync(promptFile,'utf8');
     assert.ok(prompt.includes('contextual review of an existing goal'),
       '情境评估 prompt 必须带 REASSESSMENT_INSTRUCTIONS');
     assert.ok(!prompt.includes('Required JSON shape:'),'情境评估分支不得再混入目标输出契约');
     // 3) kind='task' → 任务 prompt 要求 {"summary","next"} 形状。
-    const task=await plainRequest(runner.port,'/run',{method:'POST',
-      body:{userId:USER_A,requestId:'contract-task-1',kind:'task',
-        input:{requestId:'contract-task-1',task:{id:'t1',title:'整理',detail:'清单',when:'今天',state:'temporary'},goal:goalInput.goal,context:{}}},
-      headers:{'runner-token':runner.token}});
+    const task=await submitAndRead(runner,{userId:USER_A,requestId:'contract-task-1',kind:'task',
+      input:{requestId:'contract-task-1',task:{id:'t1',title:'整理',detail:'清单',when:'今天',state:'temporary'},goal:goalInput.goal,context:{}}});
     assert.equal(task.status,200);
     prompt=readFileSync(promptFile,'utf8');
     assert.ok(prompt.includes('"summary"')&&prompt.includes('Chinese delivery summary'),
@@ -290,9 +333,7 @@ test('runner：dsh 输出超限 / 二进制拉起失败 → blocked 终态并缓
   const dir=mkdtempSync(join(tmpdir(),'along-runner-contract-overflow-'));
   const runner=await spawnMyRunner({dir,fixture:{mode:'overflow'}});
   try {
-    const response=await plainRequest(runner.port,'/run',{method:'POST',
-      body:{userId:USER_A,requestId:'contract-overflow-1',kind:'goal',input:goalInput},
-      headers:{'runner-token':runner.token}});
+    const response=await submitAndRead(runner,{userId:USER_A,requestId:'contract-overflow-1',kind:'goal',input:goalInput});
     assert.equal(response.status,200);
     const run=response.json.run;
     assert.equal(run.status,'blocked');
@@ -308,9 +349,7 @@ test('runner：dsh 输出超限 / 二进制拉起失败 → blocked 终态并缓
   const dir2=mkdtempSync(join(tmpdir(),'along-runner-contract-enoent-'));
   const runner2=await spawnMyRunner({dir:dir2,env:{ALONG_DSH_BIN:'/nonexistent/along-no-dsh'}});
   try {
-    const response=await plainRequest(runner2.port,'/run',{method:'POST',
-      body:{userId:USER_A,requestId:'contract-enoent-1',kind:'goal',input:goalInput},
-      headers:{'runner-token':runner2.token}});
+    const response=await submitAndRead(runner2,{userId:USER_A,requestId:'contract-enoent-1',kind:'goal',input:goalInput});
     assert.equal(response.status,200);
     const run=response.json.run;
     assert.equal(run.status,'blocked');
@@ -335,12 +374,19 @@ test('runner：同键并发 POST 合并为一次拉起；跨用户同 requestId 
     ]);
     assert.equal(first.status,200);
     assert.equal(second.status,200);
+    assert.equal(first.json.run.status,'working');
     assert.deepEqual(second.json.run,first.json.run,'并发同键返回同一条运行');
+    const active=await plainRequest(runner.port,`/run/${body.requestId}`,{headers:{...headers,'x-along-user':USER_A}});
+    assert.equal(active.status,200,'提交回执中的运行可立即查询');
+    assert.equal(active.json.run.requestId,body.requestId);
+    await readCompletedRun(runner,USER_A,body.requestId);
     assert.equal(runner.callCount(),1,'并发同键只拉起一个 dsh 进程');
     // 同 requestId 换用户 → 不同缓存键，各自拉起（POST 层的跨用户隔离）。
     const otherUser=await plainRequest(runner.port,'/run',{method:'POST',
       body:{...body,userId:USER_B},headers});
     assert.equal(otherUser.status,200);
+    assert.equal(otherUser.json.run.status,'working');
+    await readCompletedRun(runner,USER_B,body.requestId);
     assert.equal(runner.callCount(),2,'跨用户同 requestId 必须再拉起一次');
   } finally { await runner.stop(); rmSync(dir,{recursive:true,force:true}); }
 });
@@ -351,8 +397,7 @@ test('runner：LRU 上限 200 —— 第 201 条淘汰最旧记录，被淘汰�
   try {
     const headers={'runner-token':runner.token};
     for (let i=0;i<=200;i+=1) {
-      const response=await plainRequest(runner.port,'/run',{method:'POST',
-        body:{userId:USER_A,requestId:`lru-${String(i).padStart(3,'0')}`,kind:'goal',input:goalInput},headers});
+      const response=await submitAndRead(runner,{userId:USER_A,requestId:`lru-${String(i).padStart(3,'0')}`,kind:'goal',input:goalInput});
       assert.equal(response.status,200);
     }
     assert.equal(runner.callCount(),201,'每个独立键各拉起一次');
@@ -362,8 +407,7 @@ test('runner：LRU 上限 200 —— 第 201 条淘汰最旧记录，被淘汰�
     assert.equal(kept.status,200);
     assert.equal(kept.json.run.requestId,'lru-200');
     // 被淘汰的键重新 POST：缓存未命中 → 再拉起一次（结果重新可用，不是永久丢失）。
-    const rerun=await plainRequest(runner.port,'/run',{method:'POST',
-      body:{userId:USER_A,requestId:'lru-000',kind:'goal',input:goalInput},headers});
+    const rerun=await submitAndRead(runner,{userId:USER_A,requestId:'lru-000',kind:'goal',input:goalInput});
     assert.equal(rerun.status,200);
     assert.equal(runner.callCount(),202);
     const back=await plainRequest(runner.port,'/run/lru-000',{headers:{...headers,'x-along-user':USER_A}});
@@ -390,10 +434,8 @@ test('runner：/health 匿名可达；运行内容（消息/回答/stderr）与 
     const badToken=await plainRequest(runner.port,'/run/contract-red-1',{headers:{'runner-token':'ff'.repeat(32),'x-along-user':USER_A}});
     assert.equal(badToken.status,401);
     // 带令牌但 x-along-user 形状非法 → 400（缓存键来源必须合法）。
-    const run=await plainRequest(runner.port,'/run',{method:'POST',
-      body:{userId:USER_A,requestId:'contract-red-1',kind:'goal',
-        input:{...goalInput,message:'SECRET-MSG-7f3a9'}},
-      headers:{'runner-token':runner.token}});
+    const run=await submitAndRead(runner,{userId:USER_A,requestId:'contract-red-1',kind:'goal',
+      input:{...goalInput,message:'SECRET-MSG-7f3a9'}});
     assert.equal(run.status,200);
     const badUser=await plainRequest(runner.port,'/run/contract-red-1',
       {headers:{'runner-token':runner.token,'x-along-user':'bad user!'}});
@@ -452,6 +494,8 @@ async function scenarioStubRunner() {
 async function spawnHost({dir,runnerPort,extraEnv={}}) {
   const tokenFile=join(dir,'runner-token');
   writeFileSync(tokenFile,'cd'.repeat(32),{mode:0o600});
+  writeFileSync(join(dir,'users.json'),JSON.stringify([USER_A,USER_B].map(userId=>({userId}))),{mode:0o600});
+  const code=await issuePairingCode(dir,USER_A);
   const port=await freePort();
   const child=spawn(process.execPath,[HOST_FILE],{env:{
     ...process.env,
@@ -467,8 +511,7 @@ async function spawnHost({dir,runnerPort,extraEnv={}}) {
   child.stderr.on('data',data=>output.push(String(data)));
   const text=()=>output.join('');
   await waitReady(port,'host',path=>phoneCall(port,path));
-  const code=text().match(/一次性配对码: (\d{8})/)?.[1];
-  assert.ok(code,`启动横幅要有通用配对码：${text().slice(0,400)}`);
+  assert.doesNotMatch(text(),/一次性配对码/);
   const paired=await phoneCall(port,'/pair',{method:'POST',body:{code}});
   assert.equal(paired.status,200);
   const stop=()=>new Promise(resolve=>{
@@ -570,6 +613,7 @@ test('host：设置 ALONG_DSH_RUNNER_URL 后 Kimi 运行时仍走 Kimi 路径，
 test('host：ALONG_RUNNER_TOKEN_FILE 存在但内容不是 64hex → 拒绝启动',()=>{
   const dir=mkdtempSync(join(tmpdir(),'along-host-contract-badtoken-'));
   try {
+    writeFileSync(join(dir,'users.json'),JSON.stringify([USER_A,USER_B].map(userId=>({userId}))),{mode:0o600});
     const tokenFile=join(dir,'runner-token');
     writeFileSync(tokenFile,'not-a-hex-token',{mode:0o600});
     const result=spawnSync(process.execPath,[HOST_FILE],{env:{...process.env,
@@ -582,15 +626,15 @@ test('host：ALONG_RUNNER_TOKEN_FILE 存在但内容不是 64hex → 拒绝启�
 
 // ---- 形状与联动（30 分钟超时无法行为级验证，只锁代码形状；版本联动是设计 §4-M3 的硬性交付） --------
 
-test('超时对齐（形状断言）：runner 内部用 AGENT_RUN_TIMEOUT_MS 杀 dsh；host→runner POST 超时再加 60s',()=>{
+test('runner 内部用 AGENT_RUN_TIMEOUT_MS 杀 dsh，Host 只等待快速回执',()=>{
   assert.equal(AGENT_RUN_TIMEOUT_MS,30*60_000);
   const runnerSrc=readFileSync(RUNNER_FILE,'utf8');
   assert.match(runnerSrc,/const RUN_TIMEOUT_MS=AGENT_RUN_TIMEOUT_MS;/,
     'runner 超时必须 import 共享常量，不得另立数值');
   assert.match(runnerSrc,/,RUN_TIMEOUT_MS\)/);
   const hostSrc=readFileSync(HOST_FILE,'utf8');
-  assert.match(hostSrc,/timeout:AGENT_RUN_TIMEOUT_MS\+60_000/,
-    'host POST /run 的超时 = AGENT_RUN_TIMEOUT_MS+60s（runner 内部先杀 dsh）');
+  assert.match(hostSrc,/user=null,timeout=15_000/);
+  assert.doesNotMatch(hostSrc,/AGENT_RUN_TIMEOUT_MS/);
 });
 
 test('SD-5 版本联动：index.html ?v= 与 sw.js CACHE 同步提高且 ≥81；goal-agent-core.mjs 登记在产物白名单',()=>{

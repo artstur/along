@@ -1,13 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {spawn, spawnSync} from 'node:child_process';
+import {execFile, spawn, spawnSync} from 'node:child_process';
 import {request as tlsRequest} from 'node:https';
 import net from 'node:net';
 import {createHash} from 'node:crypto';
-import {mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, statSync} from 'node:fs';
+import {mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, statSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {promisify} from 'node:util';
+import {lockSync} from 'proper-lockfile';
 import {CODE_TTL_MS} from '../host/pairing.mjs';
 
 // M1「配对多绑定与用户表」独立验收（docs/cloud-deploy-multi-user.md §5 验收 #1、§3.2、§4 M1）。
@@ -28,6 +30,7 @@ const HOST_FILE=fileURLToPath(new URL('../host/agent-host.mjs',import.meta.url))
 const PAIR_CODE_FILE=fileURLToPath(new URL('../host/pair-code.mjs',import.meta.url));
 const sha256hex=value=>createHash('sha256').update(value).digest('hex');
 const dead=seed=>String(seed).padStart(8,'0');   // 保证未命中的提交值
+const execFileAsync=promisify(execFile);
 
 function tempDir(prefix) {
   const dir=mkdtempSync(join(tmpdir(),prefix));
@@ -326,7 +329,7 @@ test('多用户全链路：CLI 发码、用户表热更新、公网限流、单�
 
 // ---- 真实进程：Mac 本地启动码、失败计数上限 ----------------------------------------------------
 
-test('本地形态：通用码配对；ALONG_PAIR_FAIL_LIMIT=3 限制失败计数；403 文案与多用户一致',async t=>{
+test('本地形态：通用码成功即作废，公网失败限额不影响本地码',async t=>{
   const {dir,cleanup}=tempDir('along-local-limit-');
   try {
     const host=await spawnHost(t,{dir,env:{ALONG_PAIR_FAIL_LIMIT:'3'}});
@@ -334,47 +337,109 @@ test('本地形态：通用码配对；ALONG_PAIR_FAIL_LIMIT=3 限制失败计�
     const universal=host.pairingCode();
     assert.match(universal,/^\d{8}$/);
 
-    // 3 次未命中打满 env 限额
-    for (const candidate of [dead(1),dead(2),dead(3)]) {
+    for (const candidate of [dead(1),dead(2),dead(3),dead(4)]) {
       const miss=await phoneCall(host.port,'/pair',{method:'POST',body:{code:candidate}});
       assert.equal(miss.status,403);
       assert.deepEqual(miss.json,{error:'配对码无效或已过期'},'本地形态 403 文案与多用户一致');
       assert.equal(miss.text.includes(candidate),false,'不回显提交值');
     }
-    assert.equal(readCodes(dir).failures.length,3);
-    assert.equal((await phoneCall(host.port,'/pair',{method:'POST',body:{code:dead(4)}})).status,403);
-    assert.equal(readCodes(dir).failures.length,3,'ALONG_PAIR_FAIL_LIMIT=3 在服务端生效：第 4 次未命中不再追加');
-
-    // 通用码（有效码）不受限速影响，仍然配对成功；成功清空窗口
     const paired=await phoneCall(host.port,'/pair',{method:'POST',body:{code:universal}});
-    assert.equal(paired.status,200,'有效码不受限速影响（现状 5 次失败会锁死到重启）');
+    assert.equal(paired.status,200,'本地上限仍为五次');
     assert.deepEqual(Object.keys(paired.json),['token']);
     const token1=paired.json.token;
-    assert.equal(readCodes(dir).failures.length,0,'成功清空窗口');
     const table1=readPairings(dir);
     assert.equal(table1.length,1,'本地整表一条');
     assert.match(table1[0].user_id,/^u_[0-9a-f]{8}$/,'配对即建号');
     assert.match(table1[0].device_id,/^d_[0-9a-f]{8}$/);
     assert.equal(table1[0].hash,sha256hex(token1));
 
-    // 同一通用码在 TTL 内可再次配对：这是 SD-7 移除「成功后置 5 锁死」的直接结果
-    // （旧行为：host/agent-host.mjs HEAD:305 成功后 pairFailures=5 → 直至重启任何 /pair 都 403）。
     const repaired=await phoneCall(host.port,'/pair',{method:'POST',body:{code:universal}});
-    assert.equal(repaired.status,200,'通用码 TTL 内可复用（SD-7 移除成功后锁死的直接结果）');
-    const token2=repaired.json.token;
-    assert.notEqual(token2,token1);
-    const table2=readPairings(dir);
-    assert.equal(table2.length,1,'本地重配对仍整表一条');
-    assert.equal(table2[0].user_id,table1[0].user_id,'本地重配对 user_id 沿用');
-    assert.notEqual(table2[0].device_id,table1[0].device_id,'device_id 换新');
-    assert.equal(table2[0].hash,sha256hex(token2),'配对 token 换新');
-    assert.equal((await phoneCall(host.port,'/connection/verify',{method:'POST',headers:{authorization:`Bearer ${token1}`}})).status,401,'旧 token 失效');
-    assert.deepEqual((await phoneCall(host.port,'/connection/verify',{method:'POST',headers:{authorization:`Bearer ${token2}`}})).json,{paired:true});
+    assert.equal(repaired.status,403,'成功后不能再用同一启动码配对');
+    assert.deepEqual(readPairings(dir),table1,'拒绝不改变已持久化的绑定');
+    assert.deepEqual((await phoneCall(host.port,'/connection/verify',{method:'POST',headers:{authorization:`Bearer ${token1}`}})).json,{paired:true});
+    assert.equal(existsSync(join(dir,'pairing-codes.json')),false,'本地码不写公网失败窗口');
+  } finally {cleanup();}
+});
 
-    // 窗口清空后重新计数
-    assert.equal((await phoneCall(host.port,'/pair',{method:'POST',body:{code:dead(5)}})).status,403);
-    assert.equal(readCodes(dir).failures.length,1);
-    assert.equal(host.text().includes(dead(5)),false,'提交值不落日志');
+test('本地形态：保存新绑定失败时保留现有 token，启动码可重试',async t=>{
+  const {dir,cleanup}=tempDir('along-local-save-failed-');
+  try {
+    const token='c'.repeat(64),file=join(dir,'pairings.json');
+    const current={hash:sha256hex(token),user_id:USER_A,device_id:'d_aaaa1111'};
+    writeFileSync(file,JSON.stringify([current]),{mode:0o600});
+    const host=await spawnHost(t,{dir});
+    await waitFor(()=>host.pairingCode(),'启动横幅出现通用码');
+    const code=host.pairingCode();
+    rmSync(file);
+    mkdirSync(file);
+    const failed=await phoneCall(host.port,'/pair',{method:'POST',body:{code}});
+    assert.equal(failed.status,503);
+    assert.equal(failed.json.token,undefined);
+    assert.equal((await phoneCall(host.port,'/connection/verify',{method:'POST',headers:{authorization:`Bearer ${token}`}})).status,200);
+    rmSync(file,{recursive:true});
+    const retried=await phoneCall(host.port,'/pair',{method:'POST',body:{code}});
+    assert.equal(retried.status,200);
+    assert.equal(pairingEntry(dir,USER_A).hash,sha256hex(retried.json.token));
+  } finally {cleanup();}
+});
+
+test('云端形态：缺少 users.json 时拒绝启动，运行期也不降级',async t=>{
+  const {dir,cleanup}=tempDir('along-cloud-missing-users-');
+  try {
+    const runnerToken=join(dir,'runner-token');
+    writeFileSync(runnerToken,'c'.repeat(64),{mode:0o600});
+    const runnerEnv={ALONG_DSH_RUNNER_URL:'http://127.0.0.1:3088',ALONG_RUNNER_TOKEN_FILE:runnerToken};
+    const run=spawnSync(process.execPath,[HOST_FILE],{env:{
+      ...process.env,ALONG_AGENT_STATE_DIR:dir,ALONG_AGENT_HOST:'127.0.0.1',
+      ALONG_AGENT_PORT:String(await freePort()),...runnerEnv,
+    },timeout:6_000,killSignal:'SIGKILL',encoding:'utf8'});
+    assert.equal(run.status,1,'云端 Host 应自行退出');
+    assert.doesNotMatch(run.stdout,/一次性配对码|Along 服务: /);
+    assert.match(run.stderr,/users\.json/);
+
+    writeUsers(dir,[{userId:USER_A}]);
+    const host=await spawnHost(t,{dir,env:runnerEnv});
+    const code=issueCodeViaCli(dir,USER_A).stdout.trim();
+    assert.match(code,/^\d{8}$/);
+    const before=readCodes(dir);
+    rmSync(join(dir,'users.json'));
+    const pair=()=>phoneCall(host.port,'/pair',{method:'POST',body:{code}});
+    assert.equal((await pair()).status,503);
+    assert.deepEqual(readCodes(dir),before,'用户表暂不可用时保留原码');
+    writeUsers(dir,[{userId:USER_A}]);
+    const restored=await pair();
+    assert.equal(restored.status,200);
+    assert.equal(restored.json.runtime,'dsh-superagent');
+    assert.doesNotMatch(host.text(),/一次性配对码/);
+  } finally {cleanup();}
+});
+
+test('Host 和发码 CLI 共用跨进程配对状态锁，竞争时不消费码',async t=>{
+  const {dir,cleanup}=tempDir('along-pairing-lock-');
+  try {
+    writeUsers(dir,[{userId:USER_A},{userId:USER_B}]);
+    const host=await spawnHost(t,{dir});
+    const code=issueCodeViaCli(dir,USER_A).stdout.trim();
+    assert.match(code,/^\d{8}$/);
+    const before=readCodes(dir);
+    const release=lockSync(join(dir,'pairing-codes.json'),{realpath:false});
+    try {
+      const response=await phoneCall(host.port,'/pair',{method:'POST',body:{code}});
+      assert.equal(response.status,503,'锁没有释放时 Host 不能消费');
+      const issue=issueCodeViaCli(dir,USER_B);
+      assert.equal(issue.status,1,'锁没有释放时 CLI 不能发码');
+      assert.equal(issue.stdout,'');
+      assert.deepEqual(readCodes(dir),before);
+      assert.equal(existsSync(join(dir,'pairings.json')),false);
+    } finally {release();}
+    const [issued,paired]=await Promise.all([
+      execFileAsync(process.execPath,[PAIR_CODE_FILE,USER_B],{
+        env:{...process.env,ALONG_AGENT_STATE_DIR:dir},encoding:'utf8',timeout:5_000,
+      }),
+      phoneCall(host.port,'/pair',{method:'POST',body:{code}}),
+    ]);
+    assert.equal(paired.status,200);
+    assert.deepEqual(readCodes(dir).codes.map(item=>item.slice(0,2)),[[issued.stdout.trim(),USER_B]]);
   } finally {cleanup();}
 });
 

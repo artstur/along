@@ -5,12 +5,12 @@ import {execFileSync} from 'node:child_process';
 import {networkInterfaces} from 'node:os';
 import {join} from 'node:path';
 import {mkdirSync, readFileSync, existsSync, chmodSync} from 'node:fs';
-import {stateDir,loadUsers,loadPairings,savePairings,findPairing,consumeUserCode,recordPairingFailure,clearPairingFailures,failLimitFromEnv,newBoundId} from './pairing.mjs';
+import {stateDir,loadUsers,loadPairings,savePairings,findPairing,consumeUserCode,failLimitFromEnv,newBoundId,CODE_TTL_MS} from './pairing.mjs';
 import {routeHealthChange, validateGoalReply, normalizeGoalReply, validateTaskReply} from '../web/goal-agent-core.mjs';
 import {safeAdaptiveLayout, normalizeAdaptiveLayout} from '../web/adaptive-ui.mjs';
 import {runTaskCodex} from './codex-agent.mjs';
-import {KimiCodeAgent} from './kimi-code-agent.mjs';
-import {DSH_RUNTIME, KIMI_RUNTIME, AGENT_RUN_TIMEOUT_MS, safeAgentRuntime} from '../web/super-agent.mjs';
+import {KimiCodeAgent,localKimiMigration} from './kimi-code-agent.mjs';
+import {DSH_RUNTIME, KIMI_RUNTIME, safeAgentRuntime} from '../web/super-agent.mjs';
 import {readJsonBody} from './request-body.mjs';
 import {findDailyGrant} from './daily-delegation.mjs';
 import {HostError, upstream, statusForError} from './host-error.mjs';
@@ -26,6 +26,13 @@ import {agentHealthSnapshot,cleanHealthContext,cleanPlanningContext,validateReas
 
 const dir = stateDir();
 mkdirSync(dir, {recursive:true, mode:0o700});
+// runner-token is held only by the Host and Runner. Require the cloud user table before listening.
+const dshRunnerURL=(process.env.ALONG_DSH_RUNNER_URL||'').replace(/\/$/,'');
+const runnerTokenFile=process.env.ALONG_RUNNER_TOKEN_FILE;
+const dshRunnerToken=runnerTokenFile?readBridgeToken(runnerTokenFile):null;
+if (dshRunnerURL&&!dshRunnerToken) throw Error('云端 DSH runner 需要 runner-token：设置 ALONG_RUNNER_TOKEN_FILE 后重启 Along 服务');
+const multiUser=loadUsers(dir)!==null;
+if (dshRunnerURL&&!multiUser) throw Error('云端 DSH runner 需要状态目录中的 users.json');
 const sourceJournal=createSourceJournal({dir:join(dir,'source-events')});
 const okxConnection=createOkxConnection({dir:join(dir,'okx-connections'),sourceJournal});
 const deviceSources=createDeviceSourceGateway({dir:join(dir,'device-sources'),journal:sourceJournal});
@@ -50,13 +57,10 @@ const certDER = execFileSync('openssl',['x509','-in',cert,'-outform','DER']);
 const fingerprint = createHash('sha256').update(certDER).digest('hex').toUpperCase();
 // 横幅打印到期时间（M4，§3.7）：从证书文件读取，反映实际在用的证书而不是本次 env。
 const certExpiry = execFileSync('openssl',['x509','-in',cert,'-noout','-enddate']).toString().trim().replace(/^notAfter=/,'');
-// 多用户形态开关 = users.json 存在性（docs/cloud-deploy-multi-user.md §3.2）：存在则启动不生成通用码、
-// /pair 只认每用户一次性码；缺失即本地单用户形态，行为与今天一致（唯一例外：失败限速，两模式统一）。
-// users.json 格式无效直接抛错起不来，不静默降级（那会往容器日志打通用码，§3.7）。
-const multiUser = loadUsers(dir)!==null;
-const code = multiUser?null:String(randomInt(10000000, 99999999));
-const codeExpiry = multiUser?0:Date.now() + 15*60_000;
-const pairFailLimit = failLimitFromEnv();
+const code=multiUser?null:String(randomInt(10000000,99999999));
+const codeExpiry=Date.now()+CODE_TTL_MS;
+let localPairFailures=0;
+const pairFailLimit=failLimitFromEnv();
 // 绑定表 pairings.json（数组，每用户一条）；旧单对象 pairing.json 启动时幂等升级为一元数组。
 // M2 起没有模块级 identity/tokenHash 单例：身份一律每请求从绑定表解析（见下方 resolveBinding/
 // stillPaired/currentBinding），后台泵按绑定表逐用户处理。
@@ -72,17 +76,14 @@ const contextToken=process.env.ALONG_CONTEXT_REVIEW_TOKEN_FILE?readFileSync(proc
 const bridgeToken=readBridgeToken();
 const bridge=createBridge({url:superAgentURL,token:bridgeToken});
 const contextReviewBridge=createBridge({url:contextReviewURL,token:bridgeToken});
-const kimiAgent = new KimiCodeAgent({workspace:process.env.ALONG_KIMI_WORKSPACE||process.cwd(),statePath:join(dir,'kimi-runs.json')});
+const localHost=!multiUser;
+const kimiAgent = new KimiCodeAgent({workspace:process.env.ALONG_KIMI_WORKSPACE||process.cwd(),statePath:join(dir,'kimi-runs.json'),
+  ...(localHost?localKimiMigration(dir,pairings):{})});
 // ---- 云端 DSH runner（docs/cloud-deploy-multi-user.md §3.5 M3，SD-3）----
 // ALONG_DSH_RUNNER_URL 指向 compose 内网的 deploy/agent-runner.mjs 时，/super-agent/goals|tasks
-// 与 /super-agent/goals/status|tasks/status 的 DSH 分支改走云端 runner（同步一次性调用）；
+// 与 /super-agent/goals/status|tasks/status 的 DSH 分支改走云端 runner（接单后按原编号查询）；
 // 未设置时走既有 Mac bridge，行为字节不变。runner 返回的 run 一律先过 normalizeGoalRun
 // （validateGoalReply+safeAdaptiveLayout+validateReassessment），解析失败/校验失败落终态 blocked。
-// runner-token 是服务端内部凭证：只在 host↔agent 内网请求头里走，不发 iPhone、不写日志与运行结果。
-const dshRunnerURL=(process.env.ALONG_DSH_RUNNER_URL||'').replace(/\/$/,'');
-const runnerTokenFile=process.env.ALONG_RUNNER_TOKEN_FILE;
-const dshRunnerToken=runnerTokenFile?readBridgeToken(runnerTokenFile):null;
-if (dshRunnerURL&&!dshRunnerToken) throw Error('云端 DSH runner 需要 runner-token：设置 ALONG_RUNNER_TOKEN_FILE 后重启 Along 服务');
 async function runnerCall(path,{method='GET',value,user=null,timeout=15_000}={}) {
   let response;
   try {
@@ -106,7 +107,7 @@ function runnerRun(envelope,expectedId,kind) {
   return run;
 }
 async function runnerGoalStart(userId,input,pair) {
-  const run=runnerRun(await runnerCall('/run',{method:'POST',value:{userId,requestId:input.requestId,kind:'goal',input},timeout:AGENT_RUN_TIMEOUT_MS+60_000}),input.requestId,'goal');
+  const run=runnerRun(await runnerCall('/run',{method:'POST',value:{userId,requestId:input.requestId,kind:'goal',input}}),input.requestId,'goal');
   return {run:cloudGoalResult(run,pair,Boolean(input.snapshot.planning))};
 }
 async function runnerGoalStatus(userId,id,pair) {
@@ -116,7 +117,7 @@ async function runnerGoalStatus(userId,id,pair) {
 function cloudGoalResult(run,pair,expectsPlanning) {
   // Lookup uses the classification stored with the original Host-validated input.
   const planning=run.input?.snapshot?.planning;
-  if (run.result&&((planning!==null&&planning?.revisionId!==run.requestId)||
+  if ((run.result||run.status==='working')&&((planning!==null&&planning?.revisionId!==run.requestId)||
       (expectsPlanning!==undefined&&expectsPlanning!==Boolean(planning)))) {
     throw new HostError('云端 DSH runner 返回了与本次请求不匹配的情境版本',502);
   }
@@ -127,7 +128,7 @@ function cloudGoalResult(run,pair,expectsPlanning) {
 }
 async function runnerTaskStart(userId,input) {
   const id=requestId(input.requestId);
-  const run=runnerRun(await runnerCall('/run',{method:'POST',value:{userId,requestId:id,kind:'task',input:{...input,requestId:id}},timeout:AGENT_RUN_TIMEOUT_MS+60_000}),id,'task');
+  const run=runnerRun(await runnerCall('/run',{method:'POST',value:{userId,requestId:id,kind:'task',input:{...input,requestId:id}}}),id,'task');
   return {run};
 }
 async function runnerTaskStatus(userId,id) {
@@ -273,7 +274,7 @@ const notificationServices=new Map();
 function notificationService(userId) {
   let service=notificationServices.get(userId);
   if (!service) {
-    service=taskNotifications({dir,userId,binding:()=>currentBinding(userId),
+    service=taskNotifications({dir,userId,binding:()=>currentBinding(userId),migrateLegacy:localHost,
       readPage:(who,cursor,limit)=>readSyncPage(who,cursor,limit),send:createApnsProvider()});
     notificationServices.set(userId,service);
   }
@@ -386,27 +387,25 @@ const server=createServer({key:readFileSync(key),cert:readFileSync(cert)},async(
     if (req.method==='GET' && path==='/health') return respond(res,200,{service:'along-agent-host',ready:true,contextReviewVersion:1});
     if (req.method==='POST' && path==='/pair') {
       const input=await body(req);
-      const now=Date.now();
-      // users.json 每次 /pair 重读：部署者增删用户即刻生效，无需重启（静态表，文件即事实）。
-      const allowedUsers=loadUsers(dir);
-      // 公网配对在比对码之前检查全局失败窗口（默认 15 分钟 10 次，ALONG_PAIR_FAIL_LIMIT 只许调严）。
-      // 窗口满与未命中共用 403，不回显提交值。Mac 本地启动码沿用自己的核验路径。
-      let matched;
-      if (allowedUsers) {
-        matched=consumeUserCode(dir,input?.code,now,pairFailLimit,allowedUsers);
-      } else if (typeof input?.code==='string'&&now<=codeExpiry&&input.code===code) {
-        clearPairingFailures(dir,now);
-        matched={ok:true,userId:pairings[0]?.user_id||newBoundId('u_')};
+      let userId;
+      if (multiUser) {
+        const matched=await consumeUserCode(dir,input?.code,pairFailLimit);
+        if (matched.ok) userId=matched.userId;
+      } else if (localPairFailures<5&&Date.now()<=codeExpiry&&input?.code===code) {
+        userId=pairings[0]?.user_id||newBoundId('u_');
       } else {
-        matched=recordPairingFailure(dir,now,pairFailLimit);
+        localPairFailures=Math.min(localPairFailures+1,5);
       }
-      if (!matched.ok) return respond(res,403,{error:'配对码无效或已过期'});
+      if (!userId) return respond(res,403,{error:'配对码无效或已过期'});
       const token=randomBytes(32).toString('hex');
-      const entry={hash:createHash('sha256').update(token).digest('hex'),user_id:matched.userId,device_id:newBoundId('d_')};
+      const entry={hash:createHash('sha256').update(token).digest('hex'),user_id:userId,device_id:newBoundId('d_')};
       // 多用户：按用户 upsert（同一用户换手机覆盖自己的旧绑定、user_id 不变，别人不受影响）；
       // 本地单用户：整表保留一条，user_id 沿用（D1 单用户，§2.4.1）。
-      pairings=allowedUsers?[...pairings.filter(item=>item.user_id!==matched.userId),entry]:[entry];
-      savePairings(dir,pairings);
+      const nextPairings=multiUser?[...pairings.filter(item=>item.user_id!==userId),entry]:[entry];
+      try {savePairings(dir,nextPairings);}
+      catch {throw new HostError('保存配对绑定失败，请稍后重试',503);}
+      pairings=nextPairings;
+      if (!multiUser) localPairFailures=5;
       // 该用户的登记状态复位并立即向 Along Agent 重注册（新 device_id 覆盖旧记录，fire-and-forget）。
       registeredUsers.delete(entry.user_id);
       ensurePairingRegistered({userId:entry.user_id,deviceId:entry.device_id});

@@ -140,7 +140,8 @@ export function createSourceEventBridge({journal,connection,bridge,endpoint,stil
   revoke:(who,goalId)=>connection.handle({userId:who.userId,goalId,input:{action:'disconnect'},sourceState:'revoked',stillAuthorized:()=>active(who),revokeIf:async()=>active(who)&&!(await isAuthorized(who,goalId))}),
  }};
  for(const [provider,a] of Object.entries(providers))if(provider!=='okx'||!a||!['authorized','listGoals','lookup'].every(k=>typeof a[k]==='function'))fail('invalid_source_adapter');
- let busy=false,closed=false;
+ const busyUsers=new Set();
+ let closed=false;
  const active=who=>!closed&&stillBound(who);
  const report=e=>{try{onError(e instanceof SourceBridgeError?e.code:'source_delivery_failed');}catch{}};
  const allowed=(who,goalId,provider)=>providers[provider].authorized(who,goalId);
@@ -248,7 +249,13 @@ export function createSourceEventBridge({journal,connection,bridge,endpoint,stil
   }
  }
  return {
-  async pump(who){if(busy||closed||!who||!active(who))return;busy=true;try{await reconcile(who);if(active(who)&&await flush(who))await readRequests(who);}catch(e){report(e);}finally{busy=false;}},
+  async pump(who){
+   if(!who||!active(who)||busyUsers.has(who.userId))return;
+   busyUsers.add(who.userId);
+   try{await reconcile(who);if(active(who)&&await flush(who))await readRequests(who);}
+   catch(e){report(e);}
+   finally{busyUsers.delete(who.userId);}
+  },
   close(){closed=true;},
  };
 }
