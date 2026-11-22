@@ -110,11 +110,16 @@ async function until(fn,ms=120_000,label='断言') {
 // 测试不该改动它。叠加文件是 compose 原生的隔离手段，`!override` 保证替换而不是追加。
 function writeOverlay() {
   mkdirSync(BASE,{recursive:true});
-  // Super Agent 源码位置：默认是相邻仓库。ALONG_TIER2_SUPERAGENT_REPO 可指向别处——
-  // 例如就绪修复（feature/along-tier2-readiness）所在的 worktree，
-  // 这样本用例能对着**带修复**的 Super Agent 验重启恢复（V-1 的原始失败面）。
-  const superagentRepo=resolve(process.env.ALONG_TIER2_SUPERAGENT_REPO??resolve(ROOT,'../along-superagent'));
-  if (!existsSync(superagentRepo)) throw Error(`Super Agent 源码目录不存在：${superagentRepo}`);
+  // Super Agent 源码位置：**默认与部署同源**（compose 里钉住的那个远端 git 上下文 +
+  // 固定提交）。用例必须验的是**部署真正会装的那个版本**——
+  // 否则会出现「部署装的是固定提交，用例验的是本地工作区」这种验不到点上的情况
+  // （本地工作区没带就绪修复时，重启恢复那一步会失败于 filtered/source_not_installed）。
+  //
+  // 要对着**别的** Super Agent 验（例如未修复的上游，做负例）时用
+  // ALONG_TIER2_SUPERAGENT_REPO 指向它。
+  const override=process.env.ALONG_TIER2_SUPERAGENT_REPO;
+  const superagentRepo=override?resolve(override):null;
+  if (superagentRepo&&!existsSync(superagentRepo)) throw Error(`Super Agent 源码目录不存在：${superagentRepo}`);
   writeFileSync(OVERLAY,[
     'services:',
     '  host:',
@@ -143,8 +148,9 @@ function writeOverlay() {
     '    secrets: !override [bridge-token, model-credentials]',
     '    volumes: !override ["'+SUPER_STATE+':/var/lib/along-superagent","'+DSH_HOME+':/var/lib/dsh"]',
     '    build:',
-    '      additional_contexts:',
-    '        along: '+superagentRepo,
+    // 默认**不覆盖**构建来源：用主 compose 里钉住的那个远端 git 上下文 + 固定提交
+    // （部署真正会装的那个版本）。覆盖时（负例）才写本地路径。
+    ...(superagentRepo?['      additional_contexts:','        along: '+superagentRepo]:[]),
     // 命名空间锚点：Tier 2 的叠加文件定义它。测试里换掉端口与容器名，
     // 但拓扑不变——host 与 superagent 都加入锚点的命名空间（审查 P1-3）。
     '  netns:',
