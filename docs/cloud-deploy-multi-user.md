@@ -1,5 +1,7 @@
 # Along 云端部署与多用户方案（2 人）
 
+> **2026-11-21 TLS 决策修订，尚未实施**：用户已选择 [iPhone 安装 CA 描述文件并启用系统完全信任](iphone-ca-profile-design.md)。云端目标改为 Along 专用根签发短期 SAN 叶、URLSession 系统信任评估，取代十年自签叶指纹钉扎和此前 App 内专用锚建议。本文的现状代码、历史测试与 Compose 快照不表示新路线已实现；首次信任、旧连接迁移、安装/移除、换证及失窃恢复以该专项方案为准。生产域名、根保管和双手机切换条件仍待确定，本轮只更新设计，不生成密钥或部署。
+
 > 2026-11-20。把 host 与 agent 链路从「Mac 本机单用户」迁到「云服务器 + Docker Compose」，并支持 2 个用户。部署形态已拍板：一台云主机（如阿里云 ECS）+ Docker Compose，本文档产出全部代码与配置的设计，实际登录用户云服务器执行部署不在本轮范围（由 Runbook §6.4 交给用户手动执行）。本文不放宽任何红线（AGENTS.md §5）；对规格未拍板的点以 `SD-n` 编号给出决策与理由（§7），实施中方案有变化须回写本文（AGENTS.md §3）。
 >
 > 设计基线（2026-11-20，行号以当前 `main` 工作树为准）：`along` 仓库本目录、`along-superagent` 相邻仓库。基线门禁：`npm run check` 通过（node --check 全部 `web/*.mjs`、`web/sw.js`、`host/*.mjs`、`tools/build.mjs` + `node --test test/*.test.mjs`，509 条测试全绿，本轮已实际运行）。
@@ -8,14 +10,14 @@
 
 1. 2 个用户各自用 iPhone（App 内置页面）连到**同一台云主机**上的 Along 服务，互不干扰：各自的配对 token、目标空间、每日委托索引、通知登记、OKX 连接缓存彼此隔离。
 2. agent 聊天链路在云端可用：目标对话 → 模型输出 → `validateGoalReply`/`safeAdaptiveLayout` 校验 → 自动生效，不新增采用/审批环节。
-3. Mac 本地模式**完全保留**且行为不变（`npm run activate` / `npm run agent-host`），作为回退路径；云端与本地共用同一套源码，不新增模式开关。
+3. Mac 本地模式的既有私网连接能力保留（`npm run activate` / `npm run agent-host`），作为回退路径，不要求给 Mac 路径安装 iPhone 系统根；云端与本地共用源码。CA 迁移的共享连接存储升级需单独回归，不新增用户安全模式开关。
 
 ### 上线前 P1 修复
 
-1. 公网配对在比对验证码前执行全局失败窗口检查。窗口满时统一拒绝，包括有效码，保持码未消费。管理员通过已有发码命令开启新的配对窗口。验收覆盖达到上限、窗口恢复、成功清空和两用户各自配对。Mac 仍使用本地启动时发放的码。
+1. 公网配对在比对验证码前执行按来源（连接 IP）的失败窗口检查。某来源窗口满时对该来源统一拒绝，包括有效码，保持码未消费；其他来源不受影响。发码不清窗，同 IP 噪音最长 15 分钟自然过期自愈，无清窗入口。验收覆盖达到上限、窗口恢复、成功清空和两用户各自配对。Mac 仍使用本地启动时发放的码。
 2. Runner 启动时从 Compose secret 读取模型密钥，按固定版本 headless 的契约传给子进程。Runner 内网令牌和其他父进程环境不继承给 DSH。每次运行使用独立的临时工作目录和 DSH 状态目录，退出后清理，Docker 中的临时目录使用 tmpfs。固定版本的规划配置需停用工具执行能力。验收覆盖密钥缺失、子进程环境白名单、两个用户的工作区互不重叠、退出清理，以及实际 CLI 的配置解析。
 3. 云端目标运行保留 Host 已校验的情境输入，提交和查询共用同一道输出校验。完整情境只在服务端用于校验，回给 iPhone 的运行记录维持最小字段。验收覆盖合法重评保留结果，及携带目标变更的重评在提交和查询都进入 `blocked`。
-4. 已配对用户可从当前连接区进入同一配对表单，输入新地址、指纹和验证码。切换到另一台 Host 时，Keychain 保存成功后才启用新绑定。云端 DSH 提示随绑定保存，WebView 缓存清除后也能恢复。切换后释放旧事件工作区、解绑旧异步界面回写。只改地址且凭证未变的路径继续可用。
+4. 已配对用户从当前连接区重新配对；云端 DNS 路径按 CA 方案安装/信任根后输入地址与验证码，不再输入叶指纹，Mac 私网路径保留指纹。切换到另一台 Host 时，Keychain 保存成功后才启用新绑定。云端 DSH 提示随绑定保存；切换后释放旧工作区和迟到回写。同 origin、同 token 的 CA 升级先以系统信任验证原会话，再原子迁移，不强制重新发码。
 5. 云端目标聊天的通过 Host 校验的变更自动写入当前目标。沿用已有目标写入函数和隐私保护，按同一轮请求去重，仅对匹配当前连接和请求的结果执行。Mac 兼容链路的存量行为保持一致。验收覆盖已有目标、首次新建、校验拒绝和迟到旧回执。
 
 本轮修复上述 P1，并接好云端配对后的 DSH 选择与就绪检查。验收以 §5 与 §6.4 的实际流程为准。
@@ -39,7 +41,7 @@
 - **不做**公网注册、计费、管理后台、动态扩缩容：用户数固定为 2，身份由服务端静态用户表（`users.json`）+ 每用户配对码提供（SD-2）。
 - **不做**微服务化/多实例/负载均衡：单台主机、单进程 host、单容器 agent，持久化全在本机卷。
 - **不做**新链路数据面上云（Tier 2，见 §3.5 与 §5 验证项 V-1）：`/events`、`/sync`、`/sync/ack`、`/notifications/*`、`/sources/*` 的 agent 侧持久化依赖**长驻** DSH 运行时 + along bundle（along.sqlite、投递泵、ChangeSet 原子写入）。已核实的官方 Linux 发行物 `@deepseek-ai/dsh` 是 headless 一次性形态（无监听端口、每调用一个进程退出），承载不了长驻数据面。云端 v1 这些端点维持既有开关语义返回 503（`ALONG_EVENT_INGEST` 关闭，`host/agent-host.mjs:162-167`），健康事件与 OKX 设备上报仍走 Mac 本地模式。这不降低红线：云端的目标聊天链路照样全量过校验（§3.6）。
-- **不做** UI 视觉改动：页面结构、样式、文案、交互流程零改动。注意 M3 会修改 `web/goal-agent-core.mjs`（导出共享输出形状常量；它是前端运行代码，`web/app.mjs:4`、`web/loop.mjs:2`、`web/event-workspace.mjs`、`web/adaptive-ui.mjs:1` 均 import），合入即按 AGENTS.md §2 提高 `web/index.html` 的 `?v=` 与 `web/sw.js` 的 `CACHE`（SD-5）；除此之外不新增、不删除、不改任何界面元素。
+- **不做** 无关 UI 视觉改动。CA 迁移仅调整云端连接表单的叶指纹要求及信任失败恢复指引，沿用现有连接入口；具体见 [CA 方案 §2/§7](iphone-ca-profile-design.md)。涉及 Web 代码仍须按 AGENTS.md §2 联动版本，不能把当前历史版本号直接覆盖到并行工作树。
 - **不做** Kimi 运行时上云：Kimi Code Web Server（`kimi web`，`host/kimi-code-agent.mjs:9-10` 默认 `127.0.0.1:58627`、token 在 `~/.kimi-code/server.token`）是 Mac 本机登录态服务，无云端等价物。云端它按现状自然降级为不可用（选择 Kimi 运行时时报「未找到 Kimi Code Web Server token」，与 Mac 上没启动 `kimi web` 的表现一致，`host/kimi-code-agent.mjs:143-147`），UI 的运行时切换按钮不动。预留 `ALONG_KIMI_CODE_URL` 指向可达服务即可启用，不改代码。
 - **不做** Codex 路径上云：`/goal/event` 依赖本机 Codex 二进制（`host/codex-agent.mjs:9-14`），云端镜像不安装 codex，该端点按既有语义优雅失败（「Along 暂时不可用」）；`web/` 无任何调用 `/goal/event` 的代码（本轮全库 grep 无命中），属休眠路径，上线验收时不得误判为故障（验收 #10）。
 - **不做** Hy-Memory 记忆服务上云：云端 profile 不配置 `alongMemory`，agent 仓库文档明确「Omit `alongMemory` to retain local governance and explicit SQLite fallback; this does not silently disable conversations」（`along-superagent/docs/006-deployment.md:35`），符合 D6 的降级语义（`along-superagent/docs/along/000-decisions.md:40-44`）。
@@ -69,8 +71,8 @@
 | C4 | 通知登记单文件单槽位 | `host/task-notifications.mjs:71-101` | M2：按用户分文件 |
 | C5 | Kimi 运行记录按 requestId 全局键、状态文件不随 `ALONG_AGENT_STATE_DIR` | `host/kimi-code-agent.mjs:11、180` | M2：键加 userId 前缀、`statePath` 接到 host 状态目录（云端休眠，本地兼容受益） |
 | C6 | `/goal/event` 全局互斥锁 | `host/agent-host.mjs:66、153-158、422` | M2：按用户分锁 |
-| C7 | 30 天自签证书到期即全体掉线（指纹变→重配对） | `:37-43` | M4：`ALONG_TLS_DAYS`/`ALONG_TLS_CN` env，云端 3650 天 + 域名 CN |
-| C8 | iOS 只收 RFC1918 私网 IPv4 | `AlongShellView.swift:430-447、945-951` | M6：放行合法域名（保持 https-only 与其余校验），钉扎逻辑不动 |
+| C7 | 旧叶指纹钉扎导致重签后全体重配对 | `:37-43` | M4 目标改为短期 SAN 叶及 iPhone 系统信任；同根同域轮换不改绑定，旧十年参数仅属实现基线 |
+| C8 | 早期 iOS 只收 RFC1918 私网 IPv4；当前已扩展合法 DNS 域名 | `AlongShellView.swift` 的 hostAccepted | M6 继续保留地址约束，DNS 改系统信任，私网 Mac 保留旧 pin；公网数字 IP 仍不开放 |
 | C9 | DSH 核心运行时无 Linux 长驻形态 | §2.1 已核实 | M3/M5：云端走 `@deepseek-ai/dsh` headless 一次性调用 + host 侧校验链（§3.5） |
 | C10 | 新链路数据面依赖长驻 agent | `host/agent-host.mjs:159-252` | 云端 v1 维持 `ALONG_EVENT_INGEST=off` 的 503 语义；上云列为验证项 V-1 |
 
@@ -87,7 +89,7 @@
 ```text
                          ┌─────────────────── 云主机（ECS，Linux，Docker Compose）───────────────────┐
  iPhone A ──HTTPS:443──▶ │  [host 容器]  host/agent-host.mjs:4176（容器内），端口映射 443→4176        │
- （钉扎自签证书）          │    卷 /opt/along/data/host（TLS 证书、pairings/users/codes、               │
+ （安装根并系统验证）      │    卷 /opt/along/data/host（TLS 叶/key、pairings/users/codes、             │
  iPhone B ──HTTPS:443──▶ │        daily-actions、kimi-runs…，0700/0600）                              │
                          │        │ compose 内网 DNS: agent                                          │
                          │        ▼                                                                  │
@@ -99,8 +101,8 @@
  web 静态页仍由 GitHub Pages 与 App 内置产物提供，host 不服务网页。
 ```
 
-- **不做反代（Caddy/Nginx），明确否决**：TLS 由 host 端到端提供且被 iPhone 钉扎（`PinnedAgentDelegate` 校验叶子证书指纹，`AlongShellView.swift:1208-1223`）；反代终止 TLS 会破坏钉扎，单一服务也不需要虚拟主机/限流。TLS 方案=域名 + 服务端自签长期证书（SD-1，域名本身待用户确认，见 openQuestions）。备选「Caddy + 公共 CA」的代价（放掉钉扎、改 iOS、改 README 隐私表口径）写在 §7 SD-1，若用户将来要浏览器直接访问 host 再启用。
-- **compose 结构**（`deploy/docker-compose.yml`，M5 产出）：
+- **TLS 与入口**：沿用 Host 端到端 TLS，本期不引入反代；TLS 由 host 端到端提供并由 iPhone 系统信任评估校验（云端叶证书由预签发的 Along CA 签发，根证书经描述文件安装并开启完全信任，链、SAN/主机名、有效期和 ATS 必须通过，失败不降级旧叶钉扎；终态以 [CA 方案](iphone-ca-profile-design.md) 为准），反代终止 TLS 会破坏这一信任锚。Mac 私网旧连接仍用叶指纹钉扎，作为本地兼容路径，不作为云端降级路径。单一服务也不需要虚拟主机；限流在 host/runner 应用内实现（连接上限、超时、`/pair` 按来源失败窗口与运行链路限流，见 `docs/cloud-security-hardening.md`），不引入反代。CA 不提供客户端准入。
+- **compose 结构快照**（当前 `deploy/docker-compose.yml` 的旧叶钉扎实现；其中 ALONG_TLS_DAYS=3650 和自签探活不是 CA 目标配置，实施时按 [CA 方案 §3/§7](iphone-ca-profile-design.md) 迁移，本轮不编辑运行配置）：
 
 ```yaml
 # 相对路径基准：compose v2 的 project directory = 本文件所在目录（deploy/）。
@@ -161,7 +163,7 @@ secrets:
 ```
 
 - **卷与持久化**：host 全部状态在 `/opt/along/data/host`（compose 经 `../../data/host` bind mount 到容器 `/data`，0700，对应 `ALONG_AGENT_STATE_DIR`，`host/agent-host.mjs:26`；该目录在 git 仓库**外层**，杜绝误提交）；agent 容器无状态（headless 一次性进程 + runner 内存缓存），无卷。APNs key、模型凭证、runner 内网令牌用 compose `secrets`（文件来源 `/opt/along/secrets/*`，0600，同样在仓库外层），密钥只进服务端，不进镜像、不进 git。**路径按 §6.4 布局**：secret 文件缺失会让 Compose 启动失败。Host 配置了云端 Runner 且 `/data/users.json` 缺失或无效时，在监听前退出。不部署远程通知时按 Compose 注释移除 APNs 三处引用。
-- **TLS 证书**：host 启动时若卷内无证书则 openssl 现场生成（既有逻辑 `host/agent-host.mjs:37-43`），CN/Days 由 M4 的 env 控制；指纹从 `docker logs along-host` 读取，作为配对表单的指纹输入。证书与卷同生命周期，重启不换。
+- **TLS 证书目标**：云端读取状态目录 `tls/current` 的预签发 fullchain/key，缺失或链、SAN、用途、有效期、权限不合法则在监听前拒启，不现场自签兜底。根私钥仅在离线保管链中。现有本地自签及 ALONG_TLS_* 参数行为留作 Mac 兼容；云端不再靠延长天数避免换证，参数语义与目录契约见 CA 方案 §3。
 - **监督与重启**：`restart: unless-stopped` 在容器主进程退出时由 Docker 重启。健康检查只报告健康状态。
 - **端口占用 preflight**：443（对外）、3088（容器内）不得与宿主机其他服务冲突；ECS 安全组只开 22/443。
 
@@ -170,8 +172,8 @@ secrets:
 - **用户模型**：`users.json`（host 状态目录，0600，静态由部署者写入）声明用户：`[{"userId":"u_xxxxxxxx","label":"…"}]`。无注册入口、无自助建号（D1 修订见 §7 SD-2）。`u_` 前缀沿用现有身份形状（`host/agent-host.mjs:54`）。
 - **配对**：复用现有表单和 `/pair`，已连接设备也可从连接区重新配对。云端成功响应附带 DSH 运行时提示，Mac 的响应继续只含 token。
   - 发码：部署者在服务器上执行 `docker exec along-host node host/pair-code.mjs <userId>` → 为该用户生成 8 位一次性码（15 分钟有效，写入状态目录 `pairing-codes.json`，0600），通过私下渠道发给对应的人。
-  - **码状态**：`pairing-codes.json`（0600，原子替换）保存全局失败时间戳和 `[code,userId,expiresAt]` 数组。发码 CLI 和 Host 复用已有 `proper-lockfile` 锁，持锁读、改、写。配对成功即消费验证码。锁争用超时返回 503，管理员可稍后重试。
-  - **公网全局失败窗口**：每次 `/pair` 先剔除 15 分钟前的失败和已过期码。窗口已有 `ALONG_PAIR_FAIL_LIMIT` 次失败时，所有提交在比对验证码前统一返回 403，保留尚有效的码。低于限额时，失败追加时间戳，成功消费命中的码并清空失败窗口。默认限额 10，可调低。管理员用发码命令重新开启窗口，未到期的其他用户码保留原有效期。
+  - **码状态**：`pairing-codes.json`（0600，原子替换）保存按来源（连接 IP）分桶的失败时间戳（`{<source>:[ISO,…]}`）和 `[code,userId,expiresAt]` 数组。发码 CLI 和 Host 复用已有 `proper-lockfile` 锁，持锁读、改、写。配对成功即消费验证码。锁争用超时返回 503，管理员可稍后重试。
+  - **公网按来源失败窗口**：每次 `/pair` 先剔除 15 分钟前的失败和已过期码。失败按来源（`req.socket.remoteAddress` 归一化后的连接 IP）分桶记录；某来源桶内失败已达 `ALONG_PAIR_FAIL_LIMIT` 次时，该来源的提交在比对验证码前统一返回 403，保留尚有效的码，其他来源的配对不受影响。低于限额时，失败计入该来源自己的桶；成功消费命中的码并只清该来源的桶。默认限额 10，只许调低。**发码不清窗，无清窗入口**——与攻击者同 IP 的合法设备最长 15 分钟窗口自然过期自愈（SD-7 经 `docs/cloud-security-hardening.md` SD-H2 修订）。
   - **云端启动保护**：配置 `ALONG_DSH_RUNNER_URL` 时必须有可读、有效的 `users.json` 和 Runner 令牌。多用户形态只认每用户码，启动不生成或打印通用码。
   - `/pair` 按码解析用户，持久化 `{hash,user_id,device_id}` 后再更换现役绑定并返回 token。多用户 Host 每次验码重新读用户表。管理员移除用户后，该用户的待配对码不被消费；表缺失或损坏时暂拒配对。绑定文件写入失败时保留当前绑定，云端已消费的码由管理员重发。
   - **本地兼容**：未配置云端 Runner 且启动时无用户表，Mac 使用 15 分钟启动码。成功一次或错误五次后锁定，重启后重新发码。旧 `pairing.json` 迁移成 `pairings.json`，保留身份和 token 哈希。
@@ -188,7 +190,7 @@ secrets:
   | 设备来源/OKX 缓存 | 按 userId+goalId 分文件 | 不变（`host/device-source-gateway.mjs:31`） |
   | 目标空间（云端 v1） | 手机本地，键含 userId 或按手机天然隔离 | 不变（`web/event-workspace.mjs:196`；两人各用各的 iPhone） |
   | agent 侧 allowed 列表 | 数组幂等追加 | 两用户各一条（`along-superagent/src/along/api.ts:154-164`；云端 v1 不触达，本地模式受益） |
-- **并发**：host 单进程、每用户一把 `/goal/event` 锁；runner 按「每次调用一个 dsh 进程」天然并行（用户之间互不阻塞）；同一用户并发第二条 `/goal/event` 仍返回现有 429 文案。
+- **并发**：host 单进程、每用户一把 `/goal/event` 锁；runner 按「每次调用一个 dsh 进程」天然并行（用户之间互不阻塞）；同一用户并发第二条 `/goal/event` 仍返回现有 429 文案。运行链路另有资源防护（`docs/cloud-security-hardening.md` §3.1-(7)/§3.2）：host 对 `/super-agent/goals` 与 `/super-agent/tasks` 两个 start 端点做每用户滑动窗口限流（60 秒窗口内最多 10 次，超限 429；`status` 轮询端点不限）；runner 并发硬上限为每用户 2、全局 4 个 dsh 进程（超限回 429，host 原样透传给客户端）。
 
 ### 3.3 认证与密钥
 
@@ -200,14 +202,14 @@ secrets:
 | 模型 API Key | Compose secret `model-credentials`，一行纯 DeepSeek API Key | runner 启动时读取文件，仅向 DSH 子进程传入 `DEEPSEEK_API_KEY` | 不向客户端下发，不进镜像、日志或运行结果 |
 | APNs key | compose secret（可选） | 仅 host 容器 | 同上 |
 | Kimi token / 桥接凭证 | 云端不使用 | — | 云端无此凭证即无泄露面；本地模式口径不变（SD-2/`docs/stage-a-tech-design.md:262`） |
-| OKX API Key | 只在 iPhone Keychain（现状） | 不变 | 「密钥只留采集设备」红线原样保持；云端 host 只收三字段摘要（`host/device-source-gateway.mjs` 校验不变） |
+| OKX API Key | 只在 iPhone Keychain（现状） | 不变 | 「密钥只留采集设备」红线原样保持；云端 host 只收三字段摘要，多用户形态 gateway 拒收 `trading_history` 成交/账单明细（`host/device-source-gateway.mjs`，用户指引见 §6.4 第 9 步） |
 
-- 「Token 只留在 Mac」在云端形态的等价表述：**「凭证只留在服务端（云主机）安全存储（卷/secrets/env），绝不发给 iPhone 或网页，也不写进运行结果和日志」**。传输面仍是钉扎 TLS + Bearer；内网面是 compose 私网 + runner 令牌；公网面只有 443 一个端口。M7 落实 AGENTS.md/README 措辞（§5 红线文字的修订须经用户确认，SD-6）。
+- 「Token 只留在 Mac」在云端形态的等价表述：**「凭证只留在服务端（云主机）安全存储（卷/secrets/env），绝不发给 iPhone 或网页，也不写进运行结果和日志」**。云端传输面目标是系统验证的 TLS + Bearer；内网面是 compose 私网 + runner 令牌；公网面只有 443 一个端口。公开根证书可以安装到手机，根/叶私钥和模型/桥接/APNs/runner 凭证不可下发；配对 token 的一次性响应与只存哈希规则不变。
 
 ### 3.4 web/iOS 客户端连接迁移
 
-- **Web 连接**：新连接与重新配对复用同一个地址、指纹和验证码表单。跨 Host 切换在 Keychain 保存成功后才生效，保存失败时原 Host 的绑定仍可使用。同一 Host 重配会在服务端替换旧 token，保存失败时需重新取码。云端配对后选择 DSH，并将提示随绑定保存在 Keychain。切换后丢弃旧连接在途的界面更新。
-- **iOS 唯一改动**：`clean()` 与 `agentRequest` 的地址校验在「RFC1918 私网 IPv4」之外放行**合法 DNS 域名**（每段 1–63 字符 `[A-Za-z0-9-]`、不以连字符开头/结尾、至少两段），其余校验原样保留：必须 https、无 user/password、无 path/query/fragment、指纹与 token 仍须 64hex（`AlongShellView.swift:430-447、945-951`）。证书钉扎、禁重定向、PAC=DIRECT 全部不动（`:975-978、1208-1229`）。路径白名单无需新增——多用户配对复用 `/pair`，不新增端点（`:956-959`）。
+- **Web 连接**：沿用现有连接/重新配对入口；DNS 系统策略不再要求叶指纹，Mac 私网路径保留。跨 Host 切换与 token 持久化仍遵循 Keychain 成功后启用、迟到回执隔离和云端 DSH 提示持久化。CA 同端升级与换端分开处理，不把叶换证误当换用户。
+- **iOS 改动目标**：域名 HTTPS 使用 URLSession 系统信任和 ATS，移除云端 PinnedAgentDelegate 放行逻辑；规范化地址、无凭证/path/query/fragment、路径白名单、禁重定向和 DIRECT 策略保留。连接 v2、Mac 私网 pin 兼容、Web/原生桥、健康/设备来源/通知的 fingerprint 消费点须一起迁移，详见 [CA 方案 §2](iphone-ca-profile-design.md)。安装系统根不会让旧 App 自动完成这些修改。
 - **版本联动**：当前候选 Web 版本为 82，App `CFBundleVersion` 为 73；`index.html`、Service Worker 缓存名和内置页 URL 同步更新。iPhone 需要安装新版本。
 - **健康事件 outbox 迁移口径**：outbox 绑定哈希含 baseURL（`ios/AlongHealth/Sources/HealthKitReader.swift:786-790`），换地址会归档旧 outbox 并按新绑定重建（`:819-827`）；OKX 绑定不含 baseURL（`ios/AlongHealth/Sources/PhoneSourceCoordinator.swift:513-516`，注释明写「Mac 地址变更是传输层不是新配对」）。云端 v1 不开新链路，outbox 场景仅在回退 Mac 模式时出现；Runbook 顺序把「切换前先在旧端同步清空 outbox」列为步骤（§6.4 第 8 步）。
 
@@ -251,8 +253,8 @@ secrets:
 
 ### M1 配对多绑定与用户表
 
-- **目标**：`pairings.json` 支持两位静态用户各自绑定。发码 CLI 按用户签发一次性码，`/pair` 在读取到达限额的全局失败窗口后直接返回 403。设备更换只替换该用户自己的绑定。
-- **涉及文件**：新增 `host/pairing.mjs`（绑定表读写/升级/查找/校验 + 配对码文件与全局失败窗口计数）、`host/pair-code.mjs`（CLI：`node host/pair-code.mjs <userId>` 写 `pairing-codes.json` 0600）；修改 `host/agent-host.mjs`（`/pair` 限速语义、`authorized()`、配对码加载）；测试：新增 `test/host-multi-user-pairing.test.mjs`（含防枚举限速断言），回归 `test/pairing-host-verify.test.mjs`（真实进程 + HTTPS 全链路，`USER_B` 脚手架已存在）。
+- **目标**：`pairings.json` 支持两位静态用户各自绑定。发码 CLI 按用户签发一次性码，`/pair` 在读取到达限额的按来源失败窗口后直接返回 403。设备更换只替换该用户自己的绑定。
+- **涉及文件**：新增 `host/pairing.mjs`（绑定表读写/升级/查找/校验 + 配对码文件与按来源失败窗口计数）、`host/pair-code.mjs`（CLI：`node host/pair-code.mjs <userId>` 写 `pairing-codes.json` 0600）；修改 `host/agent-host.mjs`（`/pair` 限速语义、`authorized()`、配对码加载）；测试：新增 `test/host-multi-user-pairing.test.mjs`（含防枚举限速断言），回归 `test/pairing-host-verify.test.mjs`（真实进程 + HTTPS 全链路，`USER_B` 脚手架已存在）。
 - **依赖**：无。
 
 ### M2 请求级身份与每用户隔离
@@ -269,7 +271,7 @@ secrets:
 
 ### M4 云端 TLS 与启动参数
 
-- **目标**：证书生成支持 `ALONG_TLS_DAYS`（默认 30 保持本地行为）与 `ALONG_TLS_CN`（默认 `Along Local Agent`）；启动日志打印证书到期时间与绑定地址；`ALONG_AGENT_HOST=0.0.0.0` 与 `ALONG_AGENT_PORT=4176` + 端口映射 443→4176 的组合可对外服务（`host/agent-host.mjs:67-68` 已支持任意覆盖值，本模块只补 TLS 与文案，不改监听逻辑）。
+- **目标**：旧实现已支持 ALONG_TLS_DAYS/CN 与到期横幅，作为本地兼容基线保留；云端目标改为预签发短期 SAN 叶、固定证书版本目录及启动前检查，不允许缺证自签兜底。服务器证书加载、轮换及健康检查目标按 CA 方案 §3/§6/§7 实施；监听端口映射保持不变。
 - **涉及文件**：`host/agent-host.mjs`；新增 `test/host-cloud-tls.test.mjs`（临时状态目录 + env 启动真实进程，断言 cert CN/notAfter 与指纹打印）；回归 `test/pairing-host-verify.test.mjs`。
 - **依赖**：M3（同文件顺序施工）。
 
@@ -281,9 +283,9 @@ secrets:
 
 ### M6 iOS 连接地址迁移与版本联动
 
-- **目标**：`clean()`/`agentRequest` 放行合法 DNS 域名（https-only、其余校验不变）；`build=` 80→81、`CFBundleVersion` 71→72。
-- **涉及文件**：`ios/AlongHealth/Sources/AlongShellView.swift`、`ios/AlongHealth/Info.plist`；扩展 `test/ios-connection-migration.test.mjs`（域名收、http/带凭证/带 path 拒、私网 IPv4 仍收）。与 M1–M5 无代码依赖，可并行施工；发版随 M7 一起出。
-- **依赖**：无（发版顺序上排在 M7 前）。
+- **目标**：DNS 连接使用系统信任；原子迁移连接 v2 及稳定绑定作用域；Mac 私网能力回归不变。新 App 必须与 profile 安装及服务端叶切换协调，不以历史 80→81/71→72 覆盖当前版本号。
+- **涉及文件**：AlongShellView.swift、Info.plist、HealthKitReader.swift、PhoneSourceCoordinator.swift、EventTaskNotifications.swift、`web/agent-client.mjs`、`web/app.mjs` 及版本文件；完整范围和 T01–T21 见 CA 方案 §7/§8。
+- **依赖**：本地开发可先用测试 CA；生产切换依赖 M4 的 CA 叶、两手机完成根信任和新版本就绪，不能仅按旧 M6 域名放行测试验收。
 
 ### M7 文档、决策与 Runbook 终稿
 
@@ -296,10 +298,10 @@ secrets:
 
 门禁基线：`npm run check`（`node --check` 覆盖 `web/*.mjs`、`web/sw.js`、`host/*.mjs`、`tools/build.mjs` + `node --test test/*.test.mjs`）在本设计阶段已实际运行，509 条测试全绿；每个模块合入后**必须重跑**并保持全绿（评审未复跑不构成免跑理由）。
 
-1. **多用户配对（M1）**：两个用户分别凭 CLI 发放的一次性码完成配对，两份 token 同时有效。同一用户重新配对只替换其自己的绑定。失败达到上限时，错误码和有效码统一返回 403，有效码保持未消费。覆盖窗口自然恢复、管理员发码恢复、成功清空及本地通用码兼容。
+1. **多用户配对（M1）**：两个用户分别凭 CLI 发放的一次性码完成配对，两份 token 同时有效。同一用户重新配对只替换其自己的绑定。失败达到上限时，错误码和有效码统一返回 403，有效码保持未消费。覆盖按来源窗口自然恢复（发码不清窗，无清窗入口）、成功只清该来源的桶及本地通用码兼容。
 2. **每用户隔离（M2）**：stub 上游断言 `/sync`、`/events` 转发头 `x-along-user` 等于请求者绑定；A、B 并发 `/goal/event` 都推进（各自锁），同一用户并发第二条得 429；`notification-device.<userId>.json` 互不覆盖；Kimi 运行键 `${userId}:${requestId}`，B 查 A 的 requestId 报「运行记录不存在」；**跨用户断言**：A 的绑定查不到 B 的每日委托索引（键含 pair 哈希，`host/daily-action-history.mjs:33-51`），A 的事件不会推到 B 的设备（ingest 对 `item.userId!==who.userId` 拒绝，`host/task-notifications.mjs:152`）。以上在 `test/host-multi-user-isolation.test.mjs` 断言。
 3. **runner 契约（M3）**：`ALONG_DSH_RUNNER_URL` 指向 stub runner → `/super-agent/goals` 返回的 run 过 `normalizeGoalRun`；非法 JSON/校验失败 → `status:'blocked'` 终态不重试；run 信封通过 `safeGoalSuperAgentRun` 且 `runtime==='dsh-superagent'` 显式断言（不得误标 `kimi-code-swarm`）；不设该 env → 走 bridge 的现有测试全绿（两条运行时同契约回归）。
-4. **TLS 参数（M4）**：`ALONG_TLS_CN=along.example.com ALONG_TLS_DAYS=3650` 启动 → cert.pem 的 CN 与 notAfter 符合、指纹打印；不设 env → 30 天 `CN=Along Local Agent` 与现状一致。
+4. **TLS 与信任迁移（M4/M6）**：按 CA 方案 T01–T21 验收系统根安装/完全信任、链/SAN/时间/ATS、旧连接及后台作用域、换叶/撤根与私钥失窃；旧 ALONG_TLS_* 自签测试仅证明 Mac 兼容基线，不证明新云端路线通过。
 5. **编排（M5）**：`docker compose -f deploy/docker-compose.yml config` 校验通过；两镜像在 Linux 上构建成功；`compose up` 后 host `/health` 200、agent `/health` 200、`docker logs along-host` 可读出证书指纹且启动横幅为 `https://0.0.0.0:4176`（`ALONG_AGENT_HOST=0.0.0.0` 生效——容器内无 en0，缺 env 会回退绑 127.0.0.1 导致 443 映射打不通，`host/agent-host.mjs:68`）；**路径一致性断言**：容器内 `/data/users.json` 与 Runbook 第 4 步写入的 `/opt/along/data/host/users.json` 是同一文件（`../../data/host` 基准 = deploy/ 目录，§3.1），缺失或无效时 Host 拒绝启动（§3.2）；**可选路径断言**：按 compose 注释删除 apns-key 三处引用后 `compose up` 仍成功（file secret 缺失不删引用则是硬错误）；secrets 文件内容不出现在任何镜像层（`docker history` 抽查）与日志；`deploy/env.example` 只含非敏感示例值（无真实凭证）；`docker logs` 中不出现请求体、运行内容（用户消息/模型输出）、配对码与凭证（§3.7）。
 6. **iOS（M6）**：编译真实 Swift 的 `ios-connection-migration` 测试断言：`https://along.example.com` 通过；`http://`、带 user:password、带 path/query、非法域名段、非私网数字 IP 全部拒绝；私网 IPv4 行为不变。
 7. **真机端到端（上线验收，§6.4 之后）**：两台 iPhone 各自配对并验证就绪，每人通过聊天新建目标、再修改已有目标，两次结果都在校验通过后自动生效，两台设备看不到对方的会话和目标。已有 Mac 配对的手机走一次切到云端并切回 Mac 的流程。
@@ -315,21 +317,21 @@ secrets:
 | --- | --- | --- |
 | headless 规划配置或模型凭证错误 | 目标聊天失败 | runner 启动时读入密钥。按 deploy/README.md 通过经过认证的 runner 进行一次真实模型冒烟，确认终态和结构化结果 |
 | along bundle 在 npm CLI 下无法加载（V-1 失败） | 新链路数据面不上云 | 设计已按 Tier 1 收敛：云端 v1 只依赖 goal 聊天链路，不依赖 bundle；Mac 本地模式保留全部能力 |
-| 证书 3650 天后过期或需要换域名 | 全体掉线需重配对 | 按 §6.4 步骤 10 保留旧证书备份、重建 Host 并核对新指纹 |
+| 叶过期、根失窃或手机未完成系统信任 | TLS 失败或仍信任被盗身份 | 按 CA 方案轮换/撤根；同根同域计划换叶不重配对，私钥失窃不能只部署新叶了事 |
 | Runner 进程重启丢失内存中的运行 | 原运行无法续查 | App 通过原编号查询至终态或超时。必要时通过聊天重发 |
 | 云主机持有配对哈希与每日委托索引 | 服务器被读 | 状态目录 0700/文件 0600 + ECS 加密盘（Runbook 步骤 1）；哈希不可逆；无原始健康样本、无 OKX 密钥、无模型凭证明文落盘（全在 secrets） |
 | 两用户共用 DeepSeek API Key | 计费和额度共用 | Runner 进程为每轮分配独立临时目录，模型计费仍归同一账号 |
 | `network` 内 runner 被宿主机其他进程访问 | 内网凭证泄露 | runner 只监听容器内网；宿主机上只有 docker0 桥，无发布端口；runner-token 校验兜底 |
-| 公网配对失败达到上限 | 已发出的有效码暂时不可用 | 满窗时停止验码，等待失败记录离开窗口或由管理员重新发码开启窗口 |
+| 公网配对失败达到上限 | 已发出的有效码暂时不可用 | 窗口按来源分桶：满窗只对该来源停止验码，其他用户照常；发码不清窗，15 分钟自然过期自愈，无清窗入口 |
 | 管理员发码进程与 Host 同时更新配对状态 | 并发状态写入 | 共用跨进程锁，锁内完成读改写 |
 | Compose 路径错位或 secret 缺失 | Host 或 Compose 拒绝启动 | 固定 §6.4 路径，冒烟核对容器内 `/data/users.json` 与启动横幅 |
 
 ### 6.2 Mac 本地数据怎么迁
 
-云端 v1 **不迁移业务历史库**（along.sqlite 属 Tier 2 数据面；云端 v1 目标空间在手机本地延续——`web/app.mjs` 的 `along.goal-*` 键不受换地址影响；`persistAgentConfig`（`web/app.mjs:110-117`）在 token/指纹变化时清背景模板缓存**并撤销健康目标的每日委托授权**（`revokeDaily()`，见下文第 5 条））。需要迁移/重建的是：
+云端 v1 **不迁移业务历史库**（along.sqlite 属 Tier 2 数据面；云端 v1 目标空间在手机本地延续）。当前 `persistAgentConfig` 仍按 token/指纹变化清背景模板并撤销每日委托；CA 同端升级须按专项方案先验证同一绑定并映射稳定 scope，不能因叶指纹消失误撤授权。真正跨 Host 的迁移/重建如下：
 
 1. **用户身份**：从实际在用的 Mac 状态目录读取 `pairings.json` 中现役绑定的 `user_id`，仅把该值写入云端 `users.json`。直接 `npm run agent-host` 默认用 `~/.along/agent-host/`，`npm run activate` 默认用 `~/.along/phone-test/host/`。旧版还未迁移时可读 `pairing.json` 的 `user_id`。旧文件只有哈希时，先用当前 Host 启动完成迁移再读。用户 B 使用新 `u_` 号。
-2. **可选历史快照**：如需在云端可见旧聊天记录，仅迁移手机本地数据（换地址自动保留）；服务器侧 `device-sources/`、`okx-connections/`、`source-events/` 仅在回退 Mac 模式时有用，云端 v1 用不上，**拷贝不移动**（原 Mac 数据保留，回退零成本）。
+2. **可选历史快照**：如需在云端可见旧聊天记录，仅迁移手机本地数据（换地址自动保留）；服务器侧 `device-sources/`、`okx-connections/`、`source-events/`、`kimi-runs.json` **不拷贝上云**（原 Mac 数据保留用于回退，回退零成本）——`okx-connections/` 是可解密的 OKX 凭证库，云端多用户形态启动守卫发现它即拒绝启动（`docs/cloud-security-hardening.md` §3.1-(2)）。
 3. **通知登记**：新端重新登记（App 首次连接后自动上报 APNs token，`/notifications/device`，云端 v1 也可先不配 APNs key）。
 4. **健康事件 outbox**：切换前在旧端把待同步队列清空（打开 App 等同步完成），换址后 outbox 按新绑定重建（§3.4）；云端 v1 该链路 503，原始摘要仍只在手机与 Mac。
 5. **每日委托授权随换端失效（要提前告知用户）**：重新配对（token/指纹变化）触发 `persistAgentConfig` 的 `revokeDaily()`（`web/app.mjs:111-115`），健康目标的每日委托授权被撤销；换到云端后如需情境评估的每日委托，须在新端重新确认授权——这是既有安全语义（授权跟绑定走），不是缺陷，Runbook 第 9 步后向两位用户说明。
@@ -344,25 +346,38 @@ secrets:
 
 > **2026-11-20 定稿**：命令以本节与 deploy/README.md 为准。真实模型冒烟经过配置好的 runner，覆盖模型凭证、规划配置和隔离工作目录。
 
+> **2026-11-21 修订门槛**：先完成 CA 专项方案的代码、测试材料及真机验收准备；当前运行配置仍是旧自签实现，不能仅照此文档启动就宣称 CA 已上线。实际执行还需生产输入和部署授权，本轮均未操作。
+
 前置：一台 ECS（建议 2C4G 起，Ubuntu 22.04/24.04）、一个域名、两台已装当前候选 App 的 iPhone（`CFBundleVersion=74`）。
 
 1. **主机初始化**：安装 Docker（≥24）与 compose v2；安全组只开 22/443；建议启用 ECS 云盘加密；`mkdir -p /opt/along/{data/host,secrets}`（`deploy/` 由第 2 步 clone 自带；这两个目录在 git 仓库**外层**，compose 经 `../../` 相对路径引用，基准=compose 文件所在目录 deploy/，§3.1）并收紧权限：`chmod 700 /opt/along/data/host /opt/along/secrets`（默认 umask 建出的是 0755，与 §3.1 的 0700 声明不符；第 3 步的密钥文件另须 0600）。
 2. **取代码**：`git clone` 本仓库与 `along-superagent` 保持相邻布局（`/opt/along/along` + `/opt/along/along-superagent`）；`cd /opt/along/along`。
-3. **写密钥**（全部 0600，绝不进 git/镜像；路径写死 `/opt/along/secrets/`，与 compose `../../secrets/…` 解析结果一致，§3.1；写完 `chmod 600 /opt/along/secrets/*`）：`/opt/along/secrets/runner-token`（`openssl rand -hex 32`）、`/opt/along/secrets/model-credentials`（一行纯 DeepSeek API Key，末尾可有换行）、可选 `/opt/along/secrets/apns-key.p8`（从 Mac 环境变量同值迁移，并同步记下 `ALONG_APNS_TEAM_ID`/`ALONG_APNS_KEY_ID` 两个非敏感值写入 compose env——`host/apns.mjs:8-14` 要求三件齐全才会创建 provider，只挂文件不配 env 通知会静默失效；不部署远程通知则不写该文件，并按 §3.1 注释删除三处引用）。
+3. **写密钥**（全部 0600，绝不进 git/镜像；路径写死 `/opt/along/secrets/`，与 compose `../../secrets/…` 解析结果一致，§3.1；写完 `chmod 600 /opt/along/secrets/*`）：`/opt/along/secrets/runner-token`（`openssl rand -hex 32`）、`/opt/along/secrets/model-credentials`（一行纯 DeepSeek API Key，末尾可有换行）、可选 `/opt/along/secrets/apns-key.p8`（从 Mac 环境变量同值迁移，并同步记下 `ALONG_APNS_TEAM_ID`/`ALONG_APNS_KEY_ID` 两个非敏感值写入 compose env——`host/apns.mjs:8-14` 要求三件齐全才会创建 provider，只挂文件不配 env 通知会静默失效；不部署远程通知则不写该文件，并按 §3.1 注释删除三处引用）。**密钥统一用下述形态写入**：`umask 077` 预设权限、`HISTFILE=/dev/null`（或执行前 `set +o history`）不落 shell 历史、`install -m 600 /dev/null` 预建空文件、`read -rs` 静默读入再重定向——杜绝 key 明文出现在命令行参数里进历史与进程列表（`docs/cloud-security-hardening.md` §6 步骤 2）：
+
+   ```sh
+   umask 077
+   HISTFILE=/dev/null   # 本条会话不落历史（或执行前 set +o history）
+   install -m 600 /dev/null /opt/along/secrets/runner-token
+   read -rs -p "runner-token(留空自动生成): " v; [ -n "$v" ] || v=$(openssl rand -hex 32); printf '%s\n' "$v" > /opt/along/secrets/runner-token; unset v
+   install -m 600 /dev/null /opt/along/secrets/model-credentials
+   read -rs -p "DeepSeek API key: " v; printf '%s\n' "$v" > /opt/along/secrets/model-credentials; unset v
+   ```
+
+   恢复或手工搬运 secret 文件后统一 `chmod 600`（相邻仓库备份脚本只有备份链路、恢复未实现，手工 `cp`/`mv` 可能改变权限位；权限过宽会被 0600 校验拒绝启动）。
 4. **写用户表**：按 §6.2 读取 Mac 用户 A 的现役 `user_id`，在 `/opt/along/data/host/users.json` 写入 `[{"userId":"<Mac 的 user_id>","label":"A"},{"userId":"u_<新8hex>","label":"B"}]` 并 `chmod 600`。写入其他路径会导致云端 Host 拒绝启动。
 5. **构建与启动**：`docker compose -f deploy/docker-compose.yml build`（构建口径统一由 compose 的 `build` 段承载：context `..` 以 deploy/ 为基准解析到仓库根，agent 经 `additional_contexts: {along: ../../along-superagent}` 预置 bundle（相对路径以 project directory 为基准，与手工 --build-context 从 cwd 解析不同）——手工等价命令（cwd=仓库根 `/opt/along/along`）`docker build --build-context along=../along-superagent -f deploy/Dockerfile.agent . -t along-agent:local`，位置参数必须是 `.`（仓库根），写 `..` 会以 `/opt/along` 为 context 导致 COPY 找不到 host/ 且把相邻仓库与 secrets/ 整包送进 context）；`docker compose -f deploy/docker-compose.yml up -d`（若不部署远程通知，先按 §3.1 注释删除 apns-key 三处引用再 up，否则 file secret 缺失直接报错）；冒烟：`docker logs along-host` 看到 `Along 服务: https://0.0.0.0:4176` + 证书指纹 + 证书到期时间（M4 起横幅打印到期，`host/agent-host.mjs:538`；`ALONG_AGENT_HOST=0.0.0.0` 必须生效：容器内没有 en0，缺 env 会回退绑 127.0.0.1、443 映射打不通，`host/agent-host.mjs:68`；多用户形态下横幅**不打印**配对码，发码走第 7 步），`docker exec along-host sh -c 'ls /data/users.json'` 可见（挂错卷会阻止 Host 启动，§3.1），`docker exec along-agent node -e "fetch('http://127.0.0.1:3088/health').then(r=>r.json()).then(console.log)"` 返回 ready；按 [部署冒烟](../deploy/README.md#冒烟验收-5runbook-64-第-5-步) 通过已认证的 runner 完成一次真实模型调用。
-6. **DNS**：域名 A 记录指向 ECS 公网 IP；`openssl s_client` 抽查 443 返回自签证书且 CN=域名。
-7. **发码配对**：对每个用户 `docker exec along-host node host/pair-code.mjs u_xxx` → 把「`https://<域名>` + `docker logs` 里的证书指纹 + 8 位码」私下发给对应的人（一人一码，15 分钟）。
+6. **DNS、证书与手机根信任**：域名**只配 A 记录**指向 ECS 公网 IPv4，**不配 AAAA**——IPv6 客户端经 docker-proxy 会让源 IP 退化为网关地址，`/pair` 按来源失败分桶与单 IP 连接上限都会失效（指无法达到逐外部来源隔离的目标；当前编排的源 IP 前提仍须实测，`docs/cloud-security-hardening.md` §3.1-(3)，不以 DNS 代替网络检查）。先按 CA 方案 §4 带外核验 profile 及根摘要，两手机分别安装并开启完全信任；服务端按 §3 预置证书版本。用带 CAfile、SNI 和 verify_hostname 的 TLS 探针检查实际链与 SAN；不能只核对 CN 或沿用关闭 TLS 验证的探活结论。
+7. **发码配对**：TLS 及新 App 就绪后，同端原 token 有效则先迁移验证；确需新配对时才对该用户 `docker exec along-host node host/pair-code.mjs u_xxx`，私下交付「`https://<域名>` + 8 位一次性码」（15 分钟）。根摘要在安装阶段核验，不作为 App 叶指纹输入。
 8. **切换前旧端收尾**：在 iPhone 上连旧 Mac 服务打开 App，等健康/事件同步清空待发队列，旧 Mac 服务可停可不停。
-9. **iPhone 配对**：已有连接的设备从当前连接区选择重新配对。填写新域名、指纹和验证码，App 将新 token 保存至 Keychain。两台设备分别确认连接就绪、通过聊天修改目标后自动生效，以及互相看不到对方会话。换端会撤销每日委托授权，需要继续使用时在新端重新授权。
-10. **观察与回退锚点**：用 `docker compose -f deploy/docker-compose.yml logs -f` 观察 24 小时。异常按 §6.3 切回 Mac。换证书或域名时更新 Compose 中的 `ALONG_TLS_CN`，用 `docker compose -f deploy/docker-compose.yml stop host` 停止 Host，将 `/opt/along/data/host/cert.pem` 和 `/opt/along/data/host/key.pem` 一起移到权限为 0700 的备份目录。执行 `docker compose -f deploy/docker-compose.yml up -d --no-deps --force-recreate host`，通过 DNS、TLS 握手和 Host 日志核对新域名、到期时间和指纹后重新发码。
+9. **iPhone 迁移/配对**：两台新版本 App 按 CA 方案 §5 切换；云端 DNS 不填写叶指纹。只有真正换端或原 token 失效才重新配对，Keychain 保存成功后启用。分别确认前后台连接、聊天修改目标自动生效及用户隔离；真正换端按原规则重新授权，同根同端换叶不误撤授权。**向两位用户说明 OKX 采集口径**：云端使用期间 iPhone 的 OKX 连接保持「仅账户摘要」，勿开启成交/账单明细采集——多用户形态 gateway 拒收明细，且明细与摘要在同一次原子发布里，开启后发布会持续失败、连接无法就绪；需明细复盘时在 Mac 本地模式操作（`docs/cloud-security-hardening.md` §3.5）。
+10. **观察与回退锚点**：观察 24 小时。证书按 CA 方案 §6 校验后原子切 `tls/current`，用 `docker compose -f deploy/docker-compose.yml up -d --no-deps --force-recreate host` 重载并核对实际 SAN/链/有效期。当前运行配置仍是旧自签实现（见本节修订门槛）：换证书或域名时更新 Compose 中的 `ALONG_TLS_CN`，用 `docker compose -f deploy/docker-compose.yml stop host` 停止 Host，将 `/opt/along/data/host/cert.pem` 和 `/opt/along/data/host/key.pem` 一起移到权限为 0700 的备份目录，再执行上述 `--force-recreate` 重建命令，通过 DNS、TLS 握手和 Host 日志核对新域名、到期时间和指纹。同根同域轮换不重新发码；换域名按换端处理。失败仅可恢复上一可信且未泄露的 CA 叶版本，或用户切回 Mac；不恢复云端忽略校验/旧 DNS pin。失窃走逐台撤根与独立恢复渠道。
 
 ## 7. 方案内决策记录（SD）
 
-- **SD-1 自签长期证书 + 钉扎，不用反代/公共 CA**：iPhone 已按叶子证书 SHA-256 钉扎（`AlongShellView.swift:1208-1223`），host 本就端到端 TLS；反代终止 TLS 反而破坏钉扎并多一个组件。纯浏览器访问 host 目前无场景（`web/agent-client.mjs:22-27` 无桥即抛错）。若将来要公共 CA：换 Caddy 终止 TLS、iOS 放弃钉扎改系统信任、README 隐私表改口径——三处联动，不在本轮。
+- **SD-1 专用 CA 描述文件 + iPhone 系统信任（2026-11-21 用户已选定，待实现）**：根经带外核验安装，并在系统设置开启完全信任；云端短期叶显式带 SAN/用途，URLSession 默认系统评估替代旧叶指纹钉扎，不设置 App 内锚、不失败降级。接受系统信任范围扩大及手工撤根成本；完整契约见 [CA 专项方案](iphone-ca-profile-design.md)。沿用 Host 端到端 TLS，不因该选择强制引入反代；公共 CA 与钉扎并非技术上互斥。旧十年自签方案只作为历史实现基线。
 - **SD-2 多用户 = 静态用户表 + 每用户配对码，不做注册/审批**：2 人固定；发码即授权，码走私下渠道（SSH + IM），信任模型与「看终端抄码」（`host/agent-host.mjs:435-439`）同级。D1 的「不建设注册/计费/多租户运维」原样保留，只在 agent 仓库决策记录追加「云端单机 2 用户」扩展条目。
 - **SD-3 云端 agent 用 headless 一次性进程 + host 侧校验链**：官方 Linux 发行物只有 headless 形态（§2.1/§3.5）；把「模型输出→校验→自动生效」收敛在 host 校验链上，与 Kimi 运行时同构，红线不因运行时形态降级。bundle 长驻加载列为 V-1 验证项而非承诺。
 - **SD-4 云端 v1 新链路数据面 503 不是功能砍除而是开关语义复用**：`ALONG_EVENT_INGEST` 的 off/on 单消费语义（BC-09-03/04）本就是回退通道；云端复用它，Mac 本地模式保留全量能力。
 - **SD-5 版本联动收敛**：M3 修改 `web/goal-agent-core.mjs`（前端运行代码，`web/app.mjs:4`、`web/loop.mjs:2`、`web/event-workspace.mjs`、`web/adaptive-ui.mjs:1` 均 import，且已登记 `tools/build.mjs:2` 与 `web/sw.js` 的 FILES）→ 合入即提高 `web/index.html` 的 `?v=`（80→81）与 `web/sw.js` 的 `CACHE`（along-shell-v80→v81）；iOS 原生改动（M6）→ `build=` 与 `CFBundleVersion` 必动（重装）；施工中若再波及其他 `web/` 文件，四处一并联动（AGENTS.md §2）。
 - **SD-6 红线文件措辞修订需用户确认**：M7 对 AGENTS.md §5 的改述（「Token 只留在 Mac 上」→「凭证只留在服务端安全存储」）不放宽任何实质约束（§3.6 逐条对照），但红线文件是用户钦定约束，改文字前须用户明确拍板（见交付 openQuestions）；未确认前 M7 只改 README/索引/本文档与 agent 仓库决策记录，不动 AGENTS.md §5。
-- **SD-7 公网配对限额**：同时限制有效和无效提交，窗口满时在验码前拒绝。重开发码窗口属于部署者职责，沿用已有 CLI。
+- **SD-7 公网配对限额**：同时限制有效和无效提交，窗口满时在验码前拒绝。窗口按来源（连接 IP）分桶，满窗只对该来源拒绝；发码不清窗（「发码清窗刷新攻击者配额」随分桶消解），无清窗入口——被噪音阻塞的同 IP 合法设备最长 15 分钟窗口自然过期自愈（`docs/cloud-security-hardening.md` SD-H2 修订）。

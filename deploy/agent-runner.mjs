@@ -11,7 +11,7 @@
 import {createServer} from 'node:http';
 import {spawn} from 'node:child_process';
 import {createHash, timingSafeEqual} from 'node:crypto';
-import {readFileSync} from 'node:fs';
+import {readFileSync, statSync} from 'node:fs';
 import {mkdir, mkdtemp, rm, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {dirname, join} from 'node:path';
@@ -56,23 +56,46 @@ const ID_PATTERN=/^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$/;
 const USER_PATTERN=/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const MANDATE='只规划目标与动态任务；不执行外部写操作。';
 
+// compose secrets 是 bind mount，容器内权限=宿主权限，Runbook 要求 0600。
+// 权限过宽（组/其他可读）等同配置错误：拒绝启动，且报错只提路径不回显文件内容（G-6）。
+function readSecretFile(file,label) {
+  let stat;
+  try { stat=statSync(file); }
+  catch { throw Error(`${label}文件无法读取：${file}`); }
+  if (stat.mode&0o077) throw Error(`${label}文件权限过宽（须 0600，拒绝启动）：${file}`);
+  return readFileSync(file,'utf8').trim();
+}
+
 // runner-token 只从 secret 文件读（compose secrets，0600）：缺失直接起不来，不静默降级。
 const tokenFile=process.env.ALONG_RUNNER_TOKEN_FILE;
 if (!tokenFile) throw Error('云端 agent runner 需要 runner-token：设置 ALONG_RUNNER_TOKEN_FILE 后重启');
-const runnerToken=readFileSync(tokenFile,'utf8').trim();
+const runnerToken=readSecretFile(tokenFile,'runner-token ');
 if (!runnerToken) throw Error('runner-token 文件为空');
 
 function readModelApiKey() {
   const secretFile=process.env.ALONG_MODEL_API_KEY_FILE;
   if (!secretFile) throw Error('云端 agent runner 需要模型密钥，请设置 ALONG_MODEL_API_KEY_FILE');
-  let key;
-  try { key=readFileSync(secretFile,'utf8').trim(); }
-  catch { throw Error('无法读取 ALONG_MODEL_API_KEY_FILE 指向的模型密钥文件'); }
+  const key=readSecretFile(secretFile,'模型密钥');
   if (!/^[^\s\0]+$/.test(key)) throw Error('模型密钥文件须包含单行非空 DeepSeek API key');
   return key;
 }
 const modelApiKey=readModelApiKey();
 const encodedSecrets=[modelApiKey,runnerToken].map(secret=>JSON.stringify(secret).slice(1,-1));
+
+// 两个 secret 已读入内存（此后 runner 不再读 secret 文件），在 listen 之前把整个 runner 进程
+// 降权到 node 用户（node 官方镜像自带 uid 1000 的 node 用户）：先 setgid 后 setuid——
+// setuid 之后没有权限再改组。仅 root 时执行，开发机/测试非 root 直接跳过；降权失败拒绝启动。
+// 降权后 runner 与它拉起的每个 dsh 子进程都读不到 root 0600 的 /run/secrets/*（G-6）。
+function dropPrivileges() {
+  if (typeof process.getuid!=='function'||process.getuid()!==0) return;
+  try {
+    process.setgid('node');
+    process.setuid('node');
+  } catch (error) {
+    throw Error(`runner 降权失败（容器内需要 node 用户），拒绝启动：${error?.message??error}`);
+  }
+}
+dropPrivileges();
 function tokenOk(value) {
   if (typeof value!=='string'||!value) return false;
   // 比较前先哈希：消除长度差，可用 timingSafeEqual。
@@ -210,9 +233,15 @@ function runDshProcess(prompt,cwd,env) {
   });
 }
 
+// 并发硬上限（G-1 runner 侧）：2 用户各 2 并发的资源上界，与 compose 的 mem/pids 上限配合。
+// 超限的 POST /run 直接 429，不 spawn dsh；同键幂等重提交优先于上限，不受其影响。
+const MAX_RUNS_PER_USER=2;
+const MAX_RUNS_TOTAL=4;
+
 // 在途记录可立即查询，不受已完成记录的 LRU 淘汰影响。同键 POST 复用原记录。
 const cache=new Map();
 const inflight=new Map();
+const inflightPerUser=new Map();
 const cacheKey=(userId,requestId)=>`${userId}:${requestId}`;
 function cacheGet(key) {
   const run=cache.get(key);
@@ -231,14 +260,21 @@ function execute(kind,request) {
   const key=cacheKey(request.userId,request.requestId);
   const existing=findRun(key);
   if (existing) return existing;
+  if (inflight.size>=MAX_RUNS_TOTAL||(inflightPerUser.get(request.userId)??0)>=MAX_RUNS_PER_USER) return null;
   const envelope=kind==='goal'?goalRunEnvelope:taskRunEnvelope;
   const pending=envelope(request,{status:'working'});
   inflight.set(key,pending);
+  inflightPerUser.set(request.userId,(inflightPerUser.get(request.userId)??0)+1);
   void Promise.resolve()
     .then(()=>runDsh(kind==='goal'?goalPrompt(request.input):taskPrompt(request.input)))
     .catch(()=>({status:'blocked',error:'DSH 无法完成规划'}))
     .then(outcome=>cacheSet(key,envelope(request,outcome)))
-    .finally(()=>inflight.delete(key));
+    .finally(()=>{
+      inflight.delete(key);
+      const remaining=(inflightPerUser.get(request.userId)??1)-1;
+      if (remaining>0) inflightPerUser.set(request.userId,remaining);
+      else inflightPerUser.delete(request.userId);
+    });
   return pending;
 }
 
@@ -266,6 +302,8 @@ const server=createServer(async(req,res)=>{
       if (!['goal','task'].includes(body?.kind)) throw Error('kind 无效');
       if (!body?.input||typeof body.input!=='object'||Array.isArray(body.input)) throw Error('input 无效');
       const run=execute(body.kind,{userId:body.userId,requestId:body.requestId,input:body.input,createdAt:Date.now()});
+      // 超限不 spawn：429 原文案由 M1 的 runnerCall 透传到客户端（§3.1-(7)）。
+      if (!run) return respond(res,429,{error:'模型运行并发已达上限，请稍后再试'});
       return respond(res,200,{run});
     }
     const match=req.method==='GET'&&path.match(/^\/run\/([^/]+)$/);

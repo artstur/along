@@ -65,8 +65,19 @@ import CryptoKit
 }
 enum AgentBridgeError:Error {case invalidConfiguration; case receipt([String:Any])}
 @MainActor enum AlongConnectionStore {
- static var pair=["baseURL":"https://192.0.2.1:4176","token":"synthetic","fingerprint":"pin"]
+ static var pair=["baseURL":"https://192.0.2.1:4176","token":"synthetic","fingerprint":String(repeating:"A",count:64)]
  static func load()->[String:String]? {pair}
+ // 作用域种子与真实实现同语义（docs/iphone-ca-profile-design.md §2.2）。
+ static func scopeSeed(_ connection:[String:String])->String? {
+  guard let base=connection["baseURL"],let token=connection["token"] else {return nil}
+  let policy=connection["trustPolicy"] ?? "legacy-local-pin-v1"
+  if policy=="legacy-local-pin-v1" {
+   guard let pin=connection["fingerprint"],pin.count==64 else {return nil}
+   return [base,pin,token].joined(separator:"\\n")
+  }
+  guard let scope=connection["bindingScopeId"] else {return nil}
+  return scope
+ }
 }
 @MainActor final class BackgroundHealthReviews {
  static let shared=BackgroundHealthReviews();var usesEventProtocol:()->Bool={false}

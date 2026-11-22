@@ -35,6 +35,7 @@ function storeSnippet() {
 
 const storeHarness=`import Foundation
 import Security
+import CryptoKit
 
 final class FakeDefaults {
     static let shared = FakeDefaults()
@@ -265,7 +266,10 @@ let cases: [(String, String, String, String, Bool)] = [
     ("https://along.example.com", "/goal/event", good, tok, true),   // 无端口域名走通文档验收例
     ("https://along.example.com", "/pair", good, tok, true),         // 多用户配对复用 /pair，域名下必须可达
     ("https://192.168.1.2", "/goal/event", good, tok, true),         // 无端口私网 IPv4 不变（端口从不要求）
-    ("https://along.example.com:4176", "/goal/event", String(repeating:"F",count:63), tok, false), // 指纹仍须 64hex（入口守卫既有校验）
+    // 云端域名走系统信任评估：叶指纹不再是信任依据，入口守卫不再校验它
+    // （docs/iphone-ca-profile-design.md §2.1/§2.2）。旧 pin 形态（Mac 私网）仍须 64hex。
+    ("https://along.example.com:4176", "/goal/event", String(repeating:"F",count:63), tok, true),
+    ("https://192.168.1.2:4176", "/goal/event", String(repeating:"F",count:63), tok, false),
     // token 的 64hex 校验在连接存储时（clean()，:458-459）；agentRequest 入口守卫从不校验 token，
     // 只在 :977 读取后放进 Bearer 头——这是 M6 之前就有的行为（已对 HEAD 核实），文档 §3.4「指纹与
     // token 仍须 64hex」的行号引用容易误读成入口也校验 token，此处按真实既有语义断言。
@@ -331,13 +335,16 @@ test('the endpoint whitelist remains the documented 12+4 paths',()=>{
 });
 
 test('certificate pinning, redirect blocking and DIRECT-only proxy remain wired into every agent request',()=>{
-  // M6 要求钉扎/禁重定向/PAC=DIRECT 全不动；这里钉住真实的接线位置，防止后续松动。
+  // M6 要求禁重定向/PAC=DIRECT 全不动；CA 方案（docs/iphone-ca-profile-design.md §2.1/§2.2）把
+  // 「叶指纹钉扎」按主机形态拆成两条：云端 DNS 走系统信任评估，Mac 私网保留旧 pin。
+  // 这里钉住真实的接线位置，防止后续松动，也防止云端悄悄退回旧 pin。
   const funcStart=swiftSource.indexOf('        static func agentRequest(');
   assert.notEqual(funcStart,-1,'找不到 agentRequest');
   const funcEnd=swiftSource.indexOf('        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!)',funcStart);
   assert.ok(funcEnd>funcStart,'找不到 agentRequest 结束边界');
   const body=swiftSource.slice(funcStart,funcEnd);
-  assert.match(body,/let delegate = PinnedAgentDelegate\(fingerprint: fingerprint\.uppercased\(\)\)/,'每次请求仍要构造钉扎 delegate');
+  assert.match(body,/let delegate: URLSessionDelegate = fingerprint\.map \{ PinnedAgentDelegate\(fingerprint: \$0\) \} \?\? SystemTrustAgentDelegate\(expectedHost: host\)/,'按主机形态选 delegate：私网 pin，云端系统信任');
+  assert.match(body,/policy: AlongConnectionStore\.trustPolicy\(forHost: host\)/,'信任策略由原生按主机形态推导，不接受网页自报');
   assert.match(body,/URLSession\(configuration: configuration, delegate: delegate, delegateQueue: nil\)/,'钉扎 delegate 仍要挂在实际发请求的 session 上');
   assert.match(body,/connectionProxyDictionary[\s\S]*?return 'DIRECT'/,'仍强制 PAC=DIRECT');
   assert.match(body,/configuration\.waitsForConnectivity = !background/,'前后台等待语义不变');
@@ -347,6 +354,16 @@ test('certificate pinning, redirect blocking and DIRECT-only proxy remain wired 
   const delegate=swiftSource.slice(delegateStart,delegateEnd);
   assert.match(delegate,/completionHandler\(digest == fingerprint \? \.useCredential : \.cancelAuthenticationChallenge/,'叶子证书指纹不匹配仍取消连接');
   assert.match(delegate,/willPerformHTTPRedirection[\s\S]*?completionHandler\(nil\)/,'重定向仍被丢弃');
+  // 云端系统信任委托：不做自己的信任判断，也不返回 useCredential。
+  const systemStart=swiftSource.indexOf('final class SystemTrustAgentDelegate');
+  assert.notEqual(systemStart,-1,'找不到 SystemTrustAgentDelegate');
+  const systemEnd=swiftSource.indexOf('\n}\n',systemStart);
+  const system=swiftSource.slice(systemStart,systemEnd);
+  assert.match(system,/completionHandler\(\.performDefaultHandling, nil\)/,'云端走系统默认信任评估，不自行放行');
+  assert.doesNotMatch(system,/useCredential/,'云端不得自行返回 useCredential');
+  assert.doesNotMatch(system,/SecTrustSetAnchorCertificates/,'云端不得塞入自己的信任锚');
+  assert.match(system,/guard host == expectedHost/,'挑战主机必须与当前连接的期望主机一致');
+  assert.match(system,/willPerformHTTPRedirection[\s\S]*?completionHandler\(nil\)/,'重定向仍被丢弃');
 });
 
 test('iPhone foreground requests retain their deadlines and background work stops promptly offline',{skip:!hasSwift},()=>{

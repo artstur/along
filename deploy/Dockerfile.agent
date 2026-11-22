@@ -1,9 +1,18 @@
 # Along 云端 agent 镜像（docs/cloud-deploy-multi-user.md §4 M5 / §3.5 Tier 1，SD-3）。
 # @deepseek-ai/dsh@0.2.2-rc.5 的 engines 是 node>=24.9.0（§2.1），用 node:24 系。
-# dsh 版本写死 pin 在这里；compose 的 ALONG_DSH_VERSION 只是记录用，改版本只改这一处。
-FROM node:24-bookworm-slim
-RUN npm install -g --no-fund --no-audit @deepseek-ai/dsh@0.2.2-rc.5
+# dsh 版本 pin 在 deploy/agent-dsh/package.json，传递依赖由同目录 package-lock.json 固定；
+# compose 的 ALONG_DSH_VERSION 只是记录用。升级 = 在 deploy/agent-dsh/ 内
+# `npm install --package-lock-only --ignore-scripts` 重新生成锁文件并同步版本
+# （docs/cloud-security-hardening.md §3.3-(3)、§6 步骤 6）。
+# FROM 按 digest pin（G-8）；2026-11-21 记录：
+# sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54。
+FROM node:24-bookworm-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54
 WORKDIR /app
+# dsh 经锁文件安装（G-8）：--ignore-scripts 已核实该版本 scripts:{} 不受影响，挡传递依赖在
+# 构建期以 root 执行 postinstall；runner spawn 'dsh' 走 PATH，用符号链接提供。
+COPY deploy/agent-dsh/package.json deploy/agent-dsh/package-lock.json deploy/agent-dsh/
+RUN npm ci --prefix deploy/agent-dsh --omit=dev --ignore-scripts --no-fund --no-audit \
+ && ln -s /app/deploy/agent-dsh/node_modules/.bin/dsh /usr/local/bin/dsh
 # runner（M3）与其共享契约常量：deploy/agent-runner.mjs import ../web/{super-agent,goal-agent-core,
 # contextual-planning}.mjs，三文件无进一步依赖（2026-11-20 实测），平铺保持 ../web/* 相对路径。
 COPY deploy/agent-runner.mjs deploy/

@@ -12,6 +12,7 @@
 | `env.example` | environment 段非敏感参考值（必改项：`ALONG_TLS_CN` 换真实域名） |
 | `../.dockerignore` | 两个主构建上下文都用仓库根目录的白名单，只放行 npm 清单、Host 模块及任务协议、web 模块和 runner 入口。 |
 | `agent-runner.mjs` | 内网 HTTP runner，使用 Along 专用 DSH profile；模块自检 `node --check deploy/agent-runner.mjs` |
+| `agent-dsh/` | dsh 安装清单：`package.json` + `package-lock.json` 锁定 `@deepseek-ai/dsh@0.2.2-rc.5`，镜像内 `npm ci --ignore-scripts` 安装。升级 dsh 版本时在本目录 `npm install --package-lock-only --ignore-scripts` 重新生成 lock 并入库，同时同步 `Dockerfile.agent` 的 pin 与 compose 的 `ALONG_DSH_VERSION` |
 
 ## 路径基准（配错 = 静默降级，§3.1）
 
@@ -35,7 +36,9 @@ docker compose -f deploy/docker-compose.yml up -d
 
 ## 冒烟（验收 #5；Runbook §6.4 第 5 步）
 
-1. `docker logs along-host`：看到 `Along 服务: https://0.0.0.0:4176`（`ALONG_AGENT_HOST=0.0.0.0` 生效——容器内没有 en0，缺 env 会回退绑 127.0.0.1、443 打不通）、证书 SHA-256 指纹与到期时间。指纹是 iPhone 配对表单的输入。
+1. `docker logs along-host`：看到 `Along 服务: https://0.0.0.0:4176`（`ALONG_AGENT_HOST=0.0.0.0` 生效——容器内没有 en0，缺 env 会回退绑 127.0.0.1、443 打不通）、证书 SHA-256 指纹与到期时间。云端形态另有一行「云端 CA 叶证书版本: `<serial>`」。**云端不再自签**：指纹是叶证书的公开摘要，不是 iPhone 配对表单的输入——手机按系统信任评估连入。
+   - 上线前先确认证书材料已就位：状态目录下 `tls/current` 是指向 `tls/releases/<serial>/` 的符号链接，该目录含 `fullchain.pem`、`key.pem`（0600）、`root.crt`（公开根），目录 0700。缺证、SAN 不覆盖 `ALONG_TLS_CN`、链不可验签、私钥不匹配或权限过宽，Host 都会在监听前退出。
+   - 描述文件与带外核验用 `node tools/ca-profile.mjs profile|verify`（见 [CA 方案](../docs/iphone-ca-profile-design.md) §3.2/§4.1）。根私钥不在这台机器上。
 2. `docker exec along-host sh -c 'ls -l /data/users.json'`：可见（卷没挂错、多用户形态生效）。
 3. 宿主机 `curl -k https://127.0.0.1/health`：200。
 4. `docker exec along-agent node -e "fetch('http://127.0.0.1:3088/health').then(r=>r.json()).then(console.log)"`：返回 ready。
@@ -105,6 +108,8 @@ docker run --rm --entrypoint sh -w /opt/along-superagent along-agent:local \
 ## 凭证红线（AGENTS.md §5）
 
 - 三个 secret 文件 0600：`runner-token`、`model-credentials`、`apns-key.p8`。APNs key 额外要求 prime256v1 且权限严格 0600（`host/apns.mjs:12` 校验，不过则远程通知静默失效并打 warn）。
+- **写入/更新 secret 用安全形态**，杜绝 key 明文进 shell 历史与进程列表：`umask 077` 预设权限、`HISTFILE=/dev/null`（或执行前 `set +o history`）、`install -m 600 /dev/null <目标文件>` 预建空文件、`read -rs` 静默读入后重定向写入。完整命令以 Runbook §6.4 第 3 步为准（`docs/cloud-security-hardening.md` §6 步骤 2）。权限过宽会被 0600 校验拒绝启动（host、runner 均为 fail-closed）。
+- **恢复/搬运 secret 文件后统一 `chmod 600`**：相邻仓库备份脚本只有备份链路、恢复未实现（恢复演练在阶段 E）；手工 `cp`/`mv` 或未来的恢复链路都可能改变权限位，搬运后先核对再启动。
 - `model-credentials` 只填一个 DeepSeek API key，可带结尾换行。runner 启动时读取；更新 secret 后重建 agent 容器。runner 只在启动 DSH 子进程时设置 `DEEPSEEK_API_KEY`。
 - secrets 只经 compose 挂载进容器（`/run/secrets/*`），不进构建上下文（`.dockerignore` 白名单）、不进镜像层（可用 `docker history` 抽查）、不进日志。
 - runner-token 是服务端内部凭证，只在 host↔agent 的 compose 内网请求头里走，绝不下发 iPhone/网页，不写运行结果。

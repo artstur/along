@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {readFileSync, writeFileSync, mkdtempSync, rmSync} from 'node:fs';
+import {chmodSync, readFileSync, writeFileSync, mkdtempSync, rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createServer} from 'node:http';
@@ -40,6 +40,8 @@ test('readBridgeToken 只认 0600 hex 文件：缺失、不存在、内容不对
   try {
     const file=join(directory,'bridge-token');
     writeFileSync(file,`${TOKEN}\n`);
+    // M4 credential-hygiene 0600 校验：宽松权限等同未配置（fail-closed），配置凭证的 fixture 必须真的落在 0600。
+    chmodSync(file,0o600);
     assert.equal(readBridgeToken(file),TOKEN,'末尾换行要裁掉');
     writeFileSync(file,'not-a-token');
     assert.equal(readBridgeToken(file),null,'内容不是 64 位 hex 就当没配');

@@ -295,6 +295,73 @@ enum AlongConnectionStore {
     private static let service = "com.artstur.AlongHealth.connection"
     private static let account = "Along"
 
+    // 信任策略（docs/iphone-ca-profile-design.md §2.2）：
+    //   system-pki-v1     —— 云端 DNS 连接。证书由 iOS 系统信任评估（已安装的 CA 描述文件 +
+    //                       完全信任）判定，App 不再自己比叶指纹，也没有降级回旧 pin 的分支。
+    //   legacy-local-pin-v1 —— Mac 私网 RFC1918 连接。保留原来的叶指纹钉扎，行为不变。
+    // 这不是用户可选的模式开关：策略由主机形态（私网 IPv4 还是 DNS 域名）推导后写进持久状态。
+    static let systemTrustPolicy = "system-pki-v1"
+    static let legacyPinPolicy = "legacy-local-pin-v1"
+
+    // 稳定的绑定作用域 ID（docs/iphone-ca-profile-design.md §2.2「bindingScopeId」）：
+    // 由规范化 origin（scheme/host/有效端口）与配对 token 的哈希派生，不随叶证书轮换改变，
+    // 因此换叶证书不会被误判成换用户或换设备。它不是凭证，也不发给模型。
+    static func bindingScopeId(baseURL: String, token: String) -> String? {
+        guard let components = URLComponents(string: baseURL),
+              components.scheme == "https", let host = components.host,
+              token.count == 64 else { return nil }
+        // 有效端口：显式端口优先，缺省按 scheme 取默认端口。origin 必须规范化，
+        // 否则同一台服务器的两种写法会算出两个作用域 ID。
+        let port = components.port ?? (components.scheme == "https" ? 443 : nil)
+        guard let port else { return nil }
+        let origin = "\(components.scheme!)://\(host.lowercased()):\(port)"
+        return SHA256.hash(data: Data([origin, token.lowercased()].joined(separator: "\n").utf8))
+            .map { String(format: "%02x", $0) }.joined()
+    }
+
+    // 连接形态判定：RFC1918 私网 IPv4 走旧 pin，DNS 域名走系统信任评估。
+    // 不新增用户可选开关，也不接受 JavaScript 自报 trustPolicy 来放宽规则。
+    static func trustPolicy(forHost host: String) -> String {
+        isPrivateIPv4(host) ? legacyPinPolicy : systemTrustPolicy
+    }
+
+    // 旧 pin 形态下取叶指纹；系统信任形态返回 nil（叶指纹不再是信任依据）。
+    // 格式不合法一律返回 nil，由调用方按「没有可用 pin」处理。
+    static func pinnedFingerprint(_ value: String?, policy: String) -> String? {
+        guard policy == legacyPinPolicy, let pin = value, pin.count == 64, pin.allSatisfy(\.isHexDigit) else { return nil }
+        return pin.uppercased()
+    }
+
+    // 入口守卫用：系统信任形态一律放行（不需要叶指纹）；旧 pin 形态必须带合法 64hex。
+    static func acceptsPin(_ value: String?, policy: String) -> Bool {
+        policy == systemTrustPolicy || pinnedFingerprint(value, policy: policy) != nil
+    }
+
+    static func isPrivateIPv4(_ host: String) -> Bool {
+        let labels = host.split(separator: ".", omittingEmptySubsequences: false)
+        guard labels.count == 4,
+              labels.allSatisfy({ Int($0).map { (0...255).contains($0) } ?? false }),
+              host.hasPrefix("192.168.") || host.hasPrefix("10.") ||
+              ((Int(labels[0]) == 172) && (16...31).contains(Int(labels[1]) ?? 0))
+        else { return false }
+        return true
+    }
+
+    // 统一的「作用域种子」：所有用叶指纹做作用域的地方改用它
+    // （docs/iphone-ca-profile-design.md §2.2「一起迁移；不能只修改一个网络委托」）。
+    //   - 旧 pin 形态：保持原来的 base|fingerprint|token 三段，作用域值与迁移前完全一致；
+    //   - 系统信任形态：改用 bindingScopeId（origin + token 派生），叶证书轮换不改变作用域。
+    static func scopeSeed(_ connection: [String: String]) -> String? {
+        guard let base = connection["baseURL"], let token = connection["token"] else { return nil }
+        let policy = connection["trustPolicy"] ?? legacyPinPolicy
+        if policy == legacyPinPolicy {
+            guard let pin = connection["fingerprint"], pin.count == 64 else { return nil }
+            return [base, pin, token].joined(separator: "\n")
+        }
+        guard let scope = connection["bindingScopeId"] ?? bindingScopeId(baseURL: base, token: token) else { return nil }
+        return scope
+    }
+
     static func load() -> [String: String]? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -453,12 +520,23 @@ enum AlongConnectionStore {
               hostAccepted(host),
               components.user == nil, components.password == nil,
               components.path.isEmpty, components.query == nil, components.fragment == nil,
-              let fingerprint = value["fingerprint"] as? String,
-              fingerprint.count == 64, fingerprint.allSatisfy(\.isHexDigit),
               let token = value["token"] as? String,
               token.count == 64, token.allSatisfy(\.isHexDigit)
         else { return nil }
-        var clean = ["baseURL": baseURL, "fingerprint": fingerprint.uppercased(), "token": token.lowercased()]
+        // 信任策略由主机形态推导，不接受调用方自报：DNS 云端连接走系统信任评估，
+        // 私网 IPv4 保留旧叶指纹钉扎（docs/iphone-ca-profile-design.md §2.2）。
+        let policy = trustPolicy(forHost: host)
+        var clean = ["baseURL": baseURL, "trustPolicy": policy, "token": token.lowercased()]
+        // 系统信任策略下叶指纹不是信任依据，也不再充当用户/设备绑定 ID；
+        // 只有旧 pin 形态仍需保留它。
+        if policy == legacyPinPolicy {
+            guard let fingerprint = value["fingerprint"] as? String,
+                  fingerprint.count == 64, fingerprint.allSatisfy(\.isHexDigit) else { return nil }
+            clean["fingerprint"] = fingerprint.uppercased()
+        }
+        if let scope = bindingScopeId(baseURL: baseURL, token: token) {
+            clean["bindingScopeId"] = scope
+        }
         if value["runtime"] as? String == "dsh-superagent" {
             clean["runtime"] = "dsh-superagent"
         }
@@ -468,7 +546,7 @@ enum AlongConnectionStore {
 
 struct AlongWebView: UIViewRepresentable {
     @ObservedObject var bridge: AlongBridgeModel
-    private let site = URL(string: "along://app/index.html?build=83")!
+    private let site = URL(string: "along://app/index.html?build=85")!
 
     func makeCoordinator() -> Coordinator { Coordinator(bridge: bridge) }
 
@@ -966,14 +1044,22 @@ struct AlongWebView: UIViewRepresentable {
                   AlongConnectionStore.hostAccepted(host),
                   components.user == nil, components.password == nil,
                   components.path.isEmpty, components.query == nil, components.fragment == nil,
-                  let fingerprint = input["fingerprint"] as? String,
-                  fingerprint.count == 64, fingerprint.allSatisfy(\.isHexDigit),
                   let path = input["path"] as? String,
                   // 新链路端点（docs/stage-a-tech-design.md §2.4.2）：全部 POST，语义与旧路径一致——仅网络转发。
                   (["/pair", "/connection/verify", "/connection/status", "/goal/event", "/super-agent/tasks", "/super-agent/tasks/status", "/super-agent/daily-delegation",
                    "/super-agent/goals", "/super-agent/goals/status", "/events", "/sync", "/sync/ack"].contains(path) || (privateNotificationRequest && ["/notifications/device","/notifications/scheduled"].contains(path)) || (privateSourceRequest && ["/sources/okx", "/sources/device"].contains(path))),
                   let body = input["body"] as? [String: Any],
-                  let url = URL(string: base + path) else { throw AgentBridgeError.invalidConfiguration }
+                  let url = URL(string: base + path),
+                  // 旧 pin 形态（Mac 私网）必须带合法 64hex 叶指纹；云端系统信任形态不需要。
+                  // 这里在入口守卫里就分好形态，避免后面再判一次。
+                  AlongConnectionStore.acceptsPin(input["fingerprint"] as? String,
+                                                  policy: AlongConnectionStore.trustPolicy(forHost: host))
+            else { throw AgentBridgeError.invalidConfiguration }
+            // 信任策略由主机形态推导（docs/iphone-ca-profile-design.md §2.2）：
+            // 私网 IPv4 走旧叶指纹 pin，DNS 域名交给系统信任评估。
+            // 不接受 JavaScript 自报 trustPolicy——放宽策略必须走原生自己的判定。
+            let policy = AlongConnectionStore.trustPolicy(forHost: host)
+            let fingerprint = AlongConnectionStore.pinnedFingerprint(input["fingerprint"] as? String, policy: policy)
             var request = URLRequest(url: url)
             request.httpMethod = "POST"
             request.timeoutInterval = background ? 8 : (["/connection/verify", "/sources/device"].contains(path) ? 12 : 120)
@@ -982,7 +1068,7 @@ struct AlongWebView: UIViewRepresentable {
                 request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
             }
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
-            let delegate = PinnedAgentDelegate(fingerprint: fingerprint.uppercased())
+            let delegate: URLSessionDelegate = fingerprint.map { PinnedAgentDelegate(fingerprint: $0) } ?? SystemTrustAgentDelegate(expectedHost: host)
             let configuration = URLSessionConfiguration.ephemeral
             configuration.waitsForConnectivity = !background
             configuration.timeoutIntervalForResource = background ? 10 : (["/connection/verify", "/sources/device"].contains(path) ? 15 : 120)
@@ -1220,6 +1306,44 @@ enum AgentBridgeError: LocalizedError {
     }
 }
 
+// 云端 DNS 连接的系统信任评估委托（docs/iphone-ca-profile-design.md §2.1）。
+//
+// 关键约束：这里不做任何自己的信任判断，也不返回 useCredential。
+//   - 链、可信锚、请求主机名、有效期与 ATS 全部交给 URL Loading System 评估；
+//   - 挑战的主机必须与当前连接的期望主机一致，不一致就取消，不提供额外凭证；
+//   - 不调用 SecTrustSetAnchorCertificates 塞入 App 内证书或服务器下发的根；
+//   - 不设置忽略证书错误的例外，也没有「系统评估失败再试旧叶 pin」的降级分支。
+// 失败就是失败：没有安装 CA 描述文件、没有开启完全信任、SAN 错、证书过期都会在
+// 发送 HTTP 层配对码/Bearer/业务数据之前就断掉。
+final class SystemTrustAgentDelegate: NSObject, URLSessionDelegate, URLSessionTaskDelegate {
+    private let expectedHost: String
+    init(expectedHost: String) { self.expectedHost = expectedHost.lowercased() }
+
+    func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge,
+                    completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust else {
+            completionHandler(.performDefaultHandling, nil)
+            return
+        }
+        let host = challenge.protectionSpace.host.lowercased()
+        guard host == expectedHost else {
+            print("Along server trust challenge for unexpected host: \(host)")
+            completionHandler(.cancelAuthenticationChallenge, nil)
+            return
+        }
+        // performDefaultHandling = 由系统评估证书链、可信锚、主机名与有效期，并保留 ATS 规则。
+        completionHandler(.performDefaultHandling, nil)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+        // 重定向即拒绝：不能把 Bearer 或配对码转给另一个地址（docs/iphone-ca-profile-design.md §2.1）。
+        completionHandler(nil)
+    }
+}
+
+// Mac 私网旧连接的叶指纹钉扎委托：行为不变（docs/iphone-ca-profile-design.md §2.2）。
+// 已知局限（错误主机名/过期叶证书只比指纹）不在本方案范围内，本设计不宣称已修复该本地机制。
 final class PinnedAgentDelegate: NSObject, URLSessionDelegate, URLSessionTaskDelegate {
     private let fingerprint: String
     init(fingerprint: String) { self.fingerprint = fingerprint }

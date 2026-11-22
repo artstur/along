@@ -511,8 +511,18 @@ enum PhoneSourceCoordinatorError: String, LocalizedError {
     private static func disconnected() -> [String: Any] { ["provider": "okx", "state": "disconnected", "syncState": "none"] }
     private static func hash(_ values: [String]) -> String { SHA256.hash(data: Data(values.joined(separator: "\n").utf8)).map { String(format: "%02x", $0) }.joined() }
     private static func binding(_ pair: [String: String]) throws -> String {
-        guard let pin = pair["fingerprint"], let token = pair["token"], validHash(pin.lowercased()), validHash(token.lowercased()) else { throw PhoneSourceCoordinatorError.pairingUnavailable }
-        return hash([pin.uppercased(), token.lowercased()]) // A Mac address change is transport, not a new pairing.
+        // 绑定 ID 不再用叶指纹：云端系统信任形态下叶证书会轮换，用它当绑定 ID 会把
+        // 同一个用户误判成新绑定（docs/iphone-ca-profile-design.md §2.2）。
+        // 旧 pin 形态保留原算法，保证 Mac 本地状态与迁移前完全一致。
+        guard let token = pair["token"], validHash(token.lowercased()) else { throw PhoneSourceCoordinatorError.pairingUnavailable }
+        let policy = pair["trustPolicy"] ?? AlongConnectionStore.legacyPinPolicy
+        if policy == AlongConnectionStore.legacyPinPolicy {
+            guard let pin = pair["fingerprint"], validHash(pin.lowercased()) else { throw PhoneSourceCoordinatorError.pairingUnavailable }
+            return hash([pin.uppercased(), token.lowercased()]) // A Mac address change is transport, not a new pairing.
+        }
+        guard let scope = pair["bindingScopeId"] ?? AlongConnectionStore.bindingScopeId(baseURL: pair["baseURL"] ?? "", token: token),
+              validHash(scope.lowercased()) else { throw PhoneSourceCoordinatorError.pairingUnavailable }
+        return hash([scope.lowercased(), token.lowercased()])
     }
     private static func validHash(_ value: String) -> Bool { value.utf8.count == 64 && value.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) } }
     private static func validID(_ value: String) -> Bool { value.range(of: #"^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$"#, options: .regularExpression) == value.startIndex..<value.endIndex }

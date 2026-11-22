@@ -12,6 +12,7 @@ import {GOAL_OUTPUT_INSTRUCTIONS} from '../web/goal-agent-core.mjs';
 import {issuePairingCode} from '../host/pairing.mjs';
 import {REASSESSMENT_INSTRUCTIONS} from '../web/contextual-planning.mjs';
 import {safeGoalSuperAgentRun, safeSuperAgentRun, DSH_RUNTIME, KIMI_RUNTIME} from '../web/super-agent.mjs';
+import {provideCloudCa} from './cloud-ca-fixture.mjs';
 
 // 云端 agent 适配层（docs/cloud-deploy-multi-user.md §4 M3，验收 #3）：
 // - runner 契约：deploy/agent-runner.mjs 拉起 dsh headless，stdout JSON → 运行信封，
@@ -298,6 +299,8 @@ async function spawnHostWithRunner(dir,runnerPort) {
   const tokenFile=join(dir,'runner-token');
   writeFileSync(tokenFile,'cd'.repeat(32),{mode:0o600});
   writeFileSync(join(dir,'users.json'),JSON.stringify([USER_A,USER_B].map(userId=>({userId}))),{mode:0o600});
+  // 云端形态必须加载预签发的 CA 叶证书（docs/iphone-ca-profile-design.md §3.1）。
+  provideCloudCa(dir,{host:'along.test.local'});
   const code=await issuePairingCode(dir,USER_A);
   const port=await freePort();
   const child=spawn(process.execPath,[HOST_FILE],{env:{
@@ -307,6 +310,7 @@ async function spawnHostWithRunner(dir,runnerPort) {
     ALONG_AGENT_PORT:String(port),
     ALONG_DSH_RUNNER_URL:`http://127.0.0.1:${runnerPort}`,
     ALONG_RUNNER_TOKEN_FILE:tokenFile,
+    ALONG_TLS_CN:'along.test.local',
   },stdio:['ignore','pipe','pipe']});
   const output=[];
   child.stdout.on('data',data=>output.push(String(data)));

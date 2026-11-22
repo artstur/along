@@ -12,6 +12,7 @@ import {DSH_RUNTIME, KIMI_RUNTIME, safeGoalSuperAgentRun, AGENT_RUN_TIMEOUT_MS} 
 import {GOAL_OUTPUT_INSTRUCTIONS} from '../web/goal-agent-core.mjs';
 import {REASSESSMENT_INSTRUCTIONS} from '../web/contextual-planning.mjs';
 import {issuePairingCode} from '../host/pairing.mjs';
+import {provideCloudCa} from './cloud-ca-fixture.mjs';
 
 // M3 云端 agent 适配层（docs/cloud-deploy-multi-user.md §3.5/§4-M3）的配对测试。
 // 与 test/host-runner-agreement.test.mjs 互补，这里覆盖设计验收标准里对方未覆盖的面：
@@ -495,6 +496,10 @@ async function spawnHost({dir,runnerPort,extraEnv={}}) {
   const tokenFile=join(dir,'runner-token');
   writeFileSync(tokenFile,'cd'.repeat(32),{mode:0o600});
   writeFileSync(join(dir,'users.json'),JSON.stringify([USER_A,USER_B].map(userId=>({userId}))),{mode:0o600});
+  // 云端形态必须加载预签发的 CA 叶证书（docs/iphone-ca-profile-design.md §3.1），
+  // 否则 Host 在监听前拒启。这里铺一套隔离测试 CA。
+  provideCloudCa(dir,{host:'along.test.local'});
+  const caEnv={ALONG_TLS_CN:'along.test.local'};
   const code=await issuePairingCode(dir,USER_A);
   const port=await freePort();
   const child=spawn(process.execPath,[HOST_FILE],{env:{
@@ -504,6 +509,7 @@ async function spawnHost({dir,runnerPort,extraEnv={}}) {
     ALONG_AGENT_PORT:String(port),
     ALONG_DSH_RUNNER_URL:`http://127.0.0.1:${runnerPort}`,
     ALONG_RUNNER_TOKEN_FILE:tokenFile,
+    ...caEnv,
     ...extraEnv,
   },stdio:['ignore','pipe','pipe']});
   const output=[];

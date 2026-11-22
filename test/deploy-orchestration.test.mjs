@@ -7,22 +7,27 @@ import {join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {parseDocument} from 'yaml';
 
-// M5 Docker 编排与部署产物（docs/cloud-deploy-multi-user.md §3.1/§4-M5，验收 #5）的配对测试。
-// 覆盖面（按验收 #5 可本地验证的条目）：
+// Docker 编排与部署产物的配对测试（docs/cloud-deploy-multi-user.md §3.1/§4-M5 验收 #5 +
+// docs/cloud-security-hardening.md §3.3/§4-M3，G-2/G-8 与 G-1/G-3/G-6 的编排配合）。
+// 覆盖面（可本地验证的条目）：
 // - compose 结构与 §3.1 逐项一致：443→4176、agent 仅内网不发布端口、bind 卷与 secrets 指仓库外层、
 //   additional_contexts 以 project directory（deploy/）为基准写 ../../along-superagent（§3.1 施工修正）、
 //   restart/logging 轮转/healthcheck 指向真实存在的 /health 端点；
+// - M3 编排加固：host 补齐 read_only/tmpfs/security_opt/cap_drop（G-2），两服务 mem/cpus/pids
+//   资源上限（G-1/G-3），agent cap_drop ALL + cap_add SETUID/SETGID（仅为 M2 降权保留，SD-H5）；
 // - 凭证红线（§3.3/§3.7）：compose/env.example 的环境值不含凭证形态的字符串，凭证只经 /run/secrets/* 文件路径；
-// - Dockerfile.host：Node 22、OpenSSL、锁定的生产依赖、Host 源码与 host→web 完整 import 闭包
+// - Dockerfile.host：Node 22 digest pin、OpenSSL、锁定的生产依赖、Host 源码与 host→web 完整 import 闭包
 //   （闭包由测试当次实测计算，与 §4-M5 的「以当次 grep 为准」同口径，防镜像缺文件）；
-// - Dockerfile.agent：node:24-bookworm-slim + @deepseek-ai/dsh@0.2.2-rc.5 pin + runner 及其 web 闭包；
-//   ALONG_DSH_VERSION 与 pin 跨文件一致；along bundle 不含 lib/（构建产物）；
+// - Dockerfile.agent：node:24-bookworm-slim digest pin、dsh 经 deploy/agent-dsh 锁文件
+//   npm ci --ignore-scripts 安装 + ln -s 提供（G-8，不用 npm install -g）+ runner 及其 web 闭包；
+//   ALONG_DSH_VERSION 与 deploy/agent-dsh/package.json 跨文件一致；along bundle 不含 lib/（构建产物）；
+// - deploy/agent-dsh/package-lock.json：锁定 @deepseek-ai/dsh@0.2.2-rc.5 且 packages 含传递依赖条目；
 // - env.example 只含非敏感示例值且与 compose environment 一一对应；
 // - deploy/README.md 覆盖构建/启动/冒烟五步/路径基准警告/V-1 预置与凭证红线。
 // 明确不在本测试断言、需真实 Docker 的部分（本机无 daemon，交付 Runbook §6.4 第 5 步在 ECS 验证）：
-// 两镜像可构建、compose up 后 /health 200、启动横幅与 docker logs 抽查、
-// file secret 缺失是 up 硬错误的行为。compose config 校验（验收 #5 第 1 条）在下面用
-// {skip} 门控：检测到可用 compose CLI 才跑，并可用 ALONG_COMPOSE_BIN 指定 standalone 二进制。
+// 两镜像可构建、compose up 后 /health 200、启动横幅与 docker logs 抽查、资源上限与降权的运行时行为、
+// file secret 缺失是 up 硬错误的行为。compose config 校验在下面用 {skip} 门控：检测到可用
+// compose CLI 才跑，并可用 ALONG_COMPOSE_BIN 指定 standalone 二进制。
 
 const ROOT=fileURLToPath(new URL('../',import.meta.url));
 const DEPLOY_DIR=join(ROOT,'deploy');
@@ -34,6 +39,7 @@ const dockerHost=readFileSync(join(DEPLOY_DIR,'Dockerfile.host'),'utf8');
 const dockerAgent=readFileSync(join(DEPLOY_DIR,'Dockerfile.agent'),'utf8');
 const deployReadme=readFileSync(join(DEPLOY_DIR,'README.md'),'utf8');
 const runnerSrc=readFileSync(join(DEPLOY_DIR,'agent-runner.mjs'),'utf8');
+const dshManifest=JSON.parse(readFileSync(join(DEPLOY_DIR,'agent-dsh','package.json'),'utf8'));
 const hostSrc=readFileSync(join(ROOT,'host','agent-host.mjs'),'utf8');
 const ADJACENT=resolve(DEPLOY_DIR,'../../along-superagent');
 const BUNDLE_ROOT='/opt/along-superagent/';
@@ -111,8 +117,22 @@ test('compose 按 §3.1 编排：443→4176、agent 仅内网、bind 卷与 secr
   assert.equal(hostEnv.ALONG_DSH_RUNNER_URL,'http://agent:3088','DSH 分流指向 compose 内网 agent（§3.5）');
   assert.equal(hostEnv.ALONG_RUNNER_TOKEN_FILE,'/run/secrets/runner-token','runner-token 缺失 host 拒绝启动（host/agent-host.mjs:84）');
   assert.equal(hostEnv.ALONG_EVENT_INGEST,'off','云端 v1 新链路关闭（§1/§3.5；引号防 YAML 把 off 解析成布尔）');
-  assert.equal(hostEnv.ALONG_TLS_DAYS,'3650','云端长期自签证书（§2.2 C7）');
+  // 云端不再现场自签（docs/iphone-ca-profile-design.md §3.1）：读预签发的 CA 叶证书，
+  // 缺证或不合规则监听前拒启。因此 compose 不再有 ALONG_TLS_DAYS。
+  assert.equal(hostEnv.ALONG_TLS_DAYS,undefined,'云端不再配置自签天数（CA 方案 §3.1）');
   assert.ok(hostEnv.ALONG_TLS_CN,'ALONG_TLS_CN 必配域名');
+  assert.match(hostEnv.ALONG_TLS_CN,/^[a-z0-9.-]+$/,'ALONG_TLS_CN 是期望的 DNS 主机名（须与叶证书 SAN 一致）');
+  // M3-(1) G-2：host 补齐加固三件套 + cap_drop ALL（root + cap_drop ALL + 只读根 + NNP
+  // 封死提权与持久化路径；不加非 root USER，SD-H5——compose file secret 是 bind mount、
+  // uid/gid/mode 长语法不生效，非 root 读不到 0600 secret 必然起不来）
+  assert.equal(services.host.read_only,true,'host 只读根（G-2）：唯一可写面 = /data 卷 + /tmp tmpfs');
+  assert.deepEqual(services.host.tmpfs,['/tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777'],'/tmp tmpfs noexec/nosuid/nodev');
+  assert.deepEqual(services.host.security_opt,['no-new-privileges:true'],'NNP 封死 setuid 提权路径');
+  assert.deepEqual(services.host.cap_drop,['ALL'],'host 无需能力位（写 /data、openssl 同 uid、绑 4176>1024）');
+  // M3-(2)/(3) G-1/G-3 编排面：两服务资源上限为正值（SD-H9 常数初值）
+  assert.equal(services.host.mem_limit,'512m');
+  assert.equal(services.host.cpus,'1.0');
+  assert.equal(services.host.pids_limit,128);
   // agent：仅 compose 内网（不发布端口）、模型凭证与 runner token 经 secret 文件
   assert.equal(services.agent.ports??null,null,'agent 不得发布端口（仅 compose 内网，§3.1）');
   assert.equal(services.agent.container_name,'along-agent');
@@ -120,6 +140,11 @@ test('compose 按 §3.1 编排：443→4176、agent 仅内网、bind 卷与 secr
   assert.equal(services.agent.read_only,true);
   assert.deepEqual(services.agent.tmpfs,['/tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777']);
   assert.deepEqual(services.agent.security_opt,['no-new-privileges:true']);
+  assert.deepEqual(services.agent.cap_drop,['ALL'],'agent cap_drop ALL');
+  assert.deepEqual(services.agent.cap_add,['SETUID','SETGID'],'cap_add 仅为 runner 整进程降权保留（M2，SD-H5）');
+  assert.equal(services.agent.mem_limit,'2g');
+  assert.equal(services.agent.cpus,'1.5');
+  assert.equal(services.agent.pids_limit,192);
   const agentEnv=services.agent.environment;
   assert.equal(agentEnv.ALONG_RUNNER_TOKEN_FILE,'/run/secrets/runner-token');
   assert.equal(agentEnv.ALONG_MODEL_API_KEY_FILE,'/run/secrets/model-credentials');
@@ -180,8 +205,8 @@ test('compose 按 §3.1 编排：443→4176、agent 仅内网、bind 卷与 secr
 
 // ---- Dockerfile.host：基础镜像、openssl、host→web 完整 import 闭包（§4-M5） ---------------------
 
-test('Dockerfile.host：node:22-slim+openssl，COPY 的 web 文件与当次实测的 host→web import 闭包完全一致',()=>{
-  assert.match(dockerHost,/FROM node:22-bookworm-slim/,'node:22 系（package.json engines >=22.19）');
+test('Dockerfile.host：node:22-slim+openssl（digest pin），COPY 的 web 文件与当次实测的 host→web import 闭包完全一致',()=>{
+  assert.match(dockerHost,/FROM node:22-bookworm-slim@sha256:[0-9a-f]{64}$/m,'node:22 系按 digest pin（G-8，浮动 tag 禁止）');
   assert.match(dockerHost,/apt-get install[^\n]*openssl/,'slim 无 openssl，而 host 启动即 execFileSync openssl 生成证书（host/agent-host.mjs:46）');
   assert.match(dockerHost,/COPY package\.json package-lock\.json \.\/\nRUN npm ci --omit=dev --ignore-scripts/,'按锁文件安装 Host 运行依赖');
   assert.ok(dockerHost.split('\n').some(line=>line==='COPY host/ host/'),'放行的 Host 模块与 schema 保留相对路径');
@@ -206,9 +231,15 @@ test('Dockerfile.host：node:22-slim+openssl，COPY 的 web 文件与当次实�
 
 // ---- Dockerfile.agent：node:24、dsh pin、runner 闭包、along bundle 不含 lib（§3.5/§4-M5） -------
 
-test('Dockerfile.agent：node:24-slim + dsh@0.2.2-rc.5 pin，runner 与其 web 闭包齐备，bundle 不 COPY lib/',()=>{
-  assert.match(dockerAgent,/FROM node:24-bookworm-slim/,'@deepseek-ai/dsh@0.2.2-rc.5 的 engines 是 node>=24.9.0（§2.1）');
-  assert.match(dockerAgent,/npm install -g[^\n]*@deepseek-ai\/dsh@0\.2\.2-rc\.5/,'dsh 版本写死 pin（§3.5 Tier 1）');
+test('Dockerfile.agent：node:24-slim（digest pin），dsh 经锁文件安装 + ln -s 提供，runner 与其 web 闭包齐备，bundle 不 COPY lib/',()=>{
+  assert.match(dockerAgent,/FROM node:24-bookworm-slim@sha256:[0-9a-f]{64}$/m,'@deepseek-ai/dsh@0.2.2-rc.5 的 engines 是 node>=24.9.0（§2.1）；digest pin（G-8）');
+  assert.ok(!dockerAgent.includes('npm install -g'),'不得用 npm install -g（传递依赖无锁、postinstall 以 root 执行，G-8）');
+  assert.ok(dockerAgent.split('\n').some(line=>line.startsWith('COPY deploy/agent-dsh/package.json deploy/agent-dsh/package-lock.json deploy/agent-dsh/')),
+    'dsh 两个清单文件进镜像（构建上下文由 .dockerignore 白名单放行）');
+  assert.match(dockerAgent,/RUN npm ci --prefix deploy\/agent-dsh --omit=dev --ignore-scripts --no-fund --no-audit/,
+    'dsh 按锁文件安装且禁脚本（该版本 scripts:{} 已核实不受影响，G-8）');
+  assert.match(dockerAgent,/ln -s \/app\/deploy\/agent-dsh\/node_modules\/.bin\/dsh \/usr\/local\/bin\/dsh/,
+    'runner spawn \'dsh\' 走 PATH，符号链接提供');
   assert.ok(dockerAgent.split('\n').some(line=>line.startsWith('COPY deploy/agent-runner.mjs deploy/')),
     'runner 本体进镜像');
   assert.match(dockerAgent,/CMD \["node", "deploy\/agent-runner\.mjs"\]/,'容器入口 = runner');
@@ -225,9 +256,31 @@ test('Dockerfile.agent：node:24-slim + dsh@0.2.2-rc.5 pin，runner 与其 web �
     ...dirs.map(dir=>[dir,BUNDLE_ROOT+dir]),
     [...files,BUNDLE_ROOT],
   ]);
-  // compose 记录用版本与 pin 一致（前面已断言值，这里再锁「两处同源」的文案约束）
-  assert.equal(composeDoc.services.agent.environment.ALONG_DSH_VERSION,/dsh@([\w.\-]+)\b/.exec(dockerAgent)?.[1],
-    'ALONG_DSH_VERSION 必须等于 Dockerfile 里的 dsh pin');
+  // compose 记录用版本与 deploy/agent-dsh/package.json 的 pin 一致（dsh 版本唯一源头 = 清单文件，M3-(3)）
+  assert.equal(composeDoc.services.agent.environment.ALONG_DSH_VERSION,dshManifest.dependencies['@deepseek-ai/dsh'],
+    'ALONG_DSH_VERSION 必须等于 deploy/agent-dsh/package.json 的 dsh pin');
+});
+
+// ---- deploy/agent-dsh 锁文件：dsh pin 与传递依赖全部锁定（G-8，§3.3-(3) 验收 4） --------------
+
+test('deploy/agent-dsh 锁文件存在，锁定 @deepseek-ai/dsh@0.2.2-rc.5 且 packages 含传递依赖条目',()=>{
+  assert.equal(dshManifest.dependencies['@deepseek-ai/dsh'],'0.2.2-rc.5','清单 pin（与 compose ALONG_DSH_VERSION 一致，前测已断言）');
+  assert.equal(dshManifest.private,true,'private 标记（不该被误发布）');
+  const lock=JSON.parse(readFileSync(join(DEPLOY_DIR,'agent-dsh','package-lock.json'),'utf8'));
+  assert.equal(lock.lockfileVersion,3,'npm ci（node:24 镜像 npm 10）可消费的锁文件格式');
+  const dshEntry=lock.packages['node_modules/@deepseek-ai/dsh'];
+  assert.ok(dshEntry,'lock.packages 含 @deepseek-ai/dsh 条目');
+  assert.equal(dshEntry.version,'0.2.2-rc.5','dsh 版本被锁文件固定');
+  assert.match(dshEntry.resolved??'',/^https:\/\/registry\.npmjs\.org\//,'integrity 来源为官方 registry 的固定 tarball');
+  assert.ok(dshEntry.integrity,'dsh 条目带 integrity 哈希');
+  // 传递依赖条目：dsh 的每个直接依赖都要在 packages 里有锁定条目，且总量远多于 root+dsh 两个
+  const dshDeps=Object.keys(dshEntry.dependencies??{});
+  assert.ok(dshDeps.length>0,'dsh 声明直接依赖');
+  for (const dep of dshDeps) {
+    assert.ok(lock.packages[`node_modules/${dep}`],`dsh 直接依赖被锁文件固定：${dep}`);
+  }
+  assert.ok(Object.keys(lock.packages).length>dshDeps.length+2,
+    `packages 含传递依赖条目（${Object.keys(lock.packages).length} 条 > 直接依赖 ${dshDeps.length}+2）`);
 });
 
 // ---- env.example：非敏感示例值 + 与 compose environment 一一对应（验收 #5） ---------------------
@@ -295,8 +348,16 @@ test('两个 Docker 构建共享根目录白名单，目录中的任意文件不
   const source=readFileSync(join(ROOT,'.dockerignore'),'utf8');
   const lines=source.split('\n').map(line=>line.trim()).filter(line=>line&&!line.startsWith('#'));
   assert.deepEqual(lines,[
-    '*','!package.json','!package-lock.json','!host/*.mjs','!host/schemas/task-reply.schema.json','!web/*.mjs','!deploy/agent-runner.mjs',
+    '*','!package.json','!package-lock.json','!host/*.mjs','!host/schemas/task-reply.schema.json','!web/*.mjs',
+    '!deploy/agent-runner.mjs',
+    '!deploy/agent-dsh/package.json','!deploy/agent-dsh/package-lock.json',
   ]);
+  // 白名单语义不变（G-8，§3.3-(3)）：`*` 打头 + 只放行具体路径——非 glob 的放行项必须真实存在，
+  // 任何不含通配的「新文件」都不会命中任何放行行。
+  assert.equal(lines[0],'*','默认拒绝一切，白名单只增不改');
+  for (const line of lines.filter(item=>item.startsWith('!')&&!item.includes('*'))) {
+    assert.ok(existsSync(join(ROOT,line.slice(1))),`白名单放行项必须真实存在的具体文件（防目录级整包放行）：${line}`);
+  }
 });
 
 // ---- docker compose config（验收 #5 第 1 条；门控：本机有可用 compose CLI 才跑） --------------

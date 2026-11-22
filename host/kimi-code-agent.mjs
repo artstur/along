@@ -1,6 +1,6 @@
 import {homedir} from 'node:os';
 import {dirname, join, resolve} from 'node:path';
-import {existsSync, mkdirSync, readFileSync, renameSync, writeFileSync} from 'node:fs';
+import {existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync} from 'node:fs';
 import {validateGoalReply, normalizeGoalReply, GOAL_OUTPUT_INSTRUCTIONS} from '../web/goal-agent-core.mjs';
 import {safeAdaptiveLayout, normalizeAdaptiveLayout} from '../web/adaptive-ui.mjs';
 import {KIMI_RUNTIME, AGENT_RUN_TIMEOUT_MS} from '../web/super-agent.mjs';
@@ -181,6 +181,8 @@ export class KimiCodeAgent {
   authToken() {
     if (this.token) return this.token;
     if (!existsSync(this.tokenPath)) throw Error('未找到 Kimi Code Web Server token；请先在 Mac 启动 `kimi web`');
+    // 权限过宽直接显式报错（对齐 host/apns.mjs 口径）：Mac 上这是功能性凭证，静默不可用比报错更难排查。
+    if (statSync(this.tokenPath).mode&0o077) throw Error('Kimi token 文件权限过宽（须 0600）');
     return readFileSync(this.tokenPath,'utf8').trim();
   }
   async call(path,{method='GET',value}={}) {

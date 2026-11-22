@@ -21,9 +21,19 @@ function writeStored(key, value) {
 
 export async function agentCall(config, path, body) {
   if (!window.AlongAgentBridge?.request) throw Error('请在 iPhone 的 Along App 中连接 Along');
-  if (!config?.baseURL || !config?.fingerprint) throw Error('请先完成 Along 连接设置');
+  if (!config?.baseURL) throw Error('请先完成 Along 连接设置');
   if (path !== '/pair' && !config.token) throw Error('请先连接 Along');
-  return window.AlongAgentBridge.request({baseURL:config.baseURL,fingerprint:config.fingerprint,path,token:config.token ?? '',body});
+  // 叶指纹只在旧 pin 形态（Mac 私网）需要；云端系统信任形态由原生判定策略，不靠网页上报指纹。
+  // bindingScopeId 是稳定的归属标识，不是凭证，也不发给模型。
+  const payload = {
+    baseURL: config.baseURL,
+    path,
+    token: config.token ?? '',
+    body,
+  };
+  if (config.fingerprint) payload.fingerprint = config.fingerprint;
+  if (config.bindingScopeId) payload.bindingScopeId = config.bindingScopeId;
+  return window.AlongAgentBridge.request(payload);
 }
 
 // ---- 事件待同步队列（BC-08-01/02 的客户端断言）----------------------------------------------------------
@@ -115,6 +125,8 @@ export async function loadNativeConnection() {
 }
 
 export async function saveNativeConnection(config) {
-  if (!window.AlongAgentBridge?.connection) return;
-  await window.AlongAgentBridge.connection('save', config);
+  if (!window.AlongAgentBridge?.connection) return null;
+  // 原生会补上 trustPolicy 与 bindingScopeId（docs/iphone-ca-profile-design.md §2.2），
+  // 网页必须用原生确认过的值，而不是自己猜出来的。
+  return window.AlongAgentBridge.connection('save', config);
 }
