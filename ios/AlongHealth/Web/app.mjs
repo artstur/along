@@ -82,17 +82,27 @@ function bindingKeyOf(config) {
 function sameBindingIdentity(previous,config) {
   if (!previous?.token||!config?.token) return false;
   if (previous.token!==config.token) return false;
-  return originOf(previous.baseURL)===originOf(config.baseURL);
+  const previousOrigin=originOf(previous.baseURL);
+  const configOrigin=originOf(config.baseURL);
+  // 两边都解析不出 origin 时不能判成同一绑定：那会把两个不同的 host 当成同一台设备，
+  // 既不撤销委托也不隔离工作区。解析不出来一律按「不是同一绑定」处理。
+  if (!previousOrigin||!configOrigin) return false;
+  return previousOrigin===configOrigin;
 }
 // 规范化 origin（scheme/host/有效端口），与原生 bindingScopeId 的派生口径一致。
+//
+// 非 https 的地址不能折叠成同一个空串：那会让 http://a.example.com 与
+// http://b.example.com 被判成「同一绑定」，从而既不撤销委托也不隔离工作区。
+// 解析不了就返回 null，并让 sameBindingIdentity 判为「不是同一绑定」——
+// 宁可误判成换端（安全侧），也不能误判成同一绑定。
 function originOf(baseURL) {
-  if (typeof baseURL!=='string'||!baseURL.trim()) return '';
+  if (typeof baseURL!=='string'||!baseURL.trim()) return null;
   try {
     const url=new URL(baseURL);
-    if (url.protocol!=='https:') return '';
+    if (url.protocol!=='https:') return null;
     const port=url.port||'443';
     return `${url.protocol}//${url.hostname.toLowerCase()}:${port}`;
-  } catch { return ''; }
+  } catch { return null; }
 }
 function eventConnection(config=agentConfig) {
   const saved=readStored(EVENT_CONNECTION_KEY,null);

@@ -366,7 +366,16 @@ secrets:
    恢复或手工搬运 secret 文件后统一 `chmod 600`（相邻仓库备份脚本只有备份链路、恢复未实现，手工 `cp`/`mv` 可能改变权限位；权限过宽会被 0600 校验拒绝启动）。
 4. **写用户表**：按 §6.2 读取 Mac 用户 A 的现役 `user_id`，在 `/opt/along/data/host/users.json` 写入 `[{"userId":"<Mac 的 user_id>","label":"A"},{"userId":"u_<新8hex>","label":"B"}]` 并 `chmod 600`。写入其他路径会导致云端 Host 拒绝启动。
 5. **构建与启动**：`docker compose -f deploy/docker-compose.yml build`（构建口径统一由 compose 的 `build` 段承载：context `..` 以 deploy/ 为基准解析到仓库根，agent 经 `additional_contexts: {along: ../../along-superagent}` 预置 bundle（相对路径以 project directory 为基准，与手工 --build-context 从 cwd 解析不同）——手工等价命令（cwd=仓库根 `/opt/along/along`）`docker build --build-context along=../along-superagent -f deploy/Dockerfile.agent . -t along-agent:local`，位置参数必须是 `.`（仓库根），写 `..` 会以 `/opt/along` 为 context 导致 COPY 找不到 host/ 且把相邻仓库与 secrets/ 整包送进 context）；`docker compose -f deploy/docker-compose.yml up -d`（若不部署远程通知，先按 §3.1 注释删除 apns-key 三处引用再 up，否则 file secret 缺失直接报错）；冒烟：`docker logs along-host` 看到 `Along 服务: https://0.0.0.0:4176` + 证书指纹 + 证书到期时间（M4 起横幅打印到期，`host/agent-host.mjs:538`；`ALONG_AGENT_HOST=0.0.0.0` 必须生效：容器内没有 en0，缺 env 会回退绑 127.0.0.1、443 映射打不通，`host/agent-host.mjs:68`；多用户形态下横幅**不打印**配对码，发码走第 7 步），`docker exec along-host sh -c 'ls /data/users.json'` 可见（挂错卷会阻止 Host 启动，§3.1），`docker exec along-agent node -e "fetch('http://127.0.0.1:3088/health').then(r=>r.json()).then(console.log)"` 返回 ready；按 [部署冒烟](../deploy/README.md#冒烟验收-5runbook-64-第-5-步) 通过已认证的 runner 完成一次真实模型调用。
-6. **DNS、证书与手机根信任**：域名**只配 A 记录**指向 ECS 公网 IPv4，**不配 AAAA**——IPv6 客户端经 docker-proxy 会让源 IP 退化为网关地址，`/pair` 按来源失败分桶与单 IP 连接上限都会失效（指无法达到逐外部来源隔离的目标；当前编排的源 IP 前提仍须实测，`docs/cloud-security-hardening.md` §3.1-(3)，不以 DNS 代替网络检查）。先按 CA 方案 §4 带外核验 profile 及根摘要，两手机分别安装并开启完全信任；服务端按 §3 预置证书版本。用带 CAfile、SNI 和 verify_hostname 的 TLS 探针检查实际链与 SAN；不能只核对 CN 或沿用关闭 TLS 验证的探活结论。
+6. **DNS、证书与手机根信任**：域名**只配 A 记录**指向 ECS 公网 IPv4，**不配 AAAA**——IPv6 客户端经 docker-proxy 会让源 IP 退化为网关地址，`/pair` 按来源失败分桶与单 IP 连接上限都会失效（指无法达到逐外部来源隔离的目标；当前编排的源 IP 前提仍须实测，`docs/cloud-security-hardening.md` §3.1-(3)，不以 DNS 代替网络检查）。先按 CA 方案 §4 带外核验 profile 及根摘要，两手机分别安装并开启完全信任；服务端按 §3 预置证书版本。用带 CAfile、SNI 和 verify_hostname 的 TLS 探针检查实际链与 SAN；不能只核对 CN 或沿用关闭 TLS 验证的探活结论。**预置证书版本这一步必须做，否则 Host 直接拒启**（`host/tls-material.mjs` 缺证即抛错，不回退自签）：把签发好的叶材料放进 `/opt/along/data/host/tls/releases/<serial>/`（`fullchain.pem`、`key.pem`、公开 `root.crt`），再把 `tls/current` 原子切到该版本。注意宿主机上的属主必须与容器内 Host 进程的 uid 一致——compose 的 host 服务按 SD-H5 不加非 root `USER`，进程 uid 为 0，所以宿主机放置材料时要 `chown root:root`（若管理员以其他账号放置，Host 会因「所有者不是 Host 用户」拒启），私钥 0600、目录 0700：
+
+   ```sh
+   install -d -m 700 -o root -g root /opt/along/data/host/tls/releases/<serial>
+   install -m 644 -o root -g root /opt/along/data/host/tls/releases/<serial>/fullchain.pem
+   install -m 644 -o root -g root /opt/along/data/host/tls/releases/<serial>/root.crt
+   install -m 600 -o root -g root /opt/along/data/host/tls/releases/<serial>/key.pem
+   ln -sfn /opt/along/data/host/tls/releases/<serial> /opt/along/data/host/tls/current
+   ```
+
 7. **发码配对**：TLS 及新 App 就绪后，同端原 token 有效则先迁移验证；确需新配对时才对该用户 `docker exec along-host node host/pair-code.mjs u_xxx`，私下交付「`https://<域名>` + 8 位一次性码」（15 分钟）。根摘要在安装阶段核验，不作为 App 叶指纹输入。
 8. **切换前旧端收尾**：在 iPhone 上连旧 Mac 服务打开 App，等健康/事件同步清空待发队列，旧 Mac 服务可停可不停。
 9. **iPhone 迁移/配对**：两台新版本 App 按 CA 方案 §5 切换；云端 DNS 不填写叶指纹。只有真正换端或原 token 失效才重新配对，Keychain 保存成功后启用。分别确认前后台连接、聊天修改目标自动生效及用户隔离；真正换端按原规则重新授权，同根同端换叶不误撤授权。**向两位用户说明 OKX 采集口径**：云端使用期间 iPhone 的 OKX 连接保持「仅账户摘要」，勿开启成交/账单明细采集——多用户形态 gateway 拒收明细，且明细与摘要在同一次原子发布里，开启后发布会持续失败、连接无法就绪；需明细复盘时在 Mac 本地模式操作（`docs/cloud-security-hardening.md` §3.5）。

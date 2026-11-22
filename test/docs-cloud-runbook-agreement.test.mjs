@@ -257,6 +257,19 @@ test('deploy/README.md 凭证红线段安全写入形态与 agent-dsh 锁文件�
   assert.ok(deployReadme.includes('npm install --package-lock-only --ignore-scripts'),'deploy/README.md 缺 agent-dsh lock 再生成说明');
 });
 
+test('Runbook §6.4 第 6 步含预置证书版本与属主权限（缺这一步 Host 必然拒启）',()=>{
+  // 复核报告实测：整条 Runbook 没有「把预签发叶证书装进 tls/releases/<serial>/」这一步，
+  // 也没写属主。Host 的 uid 属主检查是硬门槛——管理员若以非 root 账号放置材料，
+  // Host 会因「所有者不是 Host 用户」直接拒启，首次上线必踩。
+  for (const frag of ['tls/releases/<serial>/','fullchain.pem','key.pem','root.crt','tls/current','chown','0600','0700']) {
+    assert.ok(runbook.includes(frag),`§6.4 第 6 步缺预置证书材料片段 ${frag}`);
+  }
+  assert.ok(runbook.includes('install -m 600'),'§6.4 第 6 步缺私钥 0600 的安装命令');
+  assert.ok(runbook.includes('install -d -m 700'),'§6.4 第 6 步缺版本目录 0700 的安装命令');
+  assert.ok(runbook.includes('ln -sfn'),'§6.4 第 6 步缺 tls/current 的原子切换命令');
+  assert.ok(runbook.includes('所有者不是 Host 用户'),'§6.4 第 6 步缺属主不一致会拒启的说明');
+});
+
 test('along-superagent 决策记录：D1 保留本地约束，D19 明确云端接入边界', {skip:!existsSync(decisionsFile)},()=>{
   const decisions=readFileSync(decisionsFile,'utf8');
   const d1=section(decisions,'## D1 ','## D2 ');

@@ -226,7 +226,109 @@ test('描述文件：PayloadContent 里多塞一个 payload 槽位也被拒绝',
   // 复制一份同类型的根 payload：PayloadType 白名单放行，但 payload 槽位必须只有一个。
   const rootPayload=profile.xml.match(/<dict>\s*<key>PayloadCertificateFileName<\/key>[\s\S]*?<\/dict>/)[0];
   const tampered=profile.xml.replace('</array>','  '+rootPayload+'\n  </array>');
-  assert.throws(()=>verifyRootProfile({profileXml:tampered,rootDer}),/必须且只能含一个根证书 payload/);
+  assert.throws(()=>verifyRootProfile({profileXml:tampered,rootDer}),/必须只含一个 payload/);
+});
+
+test('描述文件：多塞一个没有 PayloadType 的 payload 元素也被拒绝',t=>{
+  // 复核报告实测：原实现数的是「PayloadType 键出现次数」，不是 PayloadContent 数组的
+  // 元素个数——塞一个没有 PayloadType 键的 dict，键数仍是 1、数组却有 2 个元素，
+  // 旧实现会放行，而设计文档 §4.1 的独立 plistlib 脚本会拒绝同一个文件。
+  // 现在按真正的 plist 结构解析，元素个数与 §4.1 口径一致。
+  const f=fixture(t);
+  const rootDer=rootDerFromPem(readFileSync(join(f.ca.root,'ca.crt'),'utf8'));
+  const profile=buildRootProfile({rootDer,environment:'test',rootId:'abc123'});
+  const tampered=profile.xml.replace('</array>',
+    '  <dict><key>PayloadDescription</key><string>无类型的夹带元素</string></dict>\n  </array>');
+  assert.throws(()=>verifyRootProfile({profileXml:tampered,rootDer}),
+    /必须只含一个 payload|缺少 PayloadType/,
+    '没有 PayloadType 的额外数组元素也必须被拒绝');
+});
+
+test('描述文件：与设计文档 §4.1 的独立 plistlib 脚本口径一致',t=>{
+  // §4.1 给管理员的独立核验脚本用 plistlib 数元素并比对内嵌根。
+  // 本工具的判定必须与它对同一文件给出同一个结论，否则会给管理员「结构合规」的假结论。
+  const f=fixture(t);
+  const rootDer=rootDerFromPem(readFileSync(join(f.ca.root,'ca.crt'),'utf8'));
+  const profile=buildRootProfile({rootDer,environment:'test',rootId:'abc123'});
+  const file=join(f.base,'Along.mobileconfig');
+  writeFileSync(file,profile.xml);
+  const script=[
+    'import hashlib, plistlib, sys',
+    'from pathlib import Path',
+    'raw = Path(sys.argv[1]).read_bytes()',
+    'profile = plistlib.loads(raw)',
+    "assert profile['PayloadType'] == 'Configuration'",
+    "payloads = profile['PayloadContent']",
+    'assert len(payloads) == 1',
+    "assert payloads[0]['PayloadType'] == 'com.apple.security.root'",
+    "der = payloads[0]['PayloadContent']",
+    "assert isinstance(der, bytes) and der == Path(sys.argv[2]).read_bytes()",
+    "print('ok')",
+  ].join('\n');
+  const scriptFile=join(f.base,'verify.py');
+  writeFileSync(scriptFile,script);
+  const derFile=join(f.base,'root.der');
+  writeFileSync(derFile,rootDer);
+  const result=execFileSync('python3',[scriptFile,file,derFile],{encoding:'utf8'});
+  assert.match(result,/ok/,'§4.1 的独立脚本应当接受我们生成的描述文件');
+  // 同一份文件，本工具也必须接受——两个口径不能打架。
+  assert.doesNotThrow(()=>verifyRootProfile({profileXml:profile.xml,rootDer}));
+});
+
+test('描述文件：不可移除限制、错误版本与缺标识都被拒绝',t=>{
+  // 复核报告实测：原实现只覆盖 payload 类型与数量，§3.2 表格里的其余约束一个都不查。
+  // 逐项补齐：允许用户移除（否则 §4.3 的卸载流程失效）、版本必须是 1、UUID 与标识齐全。
+  const f=fixture(t);
+  const rootDer=rootDerFromPem(readFileSync(join(f.ca.root,'ca.crt'),'utf8'));
+  const profile=buildRootProfile({rootDer,environment:'test',rootId:'abc123'});
+  const cases=[
+    ['<key>PayloadRemovalDisallowed</key>\n  <false/>','<key>PayloadRemovalDisallowed</key>\n  <true/>',/不允许设置 PayloadRemovalDisallowed/],
+    ['<key>PayloadVersion</key>\n  <integer>1</integer>','<key>PayloadVersion</key>\n  <integer>2</integer>',/PayloadVersion 必须是 1/],
+  ];
+  for(const [from,to,pattern] of cases) {
+    assert.ok(profile.xml.includes(from),'夹具前提不成立：'+from);
+    const tampered=profile.xml.replace(from,to);
+    assert.throws(()=>verifyRootProfile({profileXml:tampered,rootDer}),pattern);
+  }
+  // 删掉 PayloadUUID 与 PayloadIdentifier 都要被拒。
+  assert.throws(()=>verifyRootProfile({
+    profileXml:profile.xml.replace(/\s*<key>PayloadUUID<\/key>\s*<string>[^<]*<\/string>/,''),rootDer}),/缺少 PayloadUUID/);
+  assert.throws(()=>verifyRootProfile({
+    profileXml:profile.xml.replace(/\s*<key>PayloadIdentifier<\/key>\s*<string>[^<]*<\/string>/,''),rootDer}),/缺少 PayloadIdentifier/);
+  // root payload 的 .cer 文件名约定。
+  assert.throws(()=>verifyRootProfile({
+    profileXml:profile.xml.replace('Along-test-abc123.cer','Along-test-abc123.pem'),rootDer}),/\.cer 文件/);
+});
+
+test('云端 TLS：根私钥放在兄弟版本目录里也被拒绝',t=>{
+  // 复核报告实测：旧实现只扫 tls/current 指向的那一个版本目录，
+  // 根私钥放在 tls/releases/ 下的兄弟版本目录里能通过——那同样是这台服务器上的材料。
+  const f=fixture(t);
+  stageRelease(f.stateDir,f.ca);
+  const sibling=join(f.stateDir,'tls','releases','old-version');
+  mkdirSync(sibling,{recursive:true,mode:0o700});
+  writeFileSync(join(sibling,'key.pem'),readFileSync(join(f.ca.root,'ca.key')));
+  chmodSync(join(sibling,'key.pem'),0o600);
+  chmodSync(sibling,0o700);
+  assert.throws(()=>loadCloudTlsMaterial({stateDir:f.stateDir,host:'along.test.local'}),
+    /根私钥/,'兄弟版本目录里的根私钥必须被拒绝');
+});
+
+test('云端 TLS：根私钥以符号链接放在版本目录里也被拒绝',t=>{
+  // 复核报告实测：旧实现跳过符号链接，所以以链接形式放进版本目录的根私钥能通过。
+  const f=fixture(t);
+  const version=stageRelease(f.stateDir,f.ca);
+  symlinkSync(join(f.ca.root,'ca.key'),join(version,'zzz-link.pem'));
+  assert.throws(()=>loadCloudTlsMaterial({stateDir:f.stateDir,host:'along.test.local'}),
+    /根私钥/,'以符号链接形式存在的根私钥必须被拒绝');
+});
+
+test('云端 TLS：叶私钥与合法材料不会被误判成根私钥',t=>{
+  // 内容级判定必须只拦根私钥：正常的叶私钥仍能加载。
+  const f=fixture(t);
+  stageRelease(f.stateDir,f.ca);
+  const material=loadCloudTlsMaterial({stateDir:f.stateDir,host:'along.test.local'});
+  assert.ok(material.fingerprint,'合法的叶私钥不应被误判');
 });
 
 test('描述文件：可以移除，不设置不可移除限制',t=>{

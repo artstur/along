@@ -101,6 +101,27 @@ test('a token change on the same host is a real endpoint change and still revoke
   assert.ok(sharing.dailyRevokedIds?.includes(grant.id));
 });
 
+test('two different hosts over plain http are not treated as the same binding',async()=>{
+  // 复核报告实测：originOf 对任何非 https 的地址一律返回空串，
+  // 于是两个不同的 http host 都被折叠成同一个空 origin，被判成「同一绑定」——
+  // 既不撤销每日委托，也不隔离事件工作区。解析不出 origin 时必须按「不是同一绑定」处理。
+  // 前提：旧记录与新配置都是非 https，两边才会折叠成同一个值。
+  const httpOld={baseURL:'http://a.example.com',fingerprint:'A'.repeat(64),token:'b'.repeat(64)};
+  const app=await browser({
+    storage:{
+      ...legacyStorage(),
+      [AGENT_KEY]:JSON.stringify(httpOld),
+      'along.event-connection.v1':JSON.stringify({userId:'u_a',bindingScopeId:'scope-old'}),
+    },
+    connection:async()=>({baseURL:'http://b.example.com',fingerprint:'A'.repeat(64),token:'b'.repeat(64)}),
+  });
+  await settle();
+  const sharing=app.read(SHARE_KEY);
+  assert.equal(sharing.dailyDelegation,undefined,'不同 host 之间不得保留委托');
+  assert.ok(sharing.dailyRevokedIds?.includes(grant.id),'不同 host 视为换端，委托被撤销');
+  assert.equal(app.read('along.event-connection.v1'),null,'不同 host 断开事件工作区绑定');
+});
+
 test('a delegation the user explicitly withdrew is never restored by the upgrade',async()=>{
   const app=await browser({
     // 用户主动撤销：授权已从 sharing 里删掉，并留在撤销名单里。

@@ -82,6 +82,10 @@ function parseChain(pem) {
 // 判定按内容而不是按文件名（复核报告实测：改名或放子目录就能绕过按名字的黑名单）：
 // 递归扫描版本目录里的每一个 PEM 私钥，只要它的公钥与公开根的公钥相同，
 // 就说明根私钥被搬到了服务器上——无论它叫什么名字、放在哪一层。
+//
+// 扫描范围是整个 tls/releases/ 目录树（不只是 tls/current 指向的那一个版本）：
+// 复核报告实测——根私钥放在兄弟版本目录里能通过，因为旧实现只扫当前版本。
+// 符号链接也要跟进：版本目录里的符号链接同样算「在这个目录里」。
 function assertNoRootKey(dir,root) {
   const rootPublicKey=root.publicKey.export({type:'spki',format:'der'});
   const suspicious=[];
@@ -103,13 +107,29 @@ function assertNoRootKey(dir,root) {
   if(suspicious.length) throw Error('证书版本目录里不应出现根私钥文件');
 }
 
-// 递归列出目录下的普通文件（不跟随符号链接）。
-function walkFiles(dir) {
+// 递归列出目录下的文件。
+//
+// 符号链接：跟随它指向的文件（复核报告实测——根私钥以符号链接放在版本目录内能通过，
+// 因为旧实现直接跳过符号链接）。链接本身不重复计入，避免同一文件被算两次；
+// 指向目录的链接按目录递归，指向文件的链接按文件读。
+function walkFiles(dir,seen=new Set()) {
   const files=[];
   for(const entry of readdirSync(dir,{withFileTypes:true})) {
     const full=join(dir,entry.name);
-    if(entry.isSymbolicLink()) continue;
-    if(entry.isDirectory()) files.push(...walkFiles(full));
+    if(entry.isSymbolicLink()) {
+      let target;
+      try { target=realpathSync(full); }
+      catch { continue; } // 断链：读不到，不参与判定。
+      if(seen.has(target)) continue;
+      seen.add(target);
+      let stats;
+      try { stats=statSync(target); }
+      catch { continue; }
+      if(stats.isDirectory()) files.push(...walkFiles(target,seen));
+      else if(stats.isFile()) files.push(full);
+      continue;
+    }
+    if(entry.isDirectory()) files.push(...walkFiles(full,seen));
     else if(entry.isFile()) files.push(full);
   }
   return files;
@@ -135,6 +155,8 @@ export function loadCloudTlsMaterial({stateDir,host,now=new Date()}) {
   const releases=realpathSync(join(tlsRoot,'releases'));
   if(!target.startsWith(releases+sep)) throw Error('云端 TLS 的 tls/current 指向版本目录之外');
   const serial=basename(target);
+  // 根私钥检查覆盖整个 releases/ 树：兄弟版本目录里的材料同样是这台服务器上的材料。
+  const releasesDir=join(tlsRoot,'releases');
   if(!/^[A-Za-z0-9._-]{1,64}$/.test(serial)) throw Error('云端 TLS 版本目录名不合法');
   const keyFile=join(target,'key.pem');
   const certFile=join(target,'fullchain.pem');
@@ -142,7 +164,7 @@ export function loadCloudTlsMaterial({stateDir,host,now=new Date()}) {
   for(const file of [keyFile,certFile,rootFile]) if(!existsSync(file)) throw Error(`云端 TLS 缺少文件 ${basename(file)}`);
   // 根私钥检查需要公开根（按公钥比对，不靠文件名猜测）。
   const root=new X509Certificate(readFileSync(rootFile));
-  assertNoRootKey(target,root);
+  assertNoRootKey(releasesDir,root);
   const permissionProblems=checkPermissions(target,keyFile,certFile,process.getuid?.());
   if(permissionProblems.length) throw Error(`云端 TLS 材料不合规：${permissionProblems.join('、')}`);
 
