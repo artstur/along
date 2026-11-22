@@ -135,6 +135,10 @@ function writeOverlay() {
     '  superagent:',
     `    container_name: ${CONTAINER_PREFIX}-superagent`,
     `    image: ${IMAGE_TAG}-superagent`,
+    // 模型密钥：长驻服务要真跑模型回合就得拿得到它（审查 P1-4）。
+    // 本用例不跑真实模型回合，所以放一份**合成的**占位 key——
+    // 验的是「凭证能到位、启动脚本能读出并注入」，不是模型本身。
+    '    secrets: !override [bridge-token, model-credentials]',
     '    volumes: !override ["'+SUPER_STATE+':/var/lib/along-superagent","'+DSH_HOME+':/var/lib/dsh"]',
     '    build:',
     '      additional_contexts:',
@@ -149,6 +153,8 @@ function writeOverlay() {
     '    file: '+join(SECRETS,'bridge-token'),
     '  runner-token:',
     '    file: '+join(SECRETS,'runner-token'),
+    '  model-credentials:',
+    '    file: '+join(SECRETS,'model-credentials'),
     '',
   ].join('\n'));
 }
@@ -191,6 +197,8 @@ test('Tier 2 隔离 Linux Compose：TLS 入口、双用户事件同步、后台�
   writeFileSync(join(SECRETS,'bridge-token'),randomBytes(32).toString('hex'),{mode:0o600});
   // Tier 1 runner 的内网令牌：Host 启动守卫要求它（配置了云端 Runner URL 就必须有）。
   writeFileSync(join(SECRETS,'runner-token'),randomBytes(32).toString('hex'),{mode:0o600});
+  // 合成的模型密钥占位（0600 单行）：验凭证到位与注入，不验真实模型回合。
+  writeFileSync(join(SECRETS,'model-credentials'),'sk-synthetic-placeholder-key',{mode:0o600});
 
   writeOverlay();
 
