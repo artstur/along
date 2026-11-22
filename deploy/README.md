@@ -12,6 +12,7 @@
 | `docker-compose.yml` | 编排：host 443→4176、agent `agent:3088` 仅 compose 内网（不发布端口）、bind 卷 `../../data/host:/data`、compose secrets（runner-token 两服务共用） |
 | `superagent-start.sh` | Tier 2 启动脚本：铺 profile、把 bundle 链进 `profile/node_modules`、绑 `127.0.0.1:3082`、播种设置，然后 exec 常驻 dsh |
 | `superagent-seed.mjs` | Tier 2 设置播种：第一次 boot 之前把「Along Source 开、GitHub Source 关」写进编排库（`assembleAlong` 读的是已存好的设置）；已有设置时不覆盖 |
+| `superagent-preset-lockdown.mjs` | Tier 2 读取面收紧：推导出去掉文件/shell/终端/文档/子代理能力后的 preset 覆盖行（读上游自己的 patch 推导，不抄一份）；推导结果为空即拒绝启动 |
 | `env.example` | environment 段非敏感参考值（必改项：`ALONG_TLS_CN` 换真实域名） |
 | `../.dockerignore` | 两个主构建上下文都用仓库根目录的白名单，只放行 npm 清单、Host 模块及任务协议、web 模块和 runner 入口。 |
 | `agent-runner.mjs` | 内网 HTTP runner，使用 Along 专用 DSH profile；模块自检 `node --check deploy/agent-runner.mjs` |
@@ -108,12 +109,51 @@ Along Agent 的业务库（`along.sqlite`）与 DSH 状态**不清**（BC-09-03/
 投递丢失正是发生在那个窗口里，所以判定必须带身份头（`x-along-user`/`x-along-device`），
 缺头 403、缺凭证 401 都按**配置问题**报出，不静默当成「未就绪」。
 
+判定**只探一次**：就绪就是那一次 GET。之后真正的业务调用发生在别的端点上——
+再对同一路径发第二次请求，会让「持续 404 / 未就绪」被第二个请求判成上游故障（502），
+把「再等等」误报成「服务坏了」。`404` 也归入**未就绪**：旧版探针恒答 200，
+容忍 404 等于把「装错版本」说成「已就绪」。
+
+### 上游来源是钉死的提交
+
+两个镜像的构建输入都取
+`${ALONG_SUPERAGENT_SOURCE:-https://github.com/artstur/along-superagent.git#<40 位提交>}`，
+**不指向相邻 checkout 的工作区**：那个 HEAD 是可变的，运维切个分支镜像就跟着变，
+而旧版探针恒答 200，Host 侦测不到装错版本——镜像里若是没有就绪修复的 bundle，
+重启时已到期的待投递行仍会被终结为 `filtered / source_not_installed`。
+本地对着未推送的提交调试时用 `ALONG_SUPERAGENT_SOURCE` 指向相邻 checkout。
+
+### 读取面是收紧的
+
+长驻 DSH 与 Along 业务库在**同一个容器**里，而 DSH 的文件工具能读**任意绝对路径**
+（DSH 的文件沙箱只约束写，读一律放行）。业务库里两位用户的数据在**同一张表**里
+（按 `user_id` 分行），文件路径不分用户——所以 API 上的身份检查约束不了这条读取路径：
+用户 B 的会话能把用户 A 的行读出来。
+
+收紧由 `deploy/superagent-preset-lockdown.mjs` 在 boot 前完成：它**推导**出收紧后的 preset
+（读上游自己的 `cordis.patch.yml` 与 DSH web 模板的 preset，把文件、shell、终端、文档与
+子代理能力从所有 preset 里去掉，再以同 id 覆盖的形式写进 profile 的 patch 层），
+不是抄一份上游 preset——抄的会漂移，漏掉一个 preset 就是一个漏掉的读取面。
+推导结果为空即**拒绝启动**：收紧没生效等于没收紧。
+Along 业务面的读取只走 Host 的 `along_*` 工具（服务端绑定身份、逐行按 `user_id` 过滤）。
+
+### 命名空间锚点
+
+Tier 2 叠加文件里的 `netns` 服务只持有一个网络命名空间，`host` 与 `superagent` 都加入它
+（Super Agent 硬性要求 `webserver.host === '127.0.0.1'`，只能监听回环）。
+锚点与两个服务都无关，所以**只重建 host 时 superagent 不会留在旧命名空间里**
+（旧形态 `network_mode: "service:host"` 会：新 host 访问 `127.0.0.1:3082` 得到 `ECONNREFUSED`）。
+443 的发布也声明在锚点上——加入他人命名空间的容器不能自己发布端口，
+而命名空间是共享的，映射进的是同一个命名空间。
+
 ## 已知边界
 
 - 本节的长驻编排已在隔离 Linux Compose 环境验证（合成双用户 + 隔离测试 CA）；
   真实模型回合、APNs、双 iPhone 与生产拓扑仍待验。
-- `superagent` 服务目前不接模型密钥之外的凭证；模型密钥走 `DEEPSEEK_API_KEY` 环境变量
-  （只进环境，不落盘、不进日志，§3.7）。
+- `superagent` 服务目前不接模型密钥之外的凭证；模型密钥走 **file secret**
+  （`model-credentials`，挂到 `/run/secrets/model-credentials`），由启动脚本读出后注入进程
+  环境——不进 compose 的 `environment`（那会进 `compose config` 的输出与容器元数据）、
+  不进镜像层、不进日志（§3.7）。权限过宽（组/其他可读）即拒绝启动。
 
 ### 怎么复现那次隔离验证
 

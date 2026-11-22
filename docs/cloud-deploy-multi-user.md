@@ -389,6 +389,21 @@ secrets:
 
 Tier 2 与 Tier 1 的差别只在**开关与编排**，不改协议：回退是「新链路停用」，不是「数据回滚」。
 
+**上游来源是钉死的提交**。两个镜像（`agent` 与 `superagent`）的构建输入都取
+`${ALONG_SUPERAGENT_SOURCE:-https://github.com/artstur/along-superagent.git#<40 位提交>}`：
+相邻 checkout 的 HEAD 是可变的，而旧版探针恒答 `200 {ready:true}`，Host **侦测不到装错版本**——
+镜像里若是没有就绪修复的 bundle，重启时已到期的待投递行仍会被终结为
+`filtered / source_not_installed`。本地对着未推送的提交调试时用 `ALONG_SUPERAGENT_SOURCE`
+指向相邻 checkout（§6.4 第 5 步）。
+
+**读取面是收紧的**。Tier 2 的部署形态下，长驻 DSH 与 Along 业务库同容器，
+而 DSH 的文件工具能读任意绝对路径（文件沙箱只约束写），业务库两位用户的数据在**同一张表**里
+（按 `user_id` 分行），文件路径不分用户——API 上的身份检查约束不了这条读取路径。
+所以启动脚本在 boot 前**推导**出收紧后的 preset（读上游自己的 patch，把文件、shell、
+终端、文档与子代理能力从所有 preset 里去掉，并以同 id 覆盖的形式写进 profile 的 patch 层；
+推导失败即拒绝启动），Along 业务面的读取只走 Host 的 `along_*` 工具
+（服务端绑定身份、逐行按 `user_id` 过滤）。
+
 **开启**（在 §6.4 第 1 步的 `/opt/along` 布局上执行）：
 
 ```sh
@@ -396,13 +411,26 @@ Tier 2 与 Tier 1 的差别只在**开关与编排**，不改协议：回退是�
 install -m 600 /dev/null /opt/along/secrets/bridge-token
 read -rs TOKEN; printf '%s\n' "$TOKEN" > /opt/along/secrets/bridge-token   # 32 字节 hex
 
-# 2. 叠加 Tier 2 形态并启动（superagent 服务挂在 tier2 profile 下）
+# 2. 模型密钥（0600 单行；长驻服务的真实模型回合要它。权限过宽 = 拒绝启动）
+install -m 600 /dev/null /opt/along/secrets/model-credentials
+read -rs MODEL_KEY; printf '%s\n' "$MODEL_KEY" > /opt/along/secrets/model-credentials
+
+# 3. 叠加 Tier 2 形态并启动（superagent 服务挂在 tier2 profile 下）
 docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.tier2.yml --profile tier2 up -d
 
-# 3. 冒烟：宿主上 3082 必须**连不上**（管理面仅本机可达），Host 的 443 必须通
+# 4. 冒烟：宿主上 3082 必须**连不上**（管理面仅本机可达），Host 的 443 必须通
 curl -sS --max-time 3 http://127.0.0.1:3082/ ; echo "退出码应为非 0"
 curl -sk https://127.0.0.1/health
 ```
+
+**命名空间锚点**。Tier 2 叠加文件里有一个 `netns` 容器，它只持有一个网络命名空间：
+`host` 与 `superagent` 都加入它（Super Agent 硬性要求 `webserver.host === '127.0.0.1'`，
+只能监听回环，所以两者必须共享命名空间）。锚点与 host、superagent 都无关——
+所以**只重建 host 时，superagent 不会留在旧命名空间里**，新 host 访问 `127.0.0.1:3082`
+不会得到 `ECONNREFUSED`（旧形态 `network_mode: "service:host"` 会）。
+443 的端口发布也声明在锚点上：加入他人命名空间的容器不能自己发布端口
+（docker 报 `conflicting options: port publishing and the container type network mode`），
+而命名空间是共享的，映射进的是同一个命名空间。
 
 **回退**（Tier 2 → Tier 1）：
 
@@ -411,11 +439,27 @@ curl -sk https://127.0.0.1/health
 docker compose -f deploy/docker-compose.yml up -d --no-deps --force-recreate host
 ```
 
+回退必须**显式停掉长驻服务**——它还挂在 Tier 2 的命名空间锚点上，
+只重建 host 会留下一个还在跑的常驻进程：
+
+```sh
+docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.tier2.yml --profile tier2 stop superagent netns
+```
+
 回退后 `ALONG_EVENT_INGEST=off`：新链路端点 503 属预期，旧 DSH 分支（`/super-agent/goals|tasks`）照旧走 `ALONG_DSH_RUNNER_URL` 指向的 runner 服务（runner 仍在 compose 里，是显式回退目标）。**不要**清掉 `ALONG_DSH_RUNNER_URL`——它是云端形态的判据（`docs/iphone-ca-profile-design.md` §3.1），清掉会让 Host 静默退回现场自签证书（安全降级）。
 
 **数据边界**：回退**不删** `data/superagent`（`along.sqlite` 业务库 + `orchestrator.sqlite` 编排库）与 `data/dsh-home`。重开 Tier 2 时沿用同一份卷，事件游标、待投递行与已投递状态都还在；因此**回退期间不接受新事件**（客户端 503 会把事件留在手机队列里），回退窗口内不产生需要清账的增量。BC-09-03/04 的「回退不清数据」语义原样适用。
 
-**就绪验收**：以 Host 的 `/connection/status` 为准（它走真实就绪契约）。Host 日志里若出现「DSH Along Source 未就绪（503）」，说明长驻服务还在启动窗口——此时**不要**把待投递行当作故障处理：Super Agent 侧已改为「Source 注册前不领取队列」，行会保留重试时间，可用后自动恢复投递（V-1 的原始失败面：Source 注册前领取 → `filtered` / `source_not_installed`）。
+**就绪验收**：以 Host 的 `/connection/status` 为准（它走真实就绪契约，**只探一次**：
+只有 `200 {"service":"along-source","ready":true}` 才算就绪，`404` 也归入未就绪——
+旧版探针恒答 200，容忍 404 等于把「装错版本」说成「已就绪」）。
+Host 日志里若出现「DSH Along Source 未就绪（503）」，说明长驻服务还在启动窗口——
+此时**不要**把待投递行当作故障处理：Super Agent 侧已改为「Source 注册前不领取队列」，
+行会保留重试时间，可用后自动恢复投递（V-1 的原始失败面：Source 注册前领取 →
+`filtered` / `source_not_installed`）。
+
+**证书轮换**要**两个容器一起更新**：Host 与 superagent 共享命名空间，
+只重建其中一个不会更新另一个的证书材料。轮换后核对 `/connection/status`。
 
 ## 7. 方案内决策记录（SD）
 

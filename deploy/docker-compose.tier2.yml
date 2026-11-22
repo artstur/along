@@ -24,7 +24,38 @@
 # 权限必须是 0600：host/along-bridge.mjs 的 readBridgeToken 与 Super Agent 的
 # bridgeTokenOf 都按 0600 校验，权限过宽等同未配置（fail-closed）。
 services:
+  # ---- 共享网络命名空间的锚点容器（审查 P1-3）----
+  #
+  # Super Agent 硬性要求 webserver.host === '127.0.0.1'
+  # （along-superagent 的 src/along/api.ts 与 src/app/http.ts 都检查这一条），
+  # 所以它只能监听回环；host 与 superagent 必须共享同一个网络命名空间。
+  #
+  # 命名空间不能由 host 提供：挂在 host 命名空间上的 superagent 在 **host 单独重建**时
+  # 会留在旧命名空间里，新 host 访问 127.0.0.1:3082 得到 ECONNREFUSED（隔离栈实测复现）。
+  # 所以命名空间由这个与 host、superagent 都无关的第三方容器持有：
+  # 重建 host、重建 superagent、重启任一方、连锚点自身重建，另外两方的连通性都不受影响。
+  #
+  # 它只持有一个命名空间：不监听端口、不挂卷、不读任何数据，跑一个空转进程即可。
+  netns:
+    image: node:24-bookworm-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54
+    container_name: along-netns
+    command: ["node","-e","setInterval(()=>{},1<<30)"]
+    # 宿主机到 4176 的映射声明在这里：加入他人命名空间的容器**不能**自己发布端口
+    # （docker 报 "conflicting options: port publishing and the container type network mode"），
+    # 而命名空间是共享的——映射进的是同一个命名空间，host 的监听照样能被访问。
+    ports: ["443:4176"]
+    profiles: ["tier2"]
+    restart: unless-stopped
   host:
+    # 端口发布移到锚点容器（上面）：host 加入他人命名空间后不能自己发布端口。
+    ports: !override []
+    network_mode: "service:netns"
+    depends_on:
+      netns:
+        condition: service_started
+        # restart: true —— 锚点重建时把依赖它的 host 一起重建，
+        # 否则 host 会留在旧命名空间里（这正是 P1-3 要修的故障）。
+        restart: true
     environment:
       # 新链路开关（§3.5）：on = /events、/sync、/sync/ack、/notifications/* 生效；
       # 旧 DSH 分支（/super-agent/goals|tasks）改答 409「已切换新链路」。
@@ -39,8 +70,22 @@ services:
     secrets:
       - bridge-token
   superagent:
+    # 与 host 共享同一个命名空间（锚点提供的），3082 不对外发布端口。
+    network_mode: "service:netns"
+    depends_on:
+      netns:
+        condition: service_started
+        restart: true
+    # 模型密钥（审查 P1-4）：长驻服务要真跑模型回合，就必须拿得到模型凭证。
+    # 凭证本体只经 file secret 落盘（§3.3/§3.7），由启动脚本读出并注入进程环境，
+    # 不进 compose 的 environment、不进镜像层、不进日志。
     secrets:
       - bridge-token
+      - model-credentials
 secrets:
   bridge-token:
     file: ../../secrets/bridge-token
+  # 模型密钥：与 Tier 1 的 runner 共用同一份宿主文件（§6.4 第 3 步布局）。
+  # 长驻服务与一次性 runner 用的是同一个 DeepSeek 凭证。
+  model-credentials:
+    file: ../../secrets/model-credentials

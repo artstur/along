@@ -94,6 +94,9 @@ RUN mkdir -p /var/lib/dsh/home
 # 播种脚本由启动脚本调用，与它一起进镜像。
 COPY deploy/superagent-start.sh /usr/local/bin/along-superagent-start
 COPY deploy/superagent-seed.mjs /usr/local/bin/along-superagent-seed.mjs
+# 读取面收紧的推导脚本（审查 P1-1）：读上游自己的 patch 文件，去掉 preset 里的
+# 文件与 shell 读取工具，再以同 id 覆盖的形式写进 profile 的 patch 层。
+COPY deploy/superagent-preset-lockdown.mjs /usr/local/bin/along-superagent-preset-lockdown.mjs
 RUN chmod +x /usr/local/bin/along-superagent-start
 
 EXPOSE 3082

@@ -11,3 +11,4 @@
 # Tier 2 长驻 Super Agent 镜像（deploy/Dockerfile.superagent）：启动脚本与设置播种脚本。
 !deploy/superagent-start.sh
 !deploy/superagent-seed.mjs
+!deploy/superagent-preset-lockdown.mjs

@@ -34,6 +34,17 @@ const USERS=['u_aaaa1111','u_bbbb2222'];
 const HOST_NAME='along.test.local';
 const PORT='14476';
 
+// ---- 隔离标识（审查 P2-6）--------------------------------------------------
+//
+// 之前这个用例在默认的 `deploy` 项目下跑 `up --build` 与 `down -v`，
+// 容器名也是生产名（along-host / along-superagent）。与部署共用同一个 Docker daemon 时，
+// 这会**重建或停掉正在运行的服务**——测试不该动别人的东西。
+// 所以这里用独立的项目名、容器名与镜像标签：项目名带随机后缀（两次并发也不撞），
+// 容器名与镜像标签带固定前缀（一眼看出是测试栈）。
+const PROJECT=`along-tier2-test-${process.pid}`;
+const CONTAINER_PREFIX='along-t2-test';
+const IMAGE_TAG='along-tier2-test:local';
+
 // Docker 探测 ----------------------------------------------------------
 
 function dockerBin() {
@@ -105,7 +116,10 @@ function writeOverlay() {
   writeFileSync(OVERLAY,[
     'services:',
     '  host:',
-    '    ports: !override ["'+PORT+':4176"]',
+    // 容器名：独立前缀，不与部署的 along-host / along-superagent 撞。
+    `    container_name: ${CONTAINER_PREFIX}-host`,
+    // 镜像标签：独立标签，不覆盖部署栈正在用的 along-host:local / along-superagent:local。
+    `    image: ${IMAGE_TAG}-host`,
     '    volumes: !override ["'+HOST_STATE+':/data"]',
     // 期望的 DNS 主机名必须与测试叶证书的 SAN 一致（云端 TLS 的启动前校验项之一：
     // 不一致就拒启——这正是「叶证书配错域名」该有的行为）。
@@ -119,10 +133,17 @@ function writeOverlay() {
     '  agent:',
     '    profiles: ["!tier2"]',
     '  superagent:',
+    `    container_name: ${CONTAINER_PREFIX}-superagent`,
+    `    image: ${IMAGE_TAG}-superagent`,
     '    volumes: !override ["'+SUPER_STATE+':/var/lib/along-superagent","'+DSH_HOME+':/var/lib/dsh"]',
     '    build:',
     '      additional_contexts:',
     '        along: '+superagentRepo,
+    // 命名空间锚点：Tier 2 的叠加文件定义它。测试里换掉端口与容器名，
+    // 但拓扑不变——host 与 superagent 都加入锚点的命名空间（审查 P1-3）。
+    '  netns:',
+    `    container_name: ${CONTAINER_PREFIX}-netns`,
+    '    ports: !override ["'+PORT+':4176"]',
     'secrets:',
     '  bridge-token:',
     '    file: '+join(SECRETS,'bridge-token'),
@@ -133,8 +154,10 @@ function writeOverlay() {
 }
 
 function compose(args,{cwd=DEPLOY_DIR}={}) {
-  const result=spawnSync(DOCKER.bin,[...DOCKER.prefix,'-f',COMPOSE_FILE,'-f',COMPOSE_TIER2,'-f',OVERLAY,'--profile','tier2',...args],
-    {cwd,encoding:'utf8',timeout:900_000});
+  // 独立项目名（审查 P2-6）：测试栈不与部署栈共用项目、容器名或镜像标签。
+  const result=spawnSync(DOCKER.bin,[...DOCKER.prefix,'-f',COMPOSE_FILE,'-f',COMPOSE_TIER2,'-f',OVERLAY,
+    '--profile','tier2','-p',PROJECT,...args],
+    {cwd,encoding:'utf8',timeout:900_000,env:{...process.env,ALONG_TIER2_IMAGE_TAG:IMAGE_TAG}});
   return {status:result.status,stdout:result.stdout??'',stderr:result.stderr??''};
 }
 
@@ -227,6 +250,29 @@ test('Tier 2 隔离 Linux Compose：TLS 入口、双用户事件同步、后台�
     assert.equal(status.body.userId,USERS[index],'连接检查必须回报各自的用户身份');
     assert.equal(status.body.ready,true,'就绪时必须答 ready:true');
   }
+
+  // ---- 4b. 容器重建不断链（审查 P1-3）----
+  //
+  // 旧形态（superagent 挂在 host 的命名空间上）在这里会失败：**只重建 host** 时，
+  // superagent 仍挂在旧 host 容器的命名空间上，新 host 访问 127.0.0.1:3082 得到
+  // ECONNREFUSED。命名空间锚点（deploy/docker-compose.tier2.yml 的 netns 服务）
+  // 让 host 与 superagent 都挂在一个与它们无关的容器上，任一方重建都不影响另一方。
+  const rebuild=compose(['up','-d','--force-recreate','host']);
+  assert.equal(rebuild.status,0,`重建 host 失败：${rebuild.stderr.slice(-2000)}`);
+  const afterRebuild=await until(async()=>{
+    const response=await phoneRequest({path:'/connection/status',body:{},token:tokens[0]});
+    return response.status===200?response:null;
+  },180_000,'重建 host 后的连接检查（命名空间锚点未断链）');
+  assert.equal(afterRebuild.body.ready,true,'重建 host 后仍报就绪（桥接连通性未断）');
+
+  // 重建 superagent 同样不得断链（它换了容器，但命名空间是锚点的，两边都还在）。
+  const rebuildAgent=compose(['up','-d','--force-recreate','superagent']);
+  assert.equal(rebuildAgent.status,0,`重建 superagent 失败：${rebuildAgent.stderr.slice(-2000)}`);
+  const afterAgentRebuild=await until(async()=>{
+    const response=await phoneRequest({path:'/connection/status',body:{},token:tokens[0]});
+    return response.status===200?response:null;
+  },180_000,'重建 superagent 后的连接检查');
+  assert.equal(afterAgentRebuild.body.ready,true,'重建 superagent 后仍报就绪');
 
   // ---- 5. 事件写入与双用户隔离 ----
   const message=(text,eventId)=>({event_id:eventId,schema_version:'1',event_type:'along.user_message',

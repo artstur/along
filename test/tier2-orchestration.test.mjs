@@ -217,8 +217,15 @@ test('host：真实就绪探针走 along-status-probe 契约（200 + ready:true�
   assert.ok(bridgeSrc.includes("body.service!=='along-source'"),'body.service 不是 along-source 必须判为未就绪');
   assert.ok(hostSrc.includes('bridge.readyStrict({identity:who})'),
     'Host 的连接检查必须走真实就绪判定，并带上绑定身份');
-  // 旧版 Along Agent 没有该契约路径时按 404 兼容——不因升级顺序打断既有部署。
-  assert.ok(bridgeSrc.includes('response.status===404'),'旧版没有契约路径时回落到旧语义');
+  // 404 **不再**按「旧版没有契约路径」容忍成就绪（审查 P2-5）：
+  // 旧版探针恒答 200 {ready:true}，Host 侦测不到装错版本；容忍 404 等于把
+  // 「装错版本」说成「已就绪」，而装错版本的投递泵仍会把待投递行终结为
+  // filtered / source_not_installed。404 归入未就绪（503）。
+  assert.ok(!bridgeSrc.includes('response.status===404'),'404 不得再被当成就绪');
+  assert.ok(bridgeSrc.includes('response.status!==200'),'只认 200：其它状态码（含 404）都是未就绪');
+  // 就绪判定只探一次：探针之后不得再对同一路径发第二次请求。
+  assert.ok(!hostSrc.includes("bridge.call('/along-source/api/goals/along-status-probe'"),
+    '就绪判定后不得再对同一路径发第二次请求（持续 404 会被第二个请求判成 502）');
   // 401/403 是配置问题（凭证或身份头），不按未就绪静默处理。
   assert.ok(/status===401\|\|response\.status===403/.test(bridgeSrc),
     '401/403 必须给出配置提示，不能当成「未就绪」静默处理');

@@ -34,8 +34,35 @@ ALONG_STATE_DIR="${ALONG_SUPERAGENT_ALONG_STATE_DIR:-/var/lib/along-superagent/a
 # 文件不存在时 Super Agent 会自己生成一份（bridgeTokenOf 的 ENOENT 分支）——那只在
 # 本机单机调试时成立。compose 形态下这个文件由 secret 挂载提供，缺失即配置错误。
 BRIDGE_TOKEN_FILE="${ALONG_BRIDGE_TOKEN_FILE:-/run/secrets/bridge-token}"
+# 模型密钥文件（审查 P1-4）：长驻服务要真跑模型回合就必须拿得到模型凭证。
+# 之前 compose 里是 DEEPSEEK_API_KEY 环境变量——那既不进 `compose config` 的自证输出，
+# 也让凭证出现在容器元数据里。改成 file secret：本体只落盘，由本脚本读出后注入
+# 进程环境（DSH 的 llm-deepseek 适配器按 apiKeyEnv=DEEPSEEK_API_KEY 从环境取）。
+# 与 Tier 1 的 runner 共用同一份宿主文件（../../secrets/model-credentials）。
+#
+# 权限口径与 runner 一致（deploy/agent-runner.mjs 的 readSecretFile）：组/其他可读
+# 等同配置错误——直接拒绝启动，且报错只提路径不回显内容（G-6）。
+MODEL_KEY_FILE="${ALONG_MODEL_API_KEY_FILE:-/run/secrets/model-credentials}"
 CLI_DIR=/app/deploy/agent-dsh
 export DSH_HOME
+
+# 读模型密钥。缺失不是致命错误——模型回合会失败，但长驻服务本身仍要起来：
+# 配对、入队、事件同步这些不依赖模型的链路要能先跑起来，运维再补密钥。
+# 权限过宽则**拒绝启动**（凭证可能已被别的用户读到）。
+if [ -f "$MODEL_KEY_FILE" ]; then
+  model_key="$(node -e '
+    const fs=require("node:fs");
+    const file=process.argv[1];
+    const mode=fs.statSync(file).mode&0o777;
+    if (mode&0o077) { console.error(`模型密钥文件权限过宽（须 0600，拒绝启动）：${file}`); process.exit(1); }
+    const value=fs.readFileSync(file,"utf8").trim();
+    if (!/^[^\s\0]+$/.test(value)) { console.error(`模型密钥文件须包含单行非空 DeepSeek API key：${file}`); process.exit(1); }
+    process.stdout.write(value);
+  ' "$MODEL_KEY_FILE")"
+  DEEPSEEK_API_KEY="$model_key"
+  export DEEPSEEK_API_KEY
+  unset model_key
+fi
 
 # bundle 装在 DSH CLI 的 node_modules 树里（镜像构建时确定），这样它的 peer 依赖
 # （cordis、dsh-llm、dsh-scope、schemastery）才解析得到——Node 按模块**真实路径**向上找
@@ -96,6 +123,29 @@ cat > "$PROFILE_DIR/cordis.patch.yml" <<YAML
   disabled: true
 - id: dsh-superagent-along
   disabled: false
+YAML
+
+# ---- 3b. 收紧读取面（审查 P1-1）--------------------------------------------
+#
+# 长驻 DSH 与 Along 业务库在同一个容器里，而 DSH 的文件工具能读**任意绝对路径**：
+# DSH 的文件沙箱只约束写（读一律放行），业务库里两位用户的数据在**同一张表**里
+# （按 user_id 分行），文件路径不分用户——API 上的身份检查约束不了这条读取路径。
+#
+# 收紧口径：Tier 2 的部署形态下，会话只保留按用户授权的工具（Along 业务面读 Host 的
+# along_* 工具，服务端绑定身份、逐行按 user_id 过滤），文件与 shell 的读取面整体去掉。
+# 子代理也收：它跑在 DSH 的 standard preset 下，那套 preset 带全套文件与 shell 工具。
+#
+# 覆盖行是**推导**出来的（读上游自己的 patch 文件，把被禁的工具从 preset 插件表里去掉，
+# 再以同 id 覆盖的形式写进本层）——不抄一份上游 preset，改上游时不会漂移。
+#
+# 推导失败必须**拒绝启动**：收紧没生效就等于没收紧，静默继续等于把业务库敞开。
+LOCKDOWN_ROWS="$(node /usr/local/bin/along-superagent-preset-lockdown.mjs "$CLI_DIR" "$BUNDLE_DIR")"
+if [ -z "$LOCKDOWN_ROWS" ]; then
+  echo "读取面收紧推导结果为空，拒绝启动" >&2
+  exit 1
+fi
+cat >> "$PROFILE_DIR/cordis.patch.yml" <<YAML
+$LOCKDOWN_ROWS
 YAML
 
 # ---- 4. 播种设置 ----------------------------------------------------------

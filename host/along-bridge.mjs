@@ -64,6 +64,11 @@ export function createBridge({url,token=null}) {
   // 503 = 进程在但 Source 还没注册/投递泵未就绪（要区分的启动窗口）；
   // 401/403 = 凭证或身份头配置错了（属于配置问题，不按未就绪静默处理）；
   // 连不上 = 服务没起来。
+  //
+  // 404 **不再**按「旧版没有契约路径」容忍成就绪：那条路径恒答 200 的旧版 Along Agent
+  // 装错时同样会答 200 ready:true，容忍 404 等于把「装错版本」与「已就绪」混成一个答案，
+  // 而装错版本的投递泵仍会把待投递行终结为 filtered/source_not_installed。
+  // 404 现在归入未就绪（503）：宁可让连接检查说「还没准备好」，也不要给一个假的 ready。
   const READY_PATH='/along-source/api/goals/along-status-probe';
   return {
     // 存量调用语义（原 superAgentCall）：任何非 2xx 都按上游故障答复。
@@ -90,12 +95,14 @@ export function createBridge({url,token=null}) {
     /**
      * 真实就绪探测（Tier 2）：按上面的契约路径判定——200 且 body.ready === true 才算就绪。
      *
-     * 503 表示「进程在、但 Along Source 尚未注册或投递泵尚未就绪」——这正是要区分的启动
-     * 窗口，宿主把它当作未就绪（503）而不是上游故障（502），客户端据此知道「再等等」。
-     *
-     * 404 只有在**旧版** Along Agent（没有这条契约路径）时才容忍，按旧语义视作就绪，
-     * 不因升级顺序打断既有部署。但 404 不能用来证明新契约路径存在——所以判定走状态码与
-     * body，不靠「路径是否存在」。
+     * 严格口径（审查 P2-5）：
+     *   - 只探**一次**。就绪判定与后续的业务调用是两次独立的回环请求；把「探针」和
+     *     「再探一次同一路径」叠在一起，会让一次持续 404 变成 502（上游故障），把
+     *     「还没就绪」误报成「服务坏了」。
+     *   - 只认 **200**。其它 2xx（如 204）不携带契约 body，不算就绪。
+     *   - body 必须是 {service:'along-source', ready:true}。字段不对就是未就绪。
+     *   - 404 归入**未就绪（503）**，不再按「旧版没有契约路径」容忍成就绪。
+     *   - 401/403 是配置问题（凭证或身份头），给出可操作的提示，不静默当未就绪。
      *
      * identity：契约路径会校验身份头格式（Along Agent 侧 boundIdentity，缺头 403）。
      * 宿主传**服务端绑定**的配对身份（与其它回环调用同一个 who），不自造身份。
@@ -105,11 +112,12 @@ export function createBridge({url,token=null}) {
       try {
         response=await fetch(`${base}${READY_PATH}`,{method:'GET',headers:headers({identity}),signal:AbortSignal.timeout(5_000)});
       } catch(error) { throw new HostError(`DSH Super Agent 未运行：${error.message}`,503); }
-      if (response.status===404) return true; // 旧版没有契约路径：沿用旧语义（无法据此判未就绪）。
       if (response.status===401||response.status===403) {
         throw new HostError(`DSH Along Source 拒绝了桥接凭证或身份头（${response.status}）：检查 ALONG_BRIDGE_TOKEN_FILE`,503);
       }
-      if (!response.ok) throw new HostError(`DSH Along Source 未就绪（${response.status}）`,503);
+      // 非 200 一律未就绪（含 404：旧版恒答 200 的探针装错时同样会答 200，容忍 404
+      // 等于把「装错版本」说成「已就绪」）。2xx 但不是 200 也不带契约 body，同样未就绪。
+      if (response.status!==200) throw new HostError(`DSH Along Source 未就绪（${response.status}）`,503);
       let body=null;
       try { body=await response.json(); } catch { /* 非 JSON 响应：按未就绪处理。 */ }
       if (!body||body.service!=='along-source'||body.ready!==true) throw new HostError('DSH Along Source 尚未就绪',503);

@@ -627,8 +627,11 @@ const server=createServer({key:tlsKey,cert:tlsCert},async(req,res)=>{
         // 而那个窗口正是 V-1 里待投递事件被误过滤（filtered/source_not_installed）的根因。
         // 未就绪时答 503——客户端据此知道「Along Agent 还没准备好」，而不是拿到一个假的 ready。
         // 探针要带绑定身份（Along Agent 侧 boundIdentity 校验身份头格式，缺头 403）。
+        //
+        // 只探**一次**（审查 P2-5）：就绪判定就是这一次 GET。再叠加一次对同一路径的
+        // 业务调用，会让「持续 404/未就绪」这一种状态被第二个请求判成上游故障（502），
+        // 把「再等等」误报成「服务坏了」。就绪之后真正的业务调用发生在别的端点上。
         await upstream(()=>bridge.readyStrict({identity:who}));
-        await upstream(()=>bridge.call('/along-source/api/goals/along-status-probe',{method:'GET',identity:who}));
         return respond(res,200,{along:true,runtime:DSH_RUNTIME,ready:true,eventProtocol:1,userId:who.userId});
       }
       const input=await body(req),runtime=requestedRuntime(input?.runtime);
