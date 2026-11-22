@@ -161,7 +161,7 @@ services:
     # Tier 2 叠加时改挂到**锚点容器** netns 上（deploy/docker-compose.tier2.yml）：
     # 只重建 host 时，挂在 host 命名空间上的 superagent 会留在旧命名空间里，
     # 新 host 访问 127.0.0.1:3082 得到 ECONNREFUSED（实测复现）。
-    # 锚点与 host、superagent 都无关，所以任一容器重建都不影响另外两个的连通性。
+    # Host 与 Super Agent 可独立重建。锚点更换时用 tier2-stack.sh 重建三者。
     network_mode: "service:host"
     depends_on: [host]
     environment:

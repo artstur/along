@@ -33,7 +33,7 @@ services:
   # 命名空间不能由 host 提供：挂在 host 命名空间上的 superagent 在 **host 单独重建**时
   # 会留在旧命名空间里，新 host 访问 127.0.0.1:3082 得到 ECONNREFUSED（隔离栈实测复现）。
   # 所以命名空间由这个与 host、superagent 都无关的第三方容器持有：
-  # 重建 host、重建 superagent、重启任一方、连锚点自身重建，另外两方的连通性都不受影响。
+  # Host 与 Super Agent 可独立重建。更换锚点 ID 时用 tier2-stack.sh 一起重建三者。
   #
   # 它只持有一个命名空间：不监听端口、不挂卷、不读任何数据，跑一个空转进程即可。
   netns:
@@ -53,13 +53,12 @@ services:
     depends_on:
       netns:
         condition: service_started
-        # restart: true —— 锚点重建时把依赖它的 host 一起重建，
-        # 否则 host 会留在旧命名空间里（这正是 P1-3 要修的故障）。
+        # 传播 Compose 的显式 restart。容器 ID 变化由 tier2-stack.sh 的重建步骤处理。
         restart: true
     environment:
       # 新链路开关（§3.5）：on = /events、/sync、/sync/ack、/notifications/* 生效；
       # 旧 DSH 分支（/super-agent/goals|tasks）改答 409「已切换新链路」。
-      # 回退 = 本文件不叠加（或改回 off）并重建 host——业务库与 DSH 状态**不清**（BC-09-03/04）。
+      # 回退时先停 superagent 和 netns，再去掉叠加文件重建 host（§6.5）。
       ALONG_EVENT_INGEST: "on"
       # 常驻 Super Agent 的回环地址。默认值就是它，这里显式写出是为了让叠加后的
       # `compose config` 自证形态（管理面仅本机可达：superagent 不发布任何端口）。

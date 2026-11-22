@@ -1,11 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
-import {existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync} from 'node:fs';
+import {mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {parseDocument} from 'yaml';
+import {lockdownRows,verifyEffectiveConfig} from '../deploy/superagent-preset-lockdown.mjs';
 
 // PR #43 的审查修复回归（审查项 P1-1/2/3/4、P2-5/6）。
 //
@@ -24,109 +25,47 @@ const composeTier2Doc=parseDocument(composeTier2).toJS();
 const startScript=readFileSync(join(DEPLOY_DIR,'superagent-start.sh'),'utf8');
 const hostSrc=readFileSync(join(ROOT,'host','agent-host.mjs'),'utf8');
 const bridgeSrc=readFileSync(join(ROOT,'host','along-bridge.mjs'),'utf8');
-const lockdownSrc=readFileSync(join(DEPLOY_DIR,'superagent-preset-lockdown.mjs'),'utf8');
 const services=composeDoc.services;
 const superagent=services.superagent;
 const tier2=composeTier2Doc;
 
 // ---- P1-1：双用户读取权限（文件与 shell 的读取面整体收紧）--------------------------
 
-test('P1-1：收紧脚本去掉所有 preset 里的文件、shell、终端与文档读取能力',()=>{
-  // 被禁的能力清单必须覆盖：任意路径的文件读、文件搜索、shell、PTY、文档工具、
-  // 以及子代理（它跑在 standard preset 下，那套 preset 带全套读取工具）。
-  for (const name of ['dsh-tool-fs','dsh-tool-fs-search','dsh-tool-bash','dsh-tool-pwsh',
-    'dsh-tool-subagent','dsh-tool-subagent-control','dsh-tool-office','dsh-terminal-bash',
-    'dsh-tool-bash-persistent','dsh-tool-pwsh-persistent','dsh-terminal']) {
-    assert.ok(lockdownSrc.includes(name),`收紧清单必须覆盖 ${name}`);
-  }
+const configParser={yaml:{load:JSON.parse}};
+const preset=(id,plugins=[])=>({
+  id:`preset-${id}`,name:'@deepseek-ai/dsh-agent-preset',config:{id,plugins},
+});
+const registry={id:'agent-preset-registry',name:'@deepseek-ai/dsh-agent-preset-registry',
+  config:{default:'dsh-superagent-worker'}};
+const todo={id:'todo',name:'@deepseek-ai/dsh-tool-todo'};
+const group=(...config)=>({id:'group',name:'cordis:group',config});
+const worker=(plugins)=>preset('dsh-superagent-worker',plugins);
+const router=preset('dsh-superagent-router',[todo]);
+
+test('Tier 2 narrows the effective presets even when the change is inside one group', t=>{
+  const fixture=mkdtempSync(join(tmpdir(),'along-lockdown-'));
+  t.after(()=>rmSync(fixture,{recursive:true,force:true}));
+  const presetsDir=join(fixture,'node_modules','@deepseek-ai','dsh-web-app','presets');
+  mkdirSync(presetsDir,{recursive:true});
+  const shell={id:'shell',name:'@deepseek-ai/dsh-tool-bash'};
+  writeFileSync(join(fixture,'cordis.patch.yml'),JSON.stringify([{insert:[worker([group(todo,shell)]),router]}]));
+  writeFileSync(join(presetsDir,'standard.patch.yml'),JSON.stringify([{insert:[preset('standard',[todo])]}]));
+  const rows=lockdownRows(configParser,fixture,fixture);
+  assert.deepEqual(rows.find(row=>row.id==='preset-dsh-superagent-worker').config.plugins,[group(todo)]);
+  assert.equal(rows.find(row=>row.id==='preset-standard').disabled,true);
 });
 
-test('P1-1：收紧脚本是**推导**的（读上游自己的 patch），不抄一份上游 preset',()=>{
-  // 抄一份上游 preset 会在上游改动时漂移；漏掉一个 preset 就是一个漏掉的读取面。
-  assert.ok(lockdownSrc.includes('cordis.patch.yml'),'必须读上游 bundle 自己的 patch 文件');
-  assert.ok(lockdownSrc.includes('dsh-web-app'),'必须读 DSH web 模板的 preset（子代理跑在 standard 下）');
-  assert.ok(lockdownSrc.includes('lockdownRows'),'必须按上游的声明推导覆盖行');
-  // 推导失败必须拒绝启动——收紧没生效等于没收紧。
-  assert.ok(startScript.includes('along-superagent-preset-lockdown.mjs'),'启动脚本必须调用收紧脚本');
-  assert.ok(/if \[ -z "\$LOCKDOWN_ROWS" \]/.test(startScript),'推导结果为空时必须拒绝启动');
-  assert.ok(startScript.includes('exit 1'),'拒绝启动必须真的退出');
-});
-
-test('P1-1：收紧脚本在真实上游 patch 上真的去掉了读取面（实跑推导）',()=>{
-  // 用真实的上游 bundle 与 DSH web 模板跑一遍推导：所有 preset 里都不该再有读取工具。
-  // 推导脚本依赖 DSH CLI 树里的 cordis-plugin-include 与 js-yaml——
-  // 本仓库的 node_modules 里没有它们（它们只存在于 deploy/agent-dsh 的锁文件树里），
-  // 所以这里用**真实的** dsh CLI 安装目录：/tmp 下没有时从 npm 装一份等价版本。
-  const cliDir=mkdtempSync(join(tmpdir(),'along-lockdown-cli-'));
-  const bundleDir=mkdtempSync(join(tmpdir(),'along-lockdown-bundle-'));
-  try {
-    const dshCli=join(DEPLOY_DIR,'agent-dsh');
-    if (!existsSync(join(dshCli,'node_modules','js-yaml'))) {
-      // 依赖树没装（CI 只 checkout 本仓库时）：跳过这条实跑推导，
-      // 其余用例仍然锁住收紧清单本身。
-      return;
-    }
-    // 脚本从 <cli>/node_modules/@deepseek-ai/dsh/package.json 解析依赖——
-    // 夹具里造出同样的目录形状，指向真实的 dsh CLI 安装树。
-    mkdirSync(join(cliDir,'node_modules','@deepseek-ai'),{recursive:true});
-    symlinkSync(join(dshCli,'node_modules','@deepseek-ai','dsh'),
-      join(cliDir,'node_modules','@deepseek-ai','dsh'),'dir');
-    symlinkSync(join(dshCli,'node_modules','@deepseek-ai','cordis-plugin-include'),
-      join(cliDir,'node_modules','@deepseek-ai','cordis-plugin-include'),'dir');
-    symlinkSync(join(dshCli,'node_modules','js-yaml'),
-      join(cliDir,'node_modules','js-yaml'),'dir');
-    // 造一份最小的「上游」：bundle 的 patch 声明 worker preset，web 模板声明 standard。
-    writeFileSync(join(bundleDir,'cordis.patch.yml'),[
-      '- insert:',
-      '    - id: dsh-superagent-worker-preset',
-      "      name: '@deepseek-ai/dsh-agent-preset'",
-      '      config:',
-      '        id: dsh-superagent-worker',
-      '        plugins:',
-      '          - id: tool-todo',
-      "            name: '@deepseek-ai/dsh-tool-todo'",
-      '          - id: tool-fs',
-      "            name: '@deepseek-ai/dsh-tool-fs'",
-      '          - id: tool-bash',
-      "            name: '@deepseek-ai/dsh-tool-bash'",
-      '',
-    ].join('\n'));
-    const presetsDir=join(cliDir,'node_modules','@deepseek-ai','dsh-web-app','presets');
-    mkdirSync(presetsDir,{recursive:true});
-    writeFileSync(join(presetsDir,'standard.patch.yml'),[
-      '- insert:',
-      '    - id: preset-standard',
-      "      name: '@deepseek-ai/dsh-agent-preset'",
-      '      config:',
-      '        id: standard',
-      '        plugins:',
-      '          - id: tool-todo',
-      "            name: '@deepseek-ai/dsh-tool-todo'",
-      '          - id: tool-fs',
-      "            name: '@deepseek-ai/dsh-tool-fs'",
-      '          - id: tool-fs-search',
-      "            name: '@deepseek-ai/dsh-tool-fs-search'",
-      '',
-    ].join('\n'));
-    const result=spawnSync(process.execPath,[join(DEPLOY_DIR,'superagent-preset-lockdown.mjs'),cliDir,bundleDir],
-      {encoding:'utf8',timeout:60_000});
-    assert.equal(result.status,0,`推导失败：${result.stderr}`);
-    const out=result.stdout;
-    // 全局的四个禁用行必须在。
-    for (const id of ['tool-fs','tool-fs-search','tool-bash','tool-pwsh']) {
-      assert.ok(new RegExp(`- id: ${id}\\n`).test(out),`全局禁用行缺失：${id}`);
-    }
-    // 两个 preset 都要被覆盖，且覆盖行里不再有被禁的工具。
-    assert.ok(out.includes('- id: dsh-superagent-worker-preset'),'worker preset 必须被覆盖');
-    assert.ok(out.includes('- id: preset-standard'),'standard preset 必须被覆盖');
-    const covered=out.split('- id: preset-standard')[1];
-    assert.ok(!covered.includes("'@deepseek-ai/dsh-tool-fs'"),'standard preset 覆盖行里不得再有文件工具');
-    assert.ok(!covered.includes("'@deepseek-ai/dsh-tool-fs-search'"),'standard preset 覆盖行里不得再有文件搜索');
-    assert.ok(out.includes("'@deepseek-ai/dsh-tool-todo'"),'不该被禁的工具要留着');
-  } finally {
-    rmSync(cliDir,{recursive:true,force:true});
-    rmSync(bundleDir,{recursive:true,force:true});
-  }
+test('Tier 2 rejects incomplete scopes, unreviewed plugins and an incorrect default at boot',()=>{
+  const verify=(...rows)=>verifyEffectiveConfig(configParser,JSON.stringify(rows));
+  const allowed=worker([todo]);
+  const standard=preset('standard',[todo]);
+  assert.deepEqual(verify(registry,allowed,router,{...standard,disabled:true}),[]);
+  assert.match(verify(registry,allowed).join(),/缺少启用的 preset.*router/);
+  assert.match(verify().join(),/唯一启用的 preset 注册表/);
+  assert.match(verify({...registry,config:{default:'standard'}},allowed,router).join(),/默认 preset/);
+  assert.match(verify(registry,allowed,router,group(standard)).join(),/未知、无效或重复的 preset/);
+  assert.match(verify(registry,worker([group(todo,{id:'unknown',name:'fixture:unknown'})]),router).join(),/不在白名单内/);
+  assert.match(verify(registry,allowed,router,{id:'workflow',name:'@deepseek-ai/dsh-workflow-ptc'}).join(),/不在白名单内/);
 });
 
 // ---- P1-2：固定上游构建版本 ---------------------------------------------------
@@ -171,13 +110,13 @@ test('P1-3：端口发布落在锚点上（加入他人命名空间的容器不�
   assert.ok(!JSON.stringify(tier2.services.netns.ports).includes('3082'),'锚点不得发布 3082');
 });
 
-test('P1-3：锚点重建时依赖它的容器一起重建（否则留在旧命名空间里）',()=>{
+test('P1-3：运维命令一次重建锚点与两个依赖方',()=>{
   for (const name of ['host','superagent']) {
     const depends=tier2.services[name].depends_on;
     assert.ok(depends?.netns,'必须声明对锚点的依赖');
-    assert.equal(depends.netns.restart,true,
-      `depends_on.restart: true —— 锚点重建时把 ${name} 一起重建`);
   }
+  const stackScript=readFileSync(join(DEPLOY_DIR,'tier2-stack.sh'),'utf8');
+  assert.match(stackScript,/compose up -d --force-recreate netns host superagent/);
 });
 
 // ---- P1-4：长驻服务拿得到模型密钥 ---------------------------------------------
@@ -220,9 +159,30 @@ test('P2-6：隔离集成栈用独立的 project 名、容器名与镜像标签'
   // 与部署共用 Docker daemon 时，复用项目名/容器名会重建或停掉正在运行的服务。
   assert.ok(/along-tier2-test-/.test(integration),'必须用独立的项目名（带进程号后缀）');
   assert.ok(/CONTAINER_PREFIX/.test(integration),'必须给容器名加前缀');
-  assert.ok(/along-tier2-test:local/.test(integration),'必须用独立的镜像标签');
+  // 第二轮复核：标签也要带进程号——标签是全局的，两个并发用例共用一个标签时，
+  // `up --build` 会把另一个用例正在用的镜像覆盖掉。
+  assert.ok(/along-tier2-test-\$\{process\.pid\}/.test(integration),'镜像标签必须带进程号（并发用例不共用标签）');
   // 端口也不能与部署撞：部署用 443，测试用高位端口。
   assert.ok(!/443:4176/.test(integration),'测试不得占用部署的 443 端口');
+  // 第二轮复核：端口按运行随机化——固定端口意味着两个并发用例撞端口，
+  // 后起的那个 `up` 直接失败（port is already allocated），那是噪声不是被测行为。
+  assert.match(integration,/127\.0\.0\.1::4176/,'Docker 为每个测试栈分配端口');
+  // 第二轮复核：目录按运行随机化——固定目录意味着两个并发用例共用同一份状态目录，
+  // 而用例开头会清掉它（后一个把前一个的业务库与证书删了）。
+  assert.match(integration,/join\(ROOT,'\.tier2-integration',PROJECT\)/,'状态目录必须按运行隔离');
+});
+
+test('P2-6：测试覆盖**构建标签**，不更新部署的镜像标签',()=>{
+  const integration=readFileSync(join(ROOT,'test','tier2-linux-integration.test.mjs'),'utf8');
+  // 第二轮复核的缺口：主 compose 的 host 服务带 `build: {tags: [along-host:local]}`。
+  // 叠加文件只改 `image:` 是不够的——`up --build` 按 build 段的 tags **重新打标签**，
+  // 于是测试的构建会更新部署正在用的 along-host:local 标签：
+  // 部署的容器还在跑（跑的是旧镜像层），但它下次重建就会拿到测试的镜像。
+  assert.ok(/tags: !override/.test(integration),'必须用 !override 覆盖 build.tags');
+  // 注意 !override 要加在 **tags 键**上：加在 build: 上只是追加（序列默认合并），
+  // 那样部署的标签还在，up --build 照样更新它。
+  assert.ok(/tags: !override \["\$\{IMAGE_TAG\}-host"\]/.test(integration),'host 的 build.tags 必须被替换');
+  assert.ok(/tags: !override \["\$\{IMAGE_TAG\}-superagent"\]/.test(integration),'superagent 的 build.tags 必须被替换');
 });
 
 // ---- compose config 校验 --------------------------------------------------------

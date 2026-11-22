@@ -266,7 +266,8 @@ test('Runbook §6.4 第 6 步含预置证书版本与属主权限（缺这一步
   }
   assert.ok(runbook.includes('install -m 600'),'§6.4 第 6 步缺私钥 0600 的安装命令');
   assert.ok(runbook.includes('install -d -m 700'),'§6.4 第 6 步缺版本目录 0700 的安装命令');
-  assert.ok(runbook.includes('ln -sfn'),'§6.4 第 6 步缺 tls/current 的原子切换命令');
+  assert.ok(runbook.includes('ln -s "releases/$LEAF_SERIAL"')&&runbook.includes('mv -Tf "$staged/current" "$tls/current"'),
+    '§6.4 第 6 步须原子切换容器可读的相对链接');
   assert.ok(runbook.includes('所有者不是 Host 用户'),'§6.4 第 6 步缺属主不一致会拒启的说明');
 });
 

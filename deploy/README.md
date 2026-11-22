@@ -24,23 +24,9 @@ Tier 1 的 `agent` 服务跑**一次性** headless runner（每个目标聊天�
 Tier 2 增加 `superagent` 服务跑**长驻** DSH profile，承载新链路数据面：
 `/along-source/api/*`、`along.sqlite`、投递泵。两个服务共用同一份 dsh 锁文件，版本不分叉。
 
-### 网络：与 host 共享网络命名空间
+### 网络
 
-```yaml
-superagent:
-  network_mode: "service:host"
-```
-
-这是 V-1 报告优先验证的方案，原因是 Super Agent 侧两处**硬性**约束：
-
-- `src/along/api.ts:282` 与 `src/app/http.ts:234` 都要求 `webserver.host === '127.0.0.1'`，
-  所以它只能监听回环——独立 compose 服务之间用服务名访问不到它的 `127.0.0.1`。
-- 管理面（`/orchestrator` 与面板）必须保持仅本机可达。共享命名空间 + 只监听回环天然满足：
-  `superagent` **不发布任何端口**，宿主机与外网都连不上 3082。
-
-Host 通过 `http://127.0.0.1:3082` 访问（`ALONG_SUPERAGENT_URL` 的默认值就是它）。
-
-独立服务方案（专用私网入口 + 桥接鉴权）留作备选，代价见 V-1 报告的路线对比。
+Host 和 Super Agent 共用 `netns` 的网络命名空间。锚点发布 443，Super Agent 只在回环 3082 监听。
 
 ### 持久卷与桥接凭证
 
@@ -58,61 +44,13 @@ compose 里两侧都挂 `bridge-token` secret（源文件 `../../secrets/bridge-
 ENOENT 分支），Host 那份就永远对不上，桥接调用全量 401。所以凭证本体由宿主文件提供，
 容器不生成。
 
-### 开启与回退（§6.4 第 8 步）
+### 开启、锚点维护、换证与回退
 
-```sh
-# 第 1 步：写好桥接凭证（0600 的 32 字节 hex，权限过宽 = 未配置）
-install -m 600 /dev/null /opt/along/secrets/bridge-token
-read -rs TOKEN; printf '%s\n' "$TOKEN" > /opt/along/secrets/bridge-token   # 32 字节 hex
-
-# 第 2 步：叠加 Tier 2 形态（开关 + 桥接凭证 + 挂载），带 --profile tier2
-docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.tier2.yml --profile tier2 up -d
-```
-
-叠加文件改的 host 环境变量是：`ALONG_EVENT_INGEST=on`（打开新链路）、
-`ALONG_SUPERAGENT_URL=http://127.0.0.1:3082`（常驻 Super Agent 的回环地址）、
-`ALONG_BRIDGE_TOKEN_FILE=/run/secrets/bridge-token`（桥接凭证）。
-
-为什么用**叠加文件**而不是改主 compose：
-
-- 主 compose 是 Tier 1 的默认形态（`ALONG_EVENT_INGEST=off`、新链路 503、runner 在场）。
-  Tier 2 的开关与它相反，两种形态不该混在同一份文件里。
-- 桥接凭证是 compose **file secret**：宿主文件缺失会让 `up` 直接失败。主 compose 声明它，
-  没部署凭证的 Tier 1 部署连 `up` 都跑不了。
-- `superagent` 服务挂在 `tier2` profile 下：默认的 `docker compose up`（Tier 1）不受它影响，
-  回退只需不叠加 Tier 2 文件。
-
-**回退** = 去掉 Tier 2 叠加文件（或把 `ALONG_EVENT_INGEST` 改回 `off`）并重建 host：
-
-```sh
-docker compose -f deploy/docker-compose.yml up -d --no-deps --force-recreate host
-```
-
-Along Agent 的业务库（`along.sqlite`）与 DSH 状态**不清**（BC-09-03/04）——回退是
-「新链路停用」，不是「数据回滚」。runner 服务留在 compose 里作为显式回退目标
-（它仍按 `ALONG_DSH_RUNNER_URL` 分流，`ALONG_EVENT_INGEST=off` 时旧 DSH 分支照旧可用）。
+按 [部署手册 §6.5](../docs/cloud-deploy-multi-user.md#tier2-runbook) 操作。开启时叠加 `docker-compose.tier2.yml`，以 `ALONG_EVENT_INGEST=on` 启用事件链路。维护锚点使用 `deploy/tier2-stack.sh rebuild-anchor`。换叶保留叠加文件，只重建 Host。回退先停 Super Agent 和锚点，再用主 Compose 重建 Host，恢复 `ALONG_EVENT_INGEST=off` 并保留持久卷。
 
 ### 就绪判定
 
-`superagent` 的 compose healthcheck 只证明回环端口在监听，**不是**信任验收。
-真实就绪走既有契约路径 `/along-source/api/goals/along-status-probe`：
-
-- 就绪：`200` 且 body 为 `{"service":"along-source","ready":true}`；
-- 未就绪（业务面未组装或 Along Source 未注册/未启用）：`503 {"error":"along_source_not_ready"}`；
-- 旧版 Super Agent 没有这条路径：`404`，按旧语义视作就绪（不因升级顺序打断既有部署）。
-
-**不另造 `/ready` 路径**：另造一条 Super Agent 侧没实现的路径时它会 404，而 404 被当成
-「旧版没有契约路径 → 就绪」——恰好把要防的启动窗口又放回去。宿主因此按**状态码与 body**
-判定，不靠「路径是否存在」。
-
-旧版探针恒返回 200，分不清「Along Source 已注册」与「进程刚起来」的启动窗口——V-1 的
-投递丢失正是发生在那个窗口里，所以判定必须带身份头（`x-along-user`/`x-along-device`），
-缺头 403、缺凭证 401 都按**配置问题**报出，不静默当成「未就绪」。
-
-判定**只探一次**：就绪就是那一次 GET。之后真正的业务调用发生在别的端点上——
-再对同一路径发第二次请求，会让「持续 404 / 未就绪」被第二个请求判成上游故障（502），
-把「再等等」误报成「服务坏了」。`404` 也归入**未就绪**：旧版探针恒答 200，
-容忍 404 等于把「装错版本」说成「已就绪」。
+Host 通过私有回环探测 `/along-source/api/goals/along-status-probe`，带桥接凭证和绑定身份。只发一次 GET，收到 `200 {"service":"along-source","ready":true}` 才就绪。上游 `404` 和其他未就绪结果归入 Host 的 `503`，`401/403` 附带配置提示。
 
 ### 上游来源是钉死的提交
 
@@ -123,19 +61,9 @@ Along Agent 的业务库（`along.sqlite`）与 DSH 状态**不清**（BC-09-03/
 重启时已到期的待投递行仍会被终结为 `filtered / source_not_installed`。
 本地对着未推送的提交调试时用 `ALONG_SUPERAGENT_SOURCE` 指向相邻 checkout。
 
-### 读取面是收紧的
+### 会话权限
 
-长驻 DSH 与 Along 业务库在**同一个容器**里，而 DSH 的文件工具能读**任意绝对路径**
-（DSH 的文件沙箱只约束写，读一律放行）。业务库里两位用户的数据在**同一张表**里
-（按 `user_id` 分行），文件路径不分用户——所以 API 上的身份检查约束不了这条读取路径：
-用户 B 的会话能把用户 A 的行读出来。
-
-收紧由 `deploy/superagent-preset-lockdown.mjs` 在 boot 前完成：它**推导**出收紧后的 preset
-（读上游自己的 `cordis.patch.yml` 与 DSH web 模板的 preset，把文件、shell、终端、文档与
-子代理能力从所有 preset 里去掉，再以同 id 覆盖的形式写进 profile 的 patch 层），
-不是抄一份上游 preset——抄的会漂移，漏掉一个 preset 就是一个漏掉的读取面。
-推导结果为空即**拒绝启动**：收紧没生效等于没收紧。
-Along 业务面的读取只走 Host 的 `along_*` 工具（服务端绑定身份、逐行按 `user_id` 过滤）。
+Tier 2 只启用 Along Worker 和 Router。启动脚本生成 preset 覆盖并校验最终 DSH 配置，失败即退出。应用继续按用户与任务约束 Along 业务工具。
 
 ### 命名空间锚点
 

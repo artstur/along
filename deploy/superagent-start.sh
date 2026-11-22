@@ -135,11 +135,20 @@ YAML
 # along_* 工具，服务端绑定身份、逐行按 user_id 过滤），文件与 shell 的读取面整体去掉。
 # 子代理也收：它跑在 DSH 的 standard preset 下，那套 preset 带全套文件与 shell 工具。
 #
-# 覆盖行是**推导**出来的（读上游自己的 patch 文件，把被禁的工具从 preset 插件表里去掉，
-# 再以同 id 覆盖的形式写进本层）——不抄一份上游 preset，改上游时不会漂移。
+# 覆盖行是**推导**出来的（读上游自己的 patch 文件，把白名单外的模型工具从 preset
+# 插件表里去掉，再以同 id 覆盖的形式写进本层）——不抄一份上游 preset，改上游时不会漂移。
 #
 # 推导失败必须**拒绝启动**：收紧没生效就等于没收紧，静默继续等于把业务库敞开。
-LOCKDOWN_ROWS="$(node /usr/local/bin/along-superagent-preset-lockdown.mjs "$CLI_DIR" "$BUNDLE_DIR")"
+# 推导脚本在推导结果为空时**自己**非零退出（退出码即失败），
+# 不再靠「输出字符串判空」——上一版把固定的四条禁用行拼在推导结果前面，
+# 于是判空永远不成立（复核意见 P1-1）。
+#
+# set -e 已经让命令失败即退出；这里再显式判一次是为了让错误信息指向原因，
+# 而不是停在一条 shell 的通用错误上。
+if ! LOCKDOWN_ROWS="$(node /usr/local/bin/along-superagent-preset-lockdown.mjs "$CLI_DIR" "$BUNDLE_DIR")"; then
+  echo "读取面收紧推导失败，拒绝启动（收紧没生效就等于没收紧）" >&2
+  exit 1
+fi
 if [ -z "$LOCKDOWN_ROWS" ]; then
   echo "读取面收紧推导结果为空，拒绝启动" >&2
   exit 1
@@ -147,6 +156,30 @@ fi
 cat >> "$PROFILE_DIR/cordis.patch.yml" <<YAML
 $LOCKDOWN_ROWS
 YAML
+
+# ---- 3c. 校验**最终生效配置**（复核意见 P1-1）---------------------------
+#
+# 上面的推导只是「打算怎么改」。真正生效的是 compose 之后的那一份配置——
+# 上游 bundle 层、DSH web 模板层、profile 层叠在一起，任何一层的行都能在
+# 某个作用域里露出白名单外的模型可见工具。只查推导结果 = 只查了自己写的那份补丁。
+#
+# 所以这里用 dsh 自己的 --dump-config 把**最终生效配置** compose 出来，
+# 再逐作用域校验（顶层 + 每个 preset，含组内嵌套）：
+#   - 任何作用域里出现白名单外的模型可见工具 → 拒绝启动；
+#   - 出现不该存在的 preset（standard / ptc / minimal / cordis）→ 拒绝启动。
+#
+# --dump-config 不 boot、不求值 !!js 表达式，所以这一步在真实 boot 之前就能做完。
+# 校验失败 = 收紧没生效 = 拒绝启动（继续跑就是把业务库敞开）。
+DUMP_CONFIG="$(mktemp)"
+trap 'rm -f "$DUMP_CONFIG"' EXIT
+if ! "$CLI_DIR/node_modules/.bin/dsh" --profile "$PROFILE" --dump-config >"$DUMP_CONFIG" 2>/dev/null; then
+  echo "读取面收紧校验失败：无法合成最终生效配置，拒绝启动" >&2
+  exit 1
+fi
+if ! node /usr/local/bin/along-superagent-preset-lockdown.mjs "$CLI_DIR" "$BUNDLE_DIR" verify <"$DUMP_CONFIG"; then
+  echo "读取面收紧校验失败：最终生效配置里有白名单外的模型可见工具，拒绝启动" >&2
+  exit 1
+fi
 
 # ---- 4. 播种设置 ----------------------------------------------------------
 # 用编排库自己的 SQLite 表直接写「设置快照」是不行的：设置是**带版本**的记录
