@@ -99,6 +99,50 @@ test('bridge.ready 容忍旧版 Along Agent 的 404，其余非 2xx 按 503 未�
   await assert.rejects(()=>createBridge({url:'http://127.0.0.1:1',token:TOKEN}).ready(),error=>error instanceof HostError&&error.status===503);
 });
 
+// Tier 2 的真实就绪契约（docs/cloud-deploy-multi-user.md §3.5）：判定按**状态码与 body**，
+// 不靠「路径是否存在」——另造一条 Super Agent 侧没实现的 /ready 路径时它会 404，
+// 而 404 被当成「旧版没契约 → 就绪」，恰好把要防的启动窗口又放回去。
+test('bridge.readyStrict：只有 200 且 body 为 {service:along-source,ready:true} 才算就绪',async()=>{
+  const identity={userId:USER_A,deviceId:DEVICE_A};
+  const ready=await stubAlongAgent(({path,headers})=>{
+    assert.equal(path,'/along-source/api/goals/along-status-probe','就绪判定走既有契约路径');
+    assert.equal(headers['x-along-user'],USER_A,'契约路径校验身份头，必须带绑定身份');
+    assert.equal(headers['x-along-device'],DEVICE_A);
+    return {status:200,body:{service:'along-source',ready:true}};
+  });
+  try {
+    assert.equal(await createBridge({url:ready.url,token:TOKEN}).readyStrict({identity}),true);
+  } finally { await ready.close(); }
+  // 未就绪：503（Source 未注册/未启用）——判未就绪，不是上游故障。
+  const notReady=await stubAlongAgent(()=>({status:503,body:{error:'along_source_not_ready'}}));
+  try {
+    await assert.rejects(()=>createBridge({url:notReady.url,token:TOKEN}).readyStrict({identity}),
+      error=>error instanceof HostError&&error.status===503);
+  } finally { await notReady.close(); }
+  // 200 但 body 不是契约形状：仍判未就绪（恒 200 的旧探针正是这样分不清启动窗口）。
+  const legacy=await stubAlongAgent(()=>({status:200,body:{ok:true}}));
+  try {
+    await assert.rejects(()=>createBridge({url:legacy.url,token:TOKEN}).readyStrict({identity}),
+      error=>error instanceof HostError&&error.status===503);
+  } finally { await legacy.close(); }
+  // 404：旧版没有契约路径，沿用旧语义（不因升级顺序打断既有部署）。
+  const old=await stubAlongAgent(()=>({status:404,body:{}}));
+  try {
+    assert.equal(await createBridge({url:old.url,token:TOKEN}).readyStrict({identity}),true);
+  } finally { await old.close(); }
+  // 401/403 是**配置问题**（凭证或身份头），给出提示而不是静默当未就绪。
+  for (const status of [401,403]) {
+    const denied=await stubAlongAgent(()=>({status,body:{error:'unauthorized'}}));
+    try {
+      await assert.rejects(()=>createBridge({url:denied.url,token:TOKEN}).readyStrict({identity}),
+        error=>error instanceof HostError&&error.status===503&&/ALONG_BRIDGE_TOKEN_FILE/.test(error.message));
+    } finally { await denied.close(); }
+  }
+  // 连不上 = 服务没起来。
+  await assert.rejects(()=>createBridge({url:'http://127.0.0.1:1',token:TOKEN}).readyStrict({identity}),
+    error=>error instanceof HostError&&error.status===503);
+});
+
 // ---- agent-host 新链路：VM 替身直跑（参照 recent-health-context.test.mjs 的切片写法）--------------------------
 
 const hostSource=readFileSync(new URL('../host/agent-host.mjs',import.meta.url),'utf8');

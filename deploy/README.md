@@ -8,11 +8,131 @@
 | --- | --- |
 | `Dockerfile.host` | Host 镜像包含 Node 22、生成证书所需的 OpenSSL、锁文件锁定的 npm 生产依赖、Host 模块与 web 共享依赖。 |
 | `Dockerfile.agent` | agent 镜像：node:24-bookworm-slim + `@deepseek-ai/dsh@0.2.2-rc.5`（版本写死 pin，engines node>=24.9.0）；携带 `deploy/agent-runner.mjs`（M3）与其 import 的 `web/{super-agent,goal-agent-core,contextual-planning}.mjs`；经 `additional_contexts` 预置 along bundle |
+| `Dockerfile.superagent` | Tier 2 长驻镜像：同一个 node:24 摘要与同一份 dsh 锁文件；携带 **bundle 编译产物** `lib/`（V-1 的 ERR_MODULE_NOT_FOUND 根因就是只配层不装包）；入口 `deploy/superagent-start.sh` |
 | `docker-compose.yml` | 编排：host 443→4176、agent `agent:3088` 仅 compose 内网（不发布端口）、bind 卷 `../../data/host:/data`、compose secrets（runner-token 两服务共用） |
+| `superagent-start.sh` | Tier 2 启动脚本：铺 profile、把 bundle 链进 `profile/node_modules`、绑 `127.0.0.1:3082`、播种设置，然后 exec 常驻 dsh |
+| `superagent-seed.mjs` | Tier 2 设置播种：第一次 boot 之前把「Along Source 开、GitHub Source 关」写进编排库（`assembleAlong` 读的是已存好的设置）；已有设置时不覆盖 |
 | `env.example` | environment 段非敏感参考值（必改项：`ALONG_TLS_CN` 换真实域名） |
 | `../.dockerignore` | 两个主构建上下文都用仓库根目录的白名单，只放行 npm 清单、Host 模块及任务协议、web 模块和 runner 入口。 |
 | `agent-runner.mjs` | 内网 HTTP runner，使用 Along 专用 DSH profile；模块自检 `node --check deploy/agent-runner.mjs` |
 | `agent-dsh/` | dsh 安装清单：`package.json` + `package-lock.json` 锁定 `@deepseek-ai/dsh@0.2.2-rc.5`，镜像内 `npm ci --ignore-scripts` 安装。升级 dsh 版本时在本目录 `npm install --package-lock-only --ignore-scripts` 重新生成 lock 并入库，同时同步 `Dockerfile.agent` 的 pin 与 compose 的 `ALONG_DSH_VERSION` |
+
+## Tier 2：长驻 Super Agent（§3.5，验证项 V-1）
+
+Tier 1 的 `agent` 服务跑**一次性** headless runner（每个目标聊天请求拉起一个 dsh 进程）。
+Tier 2 增加 `superagent` 服务跑**长驻** DSH profile，承载新链路数据面：
+`/along-source/api/*`、`along.sqlite`、投递泵。两个服务共用同一份 dsh 锁文件，版本不分叉。
+
+### 网络：与 host 共享网络命名空间
+
+```yaml
+superagent:
+  network_mode: "service:host"
+```
+
+这是 V-1 报告优先验证的方案，原因是 Super Agent 侧两处**硬性**约束：
+
+- `src/along/api.ts:282` 与 `src/app/http.ts:234` 都要求 `webserver.host === '127.0.0.1'`，
+  所以它只能监听回环——独立 compose 服务之间用服务名访问不到它的 `127.0.0.1`。
+- 管理面（`/orchestrator` 与面板）必须保持仅本机可达。共享命名空间 + 只监听回环天然满足：
+  `superagent` **不发布任何端口**，宿主机与外网都连不上 3082。
+
+Host 通过 `http://127.0.0.1:3082` 访问（`ALONG_SUPERAGENT_URL` 的默认值就是它）。
+
+独立服务方案（专用私网入口 + 桥接鉴权）留作备选，代价见 V-1 报告的路线对比。
+
+### 持久卷与桥接凭证
+
+| 路径 | 内容 |
+| --- | --- |
+| `../../data/superagent:/var/lib/along-superagent` | 编排库（`engine/orchestrator.sqlite`）与业务库（`along/along.sqlite`） |
+| `../../data/dsh-home:/var/lib/dsh` | DSH home：profile、凭证文件、会话持久化 |
+
+桥接凭证是**同一份** 0600 的 32 字节 hex 文件：Host 用 `ALONG_BRIDGE_TOKEN_FILE` 读，
+Super Agent 用 profile 的 `alongBridgeTokenFile` 读，两侧必须指向同一个宿主文件。
+compose 里两侧都挂 `bridge-token` secret（源文件 `../../secrets/bridge-token`），
+容器内挂载点都是 `/run/secrets/bridge-token`。
+
+**两侧 token 必须一致**：文件不存在时 Super Agent 会自己生成一份（`bridgeTokenOf` 的
+ENOENT 分支），Host 那份就永远对不上，桥接调用全量 401。所以凭证本体由宿主文件提供，
+容器不生成。
+
+### 开启与回退（§6.4 第 8 步）
+
+```sh
+# 第 1 步：写好桥接凭证（0600 的 32 字节 hex，权限过宽 = 未配置）
+install -m 600 /dev/null /opt/along/secrets/bridge-token
+read -rs TOKEN; printf '%s\n' "$TOKEN" > /opt/along/secrets/bridge-token   # 32 字节 hex
+
+# 第 2 步：叠加 Tier 2 形态（开关 + 桥接凭证 + 挂载），带 --profile tier2
+docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.tier2.yml --profile tier2 up -d
+```
+
+叠加文件改的 host 环境变量是：`ALONG_EVENT_INGEST=on`（打开新链路）、
+`ALONG_SUPERAGENT_URL=http://127.0.0.1:3082`（常驻 Super Agent 的回环地址）、
+`ALONG_BRIDGE_TOKEN_FILE=/run/secrets/bridge-token`（桥接凭证）。
+
+为什么用**叠加文件**而不是改主 compose：
+
+- 主 compose 是 Tier 1 的默认形态（`ALONG_EVENT_INGEST=off`、新链路 503、runner 在场）。
+  Tier 2 的开关与它相反，两种形态不该混在同一份文件里。
+- 桥接凭证是 compose **file secret**：宿主文件缺失会让 `up` 直接失败。主 compose 声明它，
+  没部署凭证的 Tier 1 部署连 `up` 都跑不了。
+- `superagent` 服务挂在 `tier2` profile 下：默认的 `docker compose up`（Tier 1）不受它影响，
+  回退只需不叠加 Tier 2 文件。
+
+**回退** = 去掉 Tier 2 叠加文件（或把 `ALONG_EVENT_INGEST` 改回 `off`）并重建 host：
+
+```sh
+docker compose -f deploy/docker-compose.yml up -d --no-deps --force-recreate host
+```
+
+Along Agent 的业务库（`along.sqlite`）与 DSH 状态**不清**（BC-09-03/04）——回退是
+「新链路停用」，不是「数据回滚」。runner 服务留在 compose 里作为显式回退目标
+（它仍按 `ALONG_DSH_RUNNER_URL` 分流，`ALONG_EVENT_INGEST=off` 时旧 DSH 分支照旧可用）。
+
+### 就绪判定
+
+`superagent` 的 compose healthcheck 只证明回环端口在监听，**不是**信任验收。
+真实就绪走既有契约路径 `/along-source/api/goals/along-status-probe`：
+
+- 就绪：`200` 且 body 为 `{"service":"along-source","ready":true}`；
+- 未就绪（业务面未组装或 Along Source 未注册/未启用）：`503 {"error":"along_source_not_ready"}`；
+- 旧版 Super Agent 没有这条路径：`404`，按旧语义视作就绪（不因升级顺序打断既有部署）。
+
+**不另造 `/ready` 路径**：另造一条 Super Agent 侧没实现的路径时它会 404，而 404 被当成
+「旧版没有契约路径 → 就绪」——恰好把要防的启动窗口又放回去。宿主因此按**状态码与 body**
+判定，不靠「路径是否存在」。
+
+旧版探针恒返回 200，分不清「Along Source 已注册」与「进程刚起来」的启动窗口——V-1 的
+投递丢失正是发生在那个窗口里，所以判定必须带身份头（`x-along-user`/`x-along-device`），
+缺头 403、缺凭证 401 都按**配置问题**报出，不静默当成「未就绪」。
+
+## 已知边界
+
+- 本节的长驻编排已在隔离 Linux Compose 环境验证（合成双用户 + 隔离测试 CA）；
+  真实模型回合、APNs、双 iPhone 与生产拓扑仍待验。
+- `superagent` 服务目前不接模型密钥之外的凭证；模型密钥走 `DEEPSEEK_API_KEY` 环境变量
+  （只进环境，不落盘、不进日志，§3.7）。
+
+### 怎么复现那次隔离验证
+
+```sh
+# 默认不跑（要构建镜像、起容器，耗时）。用环境变量显式开启：
+ALONG_TIER2_INTEGRATION=1 node --test test/tier2-linux-integration.test.mjs
+
+# 对着 Super Agent 的某个分支验（默认是相邻仓库）：
+ALONG_TIER2_SUPERAGENT_REPO=/path/to/along-superagent \
+  ALONG_TIER2_INTEGRATION=1 node --test test/tier2-linux-integration.test.mjs
+```
+
+用例覆盖：TLS 入口 → 双用户事件同步与隔离 → 后台投递到编排 Engine → 重启恢复
+（重启前已到期的待投递行必须恢复投递，不得变成 `filtered`）。
+失败时用 `ALONG_TIER2_KEEP=1` 保留现场（容器与库留在 `.tier2-integration/`）看日志。
+
+该用例对 Super Agent 的「Source 注册前不领取队列」修复是**敏感的**：拿未修复的
+Super Agent 跑，它会在重启恢复那一步失败并报 `filtered / source_not_installed`——
+这正是 V-1 暴露的原始故障面。
 
 ## 路径基准（配错 = 静默降级，§3.1）
 

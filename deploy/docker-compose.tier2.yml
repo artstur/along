@@ -1,0 +1,46 @@
+# Tier 2 叠加文件：常驻 Super Agent + 新链路开关（docs/cloud-deploy-multi-user.md §3.5，验证项 V-1）。
+#
+# 用法（§6.4 第 8 步）：
+#
+#   docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.tier2.yml --profile tier2 up -d
+#
+# 为什么用叠加文件而不是改主 compose：
+#   - 主 compose 是 Tier 1 的**默认形态**（ALONG_EVENT_INGEST=off、新链路 503、runner 在场）。
+#     Tier 2 的开关（EVENT_INGEST=on、桥接凭证）与它相反，两种形态不该写在同一份文件里
+#     ——否则「回退」只能靠改文件再改回来（易漏、易错、审计不清）。
+#   - 桥接凭证是 compose **file secret**：宿主文件缺失会让 `up` 直接失败（不是启动后报错）。
+#     若主 compose 就声明它，没部署桥接凭证的 Tier 1 部署连 `up` 都跑不了。
+#   - 叠加文件让两种形态各自可审计：`docker compose ... config` 的输出就是当次形态的完整事实。
+#
+# 相对路径基准与主 compose 相同：project directory = deploy/（§3.1），
+# 所以 ../../data 与 ../../secrets 解析到 /opt/along/{data,secrets}（§6.4 第 1/3 步布局）。
+#
+# ---- 开启前的准备（§6.4 第 3 步的安全写入形态）----
+#
+#   install -m 600 /dev/null /opt/along/secrets/bridge-token
+#   read -rs TOKEN; printf '%s\n' "$TOKEN" > /opt/along/secrets/bridge-token   # 32 字节 hex
+#
+# 凭证本体只落盘，不进环境变量、不进镜像层、不进日志（§3.3/§3.7）。
+# 权限必须是 0600：host/along-bridge.mjs 的 readBridgeToken 与 Super Agent 的
+# bridgeTokenOf 都按 0600 校验，权限过宽等同未配置（fail-closed）。
+services:
+  host:
+    environment:
+      # 新链路开关（§3.5）：on = /events、/sync、/sync/ack、/notifications/* 生效；
+      # 旧 DSH 分支（/super-agent/goals|tasks）改答 409「已切换新链路」。
+      # 回退 = 本文件不叠加（或改回 off）并重建 host——业务库与 DSH 状态**不清**（BC-09-03/04）。
+      ALONG_EVENT_INGEST: "on"
+      # 常驻 Super Agent 的回环地址。默认值就是它，这里显式写出是为了让叠加后的
+      # `compose config` 自证形态（管理面仅本机可达：superagent 不发布任何端口）。
+      ALONG_SUPERAGENT_URL: http://127.0.0.1:3082
+      # 桥接凭证：与 superagent 读的是**同一份**宿主文件（../../secrets/bridge-token）。
+      # 两侧各挂到 /run/secrets/bridge-token，内容同一份。
+      ALONG_BRIDGE_TOKEN_FILE: /run/secrets/bridge-token
+    secrets:
+      - bridge-token
+  superagent:
+    secrets:
+      - bridge-token
+secrets:
+  bridge-token:
+    file: ../../secrets/bridge-token

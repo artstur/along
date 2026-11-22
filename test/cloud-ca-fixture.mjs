@@ -42,7 +42,10 @@ export function stageRelease(stateDir,ca,{serial='test-1'}={}) {
   chmodSync(version,0o700);
   const current=join(stateDir,'tls','current');
   if(existsSync(current)) rmSync(current,{force:true});
-  symlinkSync(version,current);
+  // 相对目标（不是绝对路径）：状态目录被 bind mount 进容器时，绝对链接会在容器里指向
+  // 不存在的宿主路径（tls/current 变成断链），Host 因「缺少证书版本目录」拒启。
+  // 相对链接在宿主机与容器里都解析到同一份材料。
+  symlinkSync(join('releases',serial),current);
   return version;
 }
 

@@ -101,7 +101,8 @@ const composeCli=probeCompose();
 test('compose 按 §3.1 编排：443→4176、agent 仅内网、bind 卷与 secrets 指仓库外层、闭包内网 DNS',()=>{
   const services=composeDoc.services;
   assert.ok(services.host&&services.agent,'必须恰有 host 与 agent 两个服务');
-  assert.equal(Object.keys(services).length,2,'不引入 §3.1 之外的第三个服务（无反代，SD-1）');
+  // Tier 2 增加 superagent 服务（§3.5）：它与 host 共享网络命名空间，不引入反代（SD-1 仍成立）。
+  assert.equal(Object.keys(services).length,3,'不引入 §3.1/§3.5 之外的第四个服务（无反代，SD-1）');
   // host：端口映射、容器名、监督、状态卷
   assert.deepEqual(services.host.ports,['443:4176'],'443→4176 端口映射（§3.1）');
   assert.equal(services.host.container_name,'along-host','README 冒烟按容器名取日志');
@@ -351,6 +352,8 @@ test('两个 Docker 构建共享根目录白名单，目录中的任意文件不
     '*','!package.json','!package-lock.json','!host/*.mjs','!host/schemas/task-reply.schema.json','!web/*.mjs',
     '!deploy/agent-runner.mjs',
     '!deploy/agent-dsh/package.json','!deploy/agent-dsh/package-lock.json',
+    // Tier 2 长驻镜像（deploy/Dockerfile.superagent）的启动脚本与设置播种脚本。
+    '!deploy/superagent-start.sh','!deploy/superagent-seed.mjs',
   ]);
   // 白名单语义不变（G-8，§3.3-(3)）：`*` 打头 + 只放行具体路径——非 glob 的放行项必须真实存在，
   // 任何不含通配的「新文件」都不会命中任何放行行。

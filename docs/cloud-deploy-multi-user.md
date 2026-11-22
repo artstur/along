@@ -225,7 +225,11 @@ secrets:
   - **客户端恢复**：同一云端连接的在途目标即使换页或重开 App，也按原编号查询。首回执丢失后，只有 Runner 确认记录不存在且接单宽限已过，才立即提示重发。临时网络错误继续遵循运行超时。
   - **执行边界**：runner 通过 stdin 把提示交给固定版本的 `dsh --profile along-headless`，使用显式模块集且无模型可见工具。每次调用新建私有工作目录和 DSH home，完成后清理。云端 agent 容器根文件系统只读，临时目录位于有上限的 tmpfs，运行子进程只接收必要的环境变量及模型密钥。
   - **开关语义不变**：云端 v1 `ALONG_EVENT_INGEST` 不设置（off）→ 新链路端点 503、旧链路 DSH 分支正常（`host/agent-host.mjs:162-167`）；情境评估凭证/桥接凭证不配置 → 相关守卫自然跳过（`:71-75`）。
-- **Tier 2（新链路数据面上云，验证项 V-1，不在本轮验收范围）**：验证 along bundle 能否在 `@deepseek-ai/dsh` CLI 下以 profile/bundle 层路径挂载方式加载（npm 版 CLI 拒绝插件管理请求，须走层路径；能否承载长驻 webserver + along.sqlite + 投递泵待验证）。验证通过则 compose 增加 bridge token secret、`ALONG_EVENT_INGEST=on`、`ALONG_SUPERAGENT_URL` 指向 agent 长驻服务；验证不通过则新链路数据面留在 Mac 本地模式，云端维持 Tier 1。两种结果都只动配置与开关，不改协议（BC-09-03/04 回退语义原样适用）。
+- **Tier 2（新链路数据面上云，验证项 V-1）**：**V-1 已通过**，路线定为「常驻 DSH profile + 兼容适配」。along bundle 以可解析包形态装进 `@deepseek-ai/dsh` CLI 的 node_modules 树（不是只配 bundle 层——那会 ERR_MODULE_NOT_FOUND），长驻承载 `/along-source/api/*`、`along.sqlite` 与投递泵。compose 侧：新增 `superagent` 服务（挂 `tier2` profile）、`bridge-token` secret、持久卷（`data/superagent` + `data/dsh-home`）。两种结果都只动配置与开关，不改协议（BC-09-03/04 回退语义原样适用）。**就绪契约**：既有路径 `/along-source/api/goals/along-status-probe`——就绪 `200 {"service":"along-source","ready":true}`，未就绪 `503 {"error":"along_source_not_ready"}`；不另造 `/ready` 路径（那会 404 并被当成「旧版没契约 → 就绪」，恰好把要防的启动窗口放回去）。
+
+  **网络拓扑**：superagent 与 host **共享网络命名空间**（`network_mode: "service:host"`），且**不发布任何端口**——Super Agent 侧两处硬性要求 `webserver.host === '127.0.0.1'`，共享命名空间 + 只监听回环天然满足「管理面仅本机可达」，宿主机与外网都连不上 3082。
+
+  **形态开关**：Tier 2 用叠加文件 `deploy/docker-compose.tier2.yml` 表达（`ALONG_EVENT_INGEST=on`、`ALONG_SUPERAGENT_URL`、`ALONG_BRIDGE_TOKEN_FILE` + 两侧挂同一份 `bridge-token` secret），主 compose 保持 Tier 1 默认形态。桥接凭证是 file secret，宿主文件缺失会让 `up` 硬失败——写在主 compose 里会让没部署凭证的 Tier 1 部署连 `up` 都跑不了。
 
 ### 3.6 红线在云端形态的等价延续
 
@@ -380,6 +384,38 @@ secrets:
 8. **切换前旧端收尾**：在 iPhone 上连旧 Mac 服务打开 App，等健康/事件同步清空待发队列，旧 Mac 服务可停可不停。
 9. **iPhone 迁移/配对**：两台新版本 App 按 CA 方案 §5 切换；云端 DNS 不填写叶指纹。只有真正换端或原 token 失效才重新配对，Keychain 保存成功后启用。分别确认前后台连接、聊天修改目标自动生效及用户隔离；真正换端按原规则重新授权，同根同端换叶不误撤授权。**向两位用户说明 OKX 采集口径**：云端使用期间 iPhone 的 OKX 连接保持「仅账户摘要」，勿开启成交/账单明细采集——多用户形态 gateway 拒收明细，且明细与摘要在同一次原子发布里，开启后发布会持续失败、连接无法就绪；需明细复盘时在 Mac 本地模式操作（`docs/cloud-security-hardening.md` §3.5）。
 10. **观察与回退锚点**：观察 24 小时。证书按 CA 方案 §6 校验后原子切 `tls/current`，用 `docker compose -f deploy/docker-compose.yml up -d --no-deps --force-recreate host` 重载并核对实际 SAN/链/有效期。当前运行配置仍是旧自签实现（见本节修订门槛）：换证书或域名时更新 Compose 中的 `ALONG_TLS_CN`，用 `docker compose -f deploy/docker-compose.yml stop host` 停止 Host，将 `/opt/along/data/host/cert.pem` 和 `/opt/along/data/host/key.pem` 一起移到权限为 0700 的备份目录，再执行上述 `--force-recreate` 重建命令，通过 DNS、TLS 握手和 Host 日志核对新域名、到期时间和指纹。同根同域轮换不重新发码；换域名按换端处理。失败仅可恢复上一可信且未泄露的 CA 叶版本，或用户切回 Mac；不恢复云端忽略校验/旧 DNS pin。失窃走逐台撤根与独立恢复渠道。
+
+### 6.5 Tier 2 开启与回退（§3.5，验证项 V-1 通过后）
+
+Tier 2 与 Tier 1 的差别只在**开关与编排**，不改协议：回退是「新链路停用」，不是「数据回滚」。
+
+**开启**（在 §6.4 第 1 步的 `/opt/along` 布局上执行）：
+
+```sh
+# 1. 写桥接凭证（0600 的 32 字节 hex；权限过宽 = 未配置，Host 与 Super Agent 都会拒用）
+install -m 600 /dev/null /opt/along/secrets/bridge-token
+read -rs TOKEN; printf '%s\n' "$TOKEN" > /opt/along/secrets/bridge-token   # 32 字节 hex
+
+# 2. 叠加 Tier 2 形态并启动（superagent 服务挂在 tier2 profile 下）
+docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.tier2.yml --profile tier2 up -d
+
+# 3. 冒烟：宿主上 3082 必须**连不上**（管理面仅本机可达），Host 的 443 必须通
+curl -sS --max-time 3 http://127.0.0.1:3082/ ; echo "退出码应为非 0"
+curl -sk https://127.0.0.1/health
+```
+
+**回退**（Tier 2 → Tier 1）：
+
+```sh
+# 去掉 Tier 2 叠加文件并重建 host（业务库与 DSH 状态**不清**）
+docker compose -f deploy/docker-compose.yml up -d --no-deps --force-recreate host
+```
+
+回退后 `ALONG_EVENT_INGEST=off`：新链路端点 503 属预期，旧 DSH 分支（`/super-agent/goals|tasks`）照旧走 `ALONG_DSH_RUNNER_URL` 指向的 runner 服务（runner 仍在 compose 里，是显式回退目标）。**不要**清掉 `ALONG_DSH_RUNNER_URL`——它是云端形态的判据（`docs/iphone-ca-profile-design.md` §3.1），清掉会让 Host 静默退回现场自签证书（安全降级）。
+
+**数据边界**：回退**不删** `data/superagent`（`along.sqlite` 业务库 + `orchestrator.sqlite` 编排库）与 `data/dsh-home`。重开 Tier 2 时沿用同一份卷，事件游标、待投递行与已投递状态都还在；因此**回退期间不接受新事件**（客户端 503 会把事件留在手机队列里），回退窗口内不产生需要清账的增量。BC-09-03/04 的「回退不清数据」语义原样适用。
+
+**就绪验收**：以 Host 的 `/connection/status` 为准（它走真实就绪契约）。Host 日志里若出现「DSH Along Source 未就绪（503）」，说明长驻服务还在启动窗口——此时**不要**把待投递行当作故障处理：Super Agent 侧已改为「Source 注册前不领取队列」，行会保留重试时间，可用后自动恢复投递（V-1 的原始失败面：Source 注册前领取 → `filtered` / `source_not_installed`）。
 
 ## 7. 方案内决策记录（SD）
 

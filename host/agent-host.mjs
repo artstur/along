@@ -620,6 +620,14 @@ const server=createServer({key:tlsKey,cert:tlsCert},async(req,res)=>{
         requireBridgeCredential();
         await ensurePairingRegistered(who);
         if (!registeredUsers.has(who.userId)) throw new HostError('配对身份尚未登记到 Along，请稍后重试',503);
+        // 真实就绪契约（§3.5）：Along Agent 侧（along-superagent 的 feature/along-tier2-readiness）
+        // 把 along-status-probe 改成真实就绪——Source 未注册/未启用时答 503
+        // {"error":"along_source_not_ready"}，就绪才答 200 {service:"along-source",ready:true}。
+        // 旧版恒 200 的探针分不清「Source 已注册」与「进程刚起来」的启动窗口，
+        // 而那个窗口正是 V-1 里待投递事件被误过滤（filtered/source_not_installed）的根因。
+        // 未就绪时答 503——客户端据此知道「Along Agent 还没准备好」，而不是拿到一个假的 ready。
+        // 探针要带绑定身份（Along Agent 侧 boundIdentity 校验身份头格式，缺头 403）。
+        await upstream(()=>bridge.readyStrict({identity:who}));
         await upstream(()=>bridge.call('/along-source/api/goals/along-status-probe',{method:'GET',identity:who}));
         return respond(res,200,{along:true,runtime:DSH_RUNTIME,ready:true,eventProtocol:1,userId:who.userId});
       }
