@@ -42,7 +42,9 @@ const PORT='14476';
 // 所以这里用独立的项目名、容器名与镜像标签：项目名带随机后缀（两次并发也不撞），
 // 容器名与镜像标签带固定前缀（一眼看出是测试栈）。
 const PROJECT=`along-tier2-test-${process.pid}`;
-const CONTAINER_PREFIX='along-t2-test';
+// 容器名也带进程号：上一次跑崩了留下的容器不挡下一次——
+// docker 的容器名是全局的，重名会让 `up` 直接失败。
+const CONTAINER_PREFIX=`along-t2-test-${process.pid}`;
 const IMAGE_TAG='along-tier2-test:local';
 
 // Docker 探测 ----------------------------------------------------------
