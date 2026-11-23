@@ -9,6 +9,8 @@
 - 搜索/抓取必须使用严格的已授权 provider 和最小公开查询，保留研究证据与隐私校验；配置就绪、真实请求和推荐完成分别登记。
 - 对最终主干 SHA 构建签名包并记录资源一致性。构建、部署、手机安装、健康自然上传、系统通知送达分别验收。
 
+旧客户端的 message.text 继续是最多1200字的明确预览；新 wire.result_text 保存最多16000字完整正文。新版只有在原有 background、task、execution receipt、revision 与 task_execution_revision 校验通过后才将完整正文存入本地text；未知或跨任务字段不扩大权限。完整正文随既有结果投影迁移重放和缓存恢复，普通chat上界保持2000。公开Web与手机仅发布本轮最终组合版本，不单独发布中间展示协议。
+
 ## 本机检查的已有不稳定项
 
 精确基线 bcde2bcc 在此 Mac 上可复现六项 TLS 断言失败：测试用 OpenSSL CLI 的人类可读 subject 文本固定格式提取 CN，LibreSSL 的格式不同会得到 null。证书本身有效。本轮测试改为 Node X509Certificate 独立解析证书的真实主题，保留 CN、有效期、指纹和实际 TLS 握手断言，不修改 Host 证书实现。

@@ -168,6 +168,12 @@ function safeMessage(message,item) {
   const goal=item.goalId?safeWorkspaceGoal(item.payload.snapshot):undefined,task=goal?.tasks.find(task=>task.id===clean.taskId);
   const scopedResult=storedResultBody(clean,goal,task);
   if(!text(message.text,scopedResult?RESULT_TEXT_LIMIT:2000))throw Error('对话同步格式不正确');
+  // New servers keep message.text short for pre-upgrade clients. The separate complete body
+  // never grants result authority, and cannot enter ordinary chat or another task's cache.
+  if(scopedResult&&item.payload.result_text!==undefined) {
+    if(!text(item.payload.result_text,RESULT_TEXT_LIMIT))throw Error('执行结果正文格式不正确');
+    clean.text=item.payload.result_text;
+  }
   const presentation=scopedResult?safeResultPresentation(item.payload.result_presentation):null;
   if(presentation)clean.resultPresentation=presentation;
   return clean;
