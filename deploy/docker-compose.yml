@@ -100,7 +100,7 @@ services:
       # 上游来源与 superagent 服务**同一个**（审查 P1-2）：两个镜像装的是同一个 Super Agent，
       # 否则修好的就绪修复与没修的会并存——而旧版探针恒答 200 {ready:true}，
       # Host 侦测不到装的是哪个版本。
-      additional_contexts: {along: "${ALONG_SUPERAGENT_SOURCE:-https://github.com/artstur/along-superagent.git#18fb8064417c95b7a46efec218091ed831d55e28}"}
+      additional_contexts: {along: "${ALONG_SUPERAGENT_SOURCE:-https://github.com/artstur/along-superagent.git#53e3ef0c8b065c4ce1f6b3c3b0b16bf1f2655385}"}
     image: along-agent:local
     container_name: along-agent
     read_only: true
@@ -144,7 +144,7 @@ services:
       # 镜像就跟着变，而旧版探针恒答 200 {ready:true}，Host 侦测不到装错版本。
       # 变量可覆盖：本地对着未推送的提交调试时设
       # ALONG_SUPERAGENT_SOURCE=../../along-superagent（§6.4 第 5 步）。
-      additional_contexts: {along: "${ALONG_SUPERAGENT_SOURCE:-https://github.com/artstur/along-superagent.git#18fb8064417c95b7a46efec218091ed831d55e28}"}
+      additional_contexts: {along: "${ALONG_SUPERAGENT_SOURCE:-https://github.com/artstur/along-superagent.git#53e3ef0c8b065c4ce1f6b3c3b0b16bf1f2655385}"}
     image: along-superagent:local
     container_name: along-superagent
     # Tier 2 才起（§6.4 第 8 步）：默认的 `docker compose up`（Tier 1）不受影响。
