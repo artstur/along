@@ -24,7 +24,8 @@ function sanNames(cert) {
   for (const part of raw.split(',')) {
     const text=part.trim();
     if(text.startsWith('DNS:')) out.push({kind:'DNS',value:text.slice(4).toLowerCase()});
-    else if(text.startsWith('IP Address:')) out.push({kind:'IP',value:text.slice(10).trim()});
+    // 'IP Address:' 是 11 个字符：少切一位会留下前导冒号，IP SAN 永远匹配不上。
+    else if(text.startsWith('IP Address:')) out.push({kind:'IP',value:text.slice('IP Address:'.length).trim()});
   }
   return out;
 }

@@ -172,6 +172,22 @@ test('SAN 覆盖：通配符只匹配最左侧单层，IP SAN 与 DNS SAN 不互
   assert.equal(certificateCoversHost(leaf,'127.0.0.1'),false);
 });
 
+test('SAN 覆盖：IP SAN 也要能匹配——云端主机名是公网 IP 时',t=>{
+  // 云端形态的 ALONG_TLS_CN 常常就是公网 IPv4，叶证书签的是 IP SAN。
+  // 解析若少切一位（'IP Address:' 是 11 个字符），IP SAN 永远匹配不上。
+  const f=fixture(t);
+  const ip='203.0.113.7';
+  openssl(['req','-new','-newkey','rsa:2048','-nodes','-keyout','ip.key','-out','ip.csr','-subj',`/CN=${ip}`],f.ca.root);
+  writeFileSync(join(f.ca.root,'ip.cnf'),
+    `basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=IP:${ip}\n`);
+  openssl(['x509','-req','-in','ip.csr','-CA','ca.crt','-CAkey','ca.key','-CAcreateserial',
+    '-out','ip.crt','-days','90','-extfile','ip.cnf'],f.ca.root);
+  const leaf=new X509Certificate(readFileSync(join(f.ca.root,'ip.crt')));
+  assert.equal(leaf.subjectAltName,`IP Address:${ip}`);
+  assert.equal(certificateCoversHost(leaf,ip),true);
+  assert.equal(certificateCoversHost(leaf,'along.test.local'),false);
+});
+
 test('描述文件：只含一个根 payload，嵌入根与批准根一致，摘要可核对',t=>{
   const f=fixture(t);
   const rootDer=rootDerFromPem(readFileSync(join(f.ca.root,'ca.crt'),'utf8'));
