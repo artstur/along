@@ -2,17 +2,109 @@
 
 对应设计 `docs/cloud-deploy-multi-user.md`（拓扑 §3.1、本模块 §4-M5、验收 #5/#10、Runbook §6.4）。**上线步骤以 Runbook §6.4 为准**，本文只写产物自身的口径与自检。
 
+固定公网 IPv4 入口按本文的[独立运维步骤](#固定公网-ipv4-直连)执行。
+
 ## 文件清单
 
 | 文件 | 内容 |
 | --- | --- |
 | `Dockerfile.host` | Host 镜像包含 Node 22、生成证书所需的 OpenSSL、锁文件锁定的 npm 生产依赖、Host 模块与 web 共享依赖。 |
 | `Dockerfile.agent` | agent 镜像：node:24-bookworm-slim + `@deepseek-ai/dsh@0.2.2-rc.5`（版本写死 pin，engines node>=24.9.0）；携带 `deploy/agent-runner.mjs`（M3）与其 import 的 `web/{super-agent,goal-agent-core,contextual-planning}.mjs`；经 `additional_contexts` 预置 along bundle |
+| `Dockerfile.superagent` | Tier 2 长驻镜像：同一个 node:24 摘要与同一份 dsh 锁文件；携带 **bundle 编译产物** `lib/`（V-1 的 ERR_MODULE_NOT_FOUND 根因就是只配层不装包）；入口 `deploy/superagent-start.sh` |
 | `docker-compose.yml` | 编排：host 443→4176、agent `agent:3088` 仅 compose 内网（不发布端口）、bind 卷 `../../data/host:/data`、compose secrets（runner-token 两服务共用） |
+| `docker-compose.public-ip.yml`、`nginx/` | Tier 2 公网 IPv4 入口及 HTTP-01 |
+| `public-ip-certificate.py` | 首次签发、定期续期、nginx 校验证书和失败回退 |
+| `superagent-start.sh` | Tier 2 启动脚本：铺 profile、把 bundle 链进 `profile/node_modules`、绑 `127.0.0.1:3082`、播种设置，然后 exec 常驻 dsh |
+| `superagent-seed.mjs` | Tier 2 设置播种：第一次 boot 之前把「Along Source 开、GitHub Source 关」写进编排库（`assembleAlong` 读的是已存好的设置）；已有设置时不覆盖 |
+| `superagent-preset-lockdown.mjs` | Tier 2 读取面收紧：推导出去掉文件/shell/终端/文档/子代理能力后的 preset 覆盖行（读上游自己的 patch 推导，不抄一份）；推导结果为空即拒绝启动 |
 | `env.example` | environment 段非敏感参考值（必改项：`ALONG_TLS_CN` 换真实域名） |
 | `../.dockerignore` | 两个主构建上下文都用仓库根目录的白名单，只放行 npm 清单、Host 模块及任务协议、web 模块和 runner 入口。 |
 | `agent-runner.mjs` | 内网 HTTP runner，使用 Along 专用 DSH profile；模块自检 `node --check deploy/agent-runner.mjs` |
 | `agent-dsh/` | dsh 安装清单：`package.json` + `package-lock.json` 锁定 `@deepseek-ai/dsh@0.2.2-rc.5`，镜像内 `npm ci --ignore-scripts` 安装。升级 dsh 版本时在本目录 `npm install --package-lock-only --ignore-scripts` 重新生成 lock 并入库，同时同步 `Dockerfile.agent` 的 pin 与 compose 的 `ALONG_DSH_VERSION` |
+
+## Tier 2：长驻 Super Agent（§3.5，验证项 V-1）
+
+Tier 1 的 `agent` 服务跑**一次性** headless runner（每个目标聊天请求拉起一个 dsh 进程）。
+Tier 2 增加 `superagent` 服务跑**长驻** DSH profile，承载新链路数据面：
+`/along-source/api/*`、`along.sqlite`、投递泵。两个服务共用同一份 dsh 锁文件，版本不分叉。
+
+### 网络
+
+Host 和 Super Agent 共用 `netns` 的网络命名空间。锚点发布 443，Super Agent 只在回环 3082 监听。
+
+### 持久卷与桥接凭证
+
+| 路径 | 内容 |
+| --- | --- |
+| `../../data/superagent:/var/lib/along-superagent` | 编排库（`engine/orchestrator.sqlite`）与业务库（`along/along.sqlite`） |
+| `../../data/dsh-home:/var/lib/dsh` | DSH home：profile、凭证文件、会话持久化 |
+
+桥接凭证是**同一份** 0600 的 32 字节 hex 文件：Host 用 `ALONG_BRIDGE_TOKEN_FILE` 读，
+Super Agent 用 profile 的 `alongBridgeTokenFile` 读，两侧必须指向同一个宿主文件。
+compose 里两侧都挂 `bridge-token` secret（源文件 `../../secrets/bridge-token`），
+容器内挂载点都是 `/run/secrets/bridge-token`。
+
+**两侧 token 必须一致**：文件不存在时 Super Agent 会自己生成一份（`bridgeTokenOf` 的
+ENOENT 分支），Host 那份就永远对不上，桥接调用全量 401。所以凭证本体由宿主文件提供，
+容器不生成。
+
+### 开启、锚点维护、换证与回退
+
+按 [部署手册 §6.5](../docs/cloud-deploy-multi-user.md#tier2-runbook) 操作。开启时叠加 `docker-compose.tier2.yml`，以 `ALONG_EVENT_INGEST=on` 启用事件链路。维护锚点使用 `deploy/tier2-stack.sh rebuild-anchor`。换叶保留叠加文件，只重建 Host。回退先停 Super Agent 和锚点，再用主 Compose 重建 Host，恢复 `ALONG_EVENT_INGEST=off` 并保留持久卷。
+
+### 就绪判定
+
+Host 通过私有回环探测 `/along-source/api/goals/along-status-probe`，带桥接凭证和绑定身份。只发一次 GET，收到 `200 {"service":"along-source","ready":true}` 才就绪。上游 `404` 和其他未就绪结果归入 Host 的 `503`，`401/403` 附带配置提示。
+
+### 上游来源是钉死的提交
+
+两个镜像的构建输入都取
+`${ALONG_SUPERAGENT_SOURCE:-https://github.com/artstur/along-superagent.git#<40 位提交>}`，
+**不指向相邻 checkout 的工作区**：那个 HEAD 是可变的，运维切个分支镜像就跟着变，
+而旧版探针恒答 200，Host 侦测不到装错版本——镜像里若是没有就绪修复的 bundle，
+重启时已到期的待投递行仍会被终结为 `filtered / source_not_installed`。
+本地对着未推送的提交调试时用 `ALONG_SUPERAGENT_SOURCE` 指向相邻 checkout。
+
+### 会话权限
+
+Tier 2 只启用 Along Worker 和 Router。启动脚本生成 preset 覆盖并校验最终 DSH 配置，失败即退出。应用继续按用户与任务约束 Along 业务工具。
+
+### 命名空间锚点
+
+Tier 2 叠加文件里的 `netns` 服务只持有一个网络命名空间，`host` 与 `superagent` 都加入它
+（Super Agent 硬性要求 `webserver.host === '127.0.0.1'`，只能监听回环）。
+锚点与两个服务都无关，所以**只重建 host 时 superagent 不会留在旧命名空间里**
+（旧形态 `network_mode: "service:host"` 会：新 host 访问 `127.0.0.1:3082` 得到 `ECONNREFUSED`）。
+443 的发布也声明在锚点上——加入他人命名空间的容器不能自己发布端口，
+而命名空间是共享的，映射进的是同一个命名空间。
+
+## 已知边界
+
+- 本节的长驻编排已在隔离 Linux Compose 环境验证（合成双用户 + 隔离测试 CA）；
+  真实模型回合、APNs、双 iPhone 与生产拓扑仍待验。
+- `superagent` 服务目前不接模型密钥之外的凭证；模型密钥走 **file secret**
+  （`model-credentials`，挂到 `/run/secrets/model-credentials`），由启动脚本读出后注入进程
+  环境——不进 compose 的 `environment`（那会进 `compose config` 的输出与容器元数据）、
+  不进镜像层、不进日志（§3.7）。权限过宽（组/其他可读）即拒绝启动。
+
+### 怎么复现那次隔离验证
+
+```sh
+# 默认不跑（要构建镜像、起容器，耗时）。用环境变量显式开启：
+ALONG_TIER2_INTEGRATION=1 node --test test/tier2-linux-integration.test.mjs
+
+# 对着 Super Agent 的某个分支验（默认是相邻仓库）：
+ALONG_TIER2_SUPERAGENT_REPO=/path/to/along-superagent \
+  ALONG_TIER2_INTEGRATION=1 node --test test/tier2-linux-integration.test.mjs
+```
+
+用例覆盖：TLS 入口 → 双用户事件同步与隔离 → 后台投递到编排 Engine → 重启恢复
+（重启前已到期的待投递行必须恢复投递，不得变成 `filtered`）。
+失败时用 `ALONG_TIER2_KEEP=1` 保留现场（容器与库留在 `.tier2-integration/`）看日志。
+
+该用例对 Super Agent 的「Source 注册前不领取队列」修复是**敏感的**：拿未修复的
+Super Agent 跑，它会在重启恢复那一步失败并报 `filtered / source_not_installed`——
+这正是 V-1 暴露的原始故障面。
 
 ## 路径基准（配错 = 静默降级，§3.1）
 
@@ -115,3 +207,84 @@ docker run --rm --entrypoint sh -w /opt/along-superagent along-agent:local \
 - runner-token 是服务端内部凭证，只在 host↔agent 的 compose 内网请求头里走，绝不下发 iPhone/网页，不写运行结果。
 - 每次 `dsh --profile along-headless` 都从 stdin 读取请求，使用独立的工作目录、`HOME` 和 `DSH_HOME`。该 profile 只加载模型与会话所需的插件，工具注册表为空。容器根文件系统只读，临时目录位于 `/tmp` 的 tmpfs，运行结束后清理。
 - dsh 的 stdout/stderr 就是运行内容：runner 只解析、不落日志（`deploy/agent-runner.mjs` 头注释，§3.7）。
+
+## 固定公网 IPv4 直连
+
+此入口基于 Tier 2。手机填 `https://<固定公网 IPv4>` 和一次性配对码，使用支持公网 IP 的 Along iOS 构建（build 78 或更新）。TLS 由 nginx 终止，iOS 验证公共信任链、有效期及 IP SAN。HTTPS 地址和配对 token 相同的情况下，换叶证书后仍使用原配对。切换到另一个地址属于换入口，按原配对流程处理。
+
+### 准备独立入口
+
+- 为 Along 准备一个可由外网访问的固定公网 IPv4。HTTP-01 必须能从公网访问 **TCP 80**，HTTPS 客户端使用 **TCP 443**。80 只服务 `/.well-known/acme-challenge/`，其他路径返回 404。通过 EIP/NAT 转发时，将 TCP 80 和 443 都转到 Along 所绑定的宿主网卡。
+- 以下编排假定 Along 独占该本地绑定地址的 80 和 443。若同机的 Multica 或其他服务已占用这两个端口，须为 Along 分配独立且未被占用的绑定地址，或在另一台主机部署。检查现有监听是否绑定了所有网卡。Along 单独使用 `/opt/along/edge`，含 Certbot 账号、续期配置、challenge Webroot 和 nginx 证书版本。
+- 按 [Tier 2 Runbook](../docs/cloud-deploy-multi-user.md#65-tier-2-开启与回退35验证项-v-1-通过后) 准备 Host 数据、用户和 secrets。从 nginx 到 Host 只经专用 Unix socket，Host 与 netns 无发布端口。已有的 `/data/tls` 用于原部署形态，公网 IP 模式的证书存于 `edge/tls`。
+- 部署机需要 Docker Compose（支持 `!override`）、Python 3.9+、OpenSSL（支持 `-verify_ip`）以及系统 CA 根证书。Compose 中的独立 ACME 服务运行固定版本的 Certbot 镜像，只挂载 Along 的 ACME 状态和 challenge 目录。Certbot 使用 [Let’s Encrypt IP 短期证书](https://letsencrypt.org/2026/03/11/shorter-certs-certbot/) 的 HTTP-01 签发方式。
+
+### 首次签发
+
+以下命令在 Linux 部署机上以 root 执行。将 IP 和 ACME 邮件地址改成实际值，将仓库放在 `/opt/along/along`。
+
+```sh
+cd /opt/along/along
+export ALONG_PUBLIC_IPV4='<公网 IPv4>'
+export ALONG_ACME_EMAIL='<维护者邮箱>'
+export ALONG_EDGE_DIR=/opt/along/edge
+install -d -m 0700 "$ALONG_EDGE_DIR" "$ALONG_EDGE_DIR/tls" \
+  "$ALONG_EDGE_DIR/tls/config" "$ALONG_EDGE_DIR/tls/releases" "$ALONG_EDGE_DIR/acme"
+if [ ! -e "$ALONG_EDGE_DIR/tls/config/active.conf" ]; then
+  install -m 0600 /dev/null "$ALONG_EDGE_DIR/tls/config/active.conf"
+fi
+install -d -m 0755 "$ALONG_EDGE_DIR/webroot" "$ALONG_EDGE_DIR/webroot/.well-known" \
+  "$ALONG_EDGE_DIR/webroot/.well-known/acme-challenge"
+
+export COMPOSE_FILE=deploy/docker-compose.yml:deploy/docker-compose.tier2.yml:deploy/docker-compose.public-ip.yml
+export COMPOSE_PROFILES=tier2
+export COMPOSE_PROJECT_NAME=along
+docker compose up -d edge
+# 从独立公网网络请求 HTTP-01 路径中的测试文件，校验内容正确后删除测试文件。
+python3 deploy/public-ip-certificate.py bootstrap
+docker compose up -d --build
+ALONG_TIER2_COMPOSE_FILES='deploy/docker-compose.yml deploy/docker-compose.tier2.yml deploy/docker-compose.public-ip.yml' \
+  deploy/tier2-stack.sh verify
+```
+
+在独立公网网络用 `curl --fail https://<公网 IPv4>/health` 验证 HTTPS。
+
+如只绑定特定本地 IPv4，运行 Compose 之前设置 `ALONG_EDGE_BIND_IPV4`，并把 `ALONG_EDGE_PROBE` 设为该本地 IPv4 加 `:443`。探针仍用公网 IP 校验证书。默认探针为 `127.0.0.1:443`。生产环境沿用系统 CA 根。若从同机已有 Along TLS 容器切换，80/443 的监听交接应放在指定维护窗口完成。Tier 2 的锚点重建沿用同一组 Compose 文件及公网 IP 自检参数。
+
+### 定期续期、失败告警与恢复
+
+将 `ALONG_PUBLIC_IPV4`、`ALONG_EDGE_DIR`、`COMPOSE_PROJECT_NAME` 写入 `/etc/along-public-ip.env`，按需加入绑定及探针变量。首次签发与定时任务必须使用相同的 Compose 项目和目录。用下列同名 systemd 服务和定时器，每 6 小时检查一次。把服务的失败状态和日志中的 `ALONG TLS ALERT` 接到值班告警，另从独立公网网络监控 HTTPS 和证书剩余寿命。
+
+```ini
+# /etc/systemd/system/along-public-ip-renew.service
+[Unit]
+Description=Renew and verify Along public IPv4 TLS certificate
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/along/along
+EnvironmentFile=/etc/along-public-ip.env
+ExecStart=/usr/bin/python3 /opt/along/along/deploy/public-ip-certificate.py renew
+```
+
+```ini
+# /etc/systemd/system/along-public-ip-renew.timer
+[Unit]
+Description=Check Along public IPv4 certificate every six hours
+
+[Timer]
+OnCalendar=*-*-* 00,06,12,18:20:00
+RandomizedDelaySec=10m
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+写入单元后执行 `systemctl daemon-reload`，再用 `systemctl enable --now along-public-ip-renew.timer` 启动定时检查。手动验证用 `systemctl start along-public-ip-renew.service`，观察 `journalctl -u along-public-ip-renew.service`。脚本在 Certbot 续期后校验 IP SAN、证书链和私钥，从 nginx 容器内原子替换 `tls/config/active.conf`，配置引用只读的证书版本目录，执行 `nginx -t` 和 reload，再用信任校验及叶指纹确认 nginx 已提供新证书。每次检查都会核对 nginx 是否加载 Certbot 谱系中的证书，因此下一次可重试已签发但未加载的版本。
+
+续期、证书校验、nginx 配置检查、重载或入口探针失败时，任务失败并记录告警，继续使用上一份仍在有效期内的证书。已经尝试重载的故障会恢复原配置、重新加载并核验旧叶。证书剩余不足 36 小时也触发告警。检查 HTTP-01 公网可达性、Certbot 日志和 nginx 日志，在旧叶过期前修复后重新启动续期服务。公网 IP 和公开信任链必须在修复后仍可通过验证。
+
+部署验收时从两个独立公网来源确认 Host 配对审计分开记录各自的 IPv4，再记录一次实际续期，核对外部地址的叶指纹变化，并让原配对的 iPhone 分别验证前台连接和后台同步。隔离验收可运行 `ALONG_PUBLIC_IP_INTEGRATION=1 node --test test/public-ip-compose.test.mjs`，使用真实 nginx 和 Host、合成 CA 与 ACME 替身。

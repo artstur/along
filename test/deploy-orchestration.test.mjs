@@ -101,7 +101,8 @@ const composeCli=probeCompose();
 test('compose 按 §3.1 编排：443→4176、agent 仅内网、bind 卷与 secrets 指仓库外层、闭包内网 DNS',()=>{
   const services=composeDoc.services;
   assert.ok(services.host&&services.agent,'必须恰有 host 与 agent 两个服务');
-  assert.equal(Object.keys(services).length,2,'不引入 §3.1 之外的第三个服务（无反代，SD-1）');
+  // Tier 2 增加 superagent 服务（§3.5）：它与 host 共享网络命名空间，不引入反代（SD-1 仍成立）。
+  assert.equal(Object.keys(services).length,3,'不引入 §3.1/§3.5 之外的第四个服务（无反代，SD-1）');
   // host：端口映射、容器名、监督、状态卷
   assert.deepEqual(services.host.ports,['443:4176'],'443→4176 端口映射（§3.1）');
   assert.equal(services.host.container_name,'along-host','README 冒烟按容器名取日志');
@@ -149,8 +150,12 @@ test('compose 按 §3.1 编排：443→4176、agent 仅内网、bind 卷与 secr
   assert.equal(agentEnv.ALONG_RUNNER_TOKEN_FILE,'/run/secrets/runner-token');
   assert.equal(agentEnv.ALONG_MODEL_API_KEY_FILE,'/run/secrets/model-credentials');
   assert.equal(agentEnv.ALONG_DSH_VERSION,'0.2.2-rc.5','与 Dockerfile 的 dsh pin 跨文件一致（§4-M5）');
-  assert.equal(services.agent.build.additional_contexts.along,'../../along-superagent',
-    'additional_contexts 以 project directory（deploy/）为基准——§3.1 施工修正：写 ../along-superagent 会指向不存在的 /opt/along/along/along-superagent');
+  // 上游来源锁到**远端 git 上下文的固定提交**（审查 P1-2）：相邻仓库的 HEAD 是可变的，
+  // 而旧版探针恒答 200 {ready:true}，Host 侦测不到装错版本。
+  // 本地调试可用 ALONG_SUPERAGENT_SOURCE 指向相邻 checkout（§6.4 第 5 步）。
+  const agentSource=services.agent.build.additional_contexts.along;
+  assert.match(agentSource,/\$\{ALONG_SUPERAGENT_SOURCE:-https:\/\/github\.com\/artstur\/along-superagent\.git#[0-9a-f]{40}\}/,
+    '上游来源必须是可覆盖的远端 git 上下文，且钉在 40 位提交上');
   assert.equal(services.agent.build.context,'..');
   assert.equal(services.agent.build.dockerfile,'deploy/Dockerfile.agent');
   // secrets：runner-token 两服务共用；apns-key 可选三处引用齐备（验收 #5 可选路径的前提）
@@ -165,13 +170,11 @@ test('compose 按 §3.1 编排：443→4176、agent 仅内网、bind 卷与 secr
   const outside=relative=>resolve(DEPLOY_DIR,relative).startsWith(ROOT)===false;
   assert.ok(outside('../../data/host'),'bind 卷源必须在仓库外层');
   for (const secret of Object.values(composeDoc.secrets)) assert.ok(outside(secret.file),'secret 文件必须在仓库外层');
-  assert.ok(outside(composeDoc.services.agent.build.additional_contexts.along),
-    'along-superagent 相邻布局在仓库外层');
-  // additional_contexts 按设计基准（project directory=deploy/）解析后必须指向真实存在的相邻仓库
-  // （本地存在 along-superagent 时强断言；CI 只 checkout 本仓库，该分支由相邻仓库门控测试覆盖）。
-  if (existsSync(ADJACENT)) {
-    assert.equal(resolve(DEPLOY_DIR,composeDoc.services.agent.build.additional_contexts.along),ADJACENT,
-      '按 deploy/ 基准解析必须命中真实相邻仓库（../along-superagent 的回归曾指向不存在的仓库内路径）');
+  // 上游来源默认是远端 git 上下文（不是本地路径），所以它不落在仓库内——
+  // 覆盖时用 ALONG_SUPERAGENT_SOURCE 指向相邻 checkout（那个路径在仓库外层）。
+  if (process.env.ALONG_SUPERAGENT_SOURCE) {
+    assert.ok(outside(process.env.ALONG_SUPERAGENT_SOURCE),
+      '本地覆盖的上游 checkout 必须在仓库外层');
   }
   // 监督与日志留存（§3.1/§3.7）：两服务都要 restart + json-file 轮转 + healthcheck(interval 30s)
   for (const [name,service] of Object.entries(services)) {
@@ -351,6 +354,10 @@ test('两个 Docker 构建共享根目录白名单，目录中的任意文件不
     '*','!package.json','!package-lock.json','!host/*.mjs','!host/schemas/task-reply.schema.json','!web/*.mjs',
     '!deploy/agent-runner.mjs',
     '!deploy/agent-dsh/package.json','!deploy/agent-dsh/package-lock.json',
+    // Tier 2 长驻镜像（deploy/Dockerfile.superagent）的启动脚本与设置播种脚本。
+    '!deploy/superagent-start.sh','!deploy/superagent-seed.mjs',
+    // 读取面收紧的推导脚本（审查 P1-1）。
+    '!deploy/superagent-preset-lockdown.mjs',
   ]);
   // 白名单语义不变（G-8，§3.3-(3)）：`*` 打头 + 只放行具体路径——非 glob 的放行项必须真实存在，
   // 任何不含通配的「新文件」都不会命中任何放行行。
@@ -382,8 +389,10 @@ test('docker compose config 校验通过；按注释删除 apns-key 三处引用
   run(['-f',COMPOSE_FILE,'config','-q'],'原始 compose config 校验');
   // 完整解析输出里，卷与 additional context 必须落在真实路径（真实解析器兜底静态断言）
   const full=run(['-f',COMPOSE_FILE,'config'],'原始 compose config 解析');
-  assert.ok(full.stdout.includes(resolve(DEPLOY_DIR,'../../along-superagent')),
-    'config 解析出的 additional_contexts 必须是真实相邻仓库路径');
+  // 上游来源默认是远端 git 上下文（审查 P1-2），不是本地路径——
+  // compose config 里它必须原样保留那个「远端 + 固定提交」的字面量。
+  assert.ok(full.stdout.includes('github.com/artstur/along-superagent.git#'),
+    'config 解析出的 additional_contexts 必须是钉住提交的远端 git 上下文');
   // 验收 #5 可选路径：删除 apns-key 三处引用后编排仍然成立（up 行为留 Runbook 第 5 步）
   const dir=mkdtempSync(join(tmpdir(),'along-deploy-noapns-'));
   try {

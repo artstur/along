@@ -296,10 +296,9 @@ enum AlongConnectionStore {
     private static let account = "Along"
 
     // 信任策略（docs/iphone-ca-profile-design.md §2.2）：
-    //   system-pki-v1     —— 云端 DNS 连接。证书由 iOS 系统信任评估（已安装的 CA 描述文件 +
-    //                       完全信任）判定，App 不再自己比叶指纹，也没有降级回旧 pin 的分支。
+    //   system-pki-v1     —— 云端 DNS 或公网 IPv4。证书由 iOS 系统信任评估，App 不比叶指纹。
     //   legacy-local-pin-v1 —— Mac 私网 RFC1918 连接。保留原来的叶指纹钉扎，行为不变。
-    // 这不是用户可选的模式开关：策略由主机形态（私网 IPv4 还是 DNS 域名）推导后写进持久状态。
+    // 这不是用户可选的模式开关：策略由主机形态（私网 IPv4、DNS 域名或公网 IPv4）推导后写进持久状态。
     static let systemTrustPolicy = "system-pki-v1"
     static let legacyPinPolicy = "legacy-local-pin-v1"
 
@@ -319,7 +318,7 @@ enum AlongConnectionStore {
             .map { String(format: "%02x", $0) }.joined()
     }
 
-    // 连接形态判定：RFC1918 私网 IPv4 走旧 pin，DNS 域名走系统信任评估。
+    // 连接形态判定：RFC1918 私网 IPv4 走旧 pin，其余已允许的云端主机走系统信任评估。
     // 不新增用户可选开关，也不接受 JavaScript 自报 trustPolicy 来放宽规则。
     static func trustPolicy(forHost host: String) -> String {
         isPrivateIPv4(host) ? legacyPinPolicy : systemTrustPolicy
@@ -494,23 +493,37 @@ enum AlongConnectionStore {
     }
 #endif
 
-    // 配对主机：RFC1918 私网 IPv4，或合法 DNS 域名（云端部署，docs/cloud-deploy-multi-user.md M6）。
-    // 域名只认 ASCII 字母数字与连字符，末段必须含字母，防止把非私网数字 IP 当域名放行；
-    // https-only 与其余校验（凭证、path/query/fragment）仍由各调用处把关。
+    // 公网 IPv4 使用十进制标准写法。保留 RFC1918 的既有校验，
+    // 特殊用途地址不进入公网系统信任路径。
     static func hostAccepted(_ host: String) -> Bool {
+        if isPrivateIPv4(host) { return true }
         let labels = host.split(separator: ".", omittingEmptySubsequences: false)
-        if labels.count == 4,
-           labels.allSatisfy({ Int($0).map { (0...255).contains($0) } ?? false }),
-           host.hasPrefix("192.168.") || host.hasPrefix("10.") ||
-            ((Int(labels[0]) == 172) && (16...31).contains(Int(labels[1]) ?? 0)) {
-            return true
+        if labels.count == 4, labels.allSatisfy({ !$0.isEmpty && $0.utf8.allSatisfy { (48...57).contains($0) } }) {
+            let octets = labels.compactMap { label -> Int? in
+                guard let number = Int(label), (0...255).contains(number), String(number) == label else { return nil }
+                return number
+            }
+            guard octets.count == 4 else { return false }
+            switch (octets[0], octets[1], octets[2], octets[3]) {
+            case (192, 0, 0, 9...10): // IANA 标记为全球可达的两项协议任播地址。
+                return true
+            case (0, _, _, _), (100, 64...127, _, _), (127, _, _, _), (169, 254, _, _),
+                 (192, 0, 0, _), (192, 0, 2, _), (192, 88, 99, _), (198, 18...19, _, _),
+                 (198, 51, 100, _), (203, 0, 113, _), (224...255, _, _, _):
+                return false
+            default:
+                return true
+            }
         }
         guard labels.count >= 2, host.count <= 253 else { return false }
         for label in labels {
             if label.isEmpty || label.count > 63 || label.first == "-" || label.last == "-" { return false }
             if !label.allSatisfy({ c in ("a"..."z").contains(c) || ("A"..."Z").contains(c) || ("0"..."9").contains(c) || c == "-" }) { return false }
         }
-        return labels.last!.contains { c in ("a"..."z").contains(c) || ("A"..."Z").contains(c) }
+        let last = labels.last!
+        // 防止 URL 栈把末段为十六进制的数字别名当作 IP。
+        if last.lowercased().hasPrefix("0x"), last.dropFirst(2).allSatisfy(\.isHexDigit) { return false }
+        return last.contains { c in ("a"..."z").contains(c) || ("A"..."Z").contains(c) }
     }
 
     private static func clean(_ value: [String: Any]) -> [String: String]? {
@@ -523,7 +536,7 @@ enum AlongConnectionStore {
               let token = value["token"] as? String,
               token.count == 64, token.allSatisfy(\.isHexDigit)
         else { return nil }
-        // 信任策略由主机形态推导，不接受调用方自报：DNS 云端连接走系统信任评估，
+        // 信任策略由主机形态推导，不接受调用方自报：云端 DNS 与公网 IPv4 走系统信任评估，
         // 私网 IPv4 保留旧叶指纹钉扎（docs/iphone-ca-profile-design.md §2.2）。
         let policy = trustPolicy(forHost: host)
         var clean = ["baseURL": baseURL, "trustPolicy": policy, "token": token.lowercased()]
@@ -546,7 +559,7 @@ enum AlongConnectionStore {
 
 struct AlongWebView: UIViewRepresentable {
     @ObservedObject var bridge: AlongBridgeModel
-    private let site = URL(string: "along://app/index.html?build=86")!
+    private let site = URL(string: "along://app/index.html?build=87")!
 
     func makeCoordinator() -> Coordinator { Coordinator(bridge: bridge) }
 
@@ -1056,7 +1069,7 @@ struct AlongWebView: UIViewRepresentable {
                                                   policy: AlongConnectionStore.trustPolicy(forHost: host))
             else { throw AgentBridgeError.invalidConfiguration }
             // 信任策略由主机形态推导（docs/iphone-ca-profile-design.md §2.2）：
-            // 私网 IPv4 走旧叶指纹 pin，DNS 域名交给系统信任评估。
+            // 私网 IPv4 走旧叶指纹 pin，云端主机交给系统信任评估。
             // 不接受 JavaScript 自报 trustPolicy——放宽策略必须走原生自己的判定。
             let policy = AlongConnectionStore.trustPolicy(forHost: host)
             let fingerprint = AlongConnectionStore.pinnedFingerprint(input["fingerprint"] as? String, policy: policy)
@@ -1072,7 +1085,7 @@ struct AlongWebView: UIViewRepresentable {
             let configuration = URLSessionConfiguration.ephemeral
             configuration.waitsForConnectivity = !background
             configuration.timeoutIntervalForResource = background ? 10 : (["/connection/verify", "/sources/device"].contains(path) ? 15 : 120)
-            // Every session is tied to one private address, pinned certificate and non-redirecting request.
+            // Every session is tied to one validated origin and disallows redirects.
             configuration.connectionProxyDictionary = [
                 kCFNetworkProxiesProxyAutoConfigEnable as String: true,
                 kCFNetworkProxiesProxyAutoConfigJavaScript as String: "function FindProxyForURL(url, host) { return 'DIRECT' }"
@@ -1306,10 +1319,10 @@ enum AgentBridgeError: LocalizedError {
     }
 }
 
-// 云端 DNS 连接的系统信任评估委托（docs/iphone-ca-profile-design.md §2.1）。
+// 云端 DNS 与公网 IPv4 的系统信任评估委托（docs/iphone-ca-profile-design.md §2.1）。
 //
 // 关键约束：这里不做任何自己的信任判断，也不返回 useCredential。
-//   - 链、可信锚、请求主机名、有效期与 ATS 全部交给 URL Loading System 评估；
+//   - 链、可信锚、请求主机名或 IP SAN、有效期与 ATS 全部交给 URL Loading System 评估；
 //   - 挑战的主机必须与当前连接的期望主机一致，不一致就取消，不提供额外凭证；
 //   - 不调用 SecTrustSetAnchorCertificates 塞入 App 内证书或服务器下发的根；
 //   - 不设置忽略证书错误的例外，也没有「系统评估失败再试旧叶 pin」的降级分支。

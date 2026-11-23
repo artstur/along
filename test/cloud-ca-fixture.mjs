@@ -7,8 +7,9 @@
 // 既不接触生产材料，也不生成任何生产密钥。
 
 import {execFileSync} from 'node:child_process';
-import {mkdirSync,writeFileSync,readFileSync,symlinkSync,chmodSync,existsSync,rmSync} from 'node:fs';
+import {mkdirSync,writeFileSync,readFileSync,symlinkSync,chmodSync,mkdtempSync,renameSync,rmdirSync} from 'node:fs';
 import {join} from 'node:path';
+import {isIP} from 'node:net';
 
 function openssl(args,cwd) {
   return execFileSync('openssl',args,{cwd,encoding:'utf8',stdio:['ignore','pipe','pipe']});
@@ -23,27 +24,50 @@ export function makeTestCa(root,host='along.test.local') {
     '-addext','keyUsage=critical,keyCertSign,cRLSign'],root);
   openssl(['req','-new','-newkey','rsa:2048','-nodes','-keyout','leaf.key','-out','leaf.csr','-subj',`/CN=${host}`],root);
   writeFileSync(join(root,'ext.cnf'),
-    'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:'+host+'\n');
+    `basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=${isIP(host)?'IP':'DNS'}:${host}\n`);
   openssl(['x509','-req','-in','leaf.csr','-CA','ca.crt','-CAkey','ca.key','-CAcreateserial',
     '-out','leaf.crt','-days','90','-extfile','ext.cnf'],root);
   return root;
 }
 
 // 铺一套符合目录契约的云端证书版本目录：tls/releases/<serial>/ + tls/current 符号链接。
-export function stageRelease(stateDir,ca,{serial='test-1'}={}) {
+//
+// leafDir：换叶时指向**新叶**的目录（由 rotateLeaf 产出）；默认用 ca 目录里的
+// leaf.crt / leaf.key。根始终是 ca/ca.crt —— 同根同域换叶（CA 方案 §6）
+// 不需要重新装机，因为手机信任的是根。
+export function stageRelease(stateDir,ca,{serial='test-1',leafDir}={}) {
+  const source=leafDir??ca;
   const version=join(stateDir,'tls','releases',serial);
   mkdirSync(version,{recursive:true,mode:0o700});
-  writeFileSync(join(version,'fullchain.pem'),readFileSync(join(ca,'leaf.crt')));
-  writeFileSync(join(version,'key.pem'),readFileSync(join(ca,'leaf.key')));
+  writeFileSync(join(version,'fullchain.pem'),readFileSync(join(source,'leaf.crt')));
+  writeFileSync(join(version,'key.pem'),readFileSync(join(source,'leaf.key')));
   writeFileSync(join(version,'root.crt'),readFileSync(join(ca,'ca.crt')));
   chmodSync(join(version,'key.pem'),0o600);
   chmodSync(join(version,'fullchain.pem'),0o644);
   chmodSync(join(version,'root.crt'),0o644);
   chmodSync(version,0o700);
-  const current=join(stateDir,'tls','current');
-  if(existsSync(current)) rmSync(current,{force:true});
-  symlinkSync(version,current);
+  const tls=join(stateDir,'tls');
+  const staging=mkdtempSync(join(tls,'.switch-'));
+  const link=join(staging,'current');
+  // 相对目标在 bind mount 内仍有效。同文件系统 rename 原子替换旧链接。
+  symlinkSync(join('releases',serial),link);
+  renameSync(link,join(tls,'current'));
+  rmdirSync(staging);
   return version;
+}
+
+// 同根同域换叶（CA 方案 §6 的轮换口径）：用**同一个根**签一张新叶。
+// 手机信任的是根，所以换叶不必重新装机；换根才需要逐台撤根。
+export function rotateLeaf(root,host='along.test.local',serial='rotated-1') {
+  const dir=join(root,`leaf-${serial}`);
+  mkdirSync(dir,{recursive:true});
+  openssl(['req','-new','-newkey','rsa:2048','-nodes','-keyout',join(dir,'leaf.key'),
+    '-out',join(dir,'leaf.csr'),'-subj',`/CN=${host}`],root);
+  writeFileSync(join(dir,'ext.cnf'),
+    `basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=${isIP(host)?'IP':'DNS'}:${host}\n`);
+  openssl(['x509','-req','-in',join(dir,'leaf.csr'),'-CA',join(root,'ca.crt'),'-CAkey',join(root,'ca.key'),
+    '-CAcreateserial','-out',join(dir,'leaf.crt'),'-days','90','-extfile',join(dir,'ext.cnf')],root);
+  return dir;
 }
 
 // 一步到位：给一个云端状态目录铺好测试 CA 材料，返回可用的主机名。

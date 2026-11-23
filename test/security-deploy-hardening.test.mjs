@@ -250,6 +250,10 @@ test('.dockerignore（验收 5）：白名单数组更新（两条 agent-dsh 清
     '*','!package.json','!package-lock.json','!host/*.mjs','!host/schemas/task-reply.schema.json','!web/*.mjs',
     '!deploy/agent-runner.mjs',
     '!deploy/agent-dsh/package.json','!deploy/agent-dsh/package-lock.json',
+    // Tier 2 长驻镜像（deploy/Dockerfile.superagent）的启动脚本与设置播种脚本。
+    '!deploy/superagent-start.sh','!deploy/superagent-seed.mjs',
+    // 读取面收紧的推导脚本（审查 P1-1）。
+    '!deploy/superagent-preset-lockdown.mjs',
   ]);
   assert.equal(lines[0],'*','默认拒绝一切：白名单语义不变（只增不改）');
   for (const line of lines.filter(item=>item.startsWith('!')&&!item.includes('*'))) {

@@ -1,0 +1,103 @@
+# Along 云端 Super Agent 长驻镜像（docs/cloud-deploy-multi-user.md §3.5 Tier 2，验证项 V-1）。
+#
+# 与 Dockerfile.agent 的分工：agent 镜像跑一次性 headless runner（Tier 1 的目标聊天链路，
+# 每调用拉起一个 dsh 进程）；本镜像跑**长驻** DSH profile，承载新链路数据面
+# （/along-source/api/*、along.sqlite、投递泵）。两者共用同一个 @deepseek-ai/dsh 版本 pin，
+# 但互不替代：Tier 2 打开后 Host 的旧 DSH 分支返回 409「已切换新链路」，runner 仍在
+# compose 里待命，可作为显式回退目标（§6.4 回退步骤）。
+#
+# dsh 版本 pin 在 deploy/agent-dsh/package.json，传递依赖由同目录 package-lock.json 固定；
+# compose 的 ALONG_DSH_VERSION 只是记录用。升级 = 在 deploy/agent-dsh/ 内
+# `npm install --package-lock-only --ignore-scripts` 重新生成锁文件并同步版本
+#（docs/cloud-security-hardening.md §3.3-(3)、§6 步骤 6）。本镜像与 Dockerfile.agent
+# 装的是同一个锁文件，所以两个服务的 dsh 版本不会分叉。
+#
+# FROM 按 digest pin（G-8）；与 Dockerfile.agent 同一个 node:24 摘要：
+# sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54。
+
+# ---- 阶段 1：在 Linux 上编译 along bundle ---------------------------------
+#
+# 为什么必须**在镜像里编译**，而不是从宿主机 COPY 编译产物：
+#   - along-superagent 的 lib/ 在 .gitignore 里（构建产物），checkout 里没有；
+#   - V-1 实测证明 bundle 必须是 profile 里**可解析的包**（真实 boot 报
+#     ERR_MODULE_NOT_FOUND，along-tier2-v1-evidence/evidence/boot-layer-only.redacted.log），
+#     所以镜像里必须有 lib/（运行时真正 import 的东西）。
+# 在构建阶段从源码编译，保证镜像与源码提交一致、可复现，也不依赖宿主机的构建状态。
+FROM node:24-bookworm-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54 AS bundle
+WORKDIR /bundle
+RUN corepack enable
+# 只取编译需要的清单与源码。bundle 源码经 compose additional_contexts
+# along=../../along-superagent 取得（基准=project directory deploy/，§3.1）。
+COPY --from=along /package.json /pnpm-lock.yaml /tsconfig.json /tsdown.config.ts ./
+# pnpm 锁文件固定了 289 个包的精确版本与完整性摘要（G-8）：构建产物与仓库锁文件一致。
+RUN pnpm install --frozen-lockfile
+COPY --from=along /src/ ./src/
+COPY --from=along /prompts/ ./prompts/
+COPY --from=along /skills/ ./skills/
+COPY --from=along /locale/ ./locale/
+COPY --from=along /scripts/ ./scripts/
+# pnpm build = tsdown：产出 lib/（编译产物）。测试与类型检查不进镜像（镜像不需要它们，
+# 且 vitest 的运行期依赖会把镜像撑大）。
+RUN pnpm build
+
+# ---- 阶段 2：运行时 -------------------------------------------------------
+FROM node:24-bookworm-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54
+WORKDIR /app
+
+# dsh 经锁文件安装（G-8）：--ignore-scripts 已核实该版本 scripts:{} 不受影响，挡传递依赖在
+# 构建期以 root 执行 postinstall；启动脚本 spawn 'dsh' 走 PATH，用符号链接提供。
+COPY deploy/agent-dsh/package.json deploy/agent-dsh/package-lock.json deploy/agent-dsh/
+RUN npm ci --prefix deploy/agent-dsh --omit=dev --ignore-scripts --no-fund --no-audit \
+ && ln -s /app/deploy/agent-dsh/node_modules/.bin/dsh /usr/local/bin/dsh
+
+# bundle 的运行期依赖 proper-lockfile 不在 DSH 的依赖树里（bundle 自己的 package.json
+# 声明了它）。版本取 bundle 声明的 4.1.2。zod 由 CLI 自带并满足 bundle 的 ^4 依赖，
+# 不另行安装——避免与 DSH 自己的 zod 版本分叉。
+# --no-save：只补运行时依赖，不改清单。
+RUN cd /app/deploy/agent-dsh \
+ && npm install --omit=dev --ignore-scripts --no-fund --no-audit --no-save proper-lockfile@4.1.2 \
+ && node -e "require.resolve('proper-lockfile');require.resolve('zod');console.log('bundle 运行时依赖可解析')"
+
+# bundle 编译产物与运行期素材。包名/入口来自 package.json 的 exports（lib/index.js 等），
+# 所以 package.json 与 lib/ 必须一起进镜像——它是可解析包的必要部分。
+#
+# 装到 **dsh CLI 的 node_modules 树里**（而不是一个独立目录）：bundle 要 import 它的
+# peer 依赖（@deepseek-ai/cordis、dsh-llm、dsh-scope、schemastery），这些包由 DSH 提供，
+# 只存在于 CLI 的 node_modules。Node 按模块**真实路径**向上找 node_modules，所以 bundle
+# 必须与 CLI 同树，运行时依赖才解析得到。V-1 实测用的就是这个装法。
+#
+# 顺序：必须在上面那次 npm install **之后**——npm 会把 node_modules 里不属于清单的目录
+# 当成 extraneous 清掉，先 COPY 再 install 会让 bundle 被删掉。
+COPY --from=bundle /bundle/lib/ /app/deploy/agent-dsh/node_modules/dsh-superagent/lib/
+COPY --from=bundle /bundle/prompts/ /app/deploy/agent-dsh/node_modules/dsh-superagent/prompts/
+COPY --from=bundle /bundle/skills/ /app/deploy/agent-dsh/node_modules/dsh-superagent/skills/
+COPY --from=bundle /bundle/locale/ /app/deploy/agent-dsh/node_modules/dsh-superagent/locale/
+COPY --from=bundle /bundle/scripts/ /app/deploy/agent-dsh/node_modules/dsh-superagent/scripts/
+COPY --from=along /package.json /app/deploy/agent-dsh/node_modules/dsh-superagent/package.json
+COPY --from=along /cordis.patch.yml /app/deploy/agent-dsh/node_modules/dsh-superagent/cordis.patch.yml
+RUN test -f /app/deploy/agent-dsh/node_modules/dsh-superagent/lib/index.js \
+ && node -e "console.log('bundle 可解析：',require.resolve('/app/deploy/agent-dsh/node_modules/dsh-superagent/package.json'))"
+
+# DSH 会往 HOME 写配置与凭据（V-1 实测把 HOME 指向独立目录）。根文件系统只读，
+# 所以 HOME 落在 DSH home 卷上（可写、持久）。
+ENV HOME=/var/lib/dsh/home \
+    DSH_HOME=/var/lib/dsh \
+    DSH_TELEMETRY_DISABLED=1 \
+    # 原生 addon 缓存关掉：node-addon-native-custom-loader 默认把预编译 .node 复制到
+    # os.tmpdir() 再 dlopen。本容器的 /tmp 是 noexec 的 tmpfs，复制过去的 .node 无法
+    # 映射（"failed to map segment from shared object"），DSH 启动即失败。
+    # 关掉后它直接从镜像里的预编译文件加载——那里是可执行的，且不写盘。
+    NARB_DISABLE_NATIVE_CACHE=1
+RUN mkdir -p /var/lib/dsh/home
+
+# 启动脚本：铺 profile、链接 bundle、播种设置，然后 exec 常驻 dsh（deploy/superagent-start.sh）。
+# 播种脚本由启动脚本调用，与它一起进镜像。
+COPY deploy/superagent-start.sh /usr/local/bin/along-superagent-start
+COPY deploy/superagent-seed.mjs /usr/local/bin/along-superagent-seed.mjs
+# 读取面收紧的推导脚本（审查 P1-1）：读上游自己的 patch 文件，去掉 preset 里的
+# 文件与 shell 读取工具，再以同 id 覆盖的形式写进 profile 的 patch 层。
+COPY deploy/superagent-preset-lockdown.mjs /usr/local/bin/along-superagent-preset-lockdown.mjs
+RUN chmod +x /usr/local/bin/along-superagent-start
+
+EXPOSE 3082
+CMD ["along-superagent-start"]

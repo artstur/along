@@ -6,6 +6,14 @@
 >
 > 设计基线（2026-11-20，行号以当前 `main` 工作树为准）：`along` 仓库本目录、`along-superagent` 相邻仓库。基线门禁：`npm run check` 通过（node --check 全部 `web/*.mjs`、`web/sw.js`、`host/*.mjs`、`tools/build.mjs` + `node --test test/*.test.mjs`，509 条测试全绿，本轮已实际运行）。
 
+## 固定公网 IPv4 直连
+
+固定公网 IPv4 部署按 [公网 IP 运维步骤](../deploy/README.md#固定公网-ipv4-直连) 执行。iPhone 配对、前台请求与后台同步共用原生 HTTPS 入口校验，公网 IPv4 由系统核验 IP SAN、证书链与有效期。原有 RFC1918 叶指纹钉扎和 DNS 系统信任连接继续沿用。
+
+Tier 2 追加 Compose 叠加文件，由 Along 独立 nginx 终止 TLS。公网 TCP 80 仅用于 HTTP-01，HTTPS 转发通过仅 Host 和 nginx 挂载的 Unix socket，Host 按 nginx 覆写的来源地址继续分配配对失败窗口。公网 IP 证书使用 Let’s Encrypt 的 `shortlived` profile。签发和 nginx 当前证书分别存放；定期续期后先校验证书、测试 nginx 配置，再重载并从 HTTPS 入口核验叶证书。失败保留上一份已加载的有效证书并记录告警。
+
+隔离验收覆盖原生连接守卫、同 IP 换叶后原配对可用、证书与重载失败回退、HTTP-01 路径以及 Host 内部端口未对外发布。公共 CA、真 iPhone 前后台同步和实际续期由部署环境另行验收。
+
 ## 0. 目标
 
 1. 2 个用户各自用 iPhone（App 内置页面）连到**同一台云主机**上的 Along 服务，互不干扰：各自的配对 token、目标空间、每日委托索引、通知登记、OKX 连接缓存彼此隔离。
@@ -225,7 +233,11 @@ secrets:
   - **客户端恢复**：同一云端连接的在途目标即使换页或重开 App，也按原编号查询。首回执丢失后，只有 Runner 确认记录不存在且接单宽限已过，才立即提示重发。临时网络错误继续遵循运行超时。
   - **执行边界**：runner 通过 stdin 把提示交给固定版本的 `dsh --profile along-headless`，使用显式模块集且无模型可见工具。每次调用新建私有工作目录和 DSH home，完成后清理。云端 agent 容器根文件系统只读，临时目录位于有上限的 tmpfs，运行子进程只接收必要的环境变量及模型密钥。
   - **开关语义不变**：云端 v1 `ALONG_EVENT_INGEST` 不设置（off）→ 新链路端点 503、旧链路 DSH 分支正常（`host/agent-host.mjs:162-167`）；情境评估凭证/桥接凭证不配置 → 相关守卫自然跳过（`:71-75`）。
-- **Tier 2（新链路数据面上云，验证项 V-1，不在本轮验收范围）**：验证 along bundle 能否在 `@deepseek-ai/dsh` CLI 下以 profile/bundle 层路径挂载方式加载（npm 版 CLI 拒绝插件管理请求，须走层路径；能否承载长驻 webserver + along.sqlite + 投递泵待验证）。验证通过则 compose 增加 bridge token secret、`ALONG_EVENT_INGEST=on`、`ALONG_SUPERAGENT_URL` 指向 agent 长驻服务；验证不通过则新链路数据面留在 Mac 本地模式，云端维持 Tier 1。两种结果都只动配置与开关，不改协议（BC-09-03/04 回退语义原样适用）。
+- **Tier 2（新链路数据面上云，验证项 V-1）**：**V-1 已通过**，路线定为「常驻 DSH profile + 兼容适配」。along bundle 以可解析包形态装进 `@deepseek-ai/dsh` CLI 的 node_modules 树（不是只配 bundle 层——那会 ERR_MODULE_NOT_FOUND），长驻承载 `/along-source/api/*`、`along.sqlite` 与投递泵。compose 侧：新增 `superagent` 服务（挂 `tier2` profile）、`bridge-token` secret、持久卷（`data/superagent` + `data/dsh-home`）。两种结果都只动配置与开关，不改协议（BC-09-03/04 回退语义原样适用）。**就绪契约**：既有路径 `/along-source/api/goals/along-status-probe`——就绪 `200 {"service":"along-source","ready":true}`，未就绪 `503 {"error":"along_source_not_ready"}`；不另造 `/ready` 路径（那会 404 并被当成「旧版没契约 → 就绪」，恰好把要防的启动窗口放回去）。
+
+  **网络拓扑**：superagent 与 host **共享网络命名空间**（`network_mode: "service:host"`），且**不发布任何端口**——Super Agent 侧两处硬性要求 `webserver.host === '127.0.0.1'`，共享命名空间 + 只监听回环天然满足「管理面仅本机可达」，宿主机与外网都连不上 3082。
+
+  **形态开关**：Tier 2 用叠加文件 `deploy/docker-compose.tier2.yml` 表达（`ALONG_EVENT_INGEST=on`、`ALONG_SUPERAGENT_URL`、`ALONG_BRIDGE_TOKEN_FILE` + 两侧挂同一份 `bridge-token` secret），主 compose 保持 Tier 1 默认形态。桥接凭证是 file secret，宿主文件缺失会让 `up` 硬失败——写在主 compose 里会让没部署凭证的 Tier 1 部署连 `up` 都跑不了。
 
 ### 3.6 红线在云端形态的等价延续
 
@@ -369,17 +381,85 @@ secrets:
 6. **DNS、证书与手机根信任**：域名**只配 A 记录**指向 ECS 公网 IPv4，**不配 AAAA**——IPv6 客户端经 docker-proxy 会让源 IP 退化为网关地址，`/pair` 按来源失败分桶与单 IP 连接上限都会失效（指无法达到逐外部来源隔离的目标；当前编排的源 IP 前提仍须实测，`docs/cloud-security-hardening.md` §3.1-(3)，不以 DNS 代替网络检查）。先按 CA 方案 §4 带外核验 profile 及根摘要，两手机分别安装并开启完全信任；服务端按 §3 预置证书版本。用带 CAfile、SNI 和 verify_hostname 的 TLS 探针检查实际链与 SAN；不能只核对 CN 或沿用关闭 TLS 验证的探活结论。**预置证书版本这一步必须做，否则 Host 直接拒启**（`host/tls-material.mjs` 缺证即抛错，不回退自签）：把签发好的叶材料放进 `/opt/along/data/host/tls/releases/<serial>/`（`fullchain.pem`、`key.pem`、公开 `root.crt`），再把 `tls/current` 原子切到该版本。注意宿主机上的属主必须与容器内 Host 进程的 uid 一致——compose 的 host 服务按 SD-H5 不加非 root `USER`，进程 uid 为 0，所以宿主机放置材料时要 `chown root:root`（若管理员以其他账号放置，Host 会因「所有者不是 Host 用户」拒启），私钥 0600、目录 0700：
 
    ```sh
-   install -d -m 700 -o root -g root /opt/along/data/host/tls/releases/<serial>
-   install -m 644 -o root -g root /opt/along/data/host/tls/releases/<serial>/fullchain.pem
-   install -m 644 -o root -g root /opt/along/data/host/tls/releases/<serial>/root.crt
-   install -m 600 -o root -g root /opt/along/data/host/tls/releases/<serial>/key.pem
-   ln -sfn /opt/along/data/host/tls/releases/<serial> /opt/along/data/host/tls/current
+   # LEAF_SERIAL 使用签发版本号。三个 *_PEM 变量是已校验材料的本地源文件。
+   tls=/opt/along/data/host/tls
+   release="$tls/releases/${LEAF_SERIAL:?请指定签发版本号}"
+   install -d -m 700 -o root -g root "$release"
+   install -m 644 -o root -g root "${FULLCHAIN_PEM:?}" "$release/fullchain.pem"
+   install -m 644 -o root -g root "${ROOT_PEM:?}" "$release/root.crt"
+   install -m 600 -o root -g root "${LEAF_KEY_PEM:?}" "$release/key.pem"
+   # 相对链接在容器 /data 挂载内仍有效。同文件系统 rename 原子切换。
+   staged="$(mktemp -d "$tls/.switch.XXXXXX")"
+   ln -s "releases/$LEAF_SERIAL" "$staged/current"
+   mv -Tf "$staged/current" "$tls/current"
+   rmdir "$staged"
    ```
 
 7. **发码配对**：TLS 及新 App 就绪后，同端原 token 有效则先迁移验证；确需新配对时才对该用户 `docker exec along-host node host/pair-code.mjs u_xxx`，私下交付「`https://<域名>` + 8 位一次性码」（15 分钟）。根摘要在安装阶段核验，不作为 App 叶指纹输入。
 8. **切换前旧端收尾**：在 iPhone 上连旧 Mac 服务打开 App，等健康/事件同步清空待发队列，旧 Mac 服务可停可不停。
 9. **iPhone 迁移/配对**：两台新版本 App 按 CA 方案 §5 切换；云端 DNS 不填写叶指纹。只有真正换端或原 token 失效才重新配对，Keychain 保存成功后启用。分别确认前后台连接、聊天修改目标自动生效及用户隔离；真正换端按原规则重新授权，同根同端换叶不误撤授权。**向两位用户说明 OKX 采集口径**：云端使用期间 iPhone 的 OKX 连接保持「仅账户摘要」，勿开启成交/账单明细采集——多用户形态 gateway 拒收明细，且明细与摘要在同一次原子发布里，开启后发布会持续失败、连接无法就绪；需明细复盘时在 Mac 本地模式操作（`docs/cloud-security-hardening.md` §3.5）。
-10. **观察与回退锚点**：观察 24 小时。证书按 CA 方案 §6 校验后原子切 `tls/current`，用 `docker compose -f deploy/docker-compose.yml up -d --no-deps --force-recreate host` 重载并核对实际 SAN/链/有效期。当前运行配置仍是旧自签实现（见本节修订门槛）：换证书或域名时更新 Compose 中的 `ALONG_TLS_CN`，用 `docker compose -f deploy/docker-compose.yml stop host` 停止 Host，将 `/opt/along/data/host/cert.pem` 和 `/opt/along/data/host/key.pem` 一起移到权限为 0700 的备份目录，再执行上述 `--force-recreate` 重建命令，通过 DNS、TLS 握手和 Host 日志核对新域名、到期时间和指纹。同根同域轮换不重新发码；换域名按换端处理。失败仅可恢复上一可信且未泄露的 CA 叶版本，或用户切回 Mac；不恢复云端忽略校验/旧 DNS pin。失窃走逐台撤根与独立恢复渠道。
+10. **观察与轮换**：观察 24 小时。同根同域换叶后原配对继续使用。证书材料按第 6 步切换。Tier 1 执行 `docker compose -f deploy/docker-compose.yml up -d --no-deps --force-recreate host`。Tier 2 按 §6.5 保留叠加文件重建。旧自签材料 `/opt/along/data/host/cert.pem` 与 `/opt/along/data/host/key.pem` 可离线备份到 0700 目录。换域名按换端处理。验证失败时恢复上一可信叶版本并按当前形态重建 Host，或让用户切回 Mac。根失窃按 CA 方案逐台撤根。
+
+<a id="tier2-runbook"></a>
+
+### 6.5 Tier 2 开启与回退（§3.5，验证项 V-1 通过后）
+
+Tier 2 与 Tier 1 的差别只在**开关与编排**，不改协议：回退是「新链路停用」，不是「数据回滚」。
+
+**上游来源是钉死的提交**。两个镜像（`agent` 与 `superagent`）的构建输入都取
+`${ALONG_SUPERAGENT_SOURCE:-https://github.com/artstur/along-superagent.git#<40 位提交>}`：
+相邻 checkout 的 HEAD 是可变的，而旧版探针恒答 `200 {ready:true}`，Host **侦测不到装错版本**——
+镜像里若是没有就绪修复的 bundle，重启时已到期的待投递行仍会被终结为
+`filtered / source_not_installed`。本地对着未推送的提交调试时用 `ALONG_SUPERAGENT_SOURCE`
+指向相邻 checkout（§6.4 第 5 步）。
+
+**会话权限**。启动时只启用上游 Worker 和 Router 两套 preset。读取上游配置生成覆盖层，再用 DSH 合成的配置校验注册表、两套必需 preset、嵌套插件与全局工具。通用会话、工作流、Shell、文件、终端和配置管理入口关闭。校验失败时拒绝启动。Along 业务工具由应用按用户与任务绑定授权。
+
+**开启**（在 §6.4 第 1 步的 `/opt/along` 布局上执行）：
+
+```sh
+# 1. 写桥接凭证（0600 的 32 字节 hex；权限过宽 = 未配置，Host 与 Super Agent 都会拒用）
+install -m 600 /dev/null /opt/along/secrets/bridge-token
+read -rs TOKEN; printf '%s\n' "$TOKEN" > /opt/along/secrets/bridge-token   # 32 字节 hex
+
+# 2. 模型密钥（0600 单行；长驻服务的真实模型回合要它。权限过宽 = 拒绝启动）
+install -m 600 /dev/null /opt/along/secrets/model-credentials
+read -rs MODEL_KEY; printf '%s\n' "$MODEL_KEY" > /opt/along/secrets/model-credentials
+
+# 3. 叠加 Tier 2 形态并启动（superagent 服务挂在 tier2 profile 下）
+docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.tier2.yml --profile tier2 up -d
+
+# 4. 使用实际 ALONG_TLS_CN 配置的域名做 HTTPS 验收
+ALONG_TIER2_TLS_HOST=along.example.com deploy/tier2-stack.sh verify
+```
+
+`verify` 检查两个服务使用同一个 `netns`、私有回环可达，以及 Host 的 HTTPS 健康端点通过 CA 与域名校验。再用原配对连接检查 `/connection/status`。只有上游返回 `200 {"service":"along-source","ready":true}` 才算就绪，`404` 归入 `503`。
+
+**维护锚点**。Tier 2 的 443 由 `netns` 发布。Docker 以锚点的容器 ID 绑定 Host 和 Super Agent。更换锚点时，一次重建三个容器，等待校验通过。
+
+```sh
+ALONG_TIER2_TLS_HOST=along.example.com deploy/tier2-stack.sh rebuild-anchor
+```
+
+**回退到 Tier 1**。先停长驻服务，再停占用 443 的锚点，最后用主 Compose 重建 Host。
+
+```sh
+docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.tier2.yml --profile tier2 stop superagent
+docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.tier2.yml --profile tier2 stop netns
+docker compose -f deploy/docker-compose.yml up -d --no-deps --force-recreate host
+```
+
+回退后先验 HTTPS `/health`，再用原配对凭证检查 DSH `/connection/status` 返回 `200`，确认 Tier 1 runner 可达。`/events` 应返回 `503`。保留 `ALONG_DSH_RUNNER_URL`、业务库、编排库与 DSH 持久卷，重新启用 Tier 2 时从原数据恢复。
+
+**同根同域换叶**。按 §6.4 第 6 步原子切换 `tls/current`，保留 Tier 2 叠加文件，只重建读取证书的 Host。
+
+```sh
+docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.tier2.yml --profile tier2 \
+  up -d --no-deps --force-recreate host
+ALONG_TIER2_TLS_HOST=along.example.com deploy/tier2-stack.sh verify
+```
+
+核对实际服务端叶指纹、SAN 与有效期，并用原配对确认 `/connection/status` 就绪。
 
 ## 7. 方案内决策记录（SD）
 

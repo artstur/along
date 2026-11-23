@@ -1,13 +1,30 @@
 # Along 云端编排（docs/cloud-deploy-multi-user.md §3.1、§4 M5）。
 # 相对路径基准：compose v2 的 project directory = 本文件所在目录（deploy/）。
 # 因此 volumes/secrets 用 ../../ 指向仓库外层 /opt/along/{data,secrets}（§6.4 第 1 步布局），
-# build.context 用 .. 指向仓库根 /opt/along/along，additional_contexts 的 ../../along-superagent
-# 即相邻仓库布局。全部相对路径与 §6.4 的绝对布局一一对应，不得混用其他基准。
+# build.context 用 .. 指向仓库根 /opt/along/along。全部相对路径与 §6.4 的绝对布局
+# 一一对应，不得混用其他基准。
+#
+# ---- Super Agent 源码的取法（审查 P1-2）----
+#
+# 上游 bundle 的构建输入**必须锁到确定的提交**，不能指向「相邻仓库的工作区」：
+#   - 相邻 checkout 的 HEAD 是可变的。运维在本地切分支、改代码，镜像就跟着变，
+#     而 `docker compose build` 的缓存不会告诉你构建产物对应哪个提交。
+#   - 旧版探针恒答 200 {ready:true}，Host **无法侦测**装错版本；一旦镜像里是修复前
+#     的 bundle，重启时已到期的待投递行仍会被终结为 filtered / source_not_installed。
+# 所以默认取法是**远端 git 上下文 + 固定提交**（见 ALONG_SUPERAGENT_SOURCE）。
+#
+# BuildKit 的 git 上下文支持 `#<完整 40 位 SHA>`：实测短 SHA 与分支名在
+# 「repository does not contain ref」上会失败或指向可移动的引用，完整 SHA 才是不可移动的。
+# 本地调试要对着未推送的提交时，用 ALONG_SUPERAGENT_SOURCE 指向本地路径覆盖（§6.4 第 5 步）。
 services:
   host:
     build: {context: .., dockerfile: deploy/Dockerfile.host, tags: [along-host:local]}
     image: along-host:local
     container_name: along-host
+    # 443 的发布语句在 Tier 2 形态下移到共享命名空间锚点（deploy/docker-compose.tier2.yml）：
+    # 加入他人命名空间的容器不能自己发布端口，而命名空间是共享的，
+    # 把映射声明在锚点上，宿主机到 4176 的路径照旧进同一个命名空间。
+    # Tier 1（不叠加 tier2 文件）时锚点不存在，所以发布语句留在下面这一行。
     ports: ["443:4176"]
     environment:
       ALONG_AGENT_STATE_DIR: /data
@@ -19,7 +36,25 @@ services:
       # （/data/tls/current → tls/releases/<serial>/），缺证或不合规则监听前拒启。
       # 详见 docs/iphone-ca-profile-design.md §3.1/§7。
       ALONG_TLS_CN: along.example.com             # 换成用户域名（必须与叶证书的 DNS SAN 一致）
-      ALONG_EVENT_INGEST: "off"                   # 云端 v1 不开新链路（§1）
+      ALONG_EVENT_INGEST: "off"                   # 云端 v1 不开新链路（§1）；Tier 2 见下面的 tier2 说明
+      # ---- Tier 2 新链路（§3.5）----
+      # 打开 Tier 2 用**叠加文件** deploy/docker-compose.tier2.yml（§6.4 第 8 步）：
+      #   docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.tier2.yml --profile tier2 up -d
+      # 叠加文件里改的是：
+      #   ALONG_EVENT_INGEST: "on"
+      #   ALONG_SUPERAGENT_URL: http://127.0.0.1:3082   # 与 superagent 共享网络命名空间，只走本机回环
+      #   ALONG_BRIDGE_TOKEN_FILE: /run/secrets/bridge-token
+      # ALONG_SUPERAGENT_URL 默认就是 http://127.0.0.1:3082（host/agent-host.mjs:151），
+      # 所以 Tier 1（上面三行都不设）与 Tier 2（只多设 EVENT_INGEST 与 BRIDGE_TOKEN_FILE）
+      # 用的是同一个回环地址，切换不需要改 URL。
+      #
+      # 桥接凭证：host 与 superagent 必须指向**同一份** 0600 的 32 字节 hex 文件
+      # （host/along-bridge.mjs 的 readBridgeToken 与 Runtime 的 bridgeTokenOf 用同一种格式）。
+      # 两侧都经 compose secret 挂到 /run/secrets/bridge-token（同一个宿主文件
+      # ../../secrets/bridge-token），superagent 的 profile 配置 alongBridgeTokenFile
+      # 指向同一个挂载点。桥接凭证与 Tier 2 开关一起放在叠加文件里——**不要**把它写回本文件：
+      # 本文件是 Tier 1 的默认形态，桥接凭证缺失时 file secret 会让 compose up 直接失败。
+      # ALONG_BRIDGE_TOKEN_FILE: ""                # Tier 2 才设；空值 = 未配置（新链路端点 503，属预期）
       # ↓ 可选：不部署远程通知时，删除这三个 env、下方 host 服务的 secrets 列表里的 apns-key
       #   与顶层 secrets.apns-key 定义（file secret 缺失是 docker compose up 的硬错误），
       #   provider 未创建只是远程通知不可用（host/apns.mjs:8-14），其余功能不受影响；
@@ -28,6 +63,14 @@ services:
       ALONG_APNS_TEAM_ID: "XXXXXXXXXX"
       ALONG_APNS_KEY_ID: "XXXXXXXXXX"
     secrets: [apns-key, runner-token]             # 不部署远程通知时把 apns-key 从两处一并删除；runner-token 两服务共用
+    # Tier 2 才启用（§6.4 第 8 步）：host 与 superagent 共用同一份桥接凭证。
+    # bridge-token: {file: ../../secrets/bridge-token}
+    # Tier 2 才启用（§6.4 第 8 步）：host 与 superagent 共用同一份桥接凭证。
+    # host 的 ALONG_BRIDGE_TOKEN_FILE 指向 /run/secrets/bridge-token；superagent 的
+    # profile 配置 alongBridgeTokenFile 指向同一个挂载点——两侧必须读到**同一份**文件，
+    # 否则各自生成不同的 token，Host 的每一次桥接调用都会被 401（见 deploy/README.md）。
+    # 桥接凭证本体不进环境变量，只经 file secret 落盘（§3.3/§3.7）。
+    #   bridge-token: {file: ../../secrets/bridge-token}
     volumes: ["../../data/host:/data"]            # → /opt/along/data/host（§6.4 第 1 步）
     # G-2 加固三件套（与 agent 服务同款，docs/cloud-security-hardening.md §3.3-(1)）：唯一可写面 =
     # /data 卷 + /tmp tmpfs；不加非 root USER（SD-H5：compose file secret 是 bind mount、
@@ -51,9 +94,13 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile.agent
       # additional_contexts 的相对路径以 project directory（deploy/）为基准解析，与 volumes/secrets
-      # 同基准：../../along-superagent → /opt/along/along-superagent（相邻布局）。注意与手工命令
-      # docker build --build-context along=../along-superagent 不同——后者从 cwd=仓库根解析（§6.4 第 5 步）。
-      additional_contexts: {along: ../../along-superagent}
+      # 同基准。注意与手工命令 docker build --build-context along=../along-superagent 不同——后者从
+      # cwd=仓库根解析（§6.4 第 5 步）。
+      #
+      # 上游来源与 superagent 服务**同一个**（审查 P1-2）：两个镜像装的是同一个 Super Agent，
+      # 否则修好的就绪修复与没修的会并存——而旧版探针恒答 200 {ready:true}，
+      # Host 侦测不到装的是哪个版本。
+      additional_contexts: {along: "${ALONG_SUPERAGENT_SOURCE:-https://github.com/artstur/along-superagent.git#18fb8064417c95b7a46efec218091ed831d55e28}"}
     image: along-agent:local
     container_name: along-agent
     read_only: true
@@ -73,6 +120,80 @@ services:
     logging: {driver: json-file, options: {max-size: "10m", max-file: "3"}}
     healthcheck:
       test: ["CMD","node","-e","fetch('http://127.0.0.1:3088/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+  # ---- Tier 2：常驻 Super Agent（§3.5，验证项 V-1）----
+  #
+  # 承载新链路数据面：/along-source/api/*、along.sqlite、投递泵。
+  #
+  # 网络：与 host **共享网络命名空间**（network_mode: "service:host"）。这是 V-1 报告
+  # 优先验证的方案，理由是 Super Agent 的两处硬性约束：
+  #   - src/along/api.ts:282 与 src/app/http.ts:234 都要求 webserver.host === '127.0.0.1'，
+  #     所以它只能监听回环；独立的 compose 服务之间无法用服务名访问它的 127.0.0.1。
+  #   - 管理面（/orchestrator 与面板）必须保持仅本机可达。共享命名空间 + 只监听回环
+  #     天然满足：3082 不发布任何端口，宿主机与外网都连不上（§6.4 第 7 步的验证项）。
+  # 独立服务方案（专用私网入口 + 桥接鉴权）留作备选，代价见 V-1 报告的路线对比。
+  #
+  # 持久卷：编排库（engine）与业务库（along，含 along.sqlite 与桥接凭证文件）
+  # 都在 ../../data/superagent 下，容器重建不丢状态。
+  superagent:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.superagent
+      # 上游 bundle 的构建输入（审查 P1-2）：默认取**远端 git 上下文 + 固定提交**，
+      # 不再指向相邻仓库的工作区。相邻 checkout 的 HEAD 是可变的——运维切个分支
+      # 镜像就跟着变，而旧版探针恒答 200 {ready:true}，Host 侦测不到装错版本。
+      # 变量可覆盖：本地对着未推送的提交调试时设
+      # ALONG_SUPERAGENT_SOURCE=../../along-superagent（§6.4 第 5 步）。
+      additional_contexts: {along: "${ALONG_SUPERAGENT_SOURCE:-https://github.com/artstur/along-superagent.git#18fb8064417c95b7a46efec218091ed831d55e28}"}
+    image: along-superagent:local
+    container_name: along-superagent
+    # Tier 2 才起（§6.4 第 8 步）：默认的 `docker compose up`（Tier 1）不受影响。
+    # 启用方式 = 叠加 deploy/docker-compose.tier2.yml 并带上 --profile tier2。
+    #
+    # 为什么用 profile 而不是只在叠加文件里定义这个服务：叠加文件里的服务会与主文件
+    # 的服务**合并**（同名的合并，不同名的叠加），把整个服务定义搬进叠加文件会让
+    # 「默认起什么」这件事取决于两个文件的合并结果——回退时容易留下半开的形态。
+    # profile 是 compose 原生的「按需启用」开关：--profile tier2 才起它。
+    profiles: ["tier2"]
+    # 与 host 共享网络命名空间；3082 不对外。
+    #
+    # Tier 1（不叠加 tier2 文件）时命名空间由 host 提供——superagent 挂在 host 上。
+    # Tier 2 叠加时改挂到**锚点容器** netns 上（deploy/docker-compose.tier2.yml）：
+    # 只重建 host 时，挂在 host 命名空间上的 superagent 会留在旧命名空间里，
+    # 新 host 访问 127.0.0.1:3082 得到 ECONNREFUSED（实测复现）。
+    # Host 与 Super Agent 可独立重建。锚点更换时用 tier2-stack.sh 重建三者。
+    network_mode: "service:host"
+    depends_on: [host]
+    environment:
+      DSH_HOME: /var/lib/dsh
+      ALONG_SUPERAGENT_PROFILE: along
+      ALONG_SUPERAGENT_STATE_DIR: /var/lib/along-superagent
+      ALONG_SUPERAGENT_ALONG_STATE_DIR: /var/lib/along-superagent/along
+      # 桥接凭证文件路径：与 host 的 ALONG_BRIDGE_TOKEN_FILE 指向**同一份**宿主文件
+      # （compose 的 bridge-token secret，两侧都挂到 /run/secrets/bridge-token）。
+      # 路径本身不是凭证，可以进环境变量（§3.3）；凭证本体只在文件里。
+      ALONG_BRIDGE_TOKEN_FILE: /run/secrets/bridge-token
+      # 模型密钥（真实模型回合用，审查 P1-4）。凭证本体**只**经 compose secret 落盘，
+      # 由启动脚本读出并注入进程环境——不进 compose 的 environment（那会进 `compose config`
+      # 的输出与容器元数据）、不进镜像层、不进日志（§3.3/§3.7）。
+      # 路径本身不是凭证，可以进环境变量。
+      ALONG_MODEL_API_KEY_FILE: /run/secrets/model-credentials
+    volumes:
+      - "../../data/superagent:/var/lib/along-superagent"
+      - "../../data/dsh-home:/var/lib/dsh"
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,nodev,size=256m,mode=1777"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    mem_limit: 2g
+    cpus: "1.5"
+    pids_limit: 192
+    restart: unless-stopped
+    logging: {driver: json-file, options: {max-size: "10m", max-file: "3"}}
+    healthcheck:
+      # 存活探针，不是信任验收：只证明回环端口在监听，不证明 Along Source 已注册、
+      # 投递泵已启动。真实就绪判定见 host 的桥接就绪检查与 readiness 契约。
+      test: ["CMD","node","-e","fetch('http://127.0.0.1:3082/').then(()=>process.exit(0)).catch(()=>process.exit(1))"]
       interval: 30s
 secrets:
   apns-key:          {file: ../../secrets/apns-key.p8}    # → /opt/along/secrets/…；不部署远程通知时删除本行
