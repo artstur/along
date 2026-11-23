@@ -79,13 +79,26 @@ test('an unscoped complete body never replaces ordinary chat or another task pre
 });
 
 test('a scoped complete body rejects invalid or oversized values instead of clipping them',async()=>{
-  for(const value of ['字'.repeat(16001),'',null,{body:'not a string'}]) {
+  for(const value of ['字'.repeat(16001),'',null,{body:'not a string'},'坏\ud800','坏\udc00']) {
     installDomStub();bridge([wire('安全预览。',{result_text:value})]);
     const workspace=createEventWorkspace({config});await workspace.sync();
     assert.equal(workspace.view().cursor,0);
     assert.equal(workspace.view().messages.length,0);
     assert.match(workspace.view().error,/执行结果正文格式不正确/);
   }
+});
+
+test('invalid optional Unicode presentation in a cache is removed without losing the workspace or legacy body',async()=>{
+  installDomStub();bridge([wire('保留旧正文',{result_presentation:presentation})]);
+  const workspace=createEventWorkspace({config});await workspace.sync();
+  const saved=JSON.parse(localStorage.getItem(key));
+  saved.messages[resultId].resultPresentation.title='坏\ud800';
+  saved.messages[resultId].text='旧预览\ud800';
+  localStorage.setItem(key,JSON.stringify(saved));
+  const reopened=createEventWorkspace({config});
+  assert.equal(reopened.view().messages[0]?.text,'旧预览\ud800');
+  assert.equal(reopened.view().messages[0]?.resultPresentation,undefined);
+  assert.equal(reopened.view().goals.g_readable.tasks[0].id,'t_readable');
 });
 
 test('legacy task results render headings and steps and keep the complete tail in the task detail',async()=>{

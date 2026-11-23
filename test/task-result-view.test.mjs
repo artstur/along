@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {safeResultPresentation,readableResultText,taskResultCard,resultPreview,RESULT_TEXT_LIMIT,captureResultReading,restoreResultReading} from '../web/task-result-view.mjs';
+import {safeResultPresentation,readableResultText,taskResultCard,resultPreview,RESULT_TEXT_LIMIT,captureResultReading,restoreResultReading,wellFormedResultText} from '../web/task-result-view.mjs';
 
 const presentation=()=>({version:1,title:'今日安排',summary:'先完成一个小步骤。',actions:[{text:'准备休息',when:'今晚'}],
   sections:[{heading:'为什么这样安排',body:'保留完整说明。'}]});
@@ -14,6 +14,15 @@ test('the optional display contract is strict, bounded and does not invent value
     {...presentation(),sections:[{heading:'x',body:'y',html:'<b>bad</b>'}]},
     {...presentation(),sources:[]}, {...presentation(),sections:[{heading:'x',body:'字'.repeat(8001)}]},
     {...presentation(),sections:[{heading:'x',body:'字'.repeat(8000)},{heading:'y',body:'字'.repeat(8000)}]}])assert.equal(safeResultPresentation(bad),null);
+});
+
+test('new product display fields reject lone surrogates while valid emoji and legacy fallback remain readable',()=>{
+  assert.equal(wellFormedResultText('中文😀'),true);
+  for(const value of ['\ud800','\udc00','prefix\ud800suffix','\udc00\ud800'])assert.equal(wellFormedResultText(value),false);
+  for(const key of ['title','summary'])assert.equal(safeResultPresentation({...presentation(),[key]:'坏\ud800'}),null);
+  assert.equal(safeResultPresentation({...presentation(),actions:[{text:'行动',when:'坏\udc00'}]}),null);
+  assert.equal(safeResultPresentation({...presentation(),sections:[{heading:'说明',body:'坏\ud800'}]}),null);
+  assert.match(taskResultCard({text:'保留旧正文',resultPresentation:{...presentation(),title:'坏\ud800'}}),/保留旧正文/);
 });
 
 test('text blocks remain inert while headings, ordered steps, quotes and code become readable',()=>{

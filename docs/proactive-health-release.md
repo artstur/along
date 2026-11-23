@@ -11,6 +11,8 @@
 
 旧客户端的 message.text 继续是最多1200字的明确预览；新 wire.result_text 保存最多16000字完整正文。新版只有在原有 background、task、execution receipt、revision 与 task_execution_revision 校验通过后才将完整正文存入本地text；未知或跨任务字段不扩大权限。完整正文随既有结果投影迁移重放和缓存恢复，普通chat上界保持2000。公开Web与手机仅发布本轮最终组合版本，不单独发布中间展示协议。
 
+新展示字段与完整正文拒绝孤立UTF16代理对；Agent分片/预览保持Unicode标量边界，避免合法emoji被切成iOS无法解析的JSON。旧缓存正文保留，可选展示结构非法时仅丢弃该结构并回退正文，不能清空工作区。
+
 ## 本机检查的已有不稳定项
 
 精确基线 bcde2bcc 在此 Mac 上可复现六项 TLS 断言失败：测试用 OpenSSL CLI 的人类可读 subject 文本固定格式提取 CN，LibreSSL 的格式不同会得到 null。证书本身有效。本轮测试改为 Node X509Certificate 独立解析证书的真实主题，保留 CN、有效期、指纹和实际 TLS 握手断言，不修改 Host 证书实现。

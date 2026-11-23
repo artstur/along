@@ -5,7 +5,7 @@ import {safeAdaptiveLayout} from './adaptive-ui.mjs';
 import {safeRecommendation} from './recommendations.mjs';
 import {safeDataSources} from './data-sources.mjs';
 import {taskResultRelevant,resultEvidence,validResultEvidence} from './task-results.mjs';
-import {safeResultPresentation,RESULT_TEXT_LIMIT} from './task-result-view.mjs';
+import {safeResultPresentation,RESULT_TEXT_LIMIT,wellFormedResultText} from './task-result-view.mjs';
 
 const id = value => typeof value==='string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$/.test(value);
 const record = value => value!==null && typeof value==='object' && !Array.isArray(value);
@@ -171,7 +171,7 @@ function safeMessage(message,item) {
   // New servers keep message.text short for pre-upgrade clients. The separate complete body
   // never grants result authority, and cannot enter ordinary chat or another task's cache.
   if(scopedResult&&item.payload.result_text!==undefined) {
-    if(!text(item.payload.result_text,RESULT_TEXT_LIMIT))throw Error('执行结果正文格式不正确');
+    if(!text(item.payload.result_text,RESULT_TEXT_LIMIT)||!wellFormedResultText(item.payload.result_text))throw Error('执行结果正文格式不正确');
     clean.text=item.payload.result_text;
   }
   const presentation=scopedResult?safeResultPresentation(item.payload.result_presentation):null;
