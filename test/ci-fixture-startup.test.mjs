@@ -12,11 +12,15 @@ import {provideCloudCa} from './cloud-ca-fixture.mjs';
 
 // Run the real contract setup in an owned process group. Only its synthetic Host
 // is replaced; leaked runner listeners must not keep a failed test alive.
-test('contract fixture exits after Host startup fails, without leaking the stub runner',
+for (const [label,file,pattern] of [
+  ['contract','./agent-runner-contract.test.mjs','设置 ALONG_DSH_RUNNER_URL 后 Kimi'],
+  ['agreement','./host-runner-agreement.test.mjs','ALONG_DSH_RUNNER_URL 分流'],
+  ['blocked agreement','./host-runner-agreement.test.mjs','runner 返回校验失败的目标输出'],
+]) test(`${label} fixture exits after Host startup fails, without leaking the stub runner`,
   {skip:process.platform==='win32'},async()=>{
   const dir=mkdtempSync(join(tmpdir(),'along-ci-startup-'));
   const hostFile=fileURLToPath(new URL('../host/agent-host.mjs',import.meta.url));
-  const contractFile=fileURLToPath(new URL('./agent-runner-contract.test.mjs',import.meta.url));
+  const contractFile=fileURLToPath(new URL(file,import.meta.url));
   const preload=join(dir,'fail-host.mjs');
   writeFileSync(preload,`
     import cp from 'node:child_process';
@@ -33,7 +37,7 @@ test('contract fixture exits after Host startup fails, without leaking the stub 
     const env={...process.env};
     delete env.NODE_TEST_CONTEXT; // A nested runner must create its own test workers.
     child=spawn(process.execPath,['--import',preload,'--test',
-      '--test-name-pattern=设置 ALONG_DSH_RUNNER_URL 后 Kimi',contractFile],
+      `--test-name-pattern=${pattern}`,contractFile],
       {env,detached:true,stdio:['ignore','pipe','pipe']});
     let output='';
     child.stdout.on('data',chunk=>output+=chunk);
@@ -82,7 +86,38 @@ test('parallel cloud CA generation keeps each state certificate/key/root consist
       const key=readFileSync(join(current,'key.pem'));
       const ca=readFileSync(join(current,'root.crt'));
       assert.doesNotThrow(()=>createSecureContext({cert,key}));
-      assert.equal(new X509Certificate(cert).verify(new X509Certificate(ca).publicKey),true);
+      const rootCert=new X509Certificate(ca);
+      assert.equal(rootCert.ca,true,'签名可验证也必须证明根有CA用途');
+      assert.equal(new X509Certificate(cert).verify(rootCert.publicKey),true);
     }));
   } finally {rmSync(root,{recursive:true,force:true});}
+});
+
+// A real ambient v3_ca config used with -addext duplicates the same OIDs in
+// both LibreSSL and OpenSSL 1.1.1; Node then correctly rejects the root as a CA.
+test('cloud CA constraints are explicit once even when ambient OpenSSL config defines v3_ca',async()=>{
+  const dir=mkdtempSync(join(tmpdir(),'along-ci-ca-defaults-'));
+  const conf=join(dir,'ambient.cnf');
+  writeFileSync(conf,'[req]\ndistinguished_name=dn\nx509_extensions=v3_ca\n[dn]\n[v3_ca]\nbasicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\nsubjectKeyIdentifier=hash\n');
+  const fixtureUrl=new URL('./cloud-ca-fixture.mjs',import.meta.url).href;
+  const tlsUrl=new URL('../host/tls-material.mjs',import.meta.url).href;
+  const source=`
+    import {provideCloudCa} from ${JSON.stringify(fixtureUrl)};
+    import {loadCloudTlsMaterial} from ${JSON.stringify(tlsUrl)};
+    import {X509Certificate} from 'node:crypto';
+    import {readFileSync} from 'node:fs';
+    import {join} from 'node:path';
+    import {execFileSync} from 'node:child_process';
+    const {ca}=provideCloudCa(process.argv[1]);
+    const cert=new X509Certificate(readFileSync(join(ca,'ca.crt')));
+    const text=execFileSync('openssl',['x509','-in',join(ca,'ca.crt'),'-noout','-text'],{encoding:'utf8'});
+    let error=null;try{loadCloudTlsMaterial({stateDir:process.argv[1],host:'along.test.local'});}catch(e){error=e.message;}
+    console.log(JSON.stringify({ca:cert.ca,basicConstraints:(text.match(/X509v3 Basic Constraints/g)||[]).length,
+      keyUsage:(text.match(/X509v3 Key Usage/g)||[]).length,error}));
+  `;
+  try {
+    const {stdout}=await promisify(execFile)(process.execPath,['--input-type=module','-e',source,join(dir,'state')],
+      {env:{...process.env,OPENSSL_CONF:conf},timeout:20_000});
+    assert.deepEqual(JSON.parse(stdout),{ca:true,basicConstraints:1,keyUsage:1,error:null});
+  } finally {rmSync(dir,{recursive:true,force:true});}
 });

@@ -79,9 +79,21 @@ function plainRequest(port,path,{method='GET',body,headers={}}={}) {
     req.end();
   });
 }
-async function waitReady(port,label,probe=path=>plainRequest(port,path)) {
+function stopChild(child) {
+  if (child.exitCode!==null||child.signalCode!==null) return Promise.resolve();
+  return new Promise(resolve=>{
+    let timer;
+    child.once('exit',()=>{clearTimeout(timer);resolve();});
+    child.kill('SIGINT');
+    timer=setTimeout(()=>child.kill('SIGKILL'),3_000);
+  });
+}
+async function waitReady(port,label,probe=path=>plainRequest(port,path),child) {
   const deadline=Date.now()+15_000;
   while (Date.now()<deadline) {
+    if (child&&(child.exitCode!==null||child.signalCode!==null)) {
+      throw new Error(`${label} exited before ready (code=${child.exitCode}, signal=${child.signalCode})`);
+    }
     try { const response=await probe('/health'); if (response.status===200) return; } catch { /* 还没起来 */ }
     await sleep(120);
   }
@@ -115,9 +127,11 @@ async function spawnRunner({dir,stdout,mode='ok',token='ab'.repeat(32)}) {
     ALONG_MODEL_API_KEY_FILE:modelFile,ALONG_DSH_BIN:bin},stdio:['ignore','pipe','pipe']});
   const output=[];
   child.stderr.on('data',data=>output.push(String(data)));
-  await waitReady(port,'agent runner');
+  const stop=()=>stopChild(child);
+  try { await waitReady(port,'agent runner',undefined,child); }
+  catch(error) { await stop(); throw error; }
   return {port,token,callCount:()=>readFileSync(logFile,'utf8').length,
-    errors:()=>output.join(''),stop:()=>child.kill('SIGINT')};
+    errors:()=>output.join(''),stop};
 }
 const runRequest=(port,path,args={})=>plainRequest(port,path,args);
 
@@ -169,7 +183,7 @@ test('runner：合法目标输出 → 信封过 safeGoalSuperAgentRun，runtime 
     assert.equal(again.status,200);
     assert.deepEqual(again.json.run,run);
     assert.equal(runner.callCount(),1,'缓存命中不再拉起第二个 dsh 进程');
-  } finally { runner.stop(); rmSync(dir,{recursive:true,force:true}); }
+  } finally { await runner.stop(); rmSync(dir,{recursive:true,force:true}); }
 });
 
 test('runner：任务输出 → 信封过 safeSuperAgentRun（version 2）',async()=>{
@@ -189,7 +203,7 @@ test('runner：任务输出 → 信封过 safeSuperAgentRun（version 2）',asyn
     assert.equal(run.status,'done');
     assert.equal(run.task.title,'整理健康推荐');
     assert.equal(run.assignments[0].report.summary,'已生成清单');
-  } finally { runner.stop(); rmSync(dir,{recursive:true,force:true}); }
+  } finally { await runner.stop(); rmSync(dir,{recursive:true,force:true}); }
 });
 
 test('runner：dsh 失败（退出码非零 / 无输出 / 输出不是 JSON）一律落 blocked 终态',async()=>{
@@ -215,7 +229,7 @@ test('runner：dsh 失败（退出码非零 / 无输出 / 输出不是 JSON）�
       const read=await runRequest(runner.port,`/run/along-goal-health-fail-${label.length}`,
         {headers:{'runner-token':runner.token,'x-along-user':USER_A}});
       assert.deepEqual(read.json.run,run);
-    } finally { runner.stop(); rmSync(dir,{recursive:true,force:true}); }
+    } finally { await runner.stop(); rmSync(dir,{recursive:true,force:true}); }
   }
 });
 
@@ -242,7 +256,7 @@ test('runner：鉴权与请求校验',async()=>{
     const unknown=await runRequest(runner.port,'/run/along-goal-health-none',
       {headers:{'runner-token':runner.token,'x-along-user':USER_A}});
     assert.equal(unknown.status,404,'没有运行过的 requestId 查不到');
-  } finally { runner.stop(); rmSync(dir,{recursive:true,force:true}); }
+  } finally { await runner.stop(); rmSync(dir,{recursive:true,force:true}); }
 });
 
 // ---- host 分流：真实 host 进程 + stub runner（验收 #3 的宿主侧断言）-------------------------------
@@ -316,25 +330,24 @@ async function spawnHostWithRunner(dir,runnerPort) {
   child.stdout.on('data',data=>output.push(String(data)));
   child.stderr.on('data',data=>output.push(String(data)));
   const text=()=>output.join('');
-  await waitReady(port,'host',path=>phoneCall(port,path));
-  assert.doesNotMatch(text(),/一次性配对码/);
-  const paired=await phoneCall(port,'/pair',{method:'POST',body:{code}});
-  assert.equal(paired.status,200);
-  const token=paired.json.token;
-  const stop=()=>new Promise(resolve=>{
-    child.once('exit',()=>resolve());
-    child.kill('SIGINT');
-    setTimeout(()=>{try{child.kill('SIGKILL');}catch{}resolve();},3_000).unref?.();
-  });
-  return {port,token,pairing:paired.json,userId:()=>JSON.parse(readFileSync(join(dir,'pairings.json'),'utf8'))[0].user_id,text,stop};
+  const stop=()=>stopChild(child);
+  try {
+    await waitReady(port,'host',path=>phoneCall(port,path),child);
+    assert.doesNotMatch(text(),/一次性配对码/);
+    const paired=await phoneCall(port,'/pair',{method:'POST',body:{code}});
+    assert.equal(paired.status,200);
+    const token=paired.json.token;
+    return {port,token,pairing:paired.json,userId:()=>JSON.parse(readFileSync(join(dir,'pairings.json'),'utf8'))[0].user_id,text,stop};
+  } catch(error) { await stop(); throw error; }
 }
 
 test('host：ALONG_DSH_RUNNER_URL 分流 → /super-agent/goals 的 run 过 normalizeGoalRun 且通过白名单',async()=>{
   const dir=mkdtempSync(join(tmpdir(),'along-host-runner-goal-'));
-  const runner=await stubRunner({expectedToken:'cd'.repeat(32),
-    postRun:body=>goalRunEnvelope(body.requestId,goalOutput)});
-  const host=await spawnHostWithRunner(dir,runner.port);
+  let runner,host;
   try {
+    runner=await stubRunner({expectedToken:'cd'.repeat(32),
+      postRun:body=>goalRunEnvelope(body.requestId,goalOutput)});
+    host=await spawnHostWithRunner(dir,runner.port);
     const response=await phoneCall(host.port,'/super-agent/goals',{method:'POST',
       body:{requestId:'along-goal-health-e2e',...goalInput,runtime:DSH_RUNTIME},
       headers:{authorization:`Bearer ${host.token}`}});
@@ -362,14 +375,15 @@ test('host：ALONG_DSH_RUNNER_URL 分流 → /super-agent/goals 的 run 过 norm
     assert.equal(status.status,200);
     assert.equal(status.json.ready,true);
     assert.ok(runner.calls.some(item=>item.method==='GET'&&item.path==='/health'));
-  } finally { await host.stop(); await runner.close(); rmSync(dir,{recursive:true,force:true}); }
+  } finally { await host?.stop(); await runner?.close(); rmSync(dir,{recursive:true,force:true}); }
 });
 
 test('host：runner 返回校验失败的目标输出 → blocked 终态不重试',async()=>{
   const dir=mkdtempSync(join(tmpdir(),'along-host-runner-blocked-'));
-  const runner=await stubRunner({postRun:body=>goalRunEnvelope(body.requestId,{reply:'',proposal:null,layout:validLayout})});
-  const host=await spawnHostWithRunner(dir,runner.port);
+  let runner,host;
   try {
+    runner=await stubRunner({postRun:body=>goalRunEnvelope(body.requestId,{reply:'',proposal:null,layout:validLayout})});
+    host=await spawnHostWithRunner(dir,runner.port);
     const response=await phoneCall(host.port,'/super-agent/goals',{method:'POST',
       body:{requestId:'along-goal-health-bad',...goalInput,runtime:DSH_RUNTIME},
       headers:{authorization:`Bearer ${host.token}`}});
@@ -380,7 +394,7 @@ test('host：runner 返回校验失败的目标输出 → blocked 终态不重�
     assert.equal(run.result,null,'校验失败的结果不能交付');
     assert.equal(run.applyValidatedGoal,undefined);
     assert.equal(safeGoalSuperAgentRun(run)?.status,'blocked');
-  } finally { await host.stop(); await runner.close(); rmSync(dir,{recursive:true,force:true}); }
+  } finally { await host?.stop(); await runner?.close(); rmSync(dir,{recursive:true,force:true}); }
 });
 
 test('cloud Host acknowledges before completion and validates the original contextual review at lookup and replay',async t=>{
@@ -395,11 +409,12 @@ test('cloud Host acknowledges before completion and validates the original conte
     ['attempt to change the goal',{active:true,title:'运动',target:120,task:'记录运动',reason:'回顾当前计划'}],
   ]) await t.test(name,async()=>{
     const dir=mkdtempSync(join(tmpdir(),'along-host-runner-review-'));
-    const runner=await spawnRunner({dir,token:'cd'.repeat(32),stdout:JSON.stringify({
-      reply:'当前任务继续执行。',proposal,layout:null,reassessment,
-    })});
-    const host=await spawnHostWithRunner(dir,runner.port);
+    let runner,host;
     try {
+      runner=await spawnRunner({dir,token:'cd'.repeat(32),stdout:JSON.stringify({
+        reply:'当前任务继续执行。',proposal,layout:null,reassessment,
+      })});
+      host=await spawnHostWithRunner(dir,runner.port);
       const headers={authorization:`Bearer ${host.token}`};
       const submitted=await phoneCall(host.port,'/super-agent/goals',{method:'POST',body:input,headers});
       assert.equal(submitted.status,200);
@@ -430,7 +445,7 @@ test('cloud Host acknowledges before completion and validates the original conte
         }
       }
       assert.equal(runner.callCount(),1);
-    } finally { await host.stop(); runner.stop(); rmSync(dir,{recursive:true,force:true}); }
+    } finally { await host?.stop(); await runner?.stop(); rmSync(dir,{recursive:true,force:true}); }
   });
 });
 
@@ -438,11 +453,12 @@ test('host：goals/status 与 tasks 两个端点同走 runner（x-along-user 用
   const dir=mkdtempSync(join(tmpdir(),'along-host-runner-status-'));
   const goalRun=goalRunEnvelope('along-goal-health-st',goalOutput);
   const taskRun=taskRunEnvelope('along-health-task9');
-  const runner=await stubRunner({
-    postRun:body=>body.kind==='goal'?goalRunEnvelope(body.requestId,goalOutput):taskRunEnvelope(body.requestId),
-    getStatus:requestId=>requestId==='along-goal-health-st'?goalRun:requestId==='along-health-task9'?taskRun:null});
-  const host=await spawnHostWithRunner(dir,runner.port);
+  let runner,host;
   try {
+    runner=await stubRunner({
+      postRun:body=>body.kind==='goal'?goalRunEnvelope(body.requestId,goalOutput):taskRunEnvelope(body.requestId),
+      getStatus:requestId=>requestId==='along-goal-health-st'?goalRun:requestId==='along-health-task9'?taskRun:null});
+    host=await spawnHostWithRunner(dir,runner.port);
     const status=await phoneCall(host.port,'/super-agent/goals/status',{method:'POST',
       body:{requestId:'along-goal-health-st',runtime:DSH_RUNTIME,contextReview:true},headers:{authorization:`Bearer ${host.token}`}});
     assert.equal(status.status,200);
@@ -468,7 +484,7 @@ test('host：goals/status 与 tasks 两个端点同走 runner（x-along-user 用
       body:{requestId:'along-goal-health-none',runtime:DSH_RUNTIME},headers:{authorization:`Bearer ${host.token}`}});
     assert.equal(missing.status,502);
     assert.match(missing.json.error,/运行记录不存在/);
-  } finally { await host.stop(); await runner.close(); rmSync(dir,{recursive:true,force:true}); }
+  } finally { await host?.stop(); await runner?.close(); rmSync(dir,{recursive:true,force:true}); }
 });
 
 test('host：设置了 ALONG_DSH_RUNNER_URL 但缺 runner-token → 拒绝启动',()=>{

@@ -7,6 +7,7 @@ import {join} from 'node:path';
 import {createHash,X509Certificate} from 'node:crypto';
 import {loadCloudTlsMaterial,certificateCoversHost,publicDigest,spkiDigest} from '../host/tls-material.mjs';
 import {buildRootProfile,verifyRootProfile,profileDigest,rootDerFromPem} from '../host/ca-profile.mjs';
+import {makeTestCa as makeCloudTestCa} from './cloud-ca-fixture.mjs';
 
 // 云端 CA 叶证书与只含公开根的描述文件（docs/iphone-ca-profile-design.md §3.1/§3.2/§8 T02/T05/T09）。
 //
@@ -20,17 +21,7 @@ function openssl(args,cwd) {
 // 生成一套隔离测试 CA：根 + 带 SAN 的叶。所有扩展显式写出，不依赖 OpenSSL 默认行为
 // （docs/iphone-ca-profile-design.md §10：默认扩展随版本与配置变化）。
 function makeTestCa(root) {
-  mkdirSync(root,{recursive:true});
-  openssl(['req','-x509','-newkey','rsa:2048','-nodes','-keyout','ca.key','-out','ca.crt','-days','3650',
-    '-subj','/CN=Along Test Root CA',
-    '-addext','basicConstraints=critical,CA:TRUE,pathlen:0',
-    '-addext','keyUsage=critical,keyCertSign,cRLSign'],root);
-  openssl(['req','-new','-newkey','rsa:2048','-nodes','-keyout','leaf.key','-out','leaf.csr',
-    '-subj','/CN=along.test.local'],root);
-  writeFileSync(join(root,'ext.cnf'),
-    'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:along.test.local\n');
-  openssl(['x509','-req','-in','leaf.csr','-CA','ca.crt','-CAkey','ca.key','-CAcreateserial',
-    '-out','leaf.crt','-days','90','-extfile','ext.cnf'],root);
+  makeCloudTestCa(root);
   return {root};
 }
 
@@ -354,3 +345,17 @@ test('描述文件：可以移除，不设置不可移除限制',t=>{
   assert.match(profile.xml,/<key>PayloadRemovalDisallowed<\/key>\s*<false\/>/);
 });
 
+
+
+test('云端加载：显式非CA根继续被严格拒绝',t=>{
+  const f=fixture(t),version=stageRelease(f.stateDir,f.ca);
+  writeFileSync(join(f.ca.root,'not-ca.cnf'),
+    '[req]\ndistinguished_name=dn\n[dn]\n[not_ca]\n'+
+    'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\n');
+  openssl(['req','-x509','-newkey','rsa:2048','-nodes','-keyout','not-ca.key','-out','not-ca.crt',
+    '-days','1','-subj','/CN=Not a CA','-config','not-ca.cnf','-extensions','not_ca'],f.ca.root);
+  const invalid=readFileSync(join(f.ca.root,'not-ca.crt'));
+  assert.equal(new X509Certificate(invalid).ca,false);
+  writeFileSync(join(version,'root.crt'),invalid);
+  assert.throws(()=>loadCloudTlsMaterial({stateDir:f.stateDir,host:'along.test.local'}),/根证书不是 CA/);
+});

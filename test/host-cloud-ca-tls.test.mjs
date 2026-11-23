@@ -1,12 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {spawn, execFileSync} from 'node:child_process';
+import {spawn,execFileSync} from 'node:child_process';
 import {request as tlsRequest} from 'node:https';
 import net from 'node:net';
 import {mkdtempSync,mkdirSync,writeFileSync,readFileSync,symlinkSync,chmodSync,rmSync,existsSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {makeTestCa} from './cloud-ca-fixture.mjs';
 
 // 云端形态的真实进程行为（docs/iphone-ca-profile-design.md §3.1/§7「服务端 TLS」、§8 T05/T20）：
 // - 多用户形态（users.json 在场）读 tls/current 的预签发叶证书，不再现场自签；
@@ -22,22 +23,6 @@ function freePort() {
   });
 }
 
-function openssl(args,cwd) {
-  return execFileSync('openssl',args,{cwd,encoding:'utf8',stdio:['ignore','pipe','pipe']});
-}
-
-function makeTestCa(root,host) {
-  mkdirSync(root,{recursive:true});
-  openssl(['req','-x509','-newkey','rsa:2048','-nodes','-keyout','ca.key','-out','ca.crt','-days','3650',
-    '-subj','/CN=Along Test Root CA','-addext','basicConstraints=critical,CA:TRUE,pathlen:0',
-    '-addext','keyUsage=critical,keyCertSign,cRLSign'],root);
-  openssl(['req','-new','-newkey','rsa:2048','-nodes','-keyout','leaf.key','-out','leaf.csr','-subj',`/CN=${host}`],root);
-  writeFileSync(join(root,'ext.cnf'),
-    'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:'+host+'\n');
-  openssl(['x509','-req','-in','leaf.csr','-CA','ca.crt','-CAkey','ca.key','-CAcreateserial',
-    '-out','leaf.crt','-days','90','-extfile','ext.cnf'],root);
-  return root;
-}
 
 function stageRelease(stateDir,ca,serial) {
   const version=join(stateDir,'tls','releases',serial);
