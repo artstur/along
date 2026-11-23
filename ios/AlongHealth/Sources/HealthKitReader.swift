@@ -17,9 +17,10 @@ final class HealthKitReader {
         }
         let ordered = HealthMetric.allCases.filter { selection.contains($0) }
         guard !ordered.isEmpty else { throw ReaderError.emptySelection }
-        let types = Set<HKObjectType>(ordered.map(Self.sampleType))
+        var types = Set<HKObjectType>(ordered.map(Self.sampleType))
         // This requests read access only for the boxes the person checked.
         if requestPermission {
+            if selection.contains(.workout) && includeContext { types.formUnion(Self.workoutDetailReadTypes()) }
             try await store.requestAuthorization(toShare: Set<HKSampleType>(), read: types)
         }
 
@@ -65,6 +66,15 @@ final class HealthKitReader {
         case .wristTemperature: return HKObjectType.quantityType(forIdentifier: .appleSleepingWristTemperature)!
         case .sleep: return HKObjectType.categoryType(forIdentifier: .sleepAnalysis)!
         }
+    }
+
+    // Extra read types belong to the explicitly selected workout summary, never
+    // a foreground/background refresh. Optional denial must not break old facts.
+    private static func workoutDetailReadTypes() -> Set<HKObjectType> {
+        var identifiers: [HKQuantityTypeIdentifier] = [.heartRate, .activeEnergyBurned,
+            .distanceWalkingRunning, .distanceCycling, .distanceSwimming, .distanceWheelchair]
+        if #available(iOS 18.0, *) { identifiers += [.workoutEffortScore, .estimatedWorkoutEffortScore] }
+        return Set(identifiers.compactMap { HKObjectType.quantityType(forIdentifier: $0) })
     }
 
     func observeChanges(_ selection: Set<HealthMetric>, onChange: @escaping (@escaping () -> Void) -> Void) {
@@ -169,7 +179,11 @@ final class HealthKitReader {
         let recentStart = calendar.date(byAdding: .day, value: -6, to: todayStart)!
         let start = includeContext ? calendar.date(byAdding: .day, value: -27, to: todayStart)! : weekStart
         let predicate = HKQuery.predicateForSamples(withStart: start, end: now, options: .strictStartDate)
+        var seen: Set<UUID> = []
         let workouts = try await samples(of: .workoutType(), predicate: predicate).compactMap { $0 as? HKWorkout }
+            .filter { $0.endDate <= now && $0.startDate <= $0.endDate && $0.duration.isFinite && $0.duration >= 0
+                && $0.duration <= $0.endDate.timeIntervalSince($0.startDate) + 1 && seen.insert($0.uuid).inserted }
+            .sorted { $0.startDate == $1.startDate ? $0.uuid.uuidString < $1.uuid.uuidString : $0.startDate > $1.startDate }
         let history = includeContext ? HealthHistoryWindows(endingAt: todayStart, calendar: calendar)
             .workout(workouts.map { ($0.startDate, $0.duration) }) : nil
         guard !workouts.isEmpty else { return (nil, nil, nil, history) }
@@ -197,11 +211,60 @@ final class HealthKitReader {
                     "averageMinutes": Int(values.reduce(0.0) { $0 + $1.duration } / Double(values.count) / 60),
                     "lastObservedAt": formatter.string(from: calendar.startOfDay(for: latest))]
         }
+        var recentSessions: [[String: Any]] = []
+        for workout in workouts.prefix(7) {
+            if let detail = await workoutDetail(workout, now: now) { recentSessions.append(detail) }
+        }
         let summary: [String: Any] = ["windowDays": 28, "weekStartAt": formatter.string(from: weekStart),
             "todayMinutes": Int(today.reduce(0.0) { $0 + $1.duration } / 60), "todayCount": today.count,
             "yesterdayMinutes": Int(yesterday.reduce(0.0) { $0 + $1.duration } / 60),
-            "latestWorkoutAt": formatter.string(from: workouts.map(\.startDate).max()!), "patterns": patterns]
+            "latestWorkoutAt": formatter.string(from: workouts.map(\.startDate).max()!), "patterns": patterns,
+            "recentSessions": recentSessions]
         return (weekMinutes, week.count, summary, history)
+    }
+
+    private func workoutDetail(_ workout: HKWorkout, now: Date) async -> [String: Any]? {
+        let indoor = workout.metadata?[HKMetadataKeyIndoorWorkout] as? Bool
+        var detail = WorkoutObservation(activity: Self.activityName(workout.workoutActivityType),
+            start: workout.startDate, end: workout.endDate, durationSeconds: workout.duration,
+            location: indoor.map { $0 ? "indoor" : "outdoor" } ?? "unknown")
+        // HKWorkout owns these associated aggregate quantities; no fine-grained
+        // sample, identifier, route, device or arbitrary metadata leaves this method.
+        detail.distanceMeters = workout.totalDistance?.doubleValue(for: .meter())
+        let energy = HKQuantityType.quantityType(forIdentifier: .activeEnergyBurned)!
+        detail.activeEnergyKcal = workout.statistics(for: energy)?.sumQuantity()?.doubleValue(for: .kilocalorie())
+            ?? workout.totalEnergyBurned?.doubleValue(for: .kilocalorie())
+        let heartRate = HKQuantityType.quantityType(forIdentifier: .heartRate)!
+        let bpm = HKUnit.count().unitDivided(by: .minute())
+        if let stats = try? await associatedStatistics(heartRate, workout: workout) {
+            detail.averageHeartRateBpm = stats.averageQuantity()?.doubleValue(for: bpm)
+            detail.maximumHeartRateBpm = stats.maximumQuantity()?.doubleValue(for: bpm)
+        }
+        if #available(iOS 18.0, *) {
+            detail.effortScore = try? await workoutEffort(.workoutEffortScore, workout: workout)
+            detail.estimatedEffortScore = try? await workoutEffort(.estimatedWorkoutEffortScore, workout: workout)
+        }
+        return detail.payload(observedAt: now)
+    }
+
+    private func associatedStatistics(_ type: HKQuantityType, workout: HKWorkout) async throws -> HKStatistics? {
+        try await withCheckedThrowingContinuation { continuation in
+            let query = HKStatisticsQuery(quantityType: type, quantitySamplePredicate: HKQuery.predicateForObjects(from: workout),
+                options: [.discreteAverage, .discreteMax]) { _, value, error in
+                if let error, !Self.isNoData(error) { continuation.resume(throwing: error) }
+                else { continuation.resume(returning: value) }
+            }
+            store.execute(query)
+        }
+    }
+
+    @available(iOS 18.0, *)
+    private func workoutEffort(_ identifier: HKQuantityTypeIdentifier, workout: HKWorkout) async throws -> Double? {
+        guard let type = HKObjectType.quantityType(forIdentifier: identifier) else { return nil }
+        let predicate = HKQuery.predicateForWorkoutEffortSamplesRelated(workout: workout, activity: nil)
+        let sorted = [NSSortDescriptor(key: HKSampleSortIdentifierEndDate, ascending: false)]
+        guard let value = try await samples(of: type, predicate: predicate, limit: 1, sort: sorted).first as? HKQuantitySample else { return nil }
+        return value.quantity.doubleValue(for: .appleEffortScore())
     }
 
     private static func activityName(_ type: HKWorkoutActivityType) -> String {
@@ -253,13 +316,27 @@ final class HealthKitReader {
         }
         let predicate = HKQuery.predicateForSamples(withStart: start, end: window.latestEnd, options: [])
         let values = try await samples(of: HKCategoryType.categoryType(forIdentifier: .sleepAnalysis)!, predicate: predicate)
+        let stages = values.compactMap { sample -> SleepStageObservation? in
+            guard let sleep = sample as? HKCategorySample, sleep.startDate < sleep.endDate,
+                  let stage = HKCategoryValueSleepAnalysis(rawValue: sleep.value) else { return nil }
+            let name: String
+            switch stage {
+            case .asleepCore: name = "core"
+            case .asleepDeep: name = "deep"
+            case .asleepREM: name = "rem"
+            case .asleepUnspecified: name = "unspecified"
+            case .awake: name = "awake"
+            default: return nil
+            }
+            return SleepStageObservation(interval: DateInterval(start: sleep.startDate, end: sleep.endDate), stage: name)
+        }
         let ranges = values.compactMap { sample -> DateInterval? in
             guard let sleep = sample as? HKCategorySample,
                   let stage = HKCategoryValueSleepAnalysis(rawValue: sleep.value),
                   HKCategoryValueSleepAnalysis.allAsleepValues.contains(stage) else { return nil }
             return sleep.startDate < sleep.endDate ? DateInterval(start: sleep.startDate, end: sleep.endDate) : nil
         }
-        return window.summarize(ranges, includeHistory: includeHistory)
+        return window.summarize(ranges, includeHistory: includeHistory, stages: stages)
     }
 
     private func samples(of type: HKSampleType, predicate: NSPredicate?, limit: Int = HKObjectQueryNoLimit, sort: [NSSortDescriptor]? = nil) async throws -> [HKSample] {
