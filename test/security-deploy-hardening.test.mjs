@@ -248,6 +248,8 @@ test('.dockerignore（验收 5）：白名单数组更新（两条 agent-dsh 清
   // 数组 = pre-M3 白名单（git show HEAD:.dockerignore 基线，7 行）+ 两条 agent-dsh 清单放行
   assert.deepEqual(lines,[
     '*','!package.json','!package-lock.json','!host/*.mjs','!host/schemas/task-reply.schema.json','!web/*.mjs',
+    // 云端 Host 镜像整目录 COPY web/（deploy/Dockerfile.host.cloud），静态资源也要放行。
+    '!web/*.html','!web/*.css','!web/*.png','!web/*.webmanifest',
     '!deploy/agent-runner.mjs',
     '!deploy/agent-dsh/package.json','!deploy/agent-dsh/package-lock.json',
     // Tier 2 长驻镜像（deploy/Dockerfile.superagent）的启动脚本与设置播种脚本。

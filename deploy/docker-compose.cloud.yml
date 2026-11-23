@@ -1,0 +1,124 @@
+# 云端 Along 栈（Linux 实测形态，2026-11-23）：常驻 Super Agent + Along Host。
+#
+# 拓扑：
+#   iPhone → 宿主 nginx:10531（Let's Encrypt IP 证书）→ 宿主 127.0.0.1:4176
+#          → Host 容器（私 CA 自签 HTTPS，对内）→ 127.0.0.1:3082（同网络命名空间）
+#          → Super Agent 容器（/along-source/api/*）
+#
+# 为什么 Host 与 Super Agent 必须共用一个网络命名空间：
+#   host/source-event-bridge.mjs:135 硬性要求桥接端点是回环地址
+#   （private_loopback_required）——这是仓库的安全边界，不能用 docker DNS 名绕开
+#   （/along-source/* 本身不校验来源，但 Host 启动即按 URL 形状拒启）。
+#   同命名空间里两者都看见 127.0.0.1，Host 才能用 http://127.0.0.1:3082 调 Super Agent。
+#
+# 为什么命名空间由**第三个容器**（anchor）持有，而不是由 host 或 superagent 持有：
+#   命名空间跟着持有它的容器走。superagent 容器一旦重启就会换一个新的网络命名空间，
+#   挂在旧命名空间里的 Host 会被留在原地——实测后果是 Host 的 4176 不再被端口映射覆盖
+#   （宿主 TLS 握手直接失败），桥接也一并断掉，而且没有任何报错提示谁被落下了。
+#   锚点与两者都无关：superagent 或 host 单独重建，命名空间不变，另一个不受影响
+#   （tier2 分支的 deploy/docker-compose.tier2.yml 是同一设计）。
+#
+# 端口：4176（Host 的 HTTPS）与 3083（DSH 管理面的跳板）都发布在锚点上——
+#   加入他人命名空间的容器不能自己发布端口。
+#
+# 相对路径基准：compose v2 的 project directory = 本文件所在目录 deploy/，
+# 所以 ../../data 与 ../../secrets 指向工作区根下的 data/ 与 secrets/。
+services:
+  anchor:
+    image: node:24-bookworm-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54
+    container_name: along-netns
+    # 只做两件事：持有命名空间；把 0.0.0.0:3083 转进 127.0.0.1:3082，
+    # 让宿主的 nginx 面板够得到绑回环的 DSH 管理面（deploy/netns-proxy.mjs）。
+    command: ["node", "/opt/netns-proxy.mjs", "3083", "3082"]
+    volumes: ["./netns-proxy.mjs:/opt/netns-proxy.mjs:ro"]
+    ports:
+      - "127.0.0.1:4176:4176"    # Host 的 HTTPS 入口（Host 在本命名空间内监听）
+      - "127.0.0.1:3083:3083"    # DSH 管理面跳板（宿主 nginx 面板用它）
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,nodev,size=32m,mode=1777"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    mem_limit: 64m
+    cpus: "0.2"
+    pids_limit: 32
+    restart: unless-stopped
+    logging: {driver: json-file, options: {max-size: "10m", max-file: "3"}}
+
+  superagent:
+    image: along-superagent:local
+    container_name: along-superagent
+    network_mode: "service:anchor"
+    depends_on:
+      anchor:
+        condition: service_started
+    environment:
+      DSH_HOME: /var/lib/dsh
+    volumes:
+      - "../../data/superagent/dsh:/var/lib/dsh"
+      - "../../data/superagent/along:/var/lib/along"
+      - "../../data/superagent/memory:/var/lib/memory"
+    command: ["dsh", "--profile", "superagent", "--no-open"]
+    healthcheck:
+      # 两个探针：① 管理面自身可达；② 跳板 127.0.0.1:3083 可达。
+      # ② 是**命名空间探针**：跳板跑在锚点的命名空间里，只有当本容器与锚点同处一个
+      # 命名空间时才够得着。锚点重启（换新 netns）会把本容器落在旧 netns 里——
+      # 实测后果是桥接断链且无任何报错；有了 ②，docker 会重启本容器把它拉回新 netns。
+      # 走跳板回来的是 403（同源校验拒绝），那也说明链路是通的，所以只判「有没有响应」。
+      test: ["CMD", "node", "-e", "const a=fetch('http://127.0.0.1:3082/orchestrator/api/state',{headers:{'x-orchestrator-request':'1'}}).then(r=>r.ok);const b=fetch('http://127.0.0.1:3083/').then(()=>true).catch(()=>false);Promise.all([a,b]).then(([x,y])=>process.exit(x&&y?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    mem_limit: 1536m
+    cpus: "1.0"
+    pids_limit: 192
+    restart: unless-stopped
+    logging: {driver: json-file, options: {max-size: "10m", max-file: "3"}}
+
+  host:
+    build: {context: .., dockerfile: deploy/Dockerfile.host.cloud, tags: [along-host:cloud]}
+    image: along-host:cloud
+    container_name: along-host
+    network_mode: "service:anchor"
+    depends_on:
+      anchor:
+        condition: service_started
+      superagent:
+        condition: service_started
+    environment:
+      ALONG_AGENT_STATE_DIR: /data
+      ALONG_AGENT_HOST: "0.0.0.0"          # 共享命名空间里要对外监听，宿主靠 4176 发布进来
+      ALONG_AGENT_PORT: "4176"
+      ALONG_TLS_CN: 8.155.140.214          # 与私 CA 叶证书的 IP SAN 一致（tls-material 校验项）
+      ALONG_DSH_RUNNER_URL: http://agent:3088   # 云端形态判据；这个 runner 不会被调用
+      ALONG_RUNNER_TOKEN_FILE: /run/secrets/runner-token
+      ALONG_BRIDGE_TOKEN_FILE: /run/secrets/bridge-token
+      ALONG_EVENT_INGEST: "on"             # 新链路：/events、/sync、/notifications 生效
+      ALONG_SUPERAGENT_URL: http://127.0.0.1:3082   # 必须回环（private_loopback_required）
+    secrets: [runner-token, bridge-token]
+    volumes: ["../../data/host:/data"]
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    mem_limit: 512m
+    cpus: "1.0"
+    pids_limit: 128
+    restart: unless-stopped
+    logging: {driver: json-file, options: {max-size: "10m", max-file: "3"}}
+    healthcheck:
+      # 两个探针：① 自己的 HTTPS 入口在监听；② 跳板 127.0.0.1:3083 可达。
+      # ② 是**命名空间探针**：跳板跑在锚点的命名空间里，只有当 Host 与锚点同处一个
+      # 命名空间时才够得着。锚点重启后 Host 会落在旧 netns 里——宿主的 4176 端口映射
+      # 随之失效（外部入口断），而 Host 自己的 4176 仍在旧 netns 里正常监听，
+      # 单一探针发现不了。有了 ②，docker 会重启 Host 把它拉回锚点当前的网络命名空间。
+      test: ["CMD", "node", "-e", "process.env.NODE_TLS_REJECT_UNAUTHORIZED='0';const a=fetch('https://127.0.0.1:4176/health').then(r=>r.ok);const b=fetch('http://127.0.0.1:3083/').then(()=>true).catch(()=>false);Promise.all([a,b]).then(([x,y])=>process.exit(x&&y?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+secrets:
+  runner-token: {file: ../../secrets/runner-token}
+  # 与 Super Agent 读的是同一份文件：它就在 superagent 的 alongStateDir 里
+  # （data/superagent/along/data/bridge-token）。两侧各挂一份、内容同一份，
+  # 否则 Host 的每一次桥接调用都会被 401（host/along-bridge.mjs 与 Runtime 的 bridgeTokenOf）。
+  bridge-token: {file: ../../data/superagent/along/data/bridge-token}

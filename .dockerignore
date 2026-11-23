@@ -5,6 +5,13 @@
 !host/*.mjs
 !host/schemas/task-reply.schema.json
 !web/*.mjs
+# 云端 Host 镜像整目录 COPY web/（deploy/Dockerfile.host.cloud），所以静态资源也要放行：
+# 原镜像按 grep 出来的 7 个 mjs 平铺，host→web 的 import 闭包一改就得跟着改清单；
+# 整目录 COPY 免掉这份清单。agent-host 本身只提供 API，静态页面由 host/server.mjs 提供。
+!web/*.html
+!web/*.css
+!web/*.png
+!web/*.webmanifest
 !deploy/agent-runner.mjs
 !deploy/agent-dsh/package.json
 !deploy/agent-dsh/package-lock.json

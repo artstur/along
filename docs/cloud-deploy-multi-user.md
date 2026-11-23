@@ -48,7 +48,7 @@ Tier 2 追加 Compose 叠加文件，由 Along 独立 nginx 终止 TLS。公网 
 
 - **不做**公网注册、计费、管理后台、动态扩缩容：用户数固定为 2，身份由服务端静态用户表（`users.json`）+ 每用户配对码提供（SD-2）。
 - **不做**微服务化/多实例/负载均衡：单台主机、单进程 host、单容器 agent，持久化全在本机卷。
-- **不做**新链路数据面上云（Tier 2，见 §3.5 与 §5 验证项 V-1）：`/events`、`/sync`、`/sync/ack`、`/notifications/*`、`/sources/*` 的 agent 侧持久化依赖**长驻** DSH 运行时 + along bundle（along.sqlite、投递泵、ChangeSet 原子写入）。已核实的官方 Linux 发行物 `@deepseek-ai/dsh` 是 headless 一次性形态（无监听端口、每调用一个进程退出），承载不了长驻数据面。云端 v1 这些端点维持既有开关语义返回 503（`ALONG_EVENT_INGEST` 关闭，`host/agent-host.mjs:162-167`），健康事件与 OKX 设备上报仍走 Mac 本地模式。这不降低红线：云端的目标聊天链路照样全量过校验（§3.6）。
+- **~~不做~~新链路数据面上云（Tier 2，见 §3.5 与 §5 验证项 V-1）**：> 2026-11-23 实测推翻，本条已作废。本条的唯一理由是「官方 Linux 发行物 `@deepseek-ai/dsh` 是 headless 一次性形态（无监听端口、每调用一个进程退出），承载不了长驻数据面」；发行物实际同时提供长驻的 `dsh web`（见[Superagent 云端部署经验](superagent-cloud-deploy.md) §1）。新链路数据面已上云并跑通真实模型回合（`ALONG_EVENT_INGEST=on`），部署形态与实测见[Host 云端部署经验](host-cloud-deploy.md)。下文 §3.5 的 Tier 1/Tier 2 划分保留为历史设计。本条作废不影响红线：云端的目标聊天链路照样全量过校验（§3.6）。
 - **不做** 无关 UI 视觉改动。CA 迁移仅调整云端连接表单的叶指纹要求及信任失败恢复指引，沿用现有连接入口；具体见 [CA 方案 §2/§7](iphone-ca-profile-design.md)。涉及 Web 代码仍须按 AGENTS.md §2 联动版本，不能把当前历史版本号直接覆盖到并行工作树。
 - **不做** Kimi 运行时上云：Kimi Code Web Server（`kimi web`，`host/kimi-code-agent.mjs:9-10` 默认 `127.0.0.1:58627`、token 在 `~/.kimi-code/server.token`）是 Mac 本机登录态服务，无云端等价物。云端它按现状自然降级为不可用（选择 Kimi 运行时时报「未找到 Kimi Code Web Server token」，与 Mac 上没启动 `kimi web` 的表现一致，`host/kimi-code-agent.mjs:143-147`），UI 的运行时切换按钮不动。预留 `ALONG_KIMI_CODE_URL` 指向可达服务即可启用，不改代码。
 - **不做** Codex 路径上云：`/goal/event` 依赖本机 Codex 二进制（`host/codex-agent.mjs:9-14`），云端镜像不安装 codex，该端点按既有语义优雅失败（「Along 暂时不可用」）；`web/` 无任何调用 `/goal/event` 的代码（本轮全库 grep 无命中），属休眠路径，上线验收时不得误判为故障（验收 #10）。
@@ -67,7 +67,7 @@ Tier 2 追加 Compose 叠加文件，由 Along 独立 nginx 终止 TLS。公网 
 - **每用户隔离已有基础**：设备来源/OKX 缓存按 `userId+goalId` 哈希分文件（`host/device-source-gateway.mjs:31`）；每日委托索引按配对 token 哈希分键（`host/daily-action-history.mjs:33-51`）；归属校验 `goal.userId===who.userId`（`host/source-access.mjs:14-27`）。**单例残留**：通知设备登记单文件单槽位 + `same(who,identity())`（`host/task-notifications.mjs:71-101`）；Kimi 运行记录只按 requestId 键（`host/kimi-code-agent.mjs:180`）；`identity` 是模块级单例，被 `deviceSourceRoute`、`sourceConnections`、`notifications`、source 事件泵共享注入（`host/agent-host.mjs:31、79-83、196、429-433`）。
 - **校验链**：`normalizeGoalRun` = `validateGoalReply`（`web/goal-agent-core.mjs`）+ `safeAdaptiveLayout`（`web/adaptive-ui.mjs`），校验失败落终态 `blocked` 不重试（`host/agent-host.mjs:262-291`）；Kimi 同款校验在 `host/kimi-code-agent.mjs:113-127`。新旧链路单消费开关 `ALONG_EVENT_INGEST` 默认 off，on 时旧 DSH 分支 409（`host/agent-host.mjs:162-167、371、385`），回退=改回 off（BC-09-03/04）。
 - **客户端**：`web/` 前端不发网络请求，全部经 `window.AlongAgentBridge.request` 由 iOS 原生转发（`web/agent-client.mjs:22-27`）；连接三要素（baseURL+64hex 指纹+token）来自配对表单，存 localStorage `along.agent.v1` 并镜像 Keychain（`web/app.mjs:110-117、1099、1702-1733`）。iOS 原生把 baseURL 锁死为 https + RFC1918 私网 IPv4 且 4 段数字（`ios/AlongHealth/Sources/AlongShellView.swift:430-447`，`agentRequest` 同款校验 `:945-951`），路径白名单 12+4 条（主路径 12 + 通知 2 + 设备来源 2，逐项清点 `ios/AlongHealth/Sources/AlongShellView.swift:958-959`），叶子证书 SHA-256 钉扎、禁重定向、强制 DIRECT（`:975-978、1208-1229`）；`build=80`（`:452`）、`Info.plist CFBundleVersion=71`。web 默认运行时 Kimi（`web/app.mjs:48`），与 AGENTS.md §4 一致。
-- **agent 侧多用户已支持**：`policy.sources.along.allowed` 是数组，配对注册幂等追加 `{id:userId}`（`along-superagent/src/along/api.ts:154-164、168、184`）；身份只来自 `x-along-user`/`x-along-device` 头（`api.ts:88-90`）。**agent 核心运行时是 macOS 专属桌面发行物**：`dsh` 是 `DeepSeek Harness.app` 内置 CLI（`~/.local/bin/dsh` symlink；`ELECTRON_RUN_AS_NODE=1` 执行 Mach-O arm64 Electron 二进制加载 app.asar 里的 `@deepseek-ai/dsh-desktop-host/lib/cli.js`；`runtime.json` 明确 `platform: darwin, arch: arm64`；`app.asar.unpacked` 含 darwin-arm64 原生模块；该包公共 npm 404）。`along-superagent` 只是加载进 DSH 的插件 bundle，不含核心运行时。**已有官方 Linux 可运行发行物：公共 npm 包 `@deepseek-ai/dsh`（0.2.2-rc.5，engines node>=24.9.0，无 os/cpu 限制），官方服务器形态为 headless profile：不挂 browser/HTTP runtime、不开监听端口，一次性执行「提交任务 → 等待静默 → stdout 输出最终答案 → exit 0/1」**（结论经用户确认，来源 npm 与 deepseek-harness 官方仓库 apps/cli）。
+- **agent 侧多用户已支持**：`policy.sources.along.allowed` 是数组，配对注册幂等追加 `{id:userId}`（`along-superagent/src/along/api.ts:154-164、168、184`）；身份只来自 `x-along-user`/`x-along-device` 头（`api.ts:88-90`）。**agent 核心运行时是 macOS 专属桌面发行物**：`dsh` 是 `DeepSeek Harness.app` 内置 CLI（`~/.local/bin/dsh` symlink；`ELECTRON_RUN_AS_NODE=1` 执行 Mach-O arm64 Electron 二进制加载 app.asar 里的 `@deepseek-ai/dsh-desktop-host/lib/cli.js`；`runtime.json` 明确 `platform: darwin, arch: arm64`；`app.asar.unpacked` 含 darwin-arm64 原生模块；该包公共 npm 404）。`along-superagent` 只是加载进 DSH 的插件 bundle，不含核心运行时。**已有官方 Linux 可运行发行物：公共 npm 包 `@deepseek-ai/dsh`（0.2.2-rc.5，engines node>=24.9.0，无 os/cpu 限制），官方服务器形态为 headless profile：不挂 browser/HTTP runtime、不开监听端口，一次性执行「提交任务 → 等待静默 → stdout 输出最终答案 → exit 0/1」**（结论经用户确认，来源 npm 与 deepseek-harness 官方仓库 apps/cli）。**> 2026-11-23 修订：这条「只有 headless 一形态」的结论已被实测推翻——同一发行物还提供长驻的 `dsh web`（`dsh --profile <name>` 启动 profile，有监听端口），足以承载长驻数据面。证据见[Superagent 云端部署经验](superagent-cloud-deploy.md) §1（V-1 通过）与[Host 云端部署经验](host-cloud-deploy.md)。**
 
 ### 2.2 与「上云 + 2 用户」正面冲突的点（按代码）
 
@@ -81,7 +81,7 @@ Tier 2 追加 Compose 叠加文件，由 Along 独立 nginx 终止 TLS。公网 
 | C6 | `/goal/event` 全局互斥锁 | `host/agent-host.mjs:66、153-158、422` | M2：按用户分锁 |
 | C7 | 旧叶指纹钉扎导致重签后全体重配对 | `:37-43` | M4 目标改为短期 SAN 叶及 iPhone 系统信任；同根同域轮换不改绑定，旧十年参数仅属实现基线 |
 | C8 | 早期 iOS 只收 RFC1918 私网 IPv4；当前已扩展合法 DNS 域名 | `AlongShellView.swift` 的 hostAccepted | M6 继续保留地址约束，DNS 改系统信任，私网 Mac 保留旧 pin；公网数字 IP 仍不开放 |
-| C9 | DSH 核心运行时无 Linux 长驻形态 | §2.1 已核实 | M3/M5：云端走 `@deepseek-ai/dsh` headless 一次性调用 + host 侧校验链（§3.5） |
+| C9 | ~~DSH 核心运行时无 Linux 长驻形态~~ | §2.1 已核实 | **V-1 已推翻（2026-11-23）**：发行物提供长驻 `dsh web`，实测可承载 Along 数据面。M3/M5 的处置相应改为常驻 Super Agent 形态，见[Host 云端部署经验](host-cloud-deploy.md) |
 | C10 | 新链路数据面依赖长驻 agent | `host/agent-host.mjs:159-252` | 云端 v1 维持 `ALONG_EVENT_INGEST=off` 的 503 语义；上云列为验证项 V-1 |
 
 ### 2.3 调研/文档与代码不符处（以代码为准，M7 修正文案）
@@ -225,6 +225,12 @@ secrets:
 
 **已核实事实**：agent 核心（DSH/DeepSeek Harness）桌面运行时是 darwin/arm64 专属（§2.1），`along-superagent` 是插件 bundle。官方 Linux 可运行发行物为公共 npm 包 `@deepseek-ai/dsh`（0.2.2-rc.5，node>=24.9.0），官方服务器形态是 **headless profile：一次性进程，无监听端口，stdout 输出最终答案**（用户确认）。因此：
 
+> 2026-11-23 修订：本节及下面的 Tier 1/Tier 2 划分**保留为历史设计**。V-1 实测证明发行物同时提供
+> 长驻的 `dsh web` 形态，Tier 2 已实现并跑通真实模型回合——现役部署形态见
+> [Host 云端部署经验](host-cloud-deploy.md)（`deploy/docker-compose.cloud.yml`）。
+> 下文 Tier 1（一次性 runner）与 Tier 2（长驻 Super Agent）的分层描述仍是**有效的技术口径**，
+> 只是 Tier 1 不再是云端 v1 的唯一形态。
+
 - **Tier 1（云端 v1，本轮实现并验收）**：目标聊天链路上云，旧链路语义。
   - **agent 容器** = `node:24` + `@deepseek-ai/dsh@0.2.2-rc.5`（版本写死在 `deploy/Dockerfile.agent`）+ `deploy/agent-runner.mjs`（极小 HTTP 服务，仅 compose 内网监听 3088）。
   - **Runner 契约**：`POST /run {userId,requestId,kind,input}` 立即返回 `{run}`，新记录状态为 `working`，同键重提交返回原记录。`GET /run/:requestId` 使用 `x-along-user` 查询同一个运行的在途或终态，两个端点都使用 `runner-token`。已完成记录 LRU 上限为 200。在途记录独立保留，接单时间与请求身份贯穿同一轮。DSH 无结果、超时或输出无效时落 `blocked`。`GET /health` 供 Compose 探活。
@@ -238,6 +244,8 @@ secrets:
   **网络拓扑**：superagent 与 host **共享网络命名空间**（`network_mode: "service:host"`），且**不发布任何端口**——Super Agent 侧两处硬性要求 `webserver.host === '127.0.0.1'`，共享命名空间 + 只监听回环天然满足「管理面仅本机可达」，宿主机与外网都连不上 3082。
 
   **形态开关**：Tier 2 用叠加文件 `deploy/docker-compose.tier2.yml` 表达（`ALONG_EVENT_INGEST=on`、`ALONG_SUPERAGENT_URL`、`ALONG_BRIDGE_TOKEN_FILE` + 两侧挂同一份 `bridge-token` secret），主 compose 保持 Tier 1 默认形态。桥接凭证是 file secret，宿主文件缺失会让 `up` 硬失败——写在主 compose 里会让没部署凭证的 Tier 1 部署连 `up` 都跑不了。
+
+  > 2026-11-23 实测补记：Tier 2 已在这台 ECS 上真跑起来（真实模型回合 → 自动建目标/任务/提醒），部署形态与踩过的坑见[Host 云端部署经验](host-cloud-deploy.md)。**拓扑与上面的叠加文件不同**：命名空间由第三方锚点容器持有，host 与 superagent **都加入**它——命名空间若由任一方持有，对方一重启就会被落在旧命名空间里（宿主端口映射失效、桥接断链，且没有任何报错）。现役编排是 `deploy/docker-compose.cloud.yml`，不是 `deploy/docker-compose.tier2.yml`。
 
 ### 3.6 红线在云端形态的等价延续
 
