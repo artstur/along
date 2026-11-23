@@ -274,3 +274,5 @@ Build78 已产生的半迁移记录只有 token-scope/user，不能单凭 token-
 实现结果：事件绑定新增规范 `bindingOrigin`，普通升级在同 origin/token 且原记录 origin 可证时同步 token→原生 scope；原 `eventConnection` 不接受任意 token-scope 兜底。旧版本缺 origin 的半迁移只在 native load 恢复的原绑定上，向内置 `along://app` 提供只读 `connection('workspace')` 证据，网页比较原 user、完整 scope、origin 并在 await 后重新核实配置和事件记录未变，随后写成普通 origin-bearing 记录。该桥接不增加 HTTP API 或用户入口，也不改变配对、TLS、授权、健康采集和通知安排规则。无原生已验证元数据的旧记录继续等待原 Host 可达确认；新记录日常离线恢复不依赖该元数据。
 
 回归与交付边界：红快照 `951e36d` 已由独立只读核实者复现；修复源码 `7417c76` 的67项相关回归和实际Swift只读文件链路通过，禁签名iOS SDK编译通过。Build79/Web88已按21文件白名单生成并逐字节比对。完整check按最新日志如实比较既有6项LibreSSL subject文本解析失败与9环境skip；不修改这些TLS测试或Host产品代码。实际签名安装、原手机离线交互与发布台账由统一release owner执行，开发任务不冒称真机完成。
+
+待交付独审追加时序（2026-11-23）：旧78半迁移的原生owner证据已返回、事件绑定已恢复时，Host请求可能持续pending直到网络超时；原缓存必须立即渲染并可点击，不得等connection/status或sync结束。回归需保持真实transport未settled，验证目标/详情/chat/草稿/通知可访问，再决定是否补最小render接线；不能用立即reject掩盖该阶段。

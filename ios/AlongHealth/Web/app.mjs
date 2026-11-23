@@ -2874,7 +2874,11 @@ const connectionRestoration=restoreAlongConnection();
 void connectionRestoration.then(async()=>{
   const config=agentConfig;
   if (config.token) {
-    if (eventConnection()) connectEventWorkspace(eventConnection().userId);
+    if (eventConnection()) {
+      connectEventWorkspace(eventConnection().userId);
+      // The verified offline cache must be usable while the Host request is still pending.
+      render();
+    }
     await refreshAgentConnection();
     if (agentConfig===config&&!eventWorkspace&&nativeObservationSeen) void reviewAll();
   }
