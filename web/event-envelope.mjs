@@ -49,7 +49,8 @@ function summaryContextReason(summary) {
   let observedTimes;
   if (summary.type === 'sleep') {
     const fields = ['windowDays', 'daysWithData', 'averageThroughAt', 'latestWindowOpen', 'averageMinutes',
-      'latestNightMinutes', 'previousNightMinutes', 'latestSleepStartAt', 'latestWakeAt'];
+      'latestNightMinutes', 'previousNightMinutes', 'latestSleepStartAt', 'latestWakeAt',
+      'latestAsleepSegmentCount', 'latestLongestAsleepMinutes', 'latestStageMinutes', 'latestStageOverlap'];
     if (!keysWithin(context, fields) || context.windowDays !== 7 || !Number.isInteger(context.daysWithData)
       || context.daysWithData < 0 || context.daysWithData > 7 || !boundedTime(context.averageThroughAt)
       || typeof context.latestWindowOpen !== 'boolean') return '睡眠汇总上下文无效';
@@ -65,9 +66,21 @@ function summaryContextReason(summary) {
       (Date.parse(value) < Date.parse(summary.window.start) || Date.parse(value) > Date.parse(summary.window.end)))) {
       return '睡眠观测不在对应统计窗内';
     }
+    const details = ['latestAsleepSegmentCount', 'latestLongestAsleepMinutes', 'latestStageMinutes', 'latestStageOverlap'];
+    if (details.some(key => context[key] !== undefined) && !number(context.latestNightMinutes, 1440)) return '最新睡眠细节缺少对应观测';
+    if (context.latestAsleepSegmentCount !== undefined && (!count(context.latestAsleepSegmentCount) || context.latestAsleepSegmentCount < 1)) return '睡眠段数无效';
+    if (context.latestLongestAsleepMinutes !== undefined && (!number(context.latestLongestAsleepMinutes, 1440)
+      || context.latestLongestAsleepMinutes > context.latestNightMinutes + 1)) return '连续睡眠分钟无效';
+    if (context.latestStageMinutes !== undefined) {
+      const stages = context.latestStageMinutes;
+      if (!isRecord(stages) || !Object.keys(stages).length || !keysWithin(stages, ['core', 'deep', 'rem', 'unspecified', 'awake'])
+        || Object.values(stages).some(value => !number(value, 1440))) return '睡眠分期汇总无效';
+      if (['core', 'deep', 'rem', 'unspecified'].reduce((sum, key) => sum + (stages[key] ?? 0), 0) > context.latestNightMinutes + 1) return '睡眠分期重复计数';
+    }
+    if (context.latestStageOverlap !== undefined && (typeof context.latestStageOverlap !== 'boolean' || context.latestStageMinutes === undefined)) return '睡眠分期不确定性无效';
     observedTimes = [context.averageThroughAt, start, end];
   } else if (summary.type === 'workout') {
-    const fields = ['windowDays', 'weekStartAt', 'todayMinutes', 'todayCount', 'yesterdayMinutes', 'latestWorkoutAt', 'patterns'];
+    const fields = ['windowDays', 'weekStartAt', 'todayMinutes', 'todayCount', 'yesterdayMinutes', 'latestWorkoutAt', 'patterns', 'recentSessions'];
     if (!keysWithin(context, fields) || context.windowDays !== 28 || !boundedTime(context.weekStartAt)
       || !number(context.todayMinutes, 40320) || !count(context.todayCount) || !number(context.yesterdayMinutes, 40320)
       || !boundedTime(context.latestWorkoutAt) || !Array.isArray(context.patterns) || context.patterns.length > 40) return '运动汇总上下文无效';
@@ -80,7 +93,35 @@ function summaryContextReason(summary) {
         || !count(pattern.recentCount) || pattern.recentCount > pattern.count || !number(pattern.averageMinutes, 40320)
         || !boundedTime(pattern.lastObservedAt)) return '运动模式汇总无效';
     }
-    observedTimes = [context.weekStartAt, context.latestWorkoutAt, ...context.patterns.map(pattern => pattern.lastObservedAt)];
+    if (context.recentSessions !== undefined) {
+      if (!Array.isArray(context.recentSessions) || context.recentSessions.length > 7) return '近期运动摘要数量无效';
+      const sessionFields = ['activity', 'startAt', 'endAt', 'durationMinutes', 'location', 'distanceMeters', 'activeEnergyKcal',
+        'averageHeartRateBpm', 'maximumHeartRateBpm', 'effortScore', 'estimatedEffortScore'];
+      for (const [index, session] of context.recentSessions.entries()) {
+        if (!isRecord(session) || !keysWithin(session, sessionFields) || typeof session.activity !== 'string' || !activity.test(session.activity)
+          || !boundedTime(session.startAt) || !boundedTime(session.endAt) || Date.parse(session.startAt) > Date.parse(session.endAt)
+          || !number(session.durationMinutes, 40320) || session.durationMinutes > (Date.parse(session.endAt) - Date.parse(session.startAt)) / 60000 + 1 / 60
+          || !['indoor', 'outdoor', 'unknown'].includes(session.location)) return '近期运动摘要无效';
+        if (index > 0 && Date.parse(session.startAt) > Date.parse(context.recentSessions[index - 1].startAt)) return '近期运动摘要顺序无效';
+        // The context spans 28 civil dates, unlike the scalar's current-week window.
+        try {
+          const formatter = new Intl.DateTimeFormat('en-CA', {timeZone: summary.timezone, year: 'numeric', month: '2-digit', day: '2-digit'});
+          const ordinal = value => {
+            const parts = Object.fromEntries(formatter.formatToParts(new Date(value)).map(p => [p.type, p.value]));
+            return Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day)) / 86400000;
+          };
+          const age = ordinal(summary.metric_version) - ordinal(session.startAt);
+          if (age < 0 || age > 27) return '运动记录不在观察窗内';
+        } catch { return '运动观察时区无效'; }
+        for (const [key, max] of [['distanceMeters', 1000000], ['activeEnergyKcal', 100000], ['averageHeartRateBpm', 400], ['maximumHeartRateBpm', 400], ['effortScore', 10], ['estimatedEffortScore', 10]]) {
+          if (session[key] !== undefined && (!number(session[key], max)
+            || (key.includes('HeartRate') && session[key] <= 0) || (key.includes('Effort') || key === 'effortScore') && session[key] < 1)) return '运动关联统计无效';
+        }
+        if (session.averageHeartRateBpm !== undefined && session.maximumHeartRateBpm !== undefined && session.averageHeartRateBpm > session.maximumHeartRateBpm) return '运动心率统计倒置';
+      }
+    }
+    observedTimes = [context.weekStartAt, context.latestWorkoutAt, ...context.patterns.map(pattern => pattern.lastObservedAt),
+      ...(context.recentSessions ?? []).flatMap(session => [session.startAt, session.endAt])];
   } else return '该摘要类型不支持上下文';
   if (observedTimes.some(value => value && Date.parse(value) > Date.parse(summary.metric_version))) return '汇总观测晚于采集时间';
   return null;
