@@ -2,13 +2,15 @@
 //
 // 凭证：ALONG_BRIDGE_TOKEN_FILE 指向 0600 的 32B hex 文件（Along Agent 首次启动生成），Host 启动读一次，
 // 之后只在两个 Mac 本机进程之间传递——不发 iPhone、不写日志与运行结果、不进 Worker 环境（AGENTS.md §5）。
-// 文件缺失或读不到 → readBridgeToken 返回 null：旧链路不带 token 照发（对旧版 Along Agent 兼容），
-// 新端点由 agent-host 先行 503「未配置桥接凭证」。
+// 文件缺失、读不到或权限过宽（非 0600，statSync 口径对齐 host/apns.mjs）→ readBridgeToken 返回 null：
+// 权限过宽等同未配置凭证（fail-closed）——旧链路不带 token 照发（对旧版 Along Agent 兼容），
+// 新端点由 agent-host 先行 503「未配置桥接凭证」，云端 runner-token 过宽则在启动时拒绝。
+// 恢复/搬运 secret 后须统一 chmod 600（恢复链路尚未实现，docs/cloud-security-hardening.md §6 移交注记）。
 //
 // 语义沿用原 superAgentCall：上游故障一律 HostError 502，错误文案取上游 error 字段。
 // /events 需要回执透传（200 accepted/duplicate、400 rejected、409 conflict），用 receipt() 拿原始
 // 状态码，不把回执错误答成 502。
-import {readFileSync} from 'node:fs';
+import {readFileSync, statSync} from 'node:fs';
 import {HostError} from './host-error.mjs';
 
 const DEFAULT_TIMEOUT=15_000;
@@ -16,6 +18,7 @@ const DEFAULT_TIMEOUT=15_000;
 export function readBridgeToken(file=process.env.ALONG_BRIDGE_TOKEN_FILE) {
   if (!file) return null;
   try {
+    if (statSync(file).mode&0o077) return null;
     const token=readFileSync(file,'utf8').trim();
     return /^[a-f0-9]{64}$/.test(token)?token:null;
   } catch { return null; }

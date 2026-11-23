@@ -1,7 +1,7 @@
 import {homedir} from 'node:os';
-import {dirname, join} from 'node:path';
-import {existsSync, mkdirSync, readFileSync, renameSync, writeFileSync} from 'node:fs';
-import {validateGoalReply, normalizeGoalReply} from '../web/goal-agent-core.mjs';
+import {dirname, join, resolve} from 'node:path';
+import {existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync} from 'node:fs';
+import {validateGoalReply, normalizeGoalReply, GOAL_OUTPUT_INSTRUCTIONS} from '../web/goal-agent-core.mjs';
 import {safeAdaptiveLayout, normalizeAdaptiveLayout} from '../web/adaptive-ui.mjs';
 import {KIMI_RUNTIME, AGENT_RUN_TIMEOUT_MS} from '../web/super-agent.mjs';
 import {REASSESSMENT_INSTRUCTIONS,validateReassessment} from '../web/contextual-planning.mjs';
@@ -9,6 +9,8 @@ import {REASSESSMENT_INSTRUCTIONS,validateReassessment} from '../web/contextual-
 const DEFAULT_URL='http://127.0.0.1:58627';
 const DEFAULT_TOKEN_PATH=join(homedir(),'.kimi-code','server.token');
 const DEFAULT_STATE_PATH=join(homedir(),'.along','agent-host','kimi-runs.json');
+const LEGACY_USER_ID=/^u_[0-9a-f]{8}$/;
+const LEGACY_REQUEST_ID=/^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$/;
 // 一次 Kimi 运行最多等这么久；超过还没拿到结果就明确停住，不让 iPhone 永远转圈。
 export const KIMI_RUN_TIMEOUT_MS=AGENT_RUN_TIMEOUT_MS;
 
@@ -35,9 +37,6 @@ function jsonFromText(text) {
   for (const candidate of candidates) { try { return JSON.parse(candidate); } catch { /* Try the next representation. */ } }
   return null;
 }
-const GOAL_OUTPUT_INSTRUCTIONS=`Required JSON shape:
-{"reply":"Chinese response","proposal":{"active":true,"title":"goal title","target":number_or_null,"task":"next step","reason":"reason"},"layout":{"version":1,"title":"space title","badge":"status","summary":"summary","modules":[...],"tasks":[...],"questions":["question"]}}
-Use at most 6 modules, 6 tasks and 6 questions. Each module has kind, id and title. A summary module has content; a fact_list module has items shaped as [{"label":"...","value":"..."}]; a chips module has string items. For a custom goal, do not use metric modules and proposal.target must be null; put learning quantities in fact_list instead. Each task has id, when, title, detail, state (temporary|planned|deferred). Choose kind=agent_action, recommendation or reminder; reminders also require scheduledFor with an absolute future ISO timestamp and timezone. Questions must be strings. Preserve any explicit number, deadline, preference and constraint from the user. Keep all user-facing text in Chinese.`;
 function goalPrompt(input) {
   return `You are the main Kimi Code session for Along. Swarm mode is enabled. ${input.snapshot?.planning?'Choose specialists only when useful for conflicting goals, missing evidence or recommendations; you may review a simple change yourself.':'You MUST use Agent Swarm and delegate in parallel to at least three real subagents with distinct roles: goal strategist, constraint/risk reviewer, and dynamic-task designer.'} Synthesize their work yourself.
 
@@ -126,23 +125,64 @@ function goalResultFromOutput(output,domain,message,planning) {
   return {...validated,layout,...(planning?{reassessment}:{})};
 }
 
+// 原版的两个 Mac 入口共用一份未带身份的运行记录。只有两边的现役绑定能确定同一所有者时才迁移。
+export function localKimiMigration(dir,pairings,home=homedir()) {
+  const defaultDir=resolve(home,'.along','agent-host'),activatedDir=resolve(home,'.along','phone-test','host');
+  const current=resolve(dir),userId=pairings[0]?.user_id;
+  if (pairings.length!==1||!LEGACY_USER_ID.test(userId??'')||![defaultDir,activatedDir].includes(current)) return {};
+  const peer=current===defaultDir?activatedDir:defaultDir;
+  for (const name of ['pairings.json','pairing.json']) {
+    let saved;
+    try {saved=JSON.parse(readFileSync(join(peer,name),'utf8'));}
+    catch (error) {
+      if (error.code==='ENOENT') continue;
+      return {};
+    }
+    const bindings=name==='pairings.json'?saved:[saved];
+    if (!Array.isArray(bindings)||bindings.some(entry=>entry?.user_id!==userId)) return {};
+    break;
+  }
+  return {legacyUserId:userId,legacyStatePath:join(defaultDir,'kimi-runs.json')};
+}
+
+function readRuns(path) {
+  try {
+    const parsed=JSON.parse(readFileSync(path,'utf8'));
+    return parsed&&typeof parsed==='object'&&!Array.isArray(parsed)?parsed:{};
+  } catch(error) {
+    if (error.code!=='ENOENT') console.warn('Along：运行记录无法读取，已按空记录继续');
+    return {};
+  }
+}
+
 export class KimiCodeAgent {
-  constructor({baseURL=process.env.ALONG_KIMI_CODE_URL||DEFAULT_URL,token=process.env.ALONG_KIMI_CODE_TOKEN,tokenPath=DEFAULT_TOKEN_PATH,statePath=DEFAULT_STATE_PATH,workspace=process.cwd(),model=process.env.ALONG_KIMI_CODE_MODEL||'kimi-code/kimi-for-coding',fetchImpl=fetch}={}) {
+  constructor({baseURL=process.env.ALONG_KIMI_CODE_URL||DEFAULT_URL,token=process.env.ALONG_KIMI_CODE_TOKEN,tokenPath=DEFAULT_TOKEN_PATH,statePath=DEFAULT_STATE_PATH,workspace=process.cwd(),model=process.env.ALONG_KIMI_CODE_MODEL||'kimi-code/kimi-for-coding',fetchImpl=fetch,legacyUserId,legacyStatePath}={}) {
     this.baseURL=baseURL.replace(/\/$/,'');this.token=token;this.tokenPath=tokenPath;this.statePath=statePath;this.workspace=workspace;this.model=model;this.fetch=fetchImpl;
-    this.runs={};this.synthesisRequests=new Set();
+    this.runs=readRuns(this.statePath);this.synthesisRequests=new Set();
     // 状态文件坏了不能让整台服务起不来：解析失败就当成没有记录继续。
     // 这些记录只是「在跑的那次会话」的指针，Kimi 侧的会话本身还在。
-    try {
-      const parsed=JSON.parse(readFileSync(this.statePath,'utf8'));
-      this.runs=parsed&&typeof parsed==='object'&&!Array.isArray(parsed)?parsed:{};
-    } catch(error) {
-      if (error.code!=='ENOENT') console.warn(`Along：运行记录无法读取，已按空记录继续（${error.message}）`);
-      this.runs={};
+    if (LEGACY_USER_ID.test(legacyUserId??'')&&legacyStatePath) this.migrateRuns(legacyUserId,legacyStatePath);
+  }
+  migrateRuns(userId,legacyStatePath) {
+    const legacy=resolve(this.statePath)===resolve(legacyStatePath)?this.runs:readRuns(legacyStatePath);
+    let changed=false;
+    for (const [requestId,run] of Object.entries(legacy)) {
+      if (!LEGACY_REQUEST_ID.test(requestId)||run?.input?.requestId!==requestId||!['goal','task'].includes(run.kind)||
+          typeof run.sessionId!=='string'||!run.sessionId) continue;
+      const key=this.runKey(userId,requestId);
+      if (Object.hasOwn(this.runs,key)) continue;
+      this.runs[key]=run;changed=true;
+    }
+    if (changed) {
+      try {this.save();}
+      catch {console.warn('Along：旧版 Kimi 运行记录暂未写入');}
     }
   }
   authToken() {
     if (this.token) return this.token;
     if (!existsSync(this.tokenPath)) throw Error('未找到 Kimi Code Web Server token；请先在 Mac 启动 `kimi web`');
+    // 权限过宽直接显式报错（对齐 host/apns.mjs 口径）：Mac 上这是功能性凭证，静默不可用比报错更难排查。
+    if (statSync(this.tokenPath).mode&0o077) throw Error('Kimi token 文件权限过宽（须 0600）');
     return readFileSync(this.tokenPath,'utf8').trim();
   }
   async call(path,{method='GET',value}={}) {
@@ -170,31 +210,38 @@ export class KimiCodeAgent {
     if (user?.kind==='ok' && user.userInfo?.userLevelName==='Free') throw Error('当前 Kimi Free 账号不包含 Kimi Code 权限；升级 Kimi Code 套餐后即可使用 Swarm');
     return {ready:true,version:meta.server_version,swarm:true};
   }
-  async start(kind,input) {
+  // 运行键按用户分命名空间（docs/cloud-deploy-multi-user.md §3.2 M2）：`${userId}:${requestId}`。
+  // 同一个 requestId 由不同手机发出时互不可见；回执里的 requestId 仍是手机自己的编号。
+  runKey(userId,requestId) {
+    if (typeof userId!=='string'||!userId) throw Error('Kimi 运行记录缺少用户身份');
+    return `${userId}:${requestId}`;
+  }
+  async start(kind,input,userId) {
     await this.ready();
     const agentConfig={model:this.model,swarm_mode:true,permission_mode:'manual',plan_mode:false};
     const created=await this.call('/api/v1/sessions',{method:'POST',value:{title:`Along · ${kind==='goal'?input.goal.title:input.task.title}`,metadata:{cwd:this.workspace},agent_config:agentConfig}});
     const sessionId=created.id;
     await this.call(`/api/v1/sessions/${encodeURIComponent(sessionId)}/profile`,{method:'POST',value:{agent_config:agentConfig}});
     const entry={kind,sessionId,input,createdAt:Date.now()};
-    this.runs[input.requestId]=entry;this.save();
+    this.runs[this.runKey(userId,input.requestId)]=entry;this.save();
     await this.call(`/api/v1/sessions/${encodeURIComponent(sessionId)}/prompts`,{method:'POST',value:{content:[{type:'text',text:kind==='goal'?goalPrompt(input):taskPrompt(input)}],model:this.model,permission_mode:'manual',plan_mode:false,swarm_mode:true,prompt_id:input.requestId}});
-    return this.status(input.requestId,kind);
+    return this.status(userId,input.requestId,kind);
   }
-  async startGoal(input) { return {run:await this.start('goal',input)}; }
-  async startTask(input) { return {run:await this.start('task',input)}; }
-  async ensureSynthesis(requestId,entry,transcript) {
-    if (entry.synthesisSessionId||this.synthesisRequests.has(requestId)) return;
-    this.synthesisRequests.add(requestId);
+  async startGoal(input,userId) { return {run:await this.start('goal',input,userId)}; }
+  async startTask(input,userId) { return {run:await this.start('task',input,userId)}; }
+  async ensureSynthesis(key,entry,transcript) {
+    if (entry.synthesisSessionId||this.synthesisRequests.has(key)) return;
+    this.synthesisRequests.add(key);
     try {
       const agentConfig={model:this.model,swarm_mode:false,permission_mode:'manual',plan_mode:false};
       const created=await this.call('/api/v1/sessions',{method:'POST',value:{title:`Along 综合 · ${entry.input.goal.title}`,metadata:{cwd:this.workspace},agent_config:agentConfig}});
-      entry.synthesisSessionId=created.id;this.runs[requestId]=entry;this.save();
-      await this.call(`/api/v1/sessions/${encodeURIComponent(created.id)}/prompts`,{method:'POST',value:{content:[{type:'text',text:synthesisPrompt(entry,transcript)}],model:this.model,permission_mode:'manual',plan_mode:false,swarm_mode:false,prompt_id:`${requestId}-synthesis`}});
-    } finally { this.synthesisRequests.delete(requestId); }
+      entry.synthesisSessionId=created.id;this.runs[key]=entry;this.save();
+      await this.call(`/api/v1/sessions/${encodeURIComponent(created.id)}/prompts`,{method:'POST',value:{content:[{type:'text',text:synthesisPrompt(entry,transcript)}],model:this.model,permission_mode:'manual',plan_mode:false,swarm_mode:false,prompt_id:`${entry.input.requestId}-synthesis`}});
+    } finally { this.synthesisRequests.delete(key); }
   }
-  async status(requestId,expectedKind) {
-    const entry=this.runs[requestId];
+  async status(userId,requestId,expectedKind) {
+    const key=this.runKey(userId,requestId);
+    const entry=this.runs[key];
     if (!entry || (expectedKind&&entry.kind!==expectedKind)) throw Error('Kimi Swarm 运行记录不存在');
     const id=encodeURIComponent(entry.sessionId);
     const [session,messagesPage,childrenPage,transcript]=await Promise.all([
@@ -215,7 +262,7 @@ export class KimiCodeAgent {
     const needsMac=session.pending_interaction==='approval'||session.pending_interaction==='question';
     // AgentSwarm 是阻塞调用：主回合结束就代表 Swarm 已经返回，子 Agent 是否回传不该再挡住终态。
     const swarmOver=swarmFinished||mainFinished;
-    if (entry.kind==='goal'&&!parsedResult&&swarmOver&&!needsMac&&!entry.synthesisSessionId) await this.ensureSynthesis(requestId,entry,transcript);
+    if (entry.kind==='goal'&&!parsedResult&&swarmOver&&!needsMac&&!entry.synthesisSessionId) await this.ensureSynthesis(key,entry,transcript);
     let activeSession=session;
     if (entry.synthesisSessionId&&!parsedResult) {
       const synthesisId=encodeURIComponent(entry.synthesisSessionId);
@@ -266,6 +313,6 @@ export class KimiCodeAgent {
     const result=done?parsedResult:null;
     return {version:1,kind:'goal',...common,input:{goal:entry.input.goal,message:entry.input.message},assignments:[],agents,result,error:error||timeoutError||(blocked?blockedError:undefined)};
   }
-  goalStatus(requestId) { return this.status(requestId,'goal'); }
-  taskStatus(requestId) { return this.status(requestId,'task'); }
+  goalStatus(userId,requestId) { return this.status(userId,requestId,'goal'); }
+  taskStatus(userId,requestId) { return this.status(userId,requestId,'task'); }
 }

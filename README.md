@@ -183,16 +183,17 @@ iPhone App 的签名、安装与 HealthKit 读取口径见 [ios/README.md](ios/R
 
 ## 配置
 
-所有变量都有默认值，一般无需设置。Mac 本地状态保存在 `~/.along/agent-host/`。
+所有变量都有默认值，一般无需设置。服务端状态目录：直接 `npm run agent-host` 在 `~/.along/agent-host/`，`npm run activate` 在 `~/.along/phone-test/`，云端部署在挂载卷 `/opt/along/data/host`（云端部署变量见 `deploy/env.example` 与 [云端部署与多用户](docs/cloud-deploy-multi-user.md)）。
 
 | 变量 | 默认值 | 作用 |
 | --- | --- | --- |
 | `PORT` / `HOST` | `4173` / `127.0.0.1` | `npm run dev` 本地服务 |
 | `ALONG_AGENT_PORT` | `4176` | Agent Host 的 HTTPS 端口 |
 | `ALONG_AGENT_HOST` | `en0` 的 IPv4，取不到时为 `127.0.0.1` | Agent Host 绑定地址 |
+| `ALONG_AGENT_STATE_DIR` | `~/.along/agent-host` | 服务端状态目录（配对绑定、用户表、每日委托、Kimi 运行记录等） |
 | `ALONG_SUPERAGENT_URL` | `http://127.0.0.1:3082` | DSH Super Agent 地址 |
 | `ALONG_EVENT_INGEST` | `off` | `on` 启用新聊天链路；App 自动协商，停止旧 DSH 写入 |
-| `ALONG_BRIDGE_TOKEN_FILE` | 未设置 | Along Agent 的 `alongBridgeTokenFile` 对应文件绝对路径；凭证只在 Mac 两个进程间传递 |
+| `ALONG_BRIDGE_TOKEN_FILE` | 未设置 | Along Agent 的 `alongBridgeTokenFile` 对应文件绝对路径；凭证只在服务端两个进程间传递 |
 | `ALONG_KIMI_CODE_URL` | `http://127.0.0.1:58627` | Kimi Code Web Server 地址 |
 | `ALONG_KIMI_CODE_TOKEN` | 读取 `~/.kimi-code/server.token` | 覆盖 Kimi token |
 | `ALONG_KIMI_CODE_MODEL` | `kimi-code/kimi-for-coding` | Kimi 模型 |
@@ -200,6 +201,10 @@ iPhone App 的签名、安装与 HealthKit 读取口径见 [ios/README.md](ios/R
 | `ALONG_CONTEXT_REVIEW_URL` | 同 DSH 服务地址 | 专用健康情境评估服务 |
 | `ALONG_CONTEXT_REVIEW_TOKEN_FILE` | 未设置 | 本机情境评估服务的凭据文件 |
 | `CODEX_BIN` | `~/.local/bin/codex`，否则 PATH 中的 `codex` | 健康变化任务提案使用的 Codex |
+| `ALONG_TLS_DAYS` / `ALONG_TLS_CN` | `30` / `Along Local Agent` | 本地自签证书的天数与 CN，只在生成证书时生效。云端形态不再自签：`ALONG_TLS_CN` 是期望的 DNS 主机名，Host 读状态目录里预签发的 CA 叶证书（`tls/current`），缺证或不合规则监听前拒启（[CA 方案](docs/iphone-ca-profile-design.md)） |
+| `ALONG_DSH_RUNNER_URL` | 未设置 | 设置后 DSH 分支走云端 Runner，Host 启动前要求有效的 `users.json`；未设置走 Mac 本地 bridge |
+| `ALONG_RUNNER_TOKEN_FILE` | 未设置 | runner 内网令牌文件；设置了 `ALONG_DSH_RUNNER_URL` 就必须配，缺失拒绝启动 |
+| `ALONG_PAIR_FAIL_LIMIT` | `10` | 公网配对失败窗口上限，按来源（连接 IP）分桶计数。某来源满窗时对该来源停止验码，可将上限调低 |
 
 ## 隐私与安全
 
@@ -209,13 +214,13 @@ Along 处理的是健康这类敏感数据，所以边界写得很死：
 | --- | --- |
 | 授权的数据范围 | 旧授权限于已选的周运动总时长。确认导入情境评估后，Agent 可收到所选健康类型的汇总、当前计划、观察变化和近期反馈 |
 | 健康数据范围 | 新事件链路在 Mac 保存授权摘要，手机保存本地摘要及待同步事件；原始 HealthKit 样本仍留在手机 |
-| Token 留在 Mac | Kimi token 和配对 token 不发给 iPhone，也不写进运行结果 |
-| 只在局域网 | Agent Host 默认只绑定 Mac 的 Wi-Fi 地址，没有公网通道，退出终端即停止 |
-| 证书钉扎 | 证书由 Mac 本地生成，iPhone 原生网络层校验指纹后才传输，连接后使用随机令牌 |
-| 通过聊天纠正 | 新事件链路中目标与任务校验后自动生效，目标只能通过聊天改变；采用流程仅保留于旧 Host 兼容路径 |
+| 凭证只留服务端 | Kimi、模型、桥接、APNs 凭证只保存在服务端安全存储（Mac 或云主机的卷/secrets/env），绝不发给 iPhone 或网页，也不写进运行结果和日志；配对 token 只在配对响应出现一次，服务端只存哈希 |
+| 部署面收敛 | Mac 本地模式默认只绑定 Mac 的 Wi-Fi 地址，没有公网通道，退出终端即停止；云端部署只开放 443 一个端口（[云端部署与多用户](docs/cloud-deploy-multi-user.md)），配对码另有按来源（连接 IP）失败限速 |
+| TLS 信任 | Mac 私网：服务端启动时现场自签，iPhone 原生网络层校验叶指纹后才传输。云端：服务端读预签发的 CA 叶证书（带 DNS SAN），iPhone 按系统信任评估校验链/主机名/有效期——根证书经描述文件安装并开启完全信任，叶证书可轮换而不必重新配对（[CA 方案](docs/iphone-ca-profile-design.md)）。两种形态连接后都使用随机令牌 |
+| 通过聊天纠正 | 新事件链路与云端目标聊天的变更经校验后自动生效。Mac 旧兼容链路保留原有采用流程 |
 | 忘记与历史分开 | 新架构中「忘记这件事」撤回对应记忆，不删除历史聊天；旧聊天不能重新激活已撤回的记忆 |
 
-连接凭证的哈希保存在 Mac 的 `~/.along/agent-host/pairing.json`，连接信息同时保存在 iPhone Keychain。
+连接凭证的哈希只保存在服务端状态目录的 `pairings.json`（每用户一条；本地模式在 `~/.along/agent-host/` 或 `~/.along/phone-test/host/`，云端在 `/opt/along/data/host`），连接信息同时保存在 iPhone Keychain。
 
 ## 项目结构
 

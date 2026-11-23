@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {readFileSync} from 'node:fs';
+import {existsSync,readFileSync} from 'node:fs';
 
 test('the paired Host registers notification devices and dispatches without a phone sync',()=>{
   const source=readFileSync(new URL('../host/agent-host.mjs',import.meta.url),'utf8');
@@ -19,7 +19,7 @@ function fixture(t) {
   const who={userId:'u_test',deviceId:'d_test'};
   let clock=Date.UTC(2026,9,11,1);
   const pages=[],sent=[];
-  const options={dir,now:()=>clock,identity:()=>who,
+  const options={dir,userId:'u_test',binding:()=>who,now:()=>clock,
     readPage:async (_,cursor)=>({items:pages.filter(item=>item.seq>cursor)}),
     send:async (device,route)=>{sent.push(route);return 'accepted';}};
   const input={token:'ab'.repeat(32),environment:'development',expectedUserId:who.userId};
@@ -45,7 +45,30 @@ test('offline retry, duplicate event, process restart and repeated phone sync pr
   await taskNotifications(f.options).dispatch();
   assert.deepEqual(f.sent,[{userId:'u_test',goalId:'g_test',taskId:'t_test',kind:'recommendation_ready',eventId:'event:1',revision:2}]);
   assert.deepEqual(two.decorate(f.who,{items:f.pages}),receipt);
-  assert.equal(statSync(join(f.dir,'notification-device.json')).mode&0o777,0o600);
+  assert.equal(statSync(join(f.dir,'notification-device.u_test.json')).mode&0o777,0o600);
+});
+test('a Mac upgrade resumes the matching device cursor, queue and schedule',async t=>{
+  const f=fixture(t),legacyFile=join(f.dir,'notification-device.json');
+  const item=f.item(49);
+  const state={...f.who,token:f.input.token,environment:f.input.environment,enabledAt:f.options.now()-1,cursor:49,
+    seen:[{id:'event:48',expires:f.options.now()+10_000}],
+    queue:[{route:{userId:f.who.userId,goalId:item.goalId,taskId:item.taskId,eventId:'event:49',revision:2,kind:'recommendation_ready'},
+      attempts:0,createdAt:item.createdAt,expires:f.options.now()+10_000}],
+    scheduled:[{goalId:item.goalId,taskId:item.taskId,revision:2,scheduledAt:new Date(f.options.now()+20_000).toISOString()}]};
+  writeFileSync(legacyFile,JSON.stringify(state),{mode:0o600});
+  const other={...f.who,deviceId:'d_other'};
+  assert.equal(taskNotifications({...f.options,migrateLegacy:true,binding:()=>other}).active(other),false);
+  assert.equal(taskNotifications(f.options).active(f.who),false);
+  assert.ok(existsSync(legacyFile));
+  const cursors=[];
+  const service=taskNotifications({...f.options,migrateLegacy:true,readPage:async(_who,cursor)=>{cursors.push(cursor);return {items:[]};}});
+  assert.equal(service.active(f.who),true);
+  assert.deepEqual(JSON.parse(readFileSync(join(f.dir,'notification-device.u_test.json'),'utf8')),state);
+  assert.equal(existsSync(legacyFile),false);
+  await service.dispatch();
+  assert.deepEqual(cursors,[49]);
+  assert.deepEqual(f.sent.map(route=>route.eventId),['event:49']);
+  assert.equal(taskNotifications(f.options).active(f.who),true);
 });
 test('only fresh, explicit and still relevant notices owned by this device are sent',async t=>{
   const f=fixture(t),service=taskNotifications(f.options);

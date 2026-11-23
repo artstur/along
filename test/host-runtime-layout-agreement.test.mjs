@@ -63,7 +63,7 @@ async function kimiVerdict(layout,extra={},snapshot={},goal={domain:'health',tit
   const {statePath,fetchImpl}=kimiServer(output);
   try {
     const agent=new KimiCodeAgent({token:'secret-token',statePath,workspace:'/along',fetchImpl});
-    const response=await agent.startGoal({requestId:'along-goal-layout',goal,snapshot,message:'做一个计划',history:[]});
+    const response=await agent.startGoal({requestId:'along-goal-layout',goal,snapshot,message:'做一个计划',history:[]},'u_aaaa1111');
     return response.run;
   } finally { rmSync(statePath,{force:true}); }
 }

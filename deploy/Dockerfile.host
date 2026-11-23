@@ -1,0 +1,21 @@
+# Along 云端 host 镜像（docs/cloud-deploy-multi-user.md §4 M5 / §3.1）。
+# node:22 系（package.json engines >=22.19）；slim 里没有 openssl，而 host 启动即用
+# execFileSync('openssl') 现场生成自签证书（host/agent-host.mjs:45），必须装 openssl。
+# FROM 按 digest pin（docs/cloud-security-hardening.md §3.3-(3)，G-8）：pin 多架构 OCI index
+# digest，FROM <tag> 解析的就是它；升级 = `docker buildx imagetools inspect node:22-bookworm-slim`
+# 取新 digest 改本行并重新记录部署台账。2026-11-21 记录：
+# sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee。
+FROM node:22-bookworm-slim@sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee
+RUN apt-get update && apt-get install -y --no-install-recommends openssl && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev --ignore-scripts
+# 构建上下文仅含 .dockerignore 放行的 Host 模块与任务协议文件。
+COPY host/ host/
+# host→web 共享 import 闭包，按 tools/build.mjs 同款平铺布局进镜像。闭包以
+# `grep -rn "from '../web/" host/*.mjs` 实测（2026-11-20）：goal-agent-core、adaptive-ui、
+# super-agent、contextual-planning、loop、health、task-results 共 7 个；闭包随代码演进会变，
+# 改 host→web 引用后同步改这里。
+COPY web/goal-agent-core.mjs web/adaptive-ui.mjs web/super-agent.mjs web/contextual-planning.mjs web/loop.mjs web/health.mjs web/task-results.mjs web/
+EXPOSE 4176
+CMD ["node", "host/agent-host.mjs"]

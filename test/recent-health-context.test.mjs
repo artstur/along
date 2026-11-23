@@ -91,6 +91,9 @@ test('both runtime dispatches receive the window guidance, metric semantics and 
     // 新链路开关与 DSH 运行时名：路由里的旧链路 409 守卫要能在这里解析（开关关闭=旧行为不变）。
     DSH_RUNTIME:'dsh-superagent',eventIngest:false,
     respond:(_res,_status,rest)=>rest,upstream:fn=>fn(),normalizeGoalRun:r=>r,
+    // 每请求身份（M2）：Kimi 分支把请求自己的绑定传给 kimiAgent（运行键带 userId 前缀）。
+    who:{userId:'u_aaaa1111',deviceId:'d_aaaa1111'},
+    dshRunnerURL:null, // M3 云端 runner 分支：切片里保持关闭（runner 路径由 host-runner-agreement 覆盖）。
     kimiAgent:{startGoal:async input=>{received.push(input);return {}}},
     superAgentCall:async (path,{value,contextReview})=>{assert.equal(path,'/along-source/api/goals');assert.equal(contextReview,true);received.push(value);return {}},
   });

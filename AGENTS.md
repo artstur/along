@@ -33,12 +33,13 @@
 - Agent 工程统一称为 **Along Agent**；本地目录沿用 `../along-superagent/`，包名与插件 ID 沿用 `dsh-superagent`。
 
 - Agent 有两种运行时，在 `web/super-agent.mjs` 里定义：`dsh-superagent` 和 `kimi-code-swarm`。用户没选过时，前端默认用 Kimi。Host 的路由在 `host/agent-host.mjs`。
-- Mac 本地状态存在 `~/.along/agent-host/`，环境变量见 `README.md`。
+- 状态目录由 `ALONG_AGENT_STATE_DIR` 决定，默认 `~/.along/agent-host/`（直接 `npm run agent-host`）；`npm run activate` 用 `~/.along/phone-test/`；云端部署用挂载卷（`/opt/along/data/host`）。环境变量见 `README.md` 与 `deploy/env.example`。
+- 云端部署形态（一台云主机 + Docker Compose、2 个静态用户、每用户一次性配对码）的设计、决策与上线 Runbook 见 `docs/cloud-deploy-multi-user.md`。Mac 本地模式完全保留且行为不变，作为回退路径；云端与本地共用同一套源码，不新增模式开关。
 - 目标方向是全链路自动化：Agent 结果校验后自动生效，目标只能通过聊天改变。现有代码里的「采用」流程、待采用提案和目标编辑入口是待迁移的旧行为；方案见 `../along-superagent/docs/along/`。改到相关代码时按第 5 节迁移，不要再新增采用、确认或审批环节。
 
 ## 5. 红线
 
-- Token 只留在 Mac 上：Kimi token 和配对 token 不发给 iPhone，也不写进运行结果。
+- 凭证只留在服务端安全存储（Mac 或云主机的卷/secrets/env）：Kimi、模型、桥接、APNs、runner 等凭证绝不发给 iPhone 或网页，也不写进运行结果和日志；配对 token 服务端只存哈希、只在配对响应里出现一次，不复用为服务端内部凭证。
 - Agent 的输出必须先通过校验才能生效：经过 `validateGoalReply`、`safeAdaptiveLayout` 及对应的变更校验，通过后自动写入目标空间，不等用户采用；用户不认可时通过聊天纠正。校验只能加严，不能为了让结果通过而放宽。
 - 目标只能通过聊天改变：界面不提供直接编辑或删除目标的入口。
 - 健康数据只发汇总值，不发原始 HealthKit 样本。

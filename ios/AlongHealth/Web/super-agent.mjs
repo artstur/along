@@ -3,6 +3,7 @@ export const GOAL_SUPER_AGENT_RUNS_KEY = 'along.goal-super-agent-runs.v1';
 export const AGENT_RUNTIME_KEY = 'along.agent-runtime.v1';
 export const DSH_RUNTIME = 'dsh-superagent';
 export const KIMI_RUNTIME = 'kimi-code-swarm';
+export const CLOUD_RUN_NOT_FOUND = '运行记录不存在';
 // 一次运行最多等这么久：读得到就读，读不到也到这个期限就明确停住，不让界面永远转圈。
 export const AGENT_RUN_TIMEOUT_MS = 30*60_000;
 

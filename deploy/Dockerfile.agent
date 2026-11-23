@@ -1,0 +1,30 @@
+# Along 云端 agent 镜像（docs/cloud-deploy-multi-user.md §4 M5 / §3.5 Tier 1，SD-3）。
+# @deepseek-ai/dsh@0.2.2-rc.5 的 engines 是 node>=24.9.0（§2.1），用 node:24 系。
+# dsh 版本 pin 在 deploy/agent-dsh/package.json，传递依赖由同目录 package-lock.json 固定；
+# compose 的 ALONG_DSH_VERSION 只是记录用。升级 = 在 deploy/agent-dsh/ 内
+# `npm install --package-lock-only --ignore-scripts` 重新生成锁文件并同步版本
+# （docs/cloud-security-hardening.md §3.3-(3)、§6 步骤 6）。
+# FROM 按 digest pin（G-8）；2026-11-21 记录：
+# sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54。
+FROM node:24-bookworm-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54
+WORKDIR /app
+# dsh 经锁文件安装（G-8）：--ignore-scripts 已核实该版本 scripts:{} 不受影响，挡传递依赖在
+# 构建期以 root 执行 postinstall；runner spawn 'dsh' 走 PATH，用符号链接提供。
+COPY deploy/agent-dsh/package.json deploy/agent-dsh/package-lock.json deploy/agent-dsh/
+RUN npm ci --prefix deploy/agent-dsh --omit=dev --ignore-scripts --no-fund --no-audit \
+ && ln -s /app/deploy/agent-dsh/node_modules/.bin/dsh /usr/local/bin/dsh
+# runner（M3）与其共享契约常量：deploy/agent-runner.mjs import ../web/{super-agent,goal-agent-core,
+# contextual-planning}.mjs，三文件无进一步依赖（2026-11-20 实测），平铺保持 ../web/* 相对路径。
+COPY deploy/agent-runner.mjs deploy/
+COPY web/goal-agent-core.mjs web/super-agent.mjs web/contextual-planning.mjs web/
+# V-1 预置（§3.5 Tier 2、验收 #9）：经 compose additional_contexts along=../../along-superagent
+# （基准=project directory deploy/，§3.1）从相邻 checkout 复制 bundle 源码。
+# 为每个目录保留原始路径；lib/ 从源码构建（见 deploy/README.md「V-1 预置」）。
+COPY --from=along src/ /opt/along-superagent/src/
+COPY --from=along prompts/ /opt/along-superagent/prompts/
+COPY --from=along skills/ /opt/along-superagent/skills/
+COPY --from=along locale/ /opt/along-superagent/locale/
+COPY --from=along scripts/ /opt/along-superagent/scripts/
+COPY --from=along package.json pnpm-lock.yaml tsdown.config.ts tsconfig.json cordis.patch.yml README.md /opt/along-superagent/
+EXPOSE 3088
+CMD ["node", "deploy/agent-runner.mjs"]

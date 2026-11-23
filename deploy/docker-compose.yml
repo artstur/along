@@ -1,0 +1,80 @@
+# Along 云端编排（docs/cloud-deploy-multi-user.md §3.1、§4 M5）。
+# 相对路径基准：compose v2 的 project directory = 本文件所在目录（deploy/）。
+# 因此 volumes/secrets 用 ../../ 指向仓库外层 /opt/along/{data,secrets}（§6.4 第 1 步布局），
+# build.context 用 .. 指向仓库根 /opt/along/along，additional_contexts 的 ../../along-superagent
+# 即相邻仓库布局。全部相对路径与 §6.4 的绝对布局一一对应，不得混用其他基准。
+services:
+  host:
+    build: {context: .., dockerfile: deploy/Dockerfile.host, tags: [along-host:local]}
+    image: along-host:local
+    container_name: along-host
+    ports: ["443:4176"]
+    environment:
+      ALONG_AGENT_STATE_DIR: /data
+      ALONG_AGENT_HOST: "0.0.0.0"                 # 必配：容器内没有 en0，缺省回退 127.0.0.1，443 映射打不通（host/agent-host.mjs:68）
+      ALONG_AGENT_PORT: "4176"
+      ALONG_DSH_RUNNER_URL: http://agent:3088     # 云端 agent 上游（§3.5）
+      ALONG_RUNNER_TOKEN_FILE: /run/secrets/runner-token   # M3 实现拍板：host 读同一份 runner-token secret，未设则拒绝启动
+      # 云端 TLS：不再现场自签。Host 读状态目录里的预签发 CA 叶证书
+      # （/data/tls/current → tls/releases/<serial>/），缺证或不合规则监听前拒启。
+      # 详见 docs/iphone-ca-profile-design.md §3.1/§7。
+      ALONG_TLS_CN: along.example.com             # 换成用户域名（必须与叶证书的 DNS SAN 一致）
+      ALONG_EVENT_INGEST: "off"                   # 云端 v1 不开新链路（§1）
+      # ↓ 可选：不部署远程通知时，删除这三个 env、下方 host 服务的 secrets 列表里的 apns-key
+      #   与顶层 secrets.apns-key 定义（file secret 缺失是 docker compose up 的硬错误），
+      #   provider 未创建只是远程通知不可用（host/apns.mjs:8-14），其余功能不受影响；
+      #   runner-token 两项引用必须保留（host 分流必需）。
+      ALONG_APNS_KEY_FILE: /run/secrets/apns-key
+      ALONG_APNS_TEAM_ID: "XXXXXXXXXX"
+      ALONG_APNS_KEY_ID: "XXXXXXXXXX"
+    secrets: [apns-key, runner-token]             # 不部署远程通知时把 apns-key 从两处一并删除；runner-token 两服务共用
+    volumes: ["../../data/host:/data"]            # → /opt/along/data/host（§6.4 第 1 步）
+    # G-2 加固三件套（与 agent 服务同款，docs/cloud-security-hardening.md §3.3-(1)）：唯一可写面 =
+    # /data 卷 + /tmp tmpfs；不加非 root USER（SD-H5：compose file secret 是 bind mount、
+    # uid/gid/mode 长语法不生效，非 root 读不到 0600 secret 必然起不来）。
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]                             # 只需写 /data、spawn openssl（同 uid）、绑 4176（>1024），不需要能力位
+    mem_limit: 512m                               # 资源上限（G-1/G-3；SD-H9 常数初值，冒烟后可调）
+    cpus: "1.0"
+    pids_limit: 128
+    restart: unless-stopped
+    logging: {driver: json-file, options: {max-size: "10m", max-file: "3"}}   # 日志留存上限（§3.7）
+    healthcheck:
+      # 存活探针，不是信任验收：关校验只保证进程在监听，不能证明证书链/SAN/主机名正确。
+      # 信任验收走公开根 + 正确 SNI 的独立核验（docs/iphone-ca-profile-design.md §7/§8）。
+      test: ["CMD","node","-e","process.env.NODE_TLS_REJECT_UNAUTHORIZED='0';fetch('https://127.0.0.1:4176/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+  agent:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.agent
+      # additional_contexts 的相对路径以 project directory（deploy/）为基准解析，与 volumes/secrets
+      # 同基准：../../along-superagent → /opt/along/along-superagent（相邻布局）。注意与手工命令
+      # docker build --build-context along=../along-superagent 不同——后者从 cwd=仓库根解析（§6.4 第 5 步）。
+      additional_contexts: {along: ../../along-superagent}
+    image: along-agent:local
+    container_name: along-agent
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    cap_add: ["SETUID", "SETGID"]                 # 仅为 runner 读入 secrets 后整进程降权到 node 用户保留（M2）
+    mem_limit: 2g                                 # G-1/G-3 资源上限（4 dsh 并发 ≈ 数百 MB～1GB，SD-H9）
+    cpus: "1.5"
+    pids_limit: 192
+    environment:
+      ALONG_RUNNER_TOKEN_FILE: /run/secrets/runner-token
+      ALONG_MODEL_API_KEY_FILE: /run/secrets/model-credentials
+      ALONG_DSH_VERSION: "0.2.2-rc.5"             # 与 Dockerfile 里的 pin 一致，记录用
+    secrets: [runner-token, model-credentials]
+    restart: unless-stopped
+    logging: {driver: json-file, options: {max-size: "10m", max-file: "3"}}
+    healthcheck:
+      test: ["CMD","node","-e","fetch('http://127.0.0.1:3088/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+secrets:
+  apns-key:          {file: ../../secrets/apns-key.p8}    # → /opt/along/secrets/…；不部署远程通知时删除本行
+  runner-token:      {file: ../../secrets/runner-token}
+  model-credentials: {file: ../../secrets/model-credentials}

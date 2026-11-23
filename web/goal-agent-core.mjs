@@ -150,6 +150,13 @@ export function normalizeGoalReply(value) {
   };
 }
 
+// 目标输出的 JSON 形状契约（提示词）：Kimi 运行时（host/kimi-code-agent.mjs）与云端 DSH runner
+// （deploy/agent-runner.mjs）共用同一份——两条运行时对同一契约必须同结论
+// （docs/cloud-deploy-multi-user.md §3.5 M3；docs/bugfix-goal-prompt.md §7 的归一纪律）。
+export const GOAL_OUTPUT_INSTRUCTIONS=`Required JSON shape:
+{"reply":"Chinese response","proposal":{"active":true,"title":"goal title","target":number_or_null,"task":"next step","reason":"reason"},"layout":{"version":1,"title":"space title","badge":"status","summary":"summary","modules":[...],"tasks":[...],"questions":["question"]}}
+Use at most 6 modules, 6 tasks and 6 questions. Each module has kind, id and title. A summary module has content; a fact_list module has items shaped as [{"label":"...","value":"..."}]; a chips module has string items. For a custom goal, do not use metric modules and proposal.target must be null; put learning quantities in fact_list instead. Each task has id, when, title, detail, state (temporary|planned|deferred). Choose kind=agent_action, recommendation or reminder; reminders also require scheduledFor with an absolute future ISO timestamp and timezone. Questions must be strings. Preserve any explicit number, deadline, preference and constraint from the user. Keep all user-facing text in Chinese.`;
+
 export function validateGoalReply(value, domain, message) {
   const answer = readAgentJSON(value);  if (typeof answer.reply !== 'string' || !answer.reply.trim() || answer.reply.length > 1200) throw Error('Agent 回复格式不正确');
   let proposal = null;

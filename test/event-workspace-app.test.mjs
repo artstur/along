@@ -337,6 +337,43 @@ test('legacy notification reopens exactly its own saved task offline and returns
   for(const key of ['along.adaptive-layouts.v1','along.goal-custom.v1','along.active-goal.v1'])assert.equal(dom.storage.get(key),seed[key]);
   assert.ok(!calls.some(p=>p.startsWith('/super-agent')||p==='/events'));
 });
+test('a v1 event connection with only a leaf fingerprint is migrated once to the binding scope and stops using the fingerprint as identity',async()=>{
+  const seed=localNoticeSeed();
+  // 旧记录只有叶指纹（docs/iphone-ca-profile-design.md §2.2 迁移期双读）。
+  assert.deepEqual(JSON.parse(seed['along.event-connection.v1']),{userId:'u_app_b',fingerprint:config.fingerprint});
+  const dom=installDomStub({storage:seed});document.visibilityState='visible';
+  installEventBridge();
+  await import(`../web/app.mjs?event-connection-migrate=${Date.now()}`);await settle();
+  const migrated=JSON.parse(dom.storage.get('along.event-connection.v1'));
+  assert.equal(migrated.userId,'u_app_b');
+  assert.equal(migrated.bindingScopeId,config.token,'迁移后的归属身份是绑定作用域，不是叶指纹');
+  assert.equal(migrated.fingerprint,undefined,'迁移后不再保留叶指纹作为身份');
+  // 迁移只做一次：再次启动读到 v2 记录时不再重写，也不丢用户身份。
+  const before=dom.storage.get('along.event-connection.v1');
+  const again=installDomStub({storage:Object.fromEntries(dom.store)});installEventBridge();
+  await import(`../web/app.mjs?event-connection-migrate-again=${Date.now()}`);await settle();
+  assert.equal(again.storage.get('along.event-connection.v1'),before,'v2 记录不应被反复改写');
+});
+test('a legacy event connection whose fingerprint does not match the current connection is not adopted',async()=>{
+  const seed=localNoticeSeed();
+  seed['along.event-connection.v1']=JSON.stringify({userId:'u_app_b',fingerprint:'Z'.repeat(64)});
+  const dom=installDomStub({storage:seed});document.visibilityState='visible';
+  installEventBridge();
+  await import(`../web/app.mjs?event-connection-mismatch=${Date.now()}`);await settle();
+  const after=JSON.parse(dom.storage.get('along.event-connection.v1'));
+  assert.equal(after.fingerprint,undefined,'指纹对不上的旧记录不得被沿用为归属身份');
+  assert.equal(after.bindingScopeId,config.token,'归属身份必须来自当前连接，而不是旧记录的叶指纹');
+});
+test('an offline stale event connection is not adopted as the current user',async()=>{
+  const seed=localNoticeSeed();
+  seed['along.event-connection.v1']=JSON.stringify({userId:'u_app_b',fingerprint:'Z'.repeat(64)});
+  const dom=installDomStub({storage:seed});document.visibilityState='visible';
+  // 离线：没有 /connection/status 可用来重新确认身份。
+  window.AlongAgentBridge={request:async()=>{throw Error('offline');},notification:async()=>({})};
+  await import(`../web/app.mjs?event-connection-stale-offline=${Date.now()}`);await settle();
+  assert.deepEqual(JSON.parse(dom.storage.get('along.event-connection.v1')),{userId:'u_app_b',fingerprint:'Z'.repeat(64)},
+    '离线且指纹对不上的旧记录既不得被采用，也不得被改写成当前绑定');
+});
 test('already-saved event goals recover on launch without losing access to independent local records',async()=>{
   const seed=localNoticeSeed(),eventKey='along.event-workspace.v1:u_app_b';
   seed[eventKey]=JSON.stringify({version:1,userId:'u_app_b',cursor:1,activeGoalId:null,returnGoalId:null,conversationId:null,drafts:{},messages:{},

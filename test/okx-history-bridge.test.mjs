@@ -21,17 +21,18 @@ async function fixture(t){
     throw Error('unexpected fixture call');
   }};
   const pump=createSourceEventBridge({journal,connection:{hasSavedSource:()=>true,sourceSnapshot:()=>gateway.sourceSnapshot({...WHO,goalId:GOAL}),handle:args=>gateway.handle({...args,deviceId:WHO.deviceId})},
-    bridge,endpoint:'http://127.0.0.1:3999',identity:()=>WHO,isAuthorized:()=>true,readGoals:()=>[GOAL],now:()=>state.now,onError:e=>{throw Error(e);}});
+    bridge,endpoint:'http://127.0.0.1:3999',stillBound:who=>Boolean(who)&&who.userId===WHO.userId&&who.deviceId===WHO.deviceId,
+    isAuthorized:()=>true,readGoals:()=>[GOAL],now:()=>state.now,onError:e=>{throw Error(e);}});
   t.after(()=>pump.close());
   const publish=(sequence,extra={})=>handle({action:'publish',grantId:opened.grantId,eventId:'history_'+sequence,sequence,observedAt:new Date(state.now).toISOString(),permission:'read_only',summary:SUMMARY,...extra});
-  const read=async(capability,id,maxAge=1800)=>{const s=journal.current(WHO.userId,GOAL);state.requests=[{request_id:id,goal_id:GOAL,provider:'okx',capability,generation:s.generation,revision:s.revision,max_age_seconds:maxAge}];await pump.pump();return state.results.at(-1);};
+  const read=async(capability,id,maxAge=1800)=>{const s=journal.current(WHO.userId,GOAL);state.requests=[{request_id:id,goal_id:GOAL,provider:'okx',capability,generation:s.generation,revision:s.revision,max_age_seconds:maxAge}];await pump.pump(WHO);return state.results.at(-1);};
   return {dir,state,journal,handle,publish,pump,read,restart(){gateway=make();},grantId:opened.grantId};
 }
 
 test('native history admission updates metadata-only capability and serves deterministic scoped report, preserving summary-only callers',async t=>{
-  const f=await fixture(t);await f.publish(1);await f.pump.pump();const old=f.journal.current(WHO.userId,GOAL);
+  const f=await fixture(t);await f.publish(1);await f.pump.pump(WHO);const old=f.journal.current(WHO.userId,GOAL);
   assert.deepEqual(f.state.events.at(-1).capabilities,['trading_account_summary']);
-  await f.publish(2,{history:history()});f.restart();await f.pump.pump();const current=f.journal.current(WHO.userId,GOAL);
+  await f.publish(2,{history:history()});f.restart();await f.pump.pump(WHO);const current=f.journal.current(WHO.userId,GOAL);
   assert.equal(current.generation,old.generation);assert.ok(current.revision>old.revision);
   assert.deepEqual(f.state.events.at(-1).capabilities,['trading_account_summary','trading_history']);
   const metadata=JSON.stringify(f.state.events)+readFileSync(join(f.dir,'journal','journal.json'),'utf8');
@@ -44,18 +45,18 @@ test('native history admission updates metadata-only capability and serves deter
   assert.equal(statSync(join(f.dir,'cache',readdirSync(join(f.dir,'cache'))[0])).mode&0o777,0o600);
 });
 test('history uses its own window freshness, receipt conflicts are rejected and revoke removes every private row',async t=>{
-  const f=await fixture(t);await f.publish(1,{history:history()});await f.pump.pump();
+  const f=await fixture(t);await f.publish(1,{history:history()});await f.pump.pump(WHO);
   await assert.rejects(f.publish(1,{history:history({fills:[]})}),e=>e.code==='event_conflict');
-  f.state.now+=120000;await f.publish(2,{history:history()});await f.pump.pump();
+  f.state.now+=120000;await f.publish(2,{history:history()});await f.pump.pump(WHO);
   assert.equal((await f.read('trading_history','history_stale',60)).state,'stale');assert.equal((await f.read('trading_account_summary','summary_fresh',60)).state,'ready');
-  await f.handle({action:'disconnect',grantId:f.grantId,eventId:'history_disconnect',sequence:3});await f.pump.pump();
+  await f.handle({action:'disconnect',grantId:f.grantId,eventId:'history_disconnect',sequence:3});await f.pump.pump(WHO);
   assert.equal(f.state.events.at(-1).state,'disconnected');assert.deepEqual(f.state.events.at(-1).capabilities,[]);
   assert.equal((await f.read('trading_history','after_revoke')).state,'denied');
   const bytes=readFileSync(join(f.dir,'cache',readdirSync(join(f.dir,'cache'))[0]),'utf8');assert.ok(!bytes.includes('9007199254740993123'));assert.equal(Object.hasOwn(JSON.parse(bytes),'history'),false);
 });
 test('strict native admission never upgrades a malformed/credential-bearing history',async t=>{
   const f=await fixture(t),h=history();h.bills[0].secretKey='fixture-only-rejected';
-  await assert.rejects(f.publish(1,{history:h}),e=>e.code==='invalid_request');await f.pump.pump();assert.ok(!f.state.events.some(e=>e.capabilities.includes('trading_history')));
+  await assert.rejects(f.publish(1,{history:h}),e=>e.code==='invalid_request');await f.pump.pump(WHO);assert.ok(!f.state.events.some(e=>e.capabilities.includes('trading_history')));
   assert.equal((await f.handle({action:'status'})).state,'pending');
 });
 test('journal revocation of history remains readable across repeated recovery and permits a new connection',async t=>{
@@ -69,7 +70,7 @@ test('journal revocation of history remains readable across repeated recovery an
 });
 test('all history endpoints failing cannot advertise a ready history capability or fulfill a queued history read',async t=>{
   const f=await fixture(t);const h=history({fills:[],bills:[]});h.streams=h.streams.map(s=>({...s,status:'unavailable',reason:'api_unavailable',pages:0}));
-  await f.publish(1,{history:h});await f.pump.pump();f.restart();
+  await f.publish(1,{history:h});await f.pump.pump(WHO);f.restart();
   assert.deepEqual(f.state.events.at(-1).capabilities,['trading_account_summary']);
   assert.equal((await f.read('trading_history','unavailable_history')).state,'denied');
   assert.deepEqual((await f.read('trading_account_summary','available_summary')).data,SUMMARY);

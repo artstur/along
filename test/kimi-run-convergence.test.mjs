@@ -49,12 +49,13 @@ function withAgent(world) {
   return {...server,agent,statePath,cleanup:()=>rmSync(statePath,{force:true})};
 }
 
+const USER='u_aaaa1111';
 const goalInput={goal:{domain:'health',title:'运动',target:120},snapshot:{},message:'做一个计划',history:[]};
 
 test('a finished main session with a valid result converges even when no subagent is visible',async()=>{
   const {agent,cleanup}=withAgent({mainMessages:[assistant(JSON.stringify(goalResult))]});
   try {
-    const response=await agent.startGoal({requestId:'req-no-agents',...goalInput});
+    const response=await agent.startGoal({requestId:'req-no-agents',...goalInput},USER);
     assert.equal(response.run.status,'done','主回合已经给出结果，运行必须收敛，不能一直 working');
     assert.ok(response.run.result);
   } finally { cleanup(); }
@@ -67,7 +68,7 @@ test('a subagent that never reports does not keep a finished run working',async(
       '<subagent agent_id="agent-0" item="目标策略师" outcome="completed">ok</subagent><subagent agent_id="agent-1" item="风险评审" outcome="completed">ok</subagent>')],
   });
   try {
-    const response=await agent.startGoal({requestId:'req-late-subagent',...goalInput});
+    const response=await agent.startGoal({requestId:'req-late-subagent',...goalInput},USER);
     assert.equal(response.run.status,'done','没回传的子 Agent 不能把已经完成的运行拖成 working');
     assert.ok(response.run.result);
   } finally { cleanup(); }
@@ -76,7 +77,7 @@ test('a subagent that never reports does not keep a finished run working',async(
 test('a finished main session without a result still gets one synthesis run',async()=>{
   const {agent,calls,cleanup}=withAgent({synthesisMessages:[assistant(JSON.stringify(goalResult))]});
   try {
-    const response=await agent.startGoal({requestId:'req-synthesis',...goalInput});
+    const response=await agent.startGoal({requestId:'req-synthesis',...goalInput},USER);
     // 主会话本身也会 POST /api/v1/sessions，必须按标题区分出综合会话，否则这条断言是假阳性。
     const synthesis=calls.filter(call=>call.path==='/api/v1/sessions'&&call.method==='POST'&&String(call.body?.title||'').startsWith('Along 综合'));
     assert.equal(synthesis.length,1,'主回合结束但没有结果时应该开一次综合会话');
@@ -88,7 +89,7 @@ test('a finished main session without a result still gets one synthesis run',asy
 test('a swarm that reports nothing at all converges to blocked instead of working',async()=>{
   const {agent,cleanup}=withAgent({transcript:[swarmFrame(['目标策略师'],'<subagent agent_id="agent-0" item="目标策略师" outcome="completed">ok</subagent>')]});
   try {
-    const response=await agent.startGoal({requestId:'req-no-output',...goalInput});
+    const response=await agent.startGoal({requestId:'req-no-output',...goalInput},USER);
     assert.equal(response.run.status,'blocked','会话结束了却一个字都没给，必须落到终态');
     assert.match(response.run.error,/没有返回可用结果/);
   } finally { cleanup(); }
@@ -101,7 +102,7 @@ test('a failed subagent does not throw away a validated result',async()=>{
       '<subagent agent_id="agent-0" item="目标策略师" outcome="completed">ok</subagent><subagent agent_id="agent-1" item="风险评审" outcome="failed">boom</subagent>')],
   });
   try {
-    const response=await agent.startGoal({requestId:'req-subagent-failed',...goalInput});
+    const response=await agent.startGoal({requestId:'req-subagent-failed',...goalInput},USER);
     assert.equal(response.run.status,'done','一个子 Agent 失败不该连坐掉已经校验过的结果');
     assert.ok(response.run.result);
     assert.ok(response.run.agents.some(item=>item.status==='blocked'),'失败的子 Agent 要在卡片上标出来');
@@ -111,7 +112,7 @@ test('a failed subagent does not throw away a validated result',async()=>{
 test('a task run converges once the main session finishes',async()=>{
   const {agent,cleanup}=withAgent({});
   try {
-    const response=await agent.startTask({requestId:'req-task',task:{id:'t1',title:'整理书桌',detail:'把书收好',when:'今天',state:'temporary'},context:{}});
+    const response=await agent.startTask({requestId:'req-task',task:{id:'t1',title:'整理书桌',detail:'把书收好',when:'今天',state:'temporary'},context:{}},USER);
     assert.equal(response.run.status,'done','动态任务运行也必须收敛');
   } finally { cleanup(); }
 });
@@ -120,7 +121,7 @@ test('a task run converges once the main session finishes',async()=>{
 function withSynthesisRun(world,{mainSession={},synthesisSession={},synthesisMessages=[]}={}) {
   const statePath=join(tmpdir(),`along-kimi-convergence-${crypto.randomUUID()}.json`);
   const server=kimiServer({...world,mainSession,synthesisSession,synthesisMessages});
-  writeFileSync(statePath,JSON.stringify({'req-synthesis-run':{
+  writeFileSync(statePath,JSON.stringify({[`${USER}:req-synthesis-run`]:{
     kind:'goal',sessionId:'session-1',createdAt:Date.now(),
     input:{goal:{domain:'health',title:'运动',target:120},snapshot:{},message:'做一个计划',history:[]},
     synthesisSessionId:'session-syn',
@@ -135,7 +136,7 @@ test('a main session waiting for approval is not hidden by the synthesis session
     synthesisSession:{busy:true,last_turn_reason:'running',pending_interaction:'none'},
   });
   try {
-    const run=await agent.goalStatus('req-synthesis-run');
+    const run=await agent.goalStatus(USER,'req-synthesis-run');
     assert.equal(run.status,'blocked','主会话等着用户在 Mac 上批准时，运行不能报 working');
     assert.match(run.statusLabel,/Mac/);
   } finally { cleanup(); }
@@ -147,7 +148,7 @@ test('a failed main session is not hidden by the synthesis session',async()=>{
     synthesisSession:{busy:true,last_turn_reason:'running',pending_interaction:'none'},
   });
   try {
-    const run=await agent.goalStatus('req-synthesis-run');
+    const run=await agent.goalStatus(USER,'req-synthesis-run');
     assert.equal(run.status,'blocked','主会话已经失败时，运行不能报 working');
   } finally { cleanup(); }
 });
@@ -159,7 +160,7 @@ test('a finished synthesis that delivered a valid result ends the run',async()=>
     synthesisMessages:[assistant(JSON.stringify(goalResult))],
   });
   try {
-    const run=await agent.goalStatus('req-synthesis-run');
+    const run=await agent.goalStatus(USER,'req-synthesis-run');
     assert.equal(run.status,'done','综合会话已经交付了校验过的结果，运行就该结束');
     assert.ok(run.result);
   } finally { cleanup(); }
@@ -168,12 +169,12 @@ test('a finished synthesis that delivered a valid result ends the run',async()=>
 test('a run record without a start time still reaches a terminal state',async()=>{
   const {agent,statePath,fetchImpl,cleanup}=withAgent({mainSession:{busy:true,last_turn_reason:'running'}});
   try {
-    await agent.startGoal({requestId:'req-no-created-at',...goalInput});
+    await agent.startGoal({requestId:'req-no-created-at',...goalInput},USER);
     const saved=JSON.parse(readFileSync(statePath,'utf8'));
-    delete saved['req-no-created-at'].createdAt;
+    delete saved[`${USER}:req-no-created-at`].createdAt;
     writeFileSync(statePath,JSON.stringify(saved));
     // 运行记录在宿主内存里，改盘上的状态要重新起一个实例才生效。
-    const expired=await new KimiCodeAgent({token:'secret-token',statePath,workspace:'/along',fetchImpl}).goalStatus('req-no-created-at');
+    const expired=await new KimiCodeAgent({token:'secret-token',statePath,workspace:'/along',fetchImpl}).goalStatus(USER,'req-no-created-at');
     assert.equal(expired.status,'blocked','缺了起始时间的运行记录也要落到终态，不能永远 working');
     assert.match(expired.error,/Kimi 长时间/);
   } finally { cleanup(); }
@@ -182,15 +183,15 @@ test('a run record without a start time still reaches a terminal state',async()=
 test('a run that never advances stops waiting instead of working forever',async()=>{
   const {agent,statePath,fetchImpl,cleanup}=withAgent({mainSession:{busy:true,last_turn_reason:'running'}});
   try {
-    await agent.startGoal({requestId:'req-stuck',...goalInput});
+    await agent.startGoal({requestId:'req-stuck',...goalInput},USER);
     const fresh=new KimiCodeAgent({token:'secret-token',statePath,workspace:'/along',fetchImpl});
-    const running=await fresh.goalStatus('req-stuck');
+    const running=await fresh.goalStatus(USER,'req-stuck');
     assert.equal(running.status,'working','还没到阈值时不应该提前判失败');
     const saved=JSON.parse(readFileSync(statePath,'utf8'));
-    saved['req-stuck'].createdAt=Date.now()-KIMI_RUN_TIMEOUT_MS-1_000;
+    saved[`${USER}:req-stuck`].createdAt=Date.now()-KIMI_RUN_TIMEOUT_MS-1_000;
     writeFileSync(statePath,JSON.stringify(saved));
     // 运行记录在宿主内存里，改盘上的状态要重新起一个实例才生效。
-    const expired=await new KimiCodeAgent({token:'secret-token',statePath,workspace:'/along',fetchImpl}).goalStatus('req-stuck');
+    const expired=await new KimiCodeAgent({token:'secret-token',statePath,workspace:'/along',fetchImpl}).goalStatus(USER,'req-stuck');
     assert.equal(expired.status,'blocked','一直等下去不是终态，超时要明确停住');
     assert.match(expired.error,/Kimi 长时间/);
   } finally { cleanup(); }

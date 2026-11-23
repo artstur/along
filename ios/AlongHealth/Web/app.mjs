@@ -10,7 +10,7 @@ import {AGENT_KEY, GOALS_KEY, CONVERSATIONS_KEY, readStored, agentCall, loadNati
 import {ADAPTIVE_LAYOUTS_KEY, customGoalEntries, findInitialCustomGoalCandidate, goalDomain, isCustomGoalKey, safeAdaptiveLayout, validateAdaptiveLayout} from './adaptive-ui.mjs';
 import {GOAL_SUPER_AGENT_RUNS_KEY, SUPER_AGENT_RUNS_KEY, createFailedGoalSuperAgentRun, createFailedSuperAgentRun,
   createGoalSuperAgentRequest, createPendingGoalSuperAgentRun, createPendingSuperAgentRun, createSuperAgentRequest,
-  safeGoalSuperAgentRun, safeSuperAgentRun, withRunError, AGENT_RUN_TIMEOUT_MS, AGENT_RUNTIME_KEY, DSH_RUNTIME, KIMI_RUNTIME, agentRuntimeLabel, safeAgentRuntime, newId} from './super-agent.mjs';
+  safeGoalSuperAgentRun, safeSuperAgentRun, withRunError, AGENT_RUN_TIMEOUT_MS, AGENT_RUNTIME_KEY, CLOUD_RUN_NOT_FOUND, DSH_RUNTIME, KIMI_RUNTIME, agentRuntimeLabel, safeAgentRuntime, newId} from './super-agent.mjs';
 import {AGENT_NOTIFICATION_LEDGER_KEY, goalRunNotification, taskRunNotification, healthProposalNotification,
   notificationWasDelivered, recordNotificationDelivered} from './agent-notifications.mjs';
 import {PLANNING_STATE_KEY,cleanDailyDelegation,validateDailyActions,agentHealthSnapshot,cleanPlanningContext,healthContextChanges,createPlanningContext,validateReassessment,buildBackgroundReviewRequest} from './contextual-planning.mjs';
@@ -44,12 +44,13 @@ let previousGoalBeforeDraft = null;
 let selectedTaskId = null;
 let running = false;
 let agentBusy = false;
+let connectionBusy = false;
 let agentConfig = readStored(AGENT_KEY, {});
-let agentRuntime = safeAgentRuntime(localStorage.getItem(AGENT_RUNTIME_KEY) || KIMI_RUNTIME);
+let agentRuntime = safeAgentRuntime(localStorage.getItem(AGENT_RUNTIME_KEY) || agentConfig.runtime || KIMI_RUNTIME);
 let verifiedHealthHost=false;
-let checkingHealthHost=false;
+let checkingHealthHost=null;
 let agentConnection = {status:agentConfig.token?'checking':'unconfigured',error:''};
-let eventWorkspace=null,eventWorkspaceBinding='';
+let eventWorkspace=null,eventWorkspaceBinding=null;
 const okxStates=new Map();
 const okxPending=new Map();
 let focusedEventRecommendation=null;
@@ -59,22 +60,86 @@ let localSelection=null,waitingForSavedGoal=false;
 let lastNotificationProjection='',lastNotificationCheck=0;
 let renderedRecommendationValidity='';
 const EVENT_CONNECTION_KEY='along.event-connection.v1';
+// 绑定标识（docs/iphone-ca-profile-design.md §2.2）：优先用原生给的 bindingScopeId；
+// 原生还没回填时退回配对 token —— 它同样稳定（换叶证书不变）、同样随换端变化，
+// 而且不是新暴露的凭证（token 本来就存在 AGENT_KEY 里）。
+// 叶指纹不再参与归属判定：换 CA 叶证书不该被当成换用户。
+function bindingKeyOf(config) {
+  return config?.bindingScopeId||config?.token||'';
+}
+// 「同一绑定」与「真换端」的判定（docs/iphone-ca-profile-design.md §2.2）。
+//
+// 升级到 CA 形态时，旧 App 的本地连接只有 {baseURL, fingerprint, token}，没有 bindingScopeId；
+// 升级当次原生回填了 bindingScopeId，于是「绑定键」从 token 变成 bindingScopeId。
+// 那是同一台设备、同一个 origin、同一个配对 token 的口径升级，不是换用户也不是换端——
+// 如果把它当成换端，每日委托授权会被静默撤销且无法自动恢复（数据丢失型回归）。
+//
+// 因此分两层看：
+//   - 身份身份层（origin + token）：换 origin 或换 token 才是真换端；
+//   - 归属键层（bindingScopeId）：口径升级时旧记录没有它，需要一次性映射。
+// 同一绑定的口径升级（origin 与 token 都没变）保留授权与提醒时间；
+// 真实换端仍然隔离（见 activateAgentConfig 的 replaceBinding）。
+function sameBindingIdentity(previous,config) {
+  if (!previous?.token||!config?.token) return false;
+  if (previous.token!==config.token) return false;
+  const previousOrigin=originOf(previous.baseURL);
+  const configOrigin=originOf(config.baseURL);
+  // 两边都解析不出 origin 时不能判成同一绑定：那会把两个不同的 host 当成同一台设备，
+  // 既不撤销委托也不隔离工作区。解析不出来一律按「不是同一绑定」处理。
+  if (!previousOrigin||!configOrigin) return false;
+  return previousOrigin===configOrigin;
+}
+// 规范化 origin（scheme/host/有效端口），与原生 bindingScopeId 的派生口径一致。
+//
+// 非 https 的地址不能折叠成同一个空串：那会让 http://a.example.com 与
+// http://b.example.com 被判成「同一绑定」，从而既不撤销委托也不隔离工作区。
+// 解析不了就返回 null，并让 sameBindingIdentity 判为「不是同一绑定」——
+// 宁可误判成换端（安全侧），也不能误判成同一绑定。
+function originOf(baseURL) {
+  if (typeof baseURL!=='string'||!baseURL.trim()) return null;
+  try {
+    const url=new URL(baseURL);
+    if (url.protocol!=='https:') return null;
+    const port=url.port||'443';
+    return `${url.protocol}//${url.hostname.toLowerCase()}:${port}`;
+  } catch { return null; }
+}
 function eventConnection(config=agentConfig) {
   const saved=readStored(EVENT_CONNECTION_KEY,null);
-  return saved?.fingerprint===config.fingerprint&&saved?.userId?saved:null;
+  if (!saved?.userId) return null;
+  if (saved.bindingScopeId) return saved.bindingScopeId===bindingKeyOf(config)?saved:null;
+  // 迁移期的临时双读（docs/iphone-ca-profile-design.md §2.2）：旧记录只有叶指纹，
+  // 没有 bindingScopeId。叶指纹不能继续当归属身份，但同一次配对留下的本地记录
+  // 需要一次性映射到当前绑定作用域，否则用户会看到本机目标与事件工作区「凭空消失」。
+  // 映射只在指纹与当前连接完全一致时生效，写入后统一是 v2 结构。
+  if (!saved.fingerprint||!config?.fingerprint||saved.fingerprint!==config.fingerprint||!config.token) return null;
+  const migrated={bindingScopeId:bindingKeyOf(config),userId:saved.userId};
+  localStorage.setItem(EVENT_CONNECTION_KEY,JSON.stringify(migrated));
+  return migrated;
+}
+function disconnectEventWorkspace() {
+  eventWorkspace?.dispose();
+  eventWorkspace=null;
+  eventWorkspaceBinding=null;
+  okxStates.clear();okxPending.clear();
+  focusedEventRecommendation=null;selectedEventTaskId=null;pendingRecommendationOpen=null;
+  waitingForSavedGoal=false;
+  lastNotificationProjection='';lastNotificationCheck=0;
 }
 function connectEventWorkspace(userId) {
-  const binding={fingerprint:agentConfig.fingerprint,userId};
+  const binding={bindingScopeId:bindingKeyOf(agentConfig),userId};
   const previous=eventConnection();
   localStorage.setItem(EVENT_CONNECTION_KEY,JSON.stringify(binding));
-  const bindingKey=JSON.stringify([agentConfig.baseURL,agentConfig.fingerprint,agentConfig.token,userId]);
-  if (!eventWorkspace||previous?.userId!==userId||eventWorkspaceBinding!==bindingKey) {
-    eventWorkspace?.dispose();
-    okxStates.clear();okxPending.clear();
-    lastNotificationProjection='';
-    eventWorkspace=createEventWorkspace({config:{...agentConfig,userId},onChange:()=>renderEventUpdate(),
-      onNotifications:window.AlongAgentBridge?.notification?value=>syncEventNotifications(value,bindingKey):undefined});
-    eventWorkspaceBinding=bindingKey;
+  const bindingKey=JSON.stringify([agentConfig.baseURL,bindingKeyOf(agentConfig),agentConfig.token,userId]);
+  if (!eventWorkspace||previous?.userId!==userId||eventWorkspaceBinding?.key!==bindingKey) {
+    disconnectEventWorkspace();
+    const binding={key:bindingKey};
+    const workspace=createEventWorkspace({config:{...agentConfig,userId},onChange:()=>{
+      if (eventWorkspace===workspace) renderEventUpdate();
+    },
+      onNotifications:window.AlongAgentBridge?.notification?value=>syncEventNotifications(value,binding):undefined});
+    eventWorkspace=workspace;
+    eventWorkspaceBinding=binding;
     const health=healthStateForWorkspace(state);
     if (health!==state) persistHealthState(health);
     const view=eventWorkspace.view();
@@ -109,11 +174,59 @@ let nativeConnectionRestored=false;
 let backgroundReplace=null,backgroundClaim=null,backgroundSyncQueued=false;
 function persistAgentConfig(config) {
   const previous=readStored(AGENT_KEY,{});
-  if (previous.token&&(previous.token!==config.token||previous.fingerprint!==config.fingerprint)) {
+  // 只有真换端才撤销每日委托：换 origin 或换 token。
+  // 同一绑定的口径升级（旧记录没有 bindingScopeId，升级当次原生回填）保留授权与提醒时间——
+  // 否则 CA 迁移升级会静默删掉用户已授权的每日提醒（复核报告「高」风险项）。
+  if (previous.token&&!sameBindingIdentity(previous,config)) {
     for (const key of healthGoalKeys()) reviewFor(key).revokeDaily();
   }
-  if (['baseURL','fingerprint','token'].some(field=>previous[field]!==config[field])) localStorage.removeItem(BG_TEMPLATE_KEY);
+  if (!sameBindingIdentity(previous,config)) localStorage.removeItem(BG_TEMPLATE_KEY);
   localStorage.setItem(AGENT_KEY,JSON.stringify(config));
+}
+function activateAgentConfig(config,{rebind=false,runtime=agentRuntime}={}) {
+  const previous=agentConfig;
+  // 同一绑定 + 同一运行时的口径升级不算换端：归属键只是从 token 补齐成 bindingScopeId，
+  // 事件工作区与本地归属都要延续，不能按新用户处理（docs/iphone-ca-profile-design.md §2.2）。
+  const sameBinding=sameBindingIdentity(previous,config);
+  if (!rebind&&runtime===agentRuntime&&sameBinding&&['baseURL','token','runtime'].every(field=>previous[field]===config[field])&&
+      bindingKeyOf(previous)===bindingKeyOf(config)) return;
+  const replaceBinding=rebind||previous.token&&!sameBinding;
+  persistAgentConfig(config);
+  if (replaceBinding) {
+    if (eventWorkspace) screen='agent';
+    disconnectEventWorkspace();
+    localSelection=null;
+    localStorage.removeItem(EVENT_CONNECTION_KEY);
+    notificationGeneration++;
+    reminderRead=null;
+    dailyReads.clear();
+    dailyJobs.clear();
+    agentBusy=false;
+    for (const [key,run] of Object.entries(goalSuperAgentRuns)) {
+      if (run?.status==='working') goalSuperAgentRuns[key]={...run,status:'blocked',statusLabel:'需要重发',
+        error:'Along 连接已更换，请重新发送。'};
+    }
+    saveGoalSuperAgentRuns();
+    for (const [key,run] of Object.entries(superAgentRuns)) {
+      if (run?.status==='working') delete superAgentRuns[key];
+    }
+    saveSuperAgentRuns();
+    for (const key of healthGoalKeys()) reviewFor(key).retireConnection();
+    backgroundReplace=null;
+    void Promise.resolve(window.AlongHealthBridge?.backgroundReview?.('disarm',{})).catch(()=>{});
+  } else if (sameBinding) {
+    // 同一绑定的口径升级：把每日委托的接收人从旧键迁移到新键，并保留原授权与提醒时间。
+    // 用户主动撤销过的授权不进 dailyRevokedIds 的回滚范围——这里只迁移接收人键，
+    // 不恢复任何已被撤销的 grant。
+    migrateDailyRecipient(bindingKeyOf(config));
+  }
+  agentConfig=config;
+  if (runtime!==agentRuntime) {
+    agentRuntime=runtime;
+    localStorage.setItem(AGENT_RUNTIME_KEY,runtime);
+  }
+  verifiedHealthHost=false;
+  agentConnection={status:'checking',error:''};
 }
 function currentBackgroundTemplate() {
   if (eventWorkspace) return null;
@@ -189,19 +302,23 @@ function reviewFor(key) {
   if (!reviews.has(key)) reviews.set(key,createHealthReview(key));
   return reviews.get(key);
 }
+// 同一绑定的口径升级：把所有健康目标的每日委托接收人迁到新归属键。
+// 用户主动撤销过的授权不在恢复范围（各目标的 migrateDailyRecipient 只改接收人键）。
+function migrateDailyRecipient(nextKey) {
+  for (const key of healthGoalKeys()) reviewFor(key).migrateDailyRecipient(nextKey);
+}
 // 当前目标可能是一个还没确认的新目标（草稿）。
 // - 有内容可恢复（写下的消息、没跑完的运行）：回到那一页，用户写下的东西
 //   不能因为重启就再也看不见。
 // - 什么都没有的草稿不是目标：回到健康目标，别让首页渲染出一个幽灵自定义目标。
-// - 上次停在一个还没拿到结果的请求上：那次请求在 App 关掉时就没有下文了，
-//   落成明确终态，别把用户锁在一页禁用的输入框上。
+// - 云端可按原编号找回首个回执。Mac 上未得到回执的草稿落成明确终态。
 const draftKey=isCustomGoalKey(activeGoal)&&!goalCustom[activeGoal]&&!goalLayouts[activeGoal]?activeGoal:null;
 if (draftKey&&!eventConnection()) {
   const draftRunKey=Object.keys(goalSuperAgentRuns).find(key=>key.startsWith(`${draftKey}:`));
   const draftRun=draftRunKey?goalSuperAgentRuns[draftRunKey]:null;
   if ((conversations[draftKey]?.length||0)>0 || draftRun) {
     screen='agent';
-    if (draftRun && draftRun.actual!==true && draftRun.status==='working') {
+    if (draftRun && draftRun.actual!==true && draftRun.status==='working' && !cloudGoalConnection(agentConfig,draftRun.runtime)) {
       goalSuperAgentRuns={...goalSuperAgentRuns,[draftRunKey]:{...draftRun,status:'blocked',statusLabel:'需要重发',
         error:'App 关闭时这次请求没有收到结果；要继续请再发一次。'}};
       saveGoalSuperAgentRuns();
@@ -283,12 +400,12 @@ function readDailyAgenda(goalKey,force=false) {
   if (!scope||!bridge?.dailyReminderStatus||document.visibilityState==='hidden'||activeGoal!==goalKey) return;
   const review=reviewFor(goalKey),plan=review.todayActions(),day=localCalendarDay(),timezone=currentZone();
   const anchor=reminderRead?.goalKey===goalKey?reminderRead.item?.requestId:null;
-  const recipient=agentConfig.fingerprint;
-  const signature=JSON.stringify([day,timezone,scope.selectedTypes,plan?.requestId,anchor||null,recipient,nativeHealthStatus,nativeObservationSeen,nativeConnectionRestored]);
+  const config=agentConfig;
+  const signature=JSON.stringify([day,timezone,scope.selectedTypes,plan?.requestId,anchor||null,bindingKeyOf(config),nativeHealthStatus,nativeObservationSeen,nativeConnectionRestored]);
   const old=dailyReads.get(goalKey);
   if (dailyJobs.has(goalKey)||(!force&&old?.signature===signature&&Date.now()-old.at<60000)) return;
   const job={}; dailyJobs.set(goalKey,job);
-  const valid=()=>dailyJobs.get(goalKey)===job&&activeGoal===goalKey&&recipient===agentConfig.fingerprint&&localCalendarDay()===day&&currentZone()===timezone&&
+  const valid=()=>dailyJobs.get(goalKey)===job&&activeGoal===goalKey&&agentConfig===config&&localCalendarDay()===day&&currentZone()===timezone&&
     document.visibilityState!=='hidden'&&JSON.stringify(dailyPhoneScope(goalKey)?.selectedTypes)===JSON.stringify(scope.selectedTypes);
   const read={signature,at:Date.now(),day,timezone,items:old?.day===day&&old.timezone===timezone?old.items:{}};
   dailyReads.set(goalKey,read);
@@ -302,12 +419,12 @@ function readDailyAgenda(goalKey,force=false) {
     };
     await readOS();
     if (!valid()) return;
-    if (!review.dailyDelegation()&&nativeConnectionRestored&&nativeObservationSeen&&nativeHealthStatus==='available'&&agentConfig.token) {
+    if (!review.dailyDelegation()&&nativeConnectionRestored&&nativeObservationSeen&&nativeHealthStatus==='available'&&config.token) {
       const anchors=[...new Set([anchor,read.items.sleep?.requestId,read.items.workout?.requestId,review.state.lastDecision?.requestId].filter(Boolean))].slice(0,4);
       if (anchors.length) {
-        const {grant}=await agentCall(agentConfig,'/super-agent/daily-delegation',{goalKey,anchors});
+        const {grant}=await agentCall(config,'/super-agent/daily-delegation',{goalKey,anchors});
         if (valid()&&grant?.goalKey===goalKey&&grant.topics?.every(t=>scope.selectedTypes.includes(t))) {
-          const run=await agentCall(agentConfig,'/super-agent/goals/status',{runtime:DSH_RUNTIME,requestId:grant.requestId,contextReview:true});
+          const run=await agentCall(config,'/super-agent/goals/status',{runtime:DSH_RUNTIME,requestId:grant.requestId,contextReview:true});
           if (valid()) await review.claimDailyDelegation(grant,run);
         }
       }
@@ -420,10 +537,10 @@ async function syncHealthReminders(goalKey) {
   }
 }
 async function refreshAgentConnection({healthOnly=false}={}) {
-  if (healthOnly&&checkingHealthHost) return;
   const config=agentConfig,runtime=agentRuntime;
-  if (healthOnly) checkingHealthHost=true;
-  if (!agentConfig.token) {checkingHealthHost=false;verifiedHealthHost=false;agentConnection={status:'unconfigured',error:''};return;}
+  if (!config.token) {verifiedHealthHost=false;agentConnection={status:'unconfigured',error:''};return;}
+  if (healthOnly&&checkingHealthHost===config) return;
+  if (healthOnly) checkingHealthHost=config;
   if (!healthOnly) {agentConnection={status:'checking',error:''};if (screen==='agent') renderAgentUpdate();}
   try {
     const status=await agentCall(config,'/connection/status',{runtime});
@@ -466,7 +583,7 @@ async function refreshAgentConnection({healthOnly=false}={}) {
     if (agentConfig!==config||agentRuntime!==runtime) return;
     verifiedHealthHost=false;
     agentConnection={status:'error',error:error.message||'连接检查失败'};
-  } finally { if (healthOnly) checkingHealthHost=false; }
+  } finally { if (healthOnly&&checkingHealthHost===config) checkingHealthHost=null; }
   if (eventWorkspace) renderEventUpdate();
   else if (screen==='agent') renderAgentUpdate();
 }
@@ -552,7 +669,7 @@ function currentTaskRecords(goalKey=activeGoal) {
 function saveSuperAgentRuns() { localStorage.setItem(SUPER_AGENT_RUNS_KEY,JSON.stringify(superAgentRuns)); }
 function runKey(taskId,runtime=agentRuntime) { return `${activeGoal}:${runtime}:${taskId}`; }
 function selectedTask() { return currentTaskRecords().find(task=>task.id===selectedTaskId) || null; }
-const superAgentRequests=new Set();
+const superAgentRequests=new Map();
 function taskRequest(task) { return {...createSuperAgentRequest({task:activeGoal==='finance'?task:reviewFor(activeGoal).shareableHealthTask(task),domain:goalDomain(activeGoal),goal:agentGoal(activeGoal),context:currentSummary()}),runtime:agentRuntime}; }
 function localOnlyTask(task,goalKey=activeGoal) {
   return goalKey!=='finance' && reviewFor(goalKey).sharing.tasks?.some(saved=>saved.id===task.id && saved.localText);
@@ -593,49 +710,57 @@ function storeTaskReply(key,goalKey,task,run,startedAt,scope) {
 }
 async function submitSuperAgentTask(task,{retry=false}={}) {
   const goalKey=activeGoal,key=runKey(task.id),callKey=taskCallKey(task);
-  if (localOnlyTask(task,goalKey)||!agentConfig.token||superAgentRequests.has(callKey)) return;
+  const config=agentConfig;
+  if (localOnlyTask(task,goalKey)||!config.token||superAgentRequests.get(callKey)===config) return;
   const current=currentSuperAgentRun(task);
   if (current?.actual===true || (current?.error&&!retry)) return;
   const request=taskRequest(task),startedAt=Date.now();
-  superAgentRequests.add(callKey);
+  superAgentRequests.set(callKey,config);
   superAgentRuns={...superAgentRuns,[key]:{...createPendingSuperAgentRun(request,startedAt,request.runtime),taskScope:taskScope(goalKey)}};
   saveSuperAgentRuns();
   render();
   void enableAgentNotifications();
   try {
-    const response=await agentCall(agentConfig,'/super-agent/tasks',request);
-    if (!taskCallIsCurrent(task.id,goalKey,request.runtime,callKey)) return;
+    const response=await agentCall(config,'/super-agent/tasks',request);
+    if (agentConfig!==config||!taskCallIsCurrent(task.id,goalKey,request.runtime,callKey)) return;
     const run=response?.run;
     if (run?.actual!==true || run.runtime!==request.runtime || run.requestId!==request.requestId)
       throw Error(typeof run?.error==='string'&&run.error||'Mac 没有返回与本次任务匹配的运行记录');
     storeTaskReply(key,goalKey,task,{...run,task:request.task},startedAt,taskScope(goalKey));
   } catch(error) {
-    if (taskCallIsCurrent(task.id,goalKey,request.runtime,callKey))
+    if (agentConfig===config&&taskCallIsCurrent(task.id,goalKey,request.runtime,callKey))
       superAgentRuns={...superAgentRuns,[key]:{...createFailedSuperAgentRun(request,error.message,Date.now(),request.runtime),taskScope:taskScope(goalKey)}};
   } finally {
-    superAgentRequests.delete(callKey);saveSuperAgentRuns();
-    if (screen==='task'&&activeGoal===goalKey&&agentRuntime===request.runtime&&selectedTaskId===task.id) render();
+    if (superAgentRequests.get(callKey)===config) superAgentRequests.delete(callKey);
+    if (agentConfig===config) {
+      saveSuperAgentRuns();
+      if (screen==='task'&&activeGoal===goalKey&&agentRuntime===request.runtime&&selectedTaskId===task.id) render();
+    }
   }
 }
 async function refreshSuperAgentTask(task,{retry=false}={}) {
   const goalKey=activeGoal,key=runKey(task.id),callKey=taskCallKey(task);
-  if (localOnlyTask(task,goalKey)||!agentConfig.token||superAgentRequests.has(callKey)) return;
+  const config=agentConfig;
+  if (localOnlyTask(task,goalKey)||!config.token||superAgentRequests.get(callKey)===config) return;
   const current=currentSuperAgentRun(task);
   if (!current?.actual || stoppedTaskDecision(current) || (current.status!=='working' && !(retry&&current.refreshFailed))) return;
-  superAgentRequests.add(callKey);
+  superAgentRequests.set(callKey,config);
   try {
-    const run=await agentCall(agentConfig,'/super-agent/tasks/status',{requestId:current.requestId,runtime:current.runtime});
-    if (!taskCallIsCurrent(task.id,goalKey,current.runtime,callKey)) return;
+    const run=await agentCall(config,'/super-agent/tasks/status',{requestId:current.requestId,runtime:current.runtime});
+    if (agentConfig!==config||!taskCallIsCurrent(task.id,goalKey,current.runtime,callKey)) return;
     if (run?.actual!==true || run.runtime!==current.runtime || run.requestId!==current.requestId)
       throw Error(typeof run?.error==='string'&&run.error||'Mac 没有返回与本次任务匹配的运行记录');
     if (!safeSuperAgentRun(run)) throw Error(typeof run.error==='string'&&run.error||'Mac 返回了无法识别的任务状态');
     storeTaskReply(key,goalKey,task,{...run,task:current.task??run.task},Number.isFinite(current.createdAt)?current.createdAt:Date.now(),taskScope(goalKey));
   } catch(error) {
-    if (taskCallIsCurrent(task.id,goalKey,current.runtime,callKey))
+    if (agentConfig===config&&taskCallIsCurrent(task.id,goalKey,current.runtime,callKey))
       superAgentRuns={...superAgentRuns,[key]:{...withRunError({...current,createdAt:Number.isFinite(current.createdAt)?current.createdAt:Date.now()},error.message),refreshFailed:true}};
   } finally {
-    superAgentRequests.delete(callKey);saveSuperAgentRuns();
-    if (screen==='task'&&activeGoal===goalKey&&agentRuntime===current.runtime&&selectedTaskId===task.id) render();
+    if (superAgentRequests.get(callKey)===config) superAgentRequests.delete(callKey);
+    if (agentConfig===config) {
+      saveSuperAgentRuns();
+      if (screen==='task'&&activeGoal===goalKey&&agentRuntime===current.runtime&&selectedTaskId===task.id) render();
+    }
   }
 }
 function saveGoalSuperAgentRuns() { localStorage.setItem(GOAL_SUPER_AGENT_RUNS_KEY,JSON.stringify(goalSuperAgentRuns)); }
@@ -667,65 +792,91 @@ function untrustedGoalRequest(goalKey,value) {
 }
 const untrustedGoalReason = value => typeof value?.error==='string'&&value.error?value.error:'宿主返回了无法识别的目标编排记录';
 const goalSuperAgentRequests=new Set();
+const CLOUD_RECEIPT_RECOVERY_MS=15_000;
+function cloudGoalConnection(config,runtime) {
+  return config.runtime===DSH_RUNTIME&&runtime===DSH_RUNTIME;
+}
 function saveGoalRun(goalKey,run) {
   goalSuperAgentRuns={...goalSuperAgentRuns,[goalRunKey(goalKey,run?.runtime||agentRuntime)]:run};
   saveGoalSuperAgentRuns();
 }
-function applyGoalRun(goalKey,value) {
+function goalRequestIsCurrent(goalKey,config,request) {
+  return agentConfig===config&&agentRuntime===request.runtime&&currentGoalSuperAgentRun(goalKey)?.requestId===request.requestId;
+}
+function applyGoalRun(goalKey,value,pending) {
   let run=safeGoalSuperAgentRun(value);
-  if (!run) throw Error(`${agentRuntimeLabel(agentRuntime)} 没有返回真实目标编排记录`);
-  void deliverAgentNotification(goalRunNotification(goalKey,run));
+  if (run?.actual!==true||run.requestId!==pending.requestId||run.runtime!==pending.runtime)
+    throw Error(`${agentRuntimeLabel(pending.runtime)} 没有返回与本次请求匹配的目标编排记录`);
   if (run.status==='done' && run.result && !run.applied) {
     const history=conversations[goalKey]||[];
     if (!history.some(item=>item.requestId===run.requestId)) {
       const localOnly=goalKey!=='finance'&&reviewFor(goalKey).sharing.oldRuns?.includes(run.requestId);
-      const pending=currentGoalSuperAgentRun(goalKey);
-      conversations[goalKey]=[...history,{role:'assistant',text:run.result.reply,proposal:localOnly?null:run.result.proposal,layout:localOnly?null:run.result.layout,
-        ...(localOnly?{localOnly:true}:{}),...(pending?.requestId===run.requestId?{userIntent:pending.input?.message}:{}),
-        requestId:run.requestId}].slice(-20);
-      const candidate=goalDomain(goalKey)==='custom'
-        ? findInitialCustomGoalCandidate(conversations[goalKey],goalCustom[goalKey],goalLayouts[goalKey])
-        : null;
-      if (candidate?.index===conversations[goalKey].length-1) {
-        applyGeneratedGoal(goalKey,candidate.item);
-        conversations[goalKey][candidate.index]={...candidate.item,proposal:null,layout:null};
-        activeGoal=goalKey;
+      const item={role:'assistant',text:run.result.reply,proposal:localOnly?null:run.result.proposal,layout:localOnly?null:run.result.layout,
+        ...(localOnly?{localOnly:true}:{}),userIntent:pending.input?.message,requestId:run.requestId};
+      const draft=goalDomain(goalKey)==='custom'&&!goalCustom[goalKey]&&!goalLayouts[goalKey];
+      const autoApply=run.applyValidatedGoal===true&&!localOnly;
+      const firstLegacyGoal=draft&&findInitialCustomGoalCandidate([item]);
+      const applied=(autoApply||firstLegacyGoal)&&applyGeneratedGoal(goalKey,item);
+      if (applied) {
+        item.proposal=null;
+        item.layout=null;
+      }
+      if (draft&&applied&&activeGoal===goalKey) {
         localStorage.setItem(ACTIVE_GOAL_KEY,activeGoal);
         previousGoalBeforeDraft=null;
         if (screen==='agent') screen='home';
-        notice('新目标和动态任务已创建');
+        notice(run.result.layout?.tasks?.length?'新目标和动态任务已创建':'新目标已创建');
       }
+      conversations[goalKey]=[...history,item].slice(-20);
       saveConversations();
     }
     run={...run,applied:true};
   }
-  saveGoalRun(goalKey,run);
+  saveGoalRun(goalKey,{...run,input:pending.input??run.input});
+  void deliverAgentNotification(goalRunNotification(goalKey,run));
   return run;
 }
 async function submitSuperAgentGoal(goalKey,message,history) {
   const request={...createGoalSuperAgentRequest({domain:goalDomain(goalKey),goal:agentGoal(goalKey),snapshot:currentSummary(),message,history}),runtime:agentRuntime};
-  saveGoalRun(goalKey,createPendingGoalSuperAgentRun(request,Date.now(),agentRuntime));
+  const config=agentConfig;
+  const pending=createPendingGoalSuperAgentRun(request,Date.now(),request.runtime);
+  saveGoalRun(goalKey,pending);
   goalSuperAgentRequests.add(request.requestId);
+  let awaitingReceipt=true;
   try {
-    const response=await agentCall(agentConfig,'/super-agent/goals',request);
-    if (!response?.run?.actual) throw Error(`${agentRuntimeLabel(agentRuntime)} 没有返回真实目标编排记录`);
-    applyGoalRun(goalKey,response.run);
+    const response=await agentCall(config,'/super-agent/goals',request);
+    awaitingReceipt=false;
+    if (goalRequestIsCurrent(goalKey,config,pending)) applyGoalRun(goalKey,response?.run,pending);
   } catch(error) {
+    if (!goalRequestIsCurrent(goalKey,config,pending)) return;
+    if (awaitingReceipt&&cloudGoalConnection(config,request.runtime)) {
+      saveGoalRun(goalKey,withRunError(pending,error.message));
+      return;
+    }
     saveGoalRun(goalKey,createFailedGoalSuperAgentRun(request,error.message,Date.now(),request.runtime));
     throw error;
   } finally { goalSuperAgentRequests.delete(request.requestId); }
 }
 async function refreshSuperAgentGoal(goalKey=activeGoal) {
   const current=currentGoalSuperAgentRun(goalKey);
-  if (!current?.actual || current.status!=='working' || goalSuperAgentRequests.has(current.requestId) || !agentConfig.token) return;
+  const config=agentConfig;
+  if (current?.status!=='working'||goalSuperAgentRequests.has(current.requestId)||!config.token) return;
+  const recovering=current.actual!==true;
+  const cloud=cloudGoalConnection(config,current.runtime);
+  if (recovering&&!cloud) return;
   goalSuperAgentRequests.add(current.requestId);
   try {
-    const run=await agentCall(agentConfig,'/super-agent/goals/status',{requestId:current.requestId,runtime:current.runtime});
-    applyGoalRun(goalKey,run);
+    const run=await agentCall(config,'/super-agent/goals/status',{requestId:current.requestId,runtime:current.runtime});
+    if (!goalRequestIsCurrent(goalKey,config,current)) return;
+    applyGoalRun(goalKey,run,current);
     if (screen==='agent'&&activeGoal===goalKey) renderAgentUpdate();
     else if (screen==='home'&&activeGoal===goalKey) render();
   } catch(error) {
-    saveGoalRun(goalKey,withRunError(current,error.message));
+    if (!goalRequestIsCurrent(goalKey,config,current)) return;
+    const waitingForAdmission=recovering&&Number.isFinite(current.createdAt)&&Date.now()-current.createdAt<CLOUD_RECEIPT_RECOVERY_MS;
+    const missing=cloud&&error.message===CLOUD_RUN_NOT_FOUND&&!waitingForAdmission;
+    const updated=withRunError(current,error.message);
+    saveGoalRun(goalKey,missing?{...updated,status:'blocked',statusLabel:'需要重发'}:updated);
     // 读不到状态也要让用户看见：否则错误只存在存储里，界面一直转圈。
     if (screen==='agent'&&activeGoal===goalKey) renderAgentUpdate();
     else if (screen==='home'&&activeGoal===goalKey) render();
@@ -1080,6 +1231,14 @@ function scrollAgentConversationToBottom() {
     scroller?.scrollTo({top:scroller.scrollHeight,behavior:'smooth'});
   });
 }
+function pairForm() {
+  // 连接指纹只在 Mac 私网（旧的叶指纹钉扎）需要；云端域名走系统信任评估，不再手抄叶指纹
+  // （docs/iphone-ca-profile-design.md §2.2/§7）。因此它不是必填项，提交时按主机形态校验。
+  return `<form id="pair-form"><input name="baseURL" type="url" aria-label="Along 服务地址" placeholder="Along 服务地址" value="${esc(agentConfig.baseURL||'')}" required><input name="fingerprint" aria-label="连接指纹（仅 Mac 私网需要）" placeholder="连接指纹（仅 Mac 私网需要）" value="${esc(agentConfig.fingerprint||'')}"><input name="code" aria-label="一次性连接码" placeholder="一次性连接码" inputmode="numeric" required><button class="button" ${connectionBusy?'disabled':''}>${agentConfig.token?'重新配对':'连接 Along'}</button></form>`;
+}
+function connectionSetup(error) {
+  return `<details class="agent-setup" data-agent-connection><summary>${error?`连接需处理 · ${esc(error)}`:'Along 连接'}</summary>${pairForm()}${error?`<form id="host-address-form"><label>只更新服务地址<input name="baseURL" type="url" value="${esc(agentConfig.baseURL||'')}" required></label><button class="button" ${connectionBusy||agentBusy?'disabled':''}>验证并更新</button></form>`:''}</details>`;
+}
 function goalAgentPage() {
   const goalKey=activeGoal;
   const domain=goalDomain(goalKey);
@@ -1092,12 +1251,11 @@ function goalAgentPage() {
   const weeklyMinutes=domain==='health'?reviewFor(goalKey).workoutTarget(true):null;
   const targetText=domain==='health'?(weeklyMinutes?`每周运动 ${weeklyMinutes} 分钟`:'按已确认的目标要求执行'):domain==='finance'?`¥${goal.target.toLocaleString('zh-CN')}`:'由你用自然语言定义';
   const connectionText=agentConnection.status==='ready'?[`Along 与 ${meta.short} 已连接`,'整条目标编排链路可用','已验证']:
-    agentConnection.status==='error'?['连接需处理',agentConnection.error,'需处理']:['正在检查连接',`正在验证 Mac Host 与 ${meta.full}`,'检查中'];
-  return `<div class="app-shell agent-shell"><header class="topbar"><div class="topbar-inner">${brand()}</div></header><main class="content agent-page"><div class="agent-scroll">${backButton('agent-back','返回目标')}<div class="agent-title"><span class="eyebrow">${label} · ${esc(meta.full)}</span><h1>${esc(goal.title)}</h1><p>当前目标：${targetText}。${esc(meta.description)}确认后才会改变首页。</p></div>
+    agentConnection.status==='error'?['连接需处理',agentConnection.error,'需处理']:['正在检查连接',`正在验证 Along 服务与 ${meta.full}`,'检查中'];
+  return `<div class="app-shell agent-shell"><header class="topbar"><div class="topbar-inner">${brand()}</div></header><main class="content agent-page"><div class="agent-scroll">${backButton('agent-back','返回目标')}<div class="agent-title"><span class="eyebrow">${label} · ${esc(meta.full)}</span><h1>${esc(goal.title)}</h1><p>当前目标：${targetText}。${esc(meta.description)}</p></div>
   <div class="runtime-switch" role="group" aria-label="选择 Agent 运行时"><button type="button" data-action="select-runtime" data-runtime="${DSH_RUNTIME}" class="${agentRuntime===DSH_RUNTIME?'active':''}" aria-pressed="${agentRuntime===DSH_RUNTIME}">DSH Agents</button><button type="button" data-action="select-runtime" data-runtime="${KIMI_RUNTIME}" class="${agentRuntime===KIMI_RUNTIME?'active':''}" aria-pressed="${agentRuntime===KIMI_RUNTIME}">Kimi Swarm</button></div>
-  ${agentConfig.token ? `<div class="agent-status ${agentConnection.status}"><strong>${esc(connectionText[0])}</strong><span>${esc(connectionText[1])}</span><em>${esc(connectionText[2])}</em></div>` : `<div class="agent-setup"><h2>首次连接 Along</h2><p>只需设置一次，之后会自动恢复。让 Mac 与 iPhone 保持在同一网络，启动 Along 服务后填入一次连接信息。</p><form id="pair-form"><input name="baseURL" placeholder="Along 服务地址" value="${esc(agentConfig.baseURL||'')}" required><input name="fingerprint" placeholder="连接指纹" value="${esc(agentConfig.fingerprint||'')}" required><input name="code" placeholder="一次性连接码" inputmode="numeric" required><button class="button" ${agentBusy?'disabled':''}>${agentBusy?'连接中…':'连接 Along'}</button></form></div>`}
-  ${agentConfig.token&&agentConnection.status==='error'?`<details class="agent-setup"><summary>Mac 的 Wi-Fi 地址变了？</summary><form id="host-address-form"><label>新的 Along 服务地址<input name="baseURL" type="url" value="${esc(agentConfig.baseURL||'')}" required></label><button class="button">验证并更新</button></form></details>`:''}
-  <div class="agent-messages" role="log" aria-live="polite">${history.length?history.map(item=>agentMessage(item,goal,domain)).join(''):'<p class="agent-empty">说说你希望达成什么、期限、约束和偏好；Along 会先整理并请你确认。</p>'}</div>
+  ${agentConfig.token ? `<div class="agent-status ${agentConnection.status}"><strong>${esc(connectionText[0])}</strong><span>${esc(connectionText[1])}</span><em>${esc(connectionText[2])}</em></div>${connectionSetup(agentConnection.error)}` : `<div class="agent-setup"><h2>首次连接 Along</h2>${pairForm()}</div>`}
+  <div class="agent-messages" role="log" aria-live="polite">${history.length?history.map(item=>agentMessage(item,goal,domain)).join(''):'<p class="agent-empty">说说你希望达成什么、期限、约束和偏好。</p>'}</div>
   ${goalOrchestrationPanel(goalRun)}
   </div><div class="agent-composer-dock"><form id="agent-form" class="agent-composer" aria-busy="${agentBusy||goalRunning}"><textarea name="message" rows="1" placeholder="描述你的目标" maxlength="800" required ${goalRunning?'disabled':''}></textarea><button class="agent-send" aria-label="交给 Super Agent" title="交给 Super Agent" ${agentBusy||goalRunning||!agentConfig.token?'disabled':''}><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 15V5m0 0L6.5 8.5M10 5l3.5 3.5"/></svg></button></form><p class="agent-disclaimer">${goalRunning?'Super Agent 编排中…':domain==='finance'?'理财连接和余额仍是演示；Super Agent 只规划，不交易。':domain==='health'?'仅发送当前目标与所选健康摘要，不发送原始记录。':'Along · 一起，慢慢向前'}</p></div></main></div>`;
 }
@@ -1124,7 +1282,10 @@ function applyGeneratedGoal(goalKey,item) {
   if (item.proposal||requestIntent) {
     goalCustom[goalKey]={...goalCustom[goalKey],...item.proposal,
       intent:`${goalCustom[goalKey]?.intent||''}\n${requestIntent||''}`.trim().slice(-1600)};
-    if (goalKey==='health'&&item.proposal) saveHealth({...state,goals:state.goals.map(goal=>goal.type==='workout'?{...goal,target:item.proposal.target}:goal)});
+    if (goalKey==='health'&&item.proposal) {
+      const health=ensureHealthGoal(state);
+      saveHealth({...health,goals:health.goals.map(goal=>goal.type==='workout'?{...goal,target:item.proposal.target}:goal)});
+    }
   }
   if (validatedLayout) goalLayouts[goalKey]=validatedLayout;
   saveGoalCustom();
@@ -1352,14 +1513,13 @@ function eventWorkspacePage() {
   const scopedMessages=view.messages.filter(message=>(view.activeGoalId
     ?message.goalId===view.activeGoalId:message.conversationId===view.conversationId));
   const messages=scopedMessages.filter(message=>message.audience!=='background'&&message.presentation!=='execution');
-  const connectionError=view.error||agentConnection.error;
-  const connection=connectionError?`<details class="agent-setup"><summary>连接需处理 · ${esc(connectionError)}</summary><form id="host-address-form"><label>Along 服务地址<input name="baseURL" type="url" value="${esc(agentConfig.baseURL||'')}" required></label><button class="button">验证并更新</button></form></details>`:'';
+  const connection=connectionSetup(view.error||agentConnection.error);
   const goalPicker=`<div class="goal-switch"><label for="event-goal-select">当前目标</label><div class="goal-switch-actions"><div class="select-wrap"><select id="event-goal-select" aria-label="切换目标"><option value="" ${!localSelection&&!view.activeGoalId?'selected':''}>新对话</option>${options}${localChoices.length?`<optgroup label="本机已存目标">${localChoices.map(l=>`<option value="local:${esc(l.key)}" ${localSelection?.key===l.key?'selected':''}>${esc(l.title)}</option>`).join('')}</optgroup>`:''}</select></div><button class="goal-add-button" data-action="new-goal">新建</button></div></div>`;
   if (selectedLocal) return localRecordPage(localSelection,selectedLocal.title,goalPicker,connection);
   const history=messages.map(message=>`<div ${message.notificationEventId?`id="event-message-${esc(message.notificationEventId)}"`: ''} class="agent-message ${message.role==='user'?'user':'assistant'}"><p>${esc(message.text)}</p>${message.status==='pending'?'<p class="agent-disclaimer">待同步</p>':message.status==='rejected'||message.status==='failed'?'<p class="agent-disclaimer">发送未完成，请通过聊天重新说明。</p>':''}</div>`).join('');
   const content=chat?`${backButton('agent-back','返回目标')}<div class="agent-title"><h1>${esc(goal?.title||'说说你想做什么')}</h1></div>${connection}<div class="agent-messages" role="log" aria-live="polite">${history||'<p class="agent-empty">说说你的想法，Along 会和你一起理清下一步。</p>'}</div>`
     :goal&&screen==='task'?eventTaskDetail(goal,scopedMessages)
-    :goal?`${connection}<section class="goal-card"><h1>${esc(goal.title)}</h1>${goal.metric?`<p class="goal-note">${esc(goal.metric.target)} ${esc(goal.metric.unit)} · ${esc(goal.metric.period)}</p>`:''}${goal.context.length?`<p class="goal-note">${goal.context.map(item=>esc(typeof item==='string'?item:item.text)).join('；')}</p>`:''}<div class="card-actions"><button class="agent-action" data-action="event-chat">聊聊这个目标</button></div></section><section class="task-section"><div class="section-heading"><h2>动态任务</h2></div><div class="task-list">${goal.tasks.filter(task=>task.status!=='cancelled').map(eventTaskCard).join('')||'<p class="agent-empty">通过聊天安排下一步。</p>'}</div></section>${eventDataSources(goal)}`:'';
+    :goal?`${connection}<section class="goal-card"><h1>${esc(goal.title)}</h1>${goal.metric?`<p class="goal-note">${esc(goal.metric.target)} ${esc(goal.metric.unit)} · ${esc(goal.metric.period)}</p>`:''}${goal.context.length?`<p class="goal-note">${goal.context.map(item=>esc(typeof item==='string'?item:item.text)).join('；')}</p>`:''}<div class="card-actions"><button class="agent-action" data-action="event-chat">聊聊这个目标</button></div></section><section class="task-section"><div class="section-heading"><h2>动态任务</h2></div><div class="task-list">${goal.tasks.filter(task=>task.status!=='cancelled').map(eventTaskCard).join('')||'<p class="agent-empty">通过聊天安排下一步。</p>'}</div></section>${eventDataSources(goal)}`:connection;
   return `<div class="app-shell ${chat?'agent-shell':''}"><header class="topbar"><div class="topbar-inner">${brand()}</div></header><main class="content ${chat?'agent-page':goal&&screen==='task'?'event-task-detail':''}"><div class="${chat?'agent-scroll':''}">${goalPicker}${content}</div>${chat?`<div class="agent-composer-dock"><form id="agent-form" class="agent-composer"><textarea name="message" rows="1" placeholder="说说你的想法" maxlength="800" data-draft-scope="${esc(view.draftScope)}" required>${esc(eventWorkspace.draft())}</textarea><button class="agent-send" aria-label="发送" ${agentBusy?'disabled':''}>↑</button></form><p class="agent-disclaimer">Along · 一起，慢慢向前</p></div>`:''}</main></div>`;
 }
 function renderEventUpdate() {
@@ -1387,7 +1547,26 @@ function renderEventUpdate() {
     pendingRecommendationOpen=null;void openEventNotification(pending.route,true);
   }
 }
-function render() { app.innerHTML = eventWorkspace ? eventWorkspacePage() : screen === 'lab' ? lab() : screen === 'agent' ? goalAgentPage() : screen === 'task' ? taskDetailPage() : home(); queueBackgroundSync(); }
+function render() {
+  // Event sync redraws the workspace. Keep unsent connection fields only in the
+  // currently open panel so a sync cannot close it while someone is pairing.
+  const panel=connectionBusy?null:app.querySelector('[data-agent-connection][open]');
+  const fields=panel?.querySelectorAll('input');
+  const focused=document.activeElement;
+  app.innerHTML = eventWorkspace ? eventWorkspacePage() : screen === 'lab' ? lab() : screen === 'agent' ? goalAgentPage() : screen === 'task' ? taskDetailPage() : home();
+  const nextPanel=fields?.length?app.querySelector('[data-agent-connection]'):null;
+  if (nextPanel) {
+    nextPanel.open=true;
+    for (const field of fields) {
+      const input=nextPanel.querySelector(`#${field.form.id} [name="${field.name}"]`);
+      if (input) {
+        input.value=field.value;
+        if (field===focused) input.focus();
+      }
+    }
+  }
+  queueBackgroundSync();
+}
 function renderAgentUpdate({follow=false}={}) {
   const previous=app.querySelector('.agent-scroll');
   if (!previous) {render();return;}
@@ -1590,6 +1769,7 @@ app.addEventListener('click', event => {
   }
   if (action === 'new-goal') { beginNewGoal();return; }
   if (action === 'select-runtime') {
+    if (agentBusy||connectionBusy) return;
     const next=safeAgentRuntime(actionTarget.dataset.runtime);
     if (next===agentRuntime) return;
     agentRuntime=next;
@@ -1695,61 +1875,70 @@ app.addEventListener('submit', async event => {
     if (answer&&hasHealthSource(activeGoal)) await reviewFor(activeGoal).answer(answer);
     return;
   }
-  if (agentBusy) return;
-  if (!eventWorkspace&&event.target.id==='agent-form' && currentGoalSuperAgentRun()?.status==='working') return;
   const formElement=event.target;
   const form=new FormData(formElement);
-  if (formElement.id==='host-address-form') {
-    const config={...agentConfig,baseURL:String(form.get('baseURL')||'').trim().replace(/\/$/,'')};
-    agentBusy=true;
+  if (connectionBusy) return;
+  if (formElement.id==='pair-form'||formElement.id==='host-address-form') {
+    const pairing=formElement.id==='pair-form';
+    if (!pairing&&agentBusy) return;
+    connectionBusy=true;
+    formElement.querySelector?.('button')?.setAttribute('disabled','');
     try {
-      const verified=await agentCall(config,'/connection/verify',{});
-      if (!verified?.paired) throw Error('未能验证已配对的 Mac');
-      await saveNativeConnection(config);
-      agentConfig=config;
-      persistAgentConfig(config);
-      await refreshAgentConnection();
-      void reviewAll();
-      notice('已更新 Mac 地址');
-    } catch(error) {notice(error.message||'更新地址失败');}
-    finally {agentBusy=false;render();}
-    return;
-  }
-  if (formElement.id==='pair-form') {
-    agentBusy=true;
-    render();
-    try {
-      const config={baseURL:String(form.get('baseURL')).trim().replace(/\/$/,''),fingerprint:String(form.get('fingerprint')).trim().replace(/[^a-fA-F0-9]/g,'').toUpperCase()};
-      const result=await agentCall(config,'/pair',{code:String(form.get('code')).trim()});
-      agentConfig={...config,token:result.token};
-      agentConnection={status:'ready',error:''};
-      persistAgentConfig(agentConfig);
-      await saveNativeConnection(agentConfig);
+      await connectionRestoration;
+      const baseURL=String(form.get('baseURL')||'').trim().replace(/\/$/,'');
+      let config={...agentConfig,baseURL};
+      let runtime=agentRuntime;
+      if (pairing) {
+        const fingerprint=String(form.get('fingerprint')||'').trim().replace(/[^a-fA-F0-9]/g,'').toUpperCase();
+        // 只有 Mac 私网（旧的叶指纹钉扎）才需要叶指纹；云端域名走系统信任评估。
+        // 这里不判断信任策略——那是原生的判定，网页只负责不把指纹当必填项。
+        config=fingerprint?{baseURL,fingerprint}:{baseURL};
+        const result=await agentCall(config,'/pair',{code:String(form.get('code')||'').trim()});
+        if (typeof result?.token!=='string'||!/^[a-f0-9]{64}$/i.test(result.token)) throw Error('Along 未返回有效配对凭证');
+        config={...config,token:result.token};
+        if (result.runtime===DSH_RUNTIME) {
+          runtime=DSH_RUNTIME;
+          config.runtime=runtime;
+        }
+      } else {
+        const verified=await agentCall(config,'/connection/verify',{});
+        if (!verified?.paired) throw Error('未能验证当前 Along 连接');
+      }
+      const saved=await saveNativeConnection(config);
+      // 原生确认过的连接（带 trustPolicy 与 bindingScopeId）才是生效值。
+      if (saved&&typeof saved==='object'&&saved.baseURL) config={...config,...saved};
+      activateAgentConfig(config,{rebind:pairing,runtime});
       await refreshAgentConnection();
       if (!eventWorkspace) void reviewAll();
-      notice('已连接 Along，之后会自动恢复');
-    } catch(error) { notice(error.message || 'Along 请求失败'); }
-    finally { agentBusy=false;render(); }
+      notice(pairing?'已连接 Along，之后会自动恢复':'已更新 Along 服务地址');
+    } catch(error) { notice(error.message || 'Along 连接未更新'); }
+    finally { connectionBusy=false;render(); }
     return;
   }
 
+  if (agentBusy||(!eventWorkspace&&currentGoalSuperAgentRun()?.status==='working')) return;
   const message=String(form.get('message')).trim();
   if (!message) return;
   if (eventWorkspace) {
+    const workspace=eventWorkspace;
     waitingForSavedGoal=false;
-    void enableAgentNotifications().then(()=>{lastNotificationProjection='';return eventWorkspace?.sync();});
+    void enableAgentNotifications().then(()=>{
+      if (eventWorkspace===workspace) {lastNotificationProjection='';return workspace.sync();}
+    });
     agentBusy=true;
     try {
-      await eventWorkspace.submit(message);
+      await workspace.submit(message);
+      if (eventWorkspace!==workspace) return;
       formElement.reset();
       const input=app.querySelector('#agent-form textarea');
       if (input) input.value='';
-      void eventWorkspace.sync();
-    } catch(error) {notice(error.message||'消息尚未保存，请保留原文后重试');}
-    finally {agentBusy=false;renderEventUpdate();}
+      void workspace.sync();
+    } catch(error) {if (eventWorkspace===workspace) notice(error.message||'消息尚未保存，请保留原文后重试');}
+    finally {if (eventWorkspace===workspace) {agentBusy=false;renderEventUpdate();}}
     return;
   }
   void enableAgentNotifications();
+  const config=agentConfig;
   const goalKey=activeGoal;
   const domain=goalDomain(goalKey);
   const history=conversations[goalKey]||[];
@@ -1772,12 +1961,13 @@ app.addEventListener('submit', async event => {
   try {
     await submitSuperAgentGoal(goalKey,message,history.filter(item=>!item.localOnly).map(item=>({role:item.role,text:item.text})));
   } catch(error) {
-    notice(error.message || 'Along 请求失败');
+    if (agentConfig===config) notice(error.message || 'Along 请求失败');
   } finally {
-    agentBusy=false;
-    if (screen==='agent' && activeGoal===goalKey) {
-      renderAgentUpdate({follow:true});
-    } else render();
+    if (agentConfig===config) {
+      agentBusy=false;
+      if (screen==='agent' && activeGoal===goalKey) renderAgentUpdate({follow:true});
+      else render();
+    }
   }
 });
 function legacyGoalIntent(key) {
@@ -2066,13 +2256,24 @@ function createHealthReview(goalKey) {
   function dailyDelegation() {
     const grant=cleanDailyDelegation(healthSharing.dailyDelegation);
     if (!grant||grant.goalKey!==goalKey||!hasHealthSource(goalKey)||!agentConfig.token||agentRuntime!==DSH_RUNTIME||
-        !healthSharing.dailyRecipient||healthSharing.dailyRecipient!==agentConfig.fingerprint||state.loop?.experiment===EXPERIMENT||
+        !healthSharing.dailyRecipient||healthSharing.dailyRecipient!==bindingKeyOf(agentConfig)||state.loop?.experiment===EXPERIMENT||
         nativeHealthStatus==='unlinked'||state.source!=='healthkit'||state.snapshot?.contextReviewAllowed!==true) return null;
     // Display can use the last approved local category list while a locked
     // phone cannot read new observations. Submission and claiming still need
     // fresh native availability. Explicit withdrawal clears this grant.
     const allowed=goalCustom[goalKey]?.healthTypes;
     return grant.topics.every(t=>state.snapshot.selectedTypes?.includes(t)&&(!Array.isArray(allowed)||allowed.includes(t)))?grant:null;
+  }
+  // 同一绑定的口径升级：把每日委托的接收人键迁到新归属键（docs/iphone-ca-profile-design.md §2.2）。
+  //
+  // 只改「授权给谁」这一个键，不动 grant 本身——授权内容与提醒时间原样保留。
+  // 已经存在于 dailyRevokedIds 的 grant 是用户主动撤销过的，不在这里恢复：
+  // 撤销名单里的 grant 本来就没有 dailyDelegation 可迁。
+  function migrateDailyRecipient(nextKey) {
+    if (!nextKey||!healthSharing.dailyRecipient||healthSharing.dailyRecipient===nextKey) return;
+    const grant=cleanDailyDelegation(healthSharing.dailyDelegation);
+    if (!grant||healthSharing.dailyRevokedIds?.includes(grant.id)) return;
+    saveHealthSharing({...healthSharing,dailyRecipient:nextKey});
   }
   function dailyReceipt(run,grant) {
     const p=run?.input?.snapshot?.planning;
@@ -2112,7 +2313,7 @@ function createHealthReview(goalKey) {
     if (!receipt||healthSharing.dailyRevokedIds?.includes(grant.id)||Date.parse(receipt.action.evaluatedAt)>Date.now()||
         Date.parse(receipt.action.evaluatedAt)<=(healthSharing.dailyRevokedAt||0)) return false;
     if (planningState.dailyRecord?.action?.delegationId===grant.id&&Date.parse(planningState.dailyRecord.action.evaluatedAt)>Date.parse(receipt.action.evaluatedAt)) return true;
-    saveHealthSharing({...healthSharing,dailyDelegation:grant,dailyRecipient:agentConfig.fingerprint});
+    saveHealthSharing({...healthSharing,dailyDelegation:grant,dailyRecipient:bindingKeyOf(agentConfig)});
     const previous=planningState;
     // A Mac handoff acknowledges this daily instruction only. Preserve an
     // unrelated pending adopt/reject proposal or working health review.
@@ -2152,7 +2353,7 @@ function createHealthReview(goalKey) {
       if (!old) return;
       const removed=stopping.slice(1).filter(Boolean).map(toTopic);
       const topics=old.topics.filter(t=>!removed.includes(t));
-      if (topics.length) saveHealthSharing({...healthSharing,dailyRecipient:agentConfig.fingerprint,
+      if (topics.length) saveHealthSharing({...healthSharing,dailyRecipient:bindingKeyOf(agentConfig),
         dailyDelegation:cleanDailyDelegation({id:newId('daily'),goalKey,topics,weeklyWorkoutMinutes:topics.includes('workout')?old.weeklyWorkoutMinutes:null})});
       return;
     }
@@ -2160,7 +2361,7 @@ function createHealthReview(goalKey) {
     const topics=[...new Set([...(old?.topics||[]),...starting.slice(1).filter(Boolean).map(toTopic)])].sort();
     if (!topics.every(t=>scopedSnapshot(goalKey).selectedTypes.includes(t))||JSON.stringify(topics)===JSON.stringify(old?.topics)) return;
     if (old) revokeDaily();
-    saveHealthSharing({...healthSharing,dailyRecipient:agentConfig.fingerprint,
+    saveHealthSharing({...healthSharing,dailyRecipient:bindingKeyOf(agentConfig),
       dailyDelegation:cleanDailyDelegation({id:newId('daily'),goalKey,topics,weeklyWorkoutMinutes:topics.includes('workout')?workoutTarget():null})});
   }
   function includesInstruction(request) {
@@ -2196,7 +2397,7 @@ function createHealthReview(goalKey) {
     // Do not hash/serialize local-only text or the pairing token. The native version
     // covers the precise approved plan and the recipient, independently of sample time.
     const {previous:ignored,...policy}=planning;
-    const identity=JSON.stringify([goalKey,healthSharing.scope||0,agentConfig.fingerprint,goal,policy,after.selectedTypes,after.comparisonHistoryAllowed]);
+    const identity=JSON.stringify([goalKey,healthSharing.scope||0,bindingKeyOf(agentConfig),goal,policy,after.selectedTypes,after.comparisonHistoryAllowed]);
     let stored=readStored(BG_TEMPLATE_KEY,null);
     if (!stored||stored.identity!==identity) {
       stored={identity,version:newId('bg-scope')};
@@ -2328,13 +2529,14 @@ function createHealthReview(goalKey) {
     if (userTask||removed) void deliverAgentNotification(healthProposalNotification(ticket));
   }
   async function reviewHealthContext(cause='observation',before=null) {
+    const config=agentConfig;
     if (eventWorkspace||eventConnection()) return;
     if (document.visibilityState==='hidden'||nativeHealthStatus!=='available'||!hasHealthSource(goalKey)||state.source!=='healthkit'||!state.snapshot?.contextReviewAllowed||state.loop?.experiment===EXPERIMENT||!agentConfig.token) return;
     if (window.AlongHealthBridge?.backgroundReview&&goalKey===activeGoal&&state.snapshot.backgroundReviewAllowed&&state.snapshot.backgroundReviewGoalKey===goalKey&&agentRuntime===DSH_RUNTIME) {
       // A native submission may have left the phone while this WebView was suspended.
       // Take ownership before creating any foreground request for the same observation.
       const template=currentBackgroundTemplate();
-      if (!template||!await claimBackgroundReview(template)||document.visibilityState==='hidden'||currentBackgroundTemplate()?.version!==template.version) return;
+      if (!template||!await claimBackgroundReview(template)||agentConfig!==config||document.visibilityState==='hidden'||currentBackgroundTemplate()?.version!==template.version) return;
     }
     if (planningState.nativeRequestId&&planningState.nativeRequestId===planningState.request?.requestId&&planningState.run?.status==='blocked') {
       if (cause==='retry'||verifiedHealthHost&&canRecoverConnection()) {
@@ -2385,21 +2587,24 @@ function createHealthReview(goalKey) {
     if (!keepProposal) saveTicket({id:submittedId,requestId:submittedId,goalKey,source:'healthkit',status:'assigned',reason:'Super Agent 正在评估目标、最新情境与已有安排'});
     if (screen==='home'&&activeGoal===goalKey) render();
     try {
-      const response=await agentCall(agentConfig,'/super-agent/goals',request);
-      if (planningState.request?.requestId===submittedId) consumeHealthReview(response?.run,request);
+      const response=await agentCall(config,'/super-agent/goals',request);
+      if (agentConfig===config&&planningState.request?.requestId===submittedId) consumeHealthReview(response?.run,request);
     } catch(error) {
-      if (planningState.request?.requestId===submittedId) {
+      if (agentConfig===config&&planningState.request?.requestId===submittedId) {
         if (localConnectionError(error.message)) verifiedHealthHost=false;
         savePlanning({...planningState,run:createFailedGoalSuperAgentRun(request,error.message,Date.now(),request.runtime)});
         if (pendingTask?.requestId===submittedId) saveTicket({...pendingTask,status:'waiting',error:error.message});
       }
     } finally {
       planningBusy=false;
-      if (screen==='home') render();
-      if (planningState.queued&&planningState.run?.status!=='working') void reviewHealthContext();
+      if (agentConfig===config) {
+        if (screen==='home') render();
+        if (planningState.queued&&planningState.run?.status!=='working') void reviewHealthContext();
+      }
     }
   }
   async function refreshHealthReview() {
+    const config=agentConfig;
     if (eventWorkspace||eventConnection()) return;
     const {run,request}=planningState;
     if (document.visibilityState==='hidden'||nativeHealthStatus!=='available'||planningBusy||run?.status!=='working'||!request||!agentConfig.token) return;
@@ -2413,9 +2618,9 @@ function createHealthReview(goalKey) {
     planningBusy=true;
     try {
       const retryNative=planningState.nativeRequestId===request.requestId&&planningState.uncertainNativeReceipt&&planningResultIsCurrent(request);
-      const latest=retryNative?(await agentCall(agentConfig,'/super-agent/goals',request))?.run:
-        await agentCall(agentConfig,'/super-agent/goals/status',{requestId:request.requestId,runtime:request.runtime,contextReview:true});
-      if (planningState.request?.requestId===request.requestId) {
+      const latest=retryNative?(await agentCall(config,'/super-agent/goals',request))?.run:
+        await agentCall(config,'/super-agent/goals/status',{requestId:request.requestId,runtime:request.runtime,contextReview:true});
+      if (agentConfig===config&&planningState.request?.requestId===request.requestId) {
         try {
           if (retryNative&&latest?.actual&&latest.requestId===request.requestId) savePlanning({...planningState,uncertainNativeReceipt:false});
           consumeHealthReview(latest,request);
@@ -2428,7 +2633,7 @@ function createHealthReview(goalKey) {
           savePlanning({...planningState,run:withRunError(planningState.run,'情境评估超时')});
       }
     } catch(error) {
-      if (planningState.request?.requestId===request.requestId) {
+      if (agentConfig===config&&planningState.request?.requestId===request.requestId) {
         const interrupted=planningState.nativeRequestId===request.requestId&&localConnectionError(error.message);
         if (interrupted) verifiedHealthHost=false;
         const failed=interrupted?{...run,status:'blocked',error:error.message}:
@@ -2438,8 +2643,10 @@ function createHealthReview(goalKey) {
       }
     } finally {
       planningBusy=false;
-      if (screen==='home') render();
-      if (planningState.queued&&planningState.run?.status!=='working') void reviewHealthContext();
+      if (agentConfig===config) {
+        if (screen==='home') render();
+        if (planningState.queued&&planningState.run?.status!=='working') void reviewHealthContext();
+      }
     }
   }
 
@@ -2448,6 +2655,12 @@ function createHealthReview(goalKey) {
     if (pendingTask?.source==='healthkit') saveTicket(null);
     planningState={};
     localStorage.removeItem(planningKey);
+  }
+  function retireConnection() {
+    const {request,run}=planningState;
+    if (!request||!run||run.status==='done') return;
+    savePlanning({...planningState,request:null,run:null,nativeRequestId:null,nativeVersion:null,uncertainNativeReceipt:false});
+    if (pendingTask?.requestId===request.requestId&&pendingTask.status!=='proposed') saveTicket(null);
   }
   function restrict() {
     revokeDaily();
@@ -2530,7 +2743,7 @@ function createHealthReview(goalKey) {
     saveGoalCustom();saveTicket(null);render();notice('下一步已更新');
   }
   return {get state(){return planningState;},get sharing(){return healthSharing;},get ticket(){return pendingTask;},
-    localHealthPlan,shareableHealthTask,accessOptions,workoutTarget,latestDecision,setAccess,dailyDelegation,todayActions,claimDailyDelegation,revokeDaily,canRecoverConnection,backgroundTemplate,retireNative,claimBackground,reviewHealthContext,refreshHealthReview,accept,dismiss,answer,instruct,clear,restrict,goalUpdated};
+    localHealthPlan,shareableHealthTask,accessOptions,workoutTarget,latestDecision,setAccess,dailyDelegation,todayActions,claimDailyDelegation,revokeDaily,migrateDailyRecipient,canRecoverConnection,backgroundTemplate,retireNative,claimBackground,reviewHealthContext,refreshHealthReview,accept,dismiss,answer,instruct,clear,retireConnection,restrict,goalUpdated};
 }
 window.addEventListener('along-health-update', async event => {
   if (document.visibilityState==='hidden'||state.loop?.experiment === EXPERIMENT) return;
@@ -2612,9 +2825,11 @@ if (recoveredInitialCustomGoal) notice('已恢复新目标和动态任务');
 async function restoreAlongConnection() {
   try {
     const saved=await loadNativeConnection();
-    if (saved?.baseURL&&saved?.fingerprint&&saved?.token) {
-      agentConfig=saved;
-      persistAgentConfig(saved);
+    // 系统信任形态下没有叶指纹（docs/iphone-ca-profile-design.md §2.2）；
+    // 归属靠 bindingScopeId，凭证靠 token。
+    if (saved?.baseURL&&saved?.token&&(saved?.bindingScopeId||saved?.fingerprint)) {
+      const runtime=!localStorage.getItem(AGENT_RUNTIME_KEY)&&saved.runtime===DSH_RUNTIME?DSH_RUNTIME:agentRuntime;
+      activateAgentConfig(saved,{runtime});
       render();
     } else if (agentConfig.token) {
       await saveNativeConnection(agentConfig);
@@ -2623,13 +2838,16 @@ async function restoreAlongConnection() {
     // A transient Keychain failure leaves the WKWebView connection available.
   }
   nativeConnectionRestored=true;queueBackgroundSync();
-  if (agentConfig.token) {
+}
+const connectionRestoration=restoreAlongConnection();
+void connectionRestoration.then(async()=>{
+  const config=agentConfig;
+  if (config.token) {
     if (eventConnection()) connectEventWorkspace(eventConnection().userId);
     await refreshAgentConnection();
-    if (!eventWorkspace&&nativeObservationSeen) void reviewAll();
+    if (agentConfig===config&&!eventWorkspace&&nativeObservationSeen) void reviewAll();
   }
-}
-void restoreAlongConnection();
+});
 if (window.AlongAgentBridge?.notification) {
   const generation=notificationGeneration;
   void Promise.resolve(window.AlongAgentBridge.notification('pendingLegacyNotification')).then(reply=>{
@@ -2693,5 +2911,10 @@ setInterval(() => {
   if (document.visibilityState==='hidden') return;
   if (eventWorkspace) {refreshRecommendationValidity();void eventWorkspace.sync();return;}
   for (const key of healthGoalKeys()) void reviewFor(key).refreshHealthReview();
-  if (screen==='agent') void refreshSuperAgentGoal(activeGoal);
+  if (nativeConnectionRestored&&cloudGoalConnection(agentConfig,agentRuntime)) {
+    const runtimeSuffix=`:${DSH_RUNTIME}`;
+    for (const [key,run] of Object.entries(goalSuperAgentRuns)) {
+      if (key.endsWith(runtimeSuffix)&&run?.status==='working') void refreshSuperAgentGoal(key.slice(0,-runtimeSuffix.length));
+    }
+  } else if (screen==='agent') void refreshSuperAgentGoal(activeGoal);
 },3_000);
