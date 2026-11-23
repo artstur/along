@@ -81,7 +81,7 @@ test('the old connection is only dropped after it is safely stored in the keycha
 
 // M6（docs/cloud-deploy-multi-user.md §4/§5.6）：连接地址在 RFC1918 私网 IPv4 之外放行合法 DNS 域名，
 // https-only 与其余校验不变。两份守卫（clean/agentRequest）都编译真实源码后断言。
-test('the paired host accepts RFC1918 IPv4 and legal DNS domains, nothing else',{skip:hasSwift?false:'本机没有 Swift 工具链，跳过原生侧行为测试'},()=>{
+test('the paired host accepts RFC1918 IPv4, public IPv4 and legal DNS domains',{skip:hasSwift?false:'本机没有 Swift 工具链，跳过原生侧行为测试'},()=>{
   const output=compileStore(`extension AlongConnectionStore {
     static func exposeClean(_ value: [String: Any]) -> [String: String]? { clean(value) }
 }
@@ -93,8 +93,20 @@ let cases: [(String, Bool)] = [
     ("https://10.0.0.5:4176", true),
     ("https://172.16.0.9:4176", true),
     ("https://172.31.255.255:4176", true),
-    ("https://172.32.0.1:4176", false),
-    ("https://8.8.8.8:4176", false),
+    ("https://172.32.0.1:4176", true),
+    ("https://8.8.8.8:4176", true),
+    ("https://0.1.2.3:4176", false),
+    ("https://8.008.8.8:4176", false),
+    ("https://127.0.0.1:4176", false),
+    ("https://100.64.0.1:4176", false),
+    ("https://169.254.0.1:4176", false),
+    ("https://192.0.2.1:4176", false),
+    ("https://198.18.0.1:4176", false),
+    ("https://198.51.100.1:4176", false),
+    ("https://203.0.113.1:4176", false),
+    ("https://224.1.2.3:4176", false),
+    ("https://240.1.2.3:4176", false),
+    ("https://0x7f.0x1:4176", false),
     ("https://1.2.3.4.5:4176", false),
     ("https://[::1]:4176", false),
     ("https://along.example.com:4176", true),
@@ -151,8 +163,8 @@ let cases: [(String, String, Bool)] = [
     ("http://along.example.com:4176", "/goal/event", false),
     ("https://user:pass@along.example.com:4176", "/goal/event", false),
     ("https://along.example.com/pair", "/goal/event", false),
-    ("https://172.32.0.1:4176", "/goal/event", false),
-    ("https://8.8.8.8:4176", "/goal/event", false),
+    ("https://172.32.0.1:4176", "/goal/event", true),
+    ("https://8.8.8.8:4176", "/goal/event", true),
     ("https://along..example.com:4176", "/goal/event", false),
     ("https://along.example.com:4176", "/not/whitelisted", false),
     ("https://along.example.com:4176", "/notifications/device", false),
@@ -227,7 +239,7 @@ let cases: [(String, Bool)] = [
     ("https://2130706433:4176", false),           // 整数 IP 形态：单段，拒绝
     ("https://192.168.1.2:4176", true),           // 私网 IPv4 行为不变
     ("https://172.16.0.9:4176", true),
-    ("https://8.8.8.8:4176", false),
+    ("https://8.8.8.8:4176", true),
 ]
 for (baseURL, expected) in cases {
     let accepted = AlongConnectionStore.exposeClean(["baseURL": baseURL, "fingerprint": fingerprint, "token": token]) != nil
@@ -275,7 +287,13 @@ let cases: [(String, String, String, String, Bool)] = [
     // token 仍须 64hex」的行号引用容易误读成入口也校验 token，此处按真实既有语义断言。
     ("https://along.example.com:4176", "/goal/event", good, String(repeating:"f",count:63), true),
     ("https://along.example.com:4176/", "/goal/event", good, tok, false), // path "/" 在入口守卫拒绝
-    ("https://8.8.8.8", "/goal/event", good, tok, false),            // 非私网数字 IP 在入口守卫拒绝
+    ("https://8.8.8.8", "/pair", "", "", true),
+    ("https://8.8.8.8", "/connection/verify", "", tok, true),
+    ("https://8.8.8.8", "/sync", "", tok, true),
+    ("https://8.8.8.8", "/sync/ack", "", tok, true),
+    ("https://8.8.8.8", "/events", "", tok, true),
+    ("https://100.64.0.1", "/sync", good, tok, false),
+    ("http://8.8.8.8", "/sync", "", tok, false),
 ]
 for (baseURL, path, fp, tk, expected) in cases {
     let ok = probe(["baseURL": baseURL, "fingerprint": fp, "token": tk, "path": path, "body": [:] as [String: Any]]) == expected
@@ -287,6 +305,19 @@ for (baseURL, path, fp, tk, expected) in cases {
     assert.match(output,/^ok https:\/\/along\.example\.com \/goal\/event$/m,'无端口域名要走通入口守卫');
     assert.match(output,/^ok https:\/\/along\.example\.com \/pair$/m,'配对端点在域名下仍可达');
   } finally { rmSync(dir,{recursive:true,force:true}); }
+});
+
+test('public IP uses system trust and preserves the Keychain scope across leaf rotation',{skip:!hasSwift},()=>{
+  const output=compileStore(`
+let token = "${'b'.repeat(64)}"
+let first = AlongConnectionStore.save(["baseURL":"https://8.8.8.8","token":token,"fingerprint":"${'A'.repeat(64)}","trustPolicy":AlongConnectionStore.legacyPinPolicy])
+let next = AlongConnectionStore.save(["baseURL":"https://8.8.8.8:443","token":token,"fingerprint":"${'C'.repeat(64)}"])
+let local = AlongConnectionStore.save(["baseURL":"https://192.168.1.2","token":token,"fingerprint":"${'A'.repeat(64)}","trustPolicy":AlongConnectionStore.systemTrustPolicy])
+print(first?["trustPolicy"] == AlongConnectionStore.systemTrustPolicy && first?["fingerprint"] == nil)
+print(first.flatMap(AlongConnectionStore.scopeSeed) != nil && first.flatMap(AlongConnectionStore.scopeSeed) == next.flatMap(AlongConnectionStore.scopeSeed))
+print(local?["trustPolicy"] == AlongConnectionStore.legacyPinPolicy && local?["fingerprint"] != nil)
+`);
+  assert.deepEqual(output.trim().split('\n'),['true','true','true']);
 });
 
 test('native rebuild linkage: bundled page cache marker and bundle version both moved',()=>{

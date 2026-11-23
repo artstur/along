@@ -295,16 +295,13 @@ test('Tier 2 隔离 Linux Compose：TLS 入口、双用户事件同步、后台�
   port=publishedPort();
   t.diagnostic('隔离栈已启动，检查 TLS、配对与容器重建');
 
-  // ---- 1. 长驻服务起来，3082 不对外 ----
+  // A running container can still be seeding the DSH profile. Wait for its
+  // private listener before inspecting the loaded profile.
   await until(()=>{
-    const result=compose(['ps','-q','superagent']);
-    const id=result.stdout.trim();
-    if (!id) return null;
-    // 注意：这里要用**原生** docker ps（不是 compose ps）——compose 的 ps 没有 --filter，
-    // 混用会把「容器在跑」误判成「没起来」，然后一直等到超时。
-    const inspect=spawnSync('docker',['ps','--filter',`id=${id}`,'--format','{{.State}}'],{encoding:'utf8'});
-    return inspect.stdout.includes('running')?id:null;
-  },300_000,'superagent 容器常驻');
+    const probe=compose(['exec','-T','host','node','-e',
+      'fetch("http://127.0.0.1:3082/",{signal:AbortSignal.timeout(2500)}).catch(()=>process.exit(1))']);
+    return probe.status===0;
+  },120_000,'superagent 回环监听与 profile 就绪');
 
   const dump=compose(['exec','-T','superagent','dsh','--profile','along','--dump-config']);
   assert.equal(dump.status,0,dump.stderr);

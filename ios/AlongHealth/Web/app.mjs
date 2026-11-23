@@ -1232,7 +1232,7 @@ function scrollAgentConversationToBottom() {
   });
 }
 function pairForm() {
-  // 连接指纹只在 Mac 私网（旧的叶指纹钉扎）需要；云端域名走系统信任评估，不再手抄叶指纹
+  // 连接指纹只在 Mac 私网（旧的叶指纹钉扎）需要；云端域名和公网 IPv4 走系统信任评估，不再手抄叶指纹
   // （docs/iphone-ca-profile-design.md §2.2/§7）。因此它不是必填项，提交时按主机形态校验。
   return `<form id="pair-form"><input name="baseURL" type="url" aria-label="Along 服务地址" placeholder="Along 服务地址" value="${esc(agentConfig.baseURL||'')}" required><input name="fingerprint" aria-label="连接指纹（仅 Mac 私网需要）" placeholder="连接指纹（仅 Mac 私网需要）" value="${esc(agentConfig.fingerprint||'')}"><input name="code" aria-label="一次性连接码" placeholder="一次性连接码" inputmode="numeric" required><button class="button" ${connectionBusy?'disabled':''}>${agentConfig.token?'重新配对':'连接 Along'}</button></form>`;
 }
@@ -1890,7 +1890,7 @@ app.addEventListener('submit', async event => {
       let runtime=agentRuntime;
       if (pairing) {
         const fingerprint=String(form.get('fingerprint')||'').trim().replace(/[^a-fA-F0-9]/g,'').toUpperCase();
-        // 只有 Mac 私网（旧的叶指纹钉扎）才需要叶指纹；云端域名走系统信任评估。
+        // 只有 Mac 私网（旧的叶指纹钉扎）才需要叶指纹；云端域名和公网 IPv4 走系统信任评估。
         // 这里不判断信任策略——那是原生的判定，网页只负责不把指纹当必填项。
         config=fingerprint?{baseURL,fingerprint}:{baseURL};
         const result=await agentCall(config,'/pair',{code:String(form.get('code')||'').trim()});

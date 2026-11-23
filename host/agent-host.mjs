@@ -1,10 +1,12 @@
 import {rememberDailyAction,includeEarlierDailyAction,pruneDailyActions} from './daily-action-history.mjs';
-import {createServer} from 'node:https';
+import {createServer as createHttpsServer} from 'node:https';
+import {createServer as createHttpServer} from 'node:http';
+import {isIPv4} from 'node:net';
 import {randomBytes, randomInt, createHash} from 'node:crypto';
 import {execFileSync} from 'node:child_process';
 import {networkInterfaces} from 'node:os';
-import {join} from 'node:path';
-import {mkdirSync, readdirSync, readFileSync, existsSync, chmodSync} from 'node:fs';
+import {isAbsolute,join} from 'node:path';
+import {mkdirSync, readdirSync, readFileSync, existsSync, chmodSync, lstatSync, unlinkSync} from 'node:fs';
 import {stateDir,loadUsers,loadPairings,savePairings,findPairing,consumeUserCode,failLimitFromEnv,newBoundId,CODE_TTL_MS,
   BINDING_TTL_MS,BINDING_RENEW_AHEAD_MS,readPairings,withPairingsLock} from './pairing.mjs';
 import {routeHealthChange, validateGoalReply, normalizeGoalReply, validateTaskReply} from '../web/goal-agent-core.mjs';
@@ -37,6 +39,12 @@ const dshRunnerToken=runnerTokenFile?readBridgeToken(runnerTokenFile):null;
 if (dshRunnerURL&&!dshRunnerToken) throw Error('云端 DSH runner 需要 runner-token：设置 ALONG_RUNNER_TOKEN_FILE 后重启 Along 服务');
 const multiUser=loadUsers(dir)!==null;
 if (dshRunnerURL&&!multiUser) throw Error('云端 DSH runner 需要状态目录中的 users.json');
+// The proxy transport exists only in the cloud stack. There is no cleartext TCP listener.
+const proxySocket=process.env.ALONG_AGENT_PROXY_SOCKET;
+if (proxySocket&&(!dshRunnerURL||!isAbsolute(proxySocket))) {
+  throw Error('代理入口需要云端 DSH runner 和绝对 Unix socket 路径');
+}
+const createServer=proxySocket?createHttpServer:createHttpsServer;
 // OKX 密钥库启动守卫（G-9）：云端多用户形态不允许携带 Mac 时代的可解密 OKX vault——vault 文件名
 // 与 okx-connection.mjs 的识别同一模式（/^[0-9a-f]{64}\.json$/）；只有 master.key 的空库不算
 // （没有密文可解）。不设豁免开关；Mac 本地形态不受影响。守卫放在创建 okxConnection 之前，拒即退出。
@@ -68,13 +76,13 @@ const tlsCN=process.env.ALONG_TLS_CN||'Along Local Agent';
 // 详见 docs/iphone-ca-profile-design.md §3.1/§7「服务端 TLS」与 host/tls-material.mjs。
 // 本地单用户形态（Mac）保持既有自签行为不变——这是 Mac 兼容路径，不受云端策略影响。
 // 形态判据沿用既有的云端 Runner 配置（ALONG_DSH_RUNNER_URL），不新增安全降级开关。
-const cloudTls=dshRunnerURL?loadCloudTlsMaterial({stateDir:dir,host:tlsCN}):null;
+const cloudTls=dshRunnerURL&&!proxySocket?loadCloudTlsMaterial({stateDir:dir,host:tlsCN}):null;
 let tlsKey,tlsCert,fingerprint,certExpiry;
 if (cloudTls) {
   tlsKey=cloudTls.key;tlsCert=cloudTls.cert;
   fingerprint=cloudTls.fingerprint;
   certExpiry=cloudTls.notAfter;
-} else {
+} else if (!proxySocket) {
   if (!existsSync(key) || !existsSync(cert)) {
     execFileSync('openssl', ['req','-x509','-newkey','rsa:3072','-nodes','-keyout',key,'-out',cert,'-days',String(tlsDays),'-subj',`/CN=${tlsCN}`]);
     chmodSync(key,0o600);
@@ -515,12 +523,15 @@ function normalizeTaskRun(run) {
     return {...run,status:'blocked',statusLabel:'输出需要重试',result:null,error:`DSH 已完成，但输出校验失败：${error.message}`};
   }
 }
-const server=createServer({key:tlsKey,cert:tlsCert},async(req,res)=>{
+const server=createServer(proxySocket?{}:{key:tlsKey,cert:tlsCert},async(req,res)=>{
   try {
     const path=new URL(req.url,'https://along.local').pathname;
     if (req.method==='GET' && path==='/health') return respond(res,200,{service:'along-agent-host',ready:true,contextReviewVersion:1});
     if (req.method==='POST' && path==='/pair') {
-      const source=normalizeSource(req.socket.remoteAddress);
+      // Only the nginx/Host Unix socket transport trusts this header. nginx replaces
+      // the incoming value with its TCP peer address before forwarding.
+      const source=proxySocket?req.headers['x-along-client-ip']:normalizeSource(req.socket.remoteAddress);
+      if (proxySocket&&!isIPv4(source)) return respond(res,400,{error:'代理来源无效'});
       // 准入预检（G-14，读体之前）：合法客户端只有 iOS 原生与管理员 curl，两者都固定
       // application/json 且不发 Origin/Referer（同仓库先例 host/server.mjs:16）。跨站 text/plain
       // 简单请求从此进不了验码逻辑；两种预检都不计入失败窗口。
@@ -734,7 +745,7 @@ server.maxConnections=64;
 // 按归一化 remoteAddress 计数，单 IP 并发超过 24 即销毁新连接（在握手开始前），'close' 时递减。
 const PER_IP_CONNECTIONS=24;
 const connectionsBySource=new Map();
-server.on('connection',socket=>{
+if (!proxySocket) server.on('connection',socket=>{
   const source=normalizeSource(socket.remoteAddress);
   const count=(connectionsBySource.get(source)??0)+1;
   if (count>PER_IP_CONNECTIONS) { socket.destroy(); return; }
@@ -755,7 +766,11 @@ const sourceEventTimer=setInterval(()=>{
   refreshPairings();
   for (const entry of pairings) sourceEvents.pump({userId:entry.user_id,deviceId:entry.device_id});
 },3000);sourceEventTimer.unref();
-server.listen(port,lanHost,()=>{
+function announce() {
+  if (proxySocket) {
+    console.log('Along Host 已通过私有 Unix socket 连接 nginx');
+    return;
+  }
   console.log(`Along 服务: https://${lanHost}:${port}`);
   console.log(`证书指纹 SHA-256: ${fingerprint}`);
   console.log(`证书到期: ${certExpiry}`);
@@ -764,6 +779,15 @@ server.listen(port,lanHost,()=>{
   // 通用码只在本地单用户形态打印；多用户形态发码走 host/pair-code.mjs（码不落容器日志，§3.7）。
   if (code) console.log(`一次性配对码: ${code} (15 分钟有效)`);
   console.log('仅用于可信任的同一 Wi-Fi；退出请按 Ctrl+C。');
-});
+}
+if (proxySocket) {
+  // Compose owns one Host for this private volume. Remove the stale socket from
+  // an unclean container shutdown. Never unlink a regular file or symlink.
+  if (lstatSync(proxySocket,{throwIfNoEntry:false})?.isSocket()) unlinkSync(proxySocket);
+  server.listen({path:proxySocket,readableAll:true,writableAll:true},announce);
+  process.on('SIGTERM',()=>server.close(()=>process.exit(0)));
+} else {
+  server.listen(port,lanHost,announce);
+}
 server.on('close',()=>{clearInterval(sourceEventTimer);sourceEvents.close();});
 process.on('SIGINT',()=>server.close(()=>process.exit(0)));

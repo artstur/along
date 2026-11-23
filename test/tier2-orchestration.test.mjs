@@ -231,7 +231,7 @@ test('host：真实就绪探针走 along-status-probe 契约（200 + ready:true�
     '401/403 必须给出配置提示，不能当成「未就绪」静默处理');
 });
 
-test('host：云端形态判据不新增 env 开关，靠 users.json 的存在（不引入安全降级开关）',()=>{
+test('host：云端 Runner 仍需 users.json，公网代理只通过 Unix socket 提供服务',()=>{
   // 仓库纪律：不新增安全降级开关（docs/iphone-ca-profile-design.md §3.1、
   // docs/cloud-security-hardening.md SD-H7、AGENTS.md §4）。users.json 的存在性
   // 已经是云端形态的既定判据。
@@ -239,8 +239,10 @@ test('host：云端形态判据不新增 env 开关，靠 users.json 的存在�
   // 判据是**云端 Runner 配置**（docs/iphone-ca-profile-design.md §3.1 原文：「以现有云端
   // Runner 配置识别云端形态……不新增安全降级开关」）。Tier 2 打开后 runner 服务仍留在
   // compose 里作为显式回退目标，所以这个判据在 Tier 2 下同样成立。
-  assert.ok(hostSrc.includes('const cloudTls=dshRunnerURL?loadCloudTlsMaterial'),
-    'CA 材料加载仍由云端 Runner 配置判定（§3.1 的既定判据）');
+  assert.ok(hostSrc.includes('const cloudTls=dshRunnerURL&&!proxySocket?loadCloudTlsMaterial'),
+    '云端直连加载 CA 材料，独立 nginx 入口才交由代理终止 TLS');
+  assert.ok(hostSrc.includes('if (proxySocket&&(!dshRunnerURL||!isAbsolute(proxySocket)))'),
+    'Unix socket 入口须配置云端 Runner 与绝对路径');
   assert.ok(hostSrc.includes('if (dshRunnerURL&&!multiUser) throw Error'),
     '配置了 runner 就必须有 users.json（多用户静态用户表）');
   // Tier 2 的叠加文件**不能**清掉 runner URL——清掉会让 Host 静默退回现场自签（安全降级）。

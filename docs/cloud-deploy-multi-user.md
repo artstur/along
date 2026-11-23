@@ -6,6 +6,14 @@
 >
 > 设计基线（2026-11-20，行号以当前 `main` 工作树为准）：`along` 仓库本目录、`along-superagent` 相邻仓库。基线门禁：`npm run check` 通过（node --check 全部 `web/*.mjs`、`web/sw.js`、`host/*.mjs`、`tools/build.mjs` + `node --test test/*.test.mjs`，509 条测试全绿，本轮已实际运行）。
 
+## 固定公网 IPv4 直连
+
+固定公网 IPv4 部署按 [公网 IP 运维步骤](../deploy/README.md#固定公网-ipv4-直连) 执行。iPhone 配对、前台请求与后台同步共用原生 HTTPS 入口校验，公网 IPv4 由系统核验 IP SAN、证书链与有效期。原有 RFC1918 叶指纹钉扎和 DNS 系统信任连接继续沿用。
+
+Tier 2 追加 Compose 叠加文件，由 Along 独立 nginx 终止 TLS。公网 TCP 80 仅用于 HTTP-01，HTTPS 转发通过仅 Host 和 nginx 挂载的 Unix socket，Host 按 nginx 覆写的来源地址继续分配配对失败窗口。公网 IP 证书使用 Let’s Encrypt 的 `shortlived` profile。签发和 nginx 当前证书分别存放；定期续期后先校验证书、测试 nginx 配置，再重载并从 HTTPS 入口核验叶证书。失败保留上一份已加载的有效证书并记录告警。
+
+隔离验收覆盖原生连接守卫、同 IP 换叶后原配对可用、证书与重载失败回退、HTTP-01 路径以及 Host 内部端口未对外发布。公共 CA、真 iPhone 前后台同步和实际续期由部署环境另行验收。
+
 ## 0. 目标
 
 1. 2 个用户各自用 iPhone（App 内置页面）连到**同一台云主机**上的 Along 服务，互不干扰：各自的配对 token、目标空间、每日委托索引、通知登记、OKX 连接缓存彼此隔离。

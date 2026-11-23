@@ -9,6 +9,7 @@
 import {execFileSync} from 'node:child_process';
 import {mkdirSync,writeFileSync,readFileSync,symlinkSync,chmodSync,mkdtempSync,renameSync,rmdirSync} from 'node:fs';
 import {join} from 'node:path';
+import {isIP} from 'node:net';
 
 function openssl(args,cwd) {
   return execFileSync('openssl',args,{cwd,encoding:'utf8',stdio:['ignore','pipe','pipe']});
@@ -23,7 +24,7 @@ export function makeTestCa(root,host='along.test.local') {
     '-addext','keyUsage=critical,keyCertSign,cRLSign'],root);
   openssl(['req','-new','-newkey','rsa:2048','-nodes','-keyout','leaf.key','-out','leaf.csr','-subj',`/CN=${host}`],root);
   writeFileSync(join(root,'ext.cnf'),
-    'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:'+host+'\n');
+    `basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=${isIP(host)?'IP':'DNS'}:${host}\n`);
   openssl(['x509','-req','-in','leaf.csr','-CA','ca.crt','-CAkey','ca.key','-CAcreateserial',
     '-out','leaf.crt','-days','90','-extfile','ext.cnf'],root);
   return root;
@@ -63,7 +64,7 @@ export function rotateLeaf(root,host='along.test.local',serial='rotated-1') {
   openssl(['req','-new','-newkey','rsa:2048','-nodes','-keyout',join(dir,'leaf.key'),
     '-out',join(dir,'leaf.csr'),'-subj',`/CN=${host}`],root);
   writeFileSync(join(dir,'ext.cnf'),
-    'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:'+host+'\n');
+    `basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=${isIP(host)?'IP':'DNS'}:${host}\n`);
   openssl(['x509','-req','-in',join(dir,'leaf.csr'),'-CA',join(root,'ca.crt'),'-CAkey',join(root,'ca.key'),
     '-CAcreateserial','-out',join(dir,'leaf.crt'),'-days','90','-extfile',join(dir,'ext.cnf')],root);
   return dir;
