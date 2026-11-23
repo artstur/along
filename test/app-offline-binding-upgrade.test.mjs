@@ -183,3 +183,12 @@ test('network recovery continues the same repaired user cache and cursor without
   assert.ok(calls.some(call=>call.path==='/sync'&&call.body.after_seq===7));
   assert.ok(!calls.some(call=>call.path==='/events'));
 });
+
+test('native-proven Build78 recovery renders the original offline workspace before the Host connection request settles',async()=>{
+  const original=seed();original[AGENT]=JSON.stringify(CURRENT);original[EVENT]=JSON.stringify({userId:USER,bindingScopeId:OLD.token});
+  const app=await start(original,{owner:{baseURL:OLD.baseURL,bindingScopeId:CURRENT.bindingScopeId,userId:USER},request:()=>new Promise(()=>{})});
+  assert.ok(app.calls.some(call=>call.path==='/connection/status'),'the real Host request is in flight and remains pending');
+  assert.equal(app.read(EVENT).bindingScopeId,CURRENT.bindingScopeId,'native ownership already restored the event binding');
+  await observableWorkspace(app);
+  preserved(app,original);
+});
