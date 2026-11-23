@@ -83,9 +83,22 @@ function phoneCall(port,path,{method='GET',body,headers={}}={}) {
     throw error;
   });
 }
-async function waitReady(port,label,probe) {
+function stopChild(child) {
+  if (child.exitCode!==null||child.signalCode!==null) return Promise.resolve();
+  return new Promise(resolve=>{
+    let timer;
+    const done=()=>{clearTimeout(timer);resolve();};
+    child.once('exit',done);
+    child.kill('SIGINT');
+    timer=setTimeout(()=>{child.kill('SIGKILL');},3_000);
+  });
+}
+async function waitReady(port,label,probe,child) {
   const deadline=Date.now()+15_000;
   while (Date.now()<deadline) {
+    if (child&&(child.exitCode!==null||child.signalCode!==null)) {
+      throw new Error(`${label} exited before ready (code=${child.exitCode}, signal=${child.signalCode})`);
+    }
     try { const response=await (probe??(path=>plainRequest(port,path)))('/health'); if (response.status===200) return; } catch { /* 还没起来 */ }
     await sleep(120);
   }
@@ -151,12 +164,9 @@ async function spawnMyRunner({dir,script=nodeFakeDsh,fixture={},env={}}) {
   const output=[];
   child.stdout.on('data',data=>output.push(String(data)));
   child.stderr.on('data',data=>output.push(String(data)));
-  await waitReady(port,'agent runner');
-  const stop=()=>new Promise(resolve=>{
-    child.once('exit',()=>resolve());
-    child.kill('SIGINT');
-    setTimeout(()=>{try{child.kill('SIGKILL');}catch{}resolve();},3_000).unref();
-  });
+  const stop=()=>stopChild(child);
+  try { await waitReady(port,'agent runner',undefined,child); }
+  catch(error) { await stop(); throw error; }
   return {port,token:'ab'.repeat(32),callCount:()=>readFileSync(logFile,'utf8').length,
     output:()=>output.join(''),stop};
 }
@@ -516,24 +526,23 @@ async function spawnHost({dir,runnerPort,extraEnv={}}) {
   child.stdout.on('data',data=>output.push(String(data)));
   child.stderr.on('data',data=>output.push(String(data)));
   const text=()=>output.join('');
-  await waitReady(port,'host',path=>phoneCall(port,path));
-  assert.doesNotMatch(text(),/一次性配对码/);
-  const paired=await phoneCall(port,'/pair',{method:'POST',body:{code}});
-  assert.equal(paired.status,200);
-  const stop=()=>new Promise(resolve=>{
-    child.once('exit',()=>resolve());
-    child.kill('SIGINT');
-    setTimeout(()=>{try{child.kill('SIGKILL');}catch{}resolve();},3_000).unref();
-  });
-  return {port,token:paired.json.token,
-    userId:()=>JSON.parse(readFileSync(join(dir,'pairings.json'),'utf8'))[0].user_id,text,stop};
+  const stop=()=>stopChild(child);
+  try {
+    await waitReady(port,'host',path=>phoneCall(port,path),child);
+    assert.doesNotMatch(text(),/一次性配对码/);
+    const paired=await phoneCall(port,'/pair',{method:'POST',body:{code}});
+    assert.equal(paired.status,200);
+    return {port,token:paired.json.token,
+      userId:()=>JSON.parse(readFileSync(join(dir,'pairings.json'),'utf8'))[0].user_id,text,stop};
+  } catch(error) { await stop(); throw error; }
 }
 
 test('host：runner 回执 requestId 不符 → 502；runner 5xx/坏 JSON → 502 且文案透传；runner 自身 blocked 原样交付',async()=>{
   const dir=mkdtempSync(join(tmpdir(),'along-host-contract-mismatch-'));
-  const runner=await scenarioStubRunner();
-  const host=await spawnHost({dir,runnerPort:runner.port});
+  let runner,host;
   try {
+    runner=await scenarioStubRunner();
+    host=await spawnHost({dir,runnerPort:runner.port});
     const auth={authorization:`Bearer ${host.token}`};
     const goals=(requestId,extra={})=>phoneCall(host.port,'/super-agent/goals',{method:'POST',
       body:{requestId,...goalInput,runtime:DSH_RUNTIME,...extra},headers:auth});
@@ -568,27 +577,29 @@ test('host：runner 回执 requestId 不符 → 502；runner 5xx/坏 JSON → 50
     assert.match(blocked.json.run.error,/长时间没有返回结果/);
     assert.equal(blocked.json.run.result,null);
     assert.equal(safeGoalSuperAgentRun(blocked.json.run)?.status,'blocked');
-  } finally { await host.stop(); await runner.close(); rmSync(dir,{recursive:true,force:true}); }
+  } finally { await host?.stop(); await runner?.close(); rmSync(dir,{recursive:true,force:true}); }
 });
 
 test('host：runner 进程不可达 → 502「云端 DSH runner 暂不可用」',async()=>{
   const dir=mkdtempSync(join(tmpdir(),'along-host-contract-dead-'));
-  const deadPort=await freePort();
-  const host=await spawnHost({dir,runnerPort:deadPort});
+  let host;
   try {
+    const deadPort=await freePort();
+    host=await spawnHost({dir,runnerPort:deadPort});
     const response=await phoneCall(host.port,'/super-agent/goals',{method:'POST',
       body:{requestId:'sc-dead-1',...goalInput,runtime:DSH_RUNTIME},
       headers:{authorization:`Bearer ${host.token}`}});
     assert.equal(response.status,502);
     assert.match(response.json.error,/云端 DSH runner 暂不可用/);
-  } finally { await host.stop(); rmSync(dir,{recursive:true,force:true}); }
+  } finally { await host?.stop(); rmSync(dir,{recursive:true,force:true}); }
 });
 
 test('host：ALONG_EVENT_INGEST=on 时 DSH 分支先 409「已切换新链路」，不触达 runner（开关语义不变）',async()=>{
   const dir=mkdtempSync(join(tmpdir(),'along-host-contract-409-'));
-  const runner=await scenarioStubRunner();
-  const host=await spawnHost({dir,runnerPort:runner.port,extraEnv:{ALONG_EVENT_INGEST:'on'}});
+  let runner,host;
   try {
+    runner=await scenarioStubRunner();
+    host=await spawnHost({dir,runnerPort:runner.port,extraEnv:{ALONG_EVENT_INGEST:'on'}});
     const auth={authorization:`Bearer ${host.token}`};
     for (const path of ['/super-agent/goals','/super-agent/tasks']) {
       const response=await phoneCall(host.port,path,{method:'POST',
@@ -597,23 +608,24 @@ test('host：ALONG_EVENT_INGEST=on 时 DSH 分支先 409「已切换新链路」
       assert.match(response.json.error,/已切换新链路/);
     }
     assert.equal(runner.calls.length,0,'409 必须发生在触达 runner 之前');
-  } finally { await host.stop(); await runner.close(); rmSync(dir,{recursive:true,force:true}); }
+  } finally { await host?.stop(); await runner?.close(); rmSync(dir,{recursive:true,force:true}); }
 });
 
 test('host：设置 ALONG_DSH_RUNNER_URL 后 Kimi 运行时仍走 Kimi 路径，不误触 runner',async()=>{
   const dir=mkdtempSync(join(tmpdir(),'along-host-contract-kimi-'));
-  const runner=await scenarioStubRunner();
-  // ALONG_KIMI_CODE_URL/TOKEN 指向死端口与哑令牌：Kimi 失败是确定性的，且不读真实本机 Kimi 凭证。
-  const host=await spawnHost({dir,runnerPort:runner.port,
-    extraEnv:{ALONG_KIMI_CODE_URL:'http://127.0.0.1:9',ALONG_KIMI_CODE_TOKEN:'test-dummy'}});
+  let runner,host;
   try {
+    runner=await scenarioStubRunner();
+    // ALONG_KIMI_CODE_URL/TOKEN 指向死端口与哑令牌：Kimi 失败是确定性的，且不读真实本机 Kimi 凭证。
+    host=await spawnHost({dir,runnerPort:runner.port,
+      extraEnv:{ALONG_KIMI_CODE_URL:'http://127.0.0.1:9',ALONG_KIMI_CODE_TOKEN:'test-dummy'}});
     const response=await phoneCall(host.port,'/super-agent/goals',{method:'POST',
       body:{requestId:'sc-kimi-1',...goalInput,runtime:KIMI_RUNTIME},
       headers:{authorization:`Bearer ${host.token}`}});
     assert.equal(response.status,502);
     assert.match(response.json.error,/Kimi Code Web Server/,'失败必须来自 Kimi 路径本身');
     assert.equal(runner.calls.length,0,'runner 分流不得劫持 Kimi 运行时的请求');
-  } finally { await host.stop(); await runner.close(); rmSync(dir,{recursive:true,force:true}); }
+  } finally { await host?.stop(); await runner?.close(); rmSync(dir,{recursive:true,force:true}); }
 });
 
 test('host：ALONG_RUNNER_TOKEN_FILE 存在但内容不是 64hex → 拒绝启动',()=>{

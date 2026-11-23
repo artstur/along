@@ -72,7 +72,8 @@ export function rotateLeaf(root,host='along.test.local',serial='rotated-1') {
 
 // 一步到位：给一个云端状态目录铺好测试 CA 材料，返回可用的主机名。
 export function provideCloudCa(stateDir,{host='along.test.local',serial='test-1',baseDir}={}) {
-  const ca=makeTestCa(join(baseDir??stateDir,'..','test-ca'),host);
+  // Each state owns its CA; sibling tmp states run concurrently in Node's test runner.
+  const ca=makeTestCa(join(baseDir??stateDir,'test-ca'),host);
   stageRelease(stateDir,ca,{serial});
   return {ca,host,serial};
 }
