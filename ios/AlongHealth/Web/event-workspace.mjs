@@ -5,13 +5,14 @@ import {safeAdaptiveLayout} from './adaptive-ui.mjs';
 import {safeRecommendation} from './recommendations.mjs';
 import {safeDataSources} from './data-sources.mjs';
 import {taskResultRelevant,resultEvidence,validResultEvidence} from './task-results.mjs';
+import {safeResultPresentation,RESULT_TEXT_LIMIT} from './task-result-view.mjs';
 
 const id = value => typeof value==='string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$/.test(value);
 const record = value => value!==null && typeof value==='object' && !Array.isArray(value);
 const text = (value,max) => typeof value==='string' && value.trim().length>0 && value.length<=max;
 const version = value => Number.isSafeInteger(value) && value>=0;
 const time = value => typeof value==='string' && Number.isFinite(Date.parse(value));
-const empty = userId => ({version:1,recommendationsVersion:1,conversationVersion:1,dataSourcesVersion:1,executionVersion:2,taskCapabilityVersion:1,userId,cursor:0,goals:{},messages:{},drafts:{},activeGoalId:null,conversationId:null,returnGoalId:null});
+const empty = userId => ({version:1,recommendationsVersion:1,conversationVersion:1,dataSourcesVersion:1,executionVersion:2,taskCapabilityVersion:1,resultPresentationVersion:1,userId,cursor:0,goals:{},messages:{},drafts:{},activeGoalId:null,conversationId:null,returnGoalId:null});
 
 function absoluteReminderTime(value) {
   if (!time(value)||!/^\d{4}-\d\d-\d\dT(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)$/.test(value)) return false;
@@ -147,13 +148,13 @@ export function safeWorkspaceGoal(snapshot) {
 
 function safeMessage(message,item) {
   if (!record(message)||!text(message.id,300)||!(id(message.eventId)||item.payload.presentation==='execution'&&eventId(message.eventId))||!['user','assistant','system'].includes(message.role)||
-      !['inbound','outbound'].includes(message.direction)||!text(message.text,2000)||!version(message.seq)||message.seq<1||
+      !['inbound','outbound'].includes(message.direction)||!version(message.seq)||message.seq<1||
       (message.causationId!==undefined&&!id(message.causationId))||
       (message.userId!==undefined&&message.userId!==item.userId)||
       (item.payload.conversation_id!==undefined&&!id(item.payload.conversation_id))||
       (message.audience!==undefined&&!['conversation','background'].includes(message.audience))||
       (item.payload.audience!==undefined&&(!['conversation','background'].includes(item.payload.audience)||message.audience!==undefined&&message.audience!==item.payload.audience))) throw Error('对话同步格式不正确');
-  return {id:message.id,eventId:message.eventId,role:message.role,text:message.text,seq:message.seq,
+  const clean={id:message.id,eventId:message.eventId,role:message.role,text:message.text,seq:message.seq,
     goalId:item.goalId,conversationId:item.payload.conversation_id??message.causationId??(item.payload.presentation==='execution'?undefined:message.eventId),
     replyToMessageId:message.replyToMessageId,presentation:item.payload.presentation,
     audience:message.audience??item.payload.audience??(item.payload.presentation==='execution'?'background':'conversation'),
@@ -162,7 +163,36 @@ function safeMessage(message,item) {
     notificationEventId:eventId(item.payload.notification?.event_id)&&['recommendation_ready','task_result'].includes(item.payload.notification.kind)
       ?item.payload.notification.event_id:undefined,
     ...(version(item.payload.notification?.revision)?{notificationRevision:item.payload.notification.revision}:{}),
+    ...(version(item.payload.task_execution_revision)&&item.payload.task_execution_revision>0?{taskExecutionRevision:item.payload.task_execution_revision}:{}),
     ...(resultEvidence(item.payload)?{resultEvidence:resultEvidence(item.payload)}:{}),status:'received'};
+  const goal=item.goalId?safeWorkspaceGoal(item.payload.snapshot):undefined,task=goal?.tasks.find(task=>task.id===clean.taskId);
+  const scopedResult=storedResultBody(clean,goal,task);
+  if(!text(message.text,scopedResult?RESULT_TEXT_LIMIT:2000))throw Error('对话同步格式不正确');
+  const presentation=scopedResult?safeResultPresentation(item.payload.result_presentation):null;
+  if(presentation)clean.resultPresentation=presentation;
+  return clean;
+}
+
+// A replay attaches the current task snapshot, whose recent 20 receipts may no longer contain this
+// historical result. Preserve host-bound occurrence metadata; current display/notification relevance
+// remains stricter and is evaluated separately by taskResultBodyRelevant/taskResultRelevant.
+function storedResultBody(message,goal,task) {
+  const e=message.resultEvidence;
+  const bound=message.role==='assistant'&&message.status==='received'&&message.audience==='background'&&
+    goal&&goal.id===message.goalId&&task&&task.goalId===goal.id&&task.id===message.taskId&&
+    eventId(message.notificationEventId)&&message.notificationEventId===message.eventId&&
+    Number.isSafeInteger(message.notificationRevision)&&message.notificationRevision>0&&message.notificationRevision<=task.revision&&
+    Number.isSafeInteger(message.taskExecutionRevision)&&message.taskExecutionRevision>0&&message.taskExecutionRevision<=message.notificationRevision&&
+    validResultEvidence(e);
+  if(!bound)return false;
+  if(message.notificationRevision<task.revision)return true;
+  return !!task.execution?.records.some(item=>e.kind==='calculation'
+      ?item.kind==='calculation'&&item.outcome==='calculated'&&item.calculationReceiptId===e.id
+      :item.kind==='research'&&item.outcome==='researched'&&item.recommendationEventId===e.id);
+}
+function cachedResultBody(message,goals) {
+  const goal=goals[message.goalId],task=goal?.tasks.find(task=>task.id===message.taskId);
+  return storedResultBody(message,goal,task);
 }
 
 const freshResult = value => {
@@ -206,12 +236,16 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
       }
       let migratedReceipt=false;
       for (const [key,message] of Object.entries(saved.messages)) {
-        if (!record(message)||message.eventId!==key||!text(message.text,2000)||
+        if (!record(message)||message.eventId!==key||!text(message.text,cachedResultBody(message,saved.goals)?RESULT_TEXT_LIMIT:2000)||
           !['user','assistant','system'].includes(message.role)||(message.goalId!==undefined&&!id(message.goalId))) throw Error('bad cache');
         if (message.audience!==undefined&&!['conversation','background'].includes(message.audience)) throw Error('bad cache');
         if (message.recommendation!==undefined) {
           const r=message.role==='assistant'&&message.goalId&&safeRecommendation(message.recommendation);
           if (r) message.recommendation=r; else delete message.recommendation;
+        }
+        if(message.resultPresentation!==undefined) {
+          const presentation=cachedResultBody(message,saved.goals)&&safeResultPresentation(message.resultPresentation);
+          if(presentation)message.resultPresentation=presentation;else delete message.resultPresentation;
         }
         if(message.resultEvidence!==undefined&&!validResultEvidence(message.resultEvidence))delete message.resultEvidence;
         if(message.notificationRevision!==undefined&&!version(message.notificationRevision))delete message.notificationRevision;
@@ -236,6 +270,7 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
       if (saved.recommendationsVersion!==1&&(!version(saved.recommendationReplayAfter)||saved.recommendationReplayAfter>saved.cursor)) saved.recommendationReplayAfter=0;
       if (saved.conversationVersion!==1&&(!version(saved.conversationReplayAfter)||saved.conversationReplayAfter>saved.cursor)) saved.conversationReplayAfter=0;
       if (saved.taskCapabilityVersion!==1&&(!version(saved.taskCapabilityReplayAfter)||saved.taskCapabilityReplayAfter>saved.cursor)) saved.taskCapabilityReplayAfter=0;
+      if (saved.resultPresentationVersion!==1&&(!version(saved.resultPresentationReplayAfter)||saved.resultPresentationReplayAfter>saved.cursor)) saved.resultPresentationReplayAfter=0;
       if (saved.executionVersion!==2) {
         if(saved.executionReplayVersion!==2||!version(saved.executionReplayAfter)||saved.executionReplayAfter>saved.cursor)saved.executionReplayAfter=0;
         saved.executionReplayVersion=2;
@@ -370,11 +405,12 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
       // Replay once from the durable outbox, preserving the acknowledged cursor and drafts.
       const replayConversation=state.conversationVersion!==1;
       const replaySources=state.dataSourcesVersion!==1;
-      const replay=state.recommendationsVersion!==1||replayConversation||replaySources||state.executionVersion!==2||state.taskCapabilityVersion!==1;
+      const replayResults=state.resultPresentationVersion!==1;
+      const replay=state.recommendationsVersion!==1||replayConversation||replaySources||state.executionVersion!==2||state.taskCapabilityVersion!==1||replayResults;
       // An older migration may already be part-way through. A newly added projection
       // still needs its earlier pages, so all pending migrations share the earliest cursor.
       const replayCursors=[...(state.recommendationsVersion!==1?[state.recommendationReplayAfter??0]:[]),
-        ...(replayConversation?[state.conversationReplayAfter??0]:[]),...(replaySources?[state.dataSourcesReplayAfter??0]:[]),...(state.executionVersion!==2?[state.executionReplayAfter??0]:[]),...(state.taskCapabilityVersion!==1?[state.taskCapabilityReplayAfter??0]:[])];
+        ...(replayConversation?[state.conversationReplayAfter??0]:[]),...(replaySources?[state.dataSourcesReplayAfter??0]:[]),...(state.executionVersion!==2?[state.executionReplayAfter??0]:[]),...(state.taskCapabilityVersion!==1?[state.taskCapabilityReplayAfter??0]:[]),...(replayResults?[state.resultPresentationReplayAfter??0]:[])];
       const after=replay?Math.min(...replayCursors):state.cursor;
       const page=await agentCall(config,'/sync',{after_seq:after,limit:50,conversation_version:1,
         ...(onNotifications?{notificationFallback:true,notificationReceipts:receipts}:{})});
@@ -392,7 +428,7 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
       if (receipts.length) next.notificationReceipts=next.notificationReceipts.filter(id=>!receipts.includes(id));
       if (page.items.length===0) {
         if (page.nextCursor!==undefined) throw Error('同步分页游标不正确');
-        if (replay) {next.recommendationsVersion=1;next.conversationVersion=1;next.dataSourcesVersion=1;next.executionVersion=2;next.taskCapabilityVersion=1;delete next.taskCapabilityReplayAfter;delete next.recommendationReplayAfter;delete next.conversationReplayAfter;delete next.dataSourcesReplayAfter;delete next.executionReplayAfter;delete next.executionReplayVersion;}
+        if (replay) {next.recommendationsVersion=1;next.conversationVersion=1;next.dataSourcesVersion=1;next.executionVersion=2;next.taskCapabilityVersion=1;next.resultPresentationVersion=1;delete next.resultPresentationReplayAfter;delete next.taskCapabilityReplayAfter;delete next.recommendationReplayAfter;delete next.conversationReplayAfter;delete next.dataSourcesReplayAfter;delete next.executionReplayAfter;delete next.executionReplayVersion;}
         if (replay||fallbacks.length||receipts.length) save(next);
         break;
       }
@@ -430,8 +466,8 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
       restoreSelection(next);
       next.cursor=Math.max(next.cursor,previous);next.pendingAck=seqs;
       if (replay) {
-        if (page.nextCursor===undefined) {next.recommendationsVersion=1;next.conversationVersion=1;next.dataSourcesVersion=1;next.executionVersion=2;next.taskCapabilityVersion=1;delete next.taskCapabilityReplayAfter;delete next.recommendationReplayAfter;delete next.conversationReplayAfter;delete next.dataSourcesReplayAfter;delete next.executionReplayAfter;delete next.executionReplayVersion;}
-        else {next.recommendationReplayAfter=previous;if(replayConversation)next.conversationReplayAfter=previous;if(replaySources)next.dataSourcesReplayAfter=previous;if(state.executionVersion!==2)next.executionReplayAfter=previous;if(state.taskCapabilityVersion!==1)next.taskCapabilityReplayAfter=previous;}
+        if (page.nextCursor===undefined) {next.recommendationsVersion=1;next.conversationVersion=1;next.dataSourcesVersion=1;next.executionVersion=2;next.taskCapabilityVersion=1;next.resultPresentationVersion=1;delete next.resultPresentationReplayAfter;delete next.taskCapabilityReplayAfter;delete next.recommendationReplayAfter;delete next.conversationReplayAfter;delete next.dataSourcesReplayAfter;delete next.executionReplayAfter;delete next.executionReplayVersion;}
+        else {next.recommendationReplayAfter=previous;if(replayConversation)next.conversationReplayAfter=previous;if(replaySources)next.dataSourcesReplayAfter=previous;if(state.executionVersion!==2)next.executionReplayAfter=previous;if(state.taskCapabilityVersion!==1)next.taskCapabilityReplayAfter=previous;if(replayResults)next.resultPresentationReplayAfter=previous;}
       }
       save(next);onChange();
       // Cache commit precedes ack. A failed ack is retried before pulling further, without replaying data.
