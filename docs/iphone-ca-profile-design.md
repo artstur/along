@@ -267,6 +267,10 @@ hermes-renren 补充更正：其复核认为 VPS Trash 的两把同名测试 CA 
 
 范围与实施顺序：先用真实 `web/app.mjs` 的 DOM 启动、延后原生连接回填、完全拒绝网络、第一次落盘和第二次冷启动证明用户行为失败；固定失败快照独立核实后再修。预期最小修复为在同一 origin/token 的归属键升级时一起迁移事件连接，并保存原 origin 作为 token 过渡键的来源证据。不同 origin、token、未知 scope 或用户不相同不迁移，不恢复主动撤销的授权，不改缓存目标内容，不新增产品入口。
 
-Build78 已产生的半迁移记录只有 token-scope/user，不能单凭 token-scope 推断原 origin 或用户。若确需离线恢复，必须使用原生已持久验证的同绑定用户证据：原生健康事件队列的 enabled binding、完整 origin/pin/token 派生 binding 与队列 binding 相同，并返回当前 bindingScopeId 与原 user；网页仅在原生 scope、saved user 与当前配置全部匹配时采用。无这份证据、读取失败、用户不同、未知 scope、真换端都保留旧缓存但不自动认领，待原 Host 可达后由连接状态确认；不能伪造成功或要求用户重建目标。该证据读取不得联网、采集、写队列、重授权或重发通知。
+Build78 已产生的半迁移记录只有 token-scope/user，不能单凭 token-scope 推断原 origin 或用户。若确需离线恢复，必须使用原生已持久验证的同绑定用户证据：原生健康事件队列的 enabled binding、完整 origin/pin/token 派生 binding 与队列 binding 相同，并返回当前 bindingScopeId 与原 user；网页仅在原生 scope、saved user 与当前配置全部匹配时采用。无这份证据、读取失败、用户不同、未知 scope、真换端都保留旧缓存但不自动认领，待原 Host 可达后由连接状态确认；不能伪造成功或要求用户重建目标。该证据读取仅解析现有队列 JSON 中的绑定元数据，不调用 HealthKit 采集或发送，不创建目录/修改文件属性/队列/启用标记/授权，也不重发通知。日常新记录有 origin 后不再依赖该旧版本恢复凭证。
 
 验收：合成两目标、任务、每日提醒、直接/后台消息及目标草稿；首次升级、连续离线冷启动、原生晚回填/不可达和网络恢复均能进入原目标/任务/直接聊天，后台记录继续不进 chat。负例覆盖真换端/换 token/用户不同、未知 scope、无 origin/原生证据的半迁移记录和主动撤销。回归保全消息及提醒内容，迁移不发送事件或通知。源码修复需先红后绿并受控回退，运行 check/build 并逐字节比对21份产物；基线已有环境失败单列，不声称全绿。实际 iPhone 验收由 release owner 另行记录。
+
+实现结果：事件绑定新增规范 `bindingOrigin`，普通升级在同 origin/token 且原记录 origin 可证时同步 token→原生 scope；原 `eventConnection` 不接受任意 token-scope 兜底。旧版本缺 origin 的半迁移只在 native load 恢复的原绑定上，向内置 `along://app` 提供只读 `connection('workspace')` 证据，网页比较原 user、完整 scope、origin 并在 await 后重新核实配置和事件记录未变，随后写成普通 origin-bearing 记录。该桥接不增加 HTTP API 或用户入口，也不改变配对、TLS、授权、健康采集和通知安排规则。无原生已验证元数据的旧记录继续等待原 Host 可达确认；新记录日常离线恢复不依赖该元数据。
+
+回归与交付边界：红快照 `951e36d` 已由独立只读核实者复现；修复源码 `7417c76` 的67项相关回归和实际Swift只读文件链路通过，禁签名iOS SDK编译通过。Build79/Web88已按21文件白名单生成并逐字节比对。完整check按最新日志如实比较既有6项LibreSSL subject文本解析失败与9环境skip；不修改这些TLS测试或Host产品代码。实际签名安装、原手机离线交互与发布台账由统一release owner执行，开发任务不冒称真机完成。

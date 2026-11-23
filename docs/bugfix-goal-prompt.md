@@ -298,3 +298,9 @@ Along 是手机优先的目标工作台：把一个目标拆成「目标 / 来�
 Historical audience-only corrections carry `classification_only:true`: retain evidence/deep-link identity but never create another alert in either Host or iOS fallback.
 
 - **原生来源重连也需要拒绝晚到的旧意图**：requestId 只能对已见请求去重，不能判定一个第一次抵达的旧 open。手机在等待 context 后比对本机耐久记录、持久保存 expectedGrantId，Host 在串行作用域内比较当前 grant 才轮换；已知 requestId 重试仍返回原 grant。去重历史采用有界 FIFO，新 grant 清空旧事件，窗口外请求由 grant/sequence 拒绝，不能把 2048 条变成来源终生不可恢复的上限。
+
+### 离线绑定升级补记（2026-11-23）
+
+- **首次升级可见不等于下次离线重开可见**。真实App启动会先迁旧指纹缓存，再接收晚到原生scope；测试必须原样继承第一次落盘，再冷启动并点击原目标、任务、直接聊天、草稿与原通知。只断言scope字段或JSON尚在会漏掉默认页回归。
+- **token过渡键不能证明原origin**。真换端先写配置后清事件缓存，中断会留下新origin配置和旧用户token-scope；即使下一次native load和新配置相同也不能认领。新事件绑定保存规范origin，Build78无origin的旧记录只接受原生已验证的同完整binding/user元数据；缺失或歧义时保留缓存、等待原Host身份确认。
+- **只读恢复路径也要执行真实文件方法**。解析既有队列绑定元数据不调用HealthKit采集或发送；缺目录不能创建，损坏文件不能覆盖，bytes/属性/enabled与授权不变。测试整体提取Swift类时，同步其引用的真实依赖，不能把新增缺失替身误报为产品或环境失败。
