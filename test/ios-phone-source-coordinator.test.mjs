@@ -16,7 +16,20 @@ import Foundation
 import CryptoKit
 
 enum AgentBridgeError: Error { case receipt([String:Any]); case server(String) }
-@MainActor enum AlongConnectionStore { static func load() -> [String:String]? { nil } }
+@MainActor enum AlongConnectionStore {
+ static let legacyPinPolicy="legacy-local-pin-v1"
+ static let systemTrustPolicy="system-pki-v1"
+ static func load() -> [String:String]? { nil }
+ // 绑定作用域 ID 与真实实现同语义（docs/iphone-ca-profile-design.md §2.2）。
+ static func bindingScopeId(baseURL:String,token:String)->String? {
+  guard let components=URLComponents(string:baseURL),components.scheme=="https",let host=components.host,
+        token.count==64 else {return nil}
+  let port=components.port ?? (components.scheme=="https" ? 443 : nil)
+  guard let port else {return nil}
+  let origin="\(components.scheme!)://\(host.lowercased()):\(port)"
+  return SHA256.hash(data:Data([origin,token.lowercased()].joined(separator:"\n").utf8)).map{String(format:"%02x",$0)}.joined()
+ }
+}
 @MainActor enum AlongWebView { enum Coordinator { static func agentRequest(_ input:[String:Any],privateSourceRequest:Bool)async throws->[String:Any]{fatalError("real transport forbidden")}} }
 enum HealthMetric: Hashable { case steps }
 struct HealthSummary {}

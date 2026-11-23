@@ -60,9 +60,62 @@ let localSelection=null,waitingForSavedGoal=false;
 let lastNotificationProjection='',lastNotificationCheck=0;
 let renderedRecommendationValidity='';
 const EVENT_CONNECTION_KEY='along.event-connection.v1';
+// 绑定标识（docs/iphone-ca-profile-design.md §2.2）：优先用原生给的 bindingScopeId；
+// 原生还没回填时退回配对 token —— 它同样稳定（换叶证书不变）、同样随换端变化，
+// 而且不是新暴露的凭证（token 本来就存在 AGENT_KEY 里）。
+// 叶指纹不再参与归属判定：换 CA 叶证书不该被当成换用户。
+function bindingKeyOf(config) {
+  return config?.bindingScopeId||config?.token||'';
+}
+// 「同一绑定」与「真换端」的判定（docs/iphone-ca-profile-design.md §2.2）。
+//
+// 升级到 CA 形态时，旧 App 的本地连接只有 {baseURL, fingerprint, token}，没有 bindingScopeId；
+// 升级当次原生回填了 bindingScopeId，于是「绑定键」从 token 变成 bindingScopeId。
+// 那是同一台设备、同一个 origin、同一个配对 token 的口径升级，不是换用户也不是换端——
+// 如果把它当成换端，每日委托授权会被静默撤销且无法自动恢复（数据丢失型回归）。
+//
+// 因此分两层看：
+//   - 身份身份层（origin + token）：换 origin 或换 token 才是真换端；
+//   - 归属键层（bindingScopeId）：口径升级时旧记录没有它，需要一次性映射。
+// 同一绑定的口径升级（origin 与 token 都没变）保留授权与提醒时间；
+// 真实换端仍然隔离（见 activateAgentConfig 的 replaceBinding）。
+function sameBindingIdentity(previous,config) {
+  if (!previous?.token||!config?.token) return false;
+  if (previous.token!==config.token) return false;
+  const previousOrigin=originOf(previous.baseURL);
+  const configOrigin=originOf(config.baseURL);
+  // 两边都解析不出 origin 时不能判成同一绑定：那会把两个不同的 host 当成同一台设备，
+  // 既不撤销委托也不隔离工作区。解析不出来一律按「不是同一绑定」处理。
+  if (!previousOrigin||!configOrigin) return false;
+  return previousOrigin===configOrigin;
+}
+// 规范化 origin（scheme/host/有效端口），与原生 bindingScopeId 的派生口径一致。
+//
+// 非 https 的地址不能折叠成同一个空串：那会让 http://a.example.com 与
+// http://b.example.com 被判成「同一绑定」，从而既不撤销委托也不隔离工作区。
+// 解析不了就返回 null，并让 sameBindingIdentity 判为「不是同一绑定」——
+// 宁可误判成换端（安全侧），也不能误判成同一绑定。
+function originOf(baseURL) {
+  if (typeof baseURL!=='string'||!baseURL.trim()) return null;
+  try {
+    const url=new URL(baseURL);
+    if (url.protocol!=='https:') return null;
+    const port=url.port||'443';
+    return `${url.protocol}//${url.hostname.toLowerCase()}:${port}`;
+  } catch { return null; }
+}
 function eventConnection(config=agentConfig) {
   const saved=readStored(EVENT_CONNECTION_KEY,null);
-  return saved?.fingerprint===config.fingerprint&&saved?.userId?saved:null;
+  if (!saved?.userId) return null;
+  if (saved.bindingScopeId) return saved.bindingScopeId===bindingKeyOf(config)?saved:null;
+  // 迁移期的临时双读（docs/iphone-ca-profile-design.md §2.2）：旧记录只有叶指纹，
+  // 没有 bindingScopeId。叶指纹不能继续当归属身份，但同一次配对留下的本地记录
+  // 需要一次性映射到当前绑定作用域，否则用户会看到本机目标与事件工作区「凭空消失」。
+  // 映射只在指纹与当前连接完全一致时生效，写入后统一是 v2 结构。
+  if (!saved.fingerprint||!config?.fingerprint||saved.fingerprint!==config.fingerprint||!config.token) return null;
+  const migrated={bindingScopeId:bindingKeyOf(config),userId:saved.userId};
+  localStorage.setItem(EVENT_CONNECTION_KEY,JSON.stringify(migrated));
+  return migrated;
 }
 function disconnectEventWorkspace() {
   eventWorkspace?.dispose();
@@ -74,10 +127,10 @@ function disconnectEventWorkspace() {
   lastNotificationProjection='';lastNotificationCheck=0;
 }
 function connectEventWorkspace(userId) {
-  const binding={fingerprint:agentConfig.fingerprint,userId};
+  const binding={bindingScopeId:bindingKeyOf(agentConfig),userId};
   const previous=eventConnection();
   localStorage.setItem(EVENT_CONNECTION_KEY,JSON.stringify(binding));
-  const bindingKey=JSON.stringify([agentConfig.baseURL,agentConfig.fingerprint,agentConfig.token,userId]);
+  const bindingKey=JSON.stringify([agentConfig.baseURL,bindingKeyOf(agentConfig),agentConfig.token,userId]);
   if (!eventWorkspace||previous?.userId!==userId||eventWorkspaceBinding?.key!==bindingKey) {
     disconnectEventWorkspace();
     const binding={key:bindingKey};
@@ -121,16 +174,23 @@ let nativeConnectionRestored=false;
 let backgroundReplace=null,backgroundClaim=null,backgroundSyncQueued=false;
 function persistAgentConfig(config) {
   const previous=readStored(AGENT_KEY,{});
-  if (previous.token&&(previous.token!==config.token||previous.fingerprint!==config.fingerprint)) {
+  // 只有真换端才撤销每日委托：换 origin 或换 token。
+  // 同一绑定的口径升级（旧记录没有 bindingScopeId，升级当次原生回填）保留授权与提醒时间——
+  // 否则 CA 迁移升级会静默删掉用户已授权的每日提醒（复核报告「高」风险项）。
+  if (previous.token&&!sameBindingIdentity(previous,config)) {
     for (const key of healthGoalKeys()) reviewFor(key).revokeDaily();
   }
-  if (['baseURL','fingerprint','token'].some(field=>previous[field]!==config[field])) localStorage.removeItem(BG_TEMPLATE_KEY);
+  if (!sameBindingIdentity(previous,config)) localStorage.removeItem(BG_TEMPLATE_KEY);
   localStorage.setItem(AGENT_KEY,JSON.stringify(config));
 }
 function activateAgentConfig(config,{rebind=false,runtime=agentRuntime}={}) {
   const previous=agentConfig;
-  if (!rebind&&runtime===agentRuntime&&['baseURL','fingerprint','token','runtime'].every(field=>previous[field]===config[field])) return;
-  const replaceBinding=rebind||previous.token&&(previous.fingerprint!==config.fingerprint||previous.token!==config.token);
+  // 同一绑定 + 同一运行时的口径升级不算换端：归属键只是从 token 补齐成 bindingScopeId，
+  // 事件工作区与本地归属都要延续，不能按新用户处理（docs/iphone-ca-profile-design.md §2.2）。
+  const sameBinding=sameBindingIdentity(previous,config);
+  if (!rebind&&runtime===agentRuntime&&sameBinding&&['baseURL','token','runtime'].every(field=>previous[field]===config[field])&&
+      bindingKeyOf(previous)===bindingKeyOf(config)) return;
+  const replaceBinding=rebind||previous.token&&!sameBinding;
   persistAgentConfig(config);
   if (replaceBinding) {
     if (eventWorkspace) screen='agent';
@@ -154,6 +214,11 @@ function activateAgentConfig(config,{rebind=false,runtime=agentRuntime}={}) {
     for (const key of healthGoalKeys()) reviewFor(key).retireConnection();
     backgroundReplace=null;
     void Promise.resolve(window.AlongHealthBridge?.backgroundReview?.('disarm',{})).catch(()=>{});
+  } else if (sameBinding) {
+    // 同一绑定的口径升级：把每日委托的接收人从旧键迁移到新键，并保留原授权与提醒时间。
+    // 用户主动撤销过的授权不进 dailyRevokedIds 的回滚范围——这里只迁移接收人键，
+    // 不恢复任何已被撤销的 grant。
+    migrateDailyRecipient(bindingKeyOf(config));
   }
   agentConfig=config;
   if (runtime!==agentRuntime) {
@@ -236,6 +301,11 @@ function scopedKey(base,key) { return key==='health'?base:`${base}:${key}`; }
 function reviewFor(key) {
   if (!reviews.has(key)) reviews.set(key,createHealthReview(key));
   return reviews.get(key);
+}
+// 同一绑定的口径升级：把所有健康目标的每日委托接收人迁到新归属键。
+// 用户主动撤销过的授权不在恢复范围（各目标的 migrateDailyRecipient 只改接收人键）。
+function migrateDailyRecipient(nextKey) {
+  for (const key of healthGoalKeys()) reviewFor(key).migrateDailyRecipient(nextKey);
 }
 // 当前目标可能是一个还没确认的新目标（草稿）。
 // - 有内容可恢复（写下的消息、没跑完的运行）：回到那一页，用户写下的东西
@@ -331,7 +401,7 @@ function readDailyAgenda(goalKey,force=false) {
   const review=reviewFor(goalKey),plan=review.todayActions(),day=localCalendarDay(),timezone=currentZone();
   const anchor=reminderRead?.goalKey===goalKey?reminderRead.item?.requestId:null;
   const config=agentConfig;
-  const signature=JSON.stringify([day,timezone,scope.selectedTypes,plan?.requestId,anchor||null,config.fingerprint,nativeHealthStatus,nativeObservationSeen,nativeConnectionRestored]);
+  const signature=JSON.stringify([day,timezone,scope.selectedTypes,plan?.requestId,anchor||null,bindingKeyOf(config),nativeHealthStatus,nativeObservationSeen,nativeConnectionRestored]);
   const old=dailyReads.get(goalKey);
   if (dailyJobs.has(goalKey)||(!force&&old?.signature===signature&&Date.now()-old.at<60000)) return;
   const job={}; dailyJobs.set(goalKey,job);
@@ -1162,7 +1232,9 @@ function scrollAgentConversationToBottom() {
   });
 }
 function pairForm() {
-  return `<form id="pair-form"><input name="baseURL" type="url" aria-label="Along 服务地址" placeholder="Along 服务地址" value="${esc(agentConfig.baseURL||'')}" required><input name="fingerprint" aria-label="连接指纹" placeholder="连接指纹" value="${esc(agentConfig.fingerprint||'')}" required><input name="code" aria-label="一次性连接码" placeholder="一次性连接码" inputmode="numeric" required><button class="button" ${connectionBusy?'disabled':''}>${agentConfig.token?'重新配对':'连接 Along'}</button></form>`;
+  // 连接指纹只在 Mac 私网（旧的叶指纹钉扎）需要；云端域名和公网 IPv4 走系统信任评估，不再手抄叶指纹
+  // （docs/iphone-ca-profile-design.md §2.2/§7）。因此它不是必填项，提交时按主机形态校验。
+  return `<form id="pair-form"><input name="baseURL" type="url" aria-label="Along 服务地址" placeholder="Along 服务地址" value="${esc(agentConfig.baseURL||'')}" required><input name="fingerprint" aria-label="连接指纹（仅 Mac 私网需要）" placeholder="连接指纹（仅 Mac 私网需要）" value="${esc(agentConfig.fingerprint||'')}"><input name="code" aria-label="一次性连接码" placeholder="一次性连接码" inputmode="numeric" required><button class="button" ${connectionBusy?'disabled':''}>${agentConfig.token?'重新配对':'连接 Along'}</button></form>`;
 }
 function connectionSetup(error) {
   return `<details class="agent-setup" data-agent-connection><summary>${error?`连接需处理 · ${esc(error)}`:'Along 连接'}</summary>${pairForm()}${error?`<form id="host-address-form"><label>只更新服务地址<input name="baseURL" type="url" value="${esc(agentConfig.baseURL||'')}" required></label><button class="button" ${connectionBusy||agentBusy?'disabled':''}>验证并更新</button></form>`:''}</details>`;
@@ -1818,7 +1890,9 @@ app.addEventListener('submit', async event => {
       let runtime=agentRuntime;
       if (pairing) {
         const fingerprint=String(form.get('fingerprint')||'').trim().replace(/[^a-fA-F0-9]/g,'').toUpperCase();
-        config={baseURL,fingerprint};
+        // 只有 Mac 私网（旧的叶指纹钉扎）才需要叶指纹；云端域名和公网 IPv4 走系统信任评估。
+        // 这里不判断信任策略——那是原生的判定，网页只负责不把指纹当必填项。
+        config=fingerprint?{baseURL,fingerprint}:{baseURL};
         const result=await agentCall(config,'/pair',{code:String(form.get('code')||'').trim()});
         if (typeof result?.token!=='string'||!/^[a-f0-9]{64}$/i.test(result.token)) throw Error('Along 未返回有效配对凭证');
         config={...config,token:result.token};
@@ -1830,7 +1904,9 @@ app.addEventListener('submit', async event => {
         const verified=await agentCall(config,'/connection/verify',{});
         if (!verified?.paired) throw Error('未能验证当前 Along 连接');
       }
-      await saveNativeConnection(config);
+      const saved=await saveNativeConnection(config);
+      // 原生确认过的连接（带 trustPolicy 与 bindingScopeId）才是生效值。
+      if (saved&&typeof saved==='object'&&saved.baseURL) config={...config,...saved};
       activateAgentConfig(config,{rebind:pairing,runtime});
       await refreshAgentConnection();
       if (!eventWorkspace) void reviewAll();
@@ -2180,13 +2256,24 @@ function createHealthReview(goalKey) {
   function dailyDelegation() {
     const grant=cleanDailyDelegation(healthSharing.dailyDelegation);
     if (!grant||grant.goalKey!==goalKey||!hasHealthSource(goalKey)||!agentConfig.token||agentRuntime!==DSH_RUNTIME||
-        !healthSharing.dailyRecipient||healthSharing.dailyRecipient!==agentConfig.fingerprint||state.loop?.experiment===EXPERIMENT||
+        !healthSharing.dailyRecipient||healthSharing.dailyRecipient!==bindingKeyOf(agentConfig)||state.loop?.experiment===EXPERIMENT||
         nativeHealthStatus==='unlinked'||state.source!=='healthkit'||state.snapshot?.contextReviewAllowed!==true) return null;
     // Display can use the last approved local category list while a locked
     // phone cannot read new observations. Submission and claiming still need
     // fresh native availability. Explicit withdrawal clears this grant.
     const allowed=goalCustom[goalKey]?.healthTypes;
     return grant.topics.every(t=>state.snapshot.selectedTypes?.includes(t)&&(!Array.isArray(allowed)||allowed.includes(t)))?grant:null;
+  }
+  // 同一绑定的口径升级：把每日委托的接收人键迁到新归属键（docs/iphone-ca-profile-design.md §2.2）。
+  //
+  // 只改「授权给谁」这一个键，不动 grant 本身——授权内容与提醒时间原样保留。
+  // 已经存在于 dailyRevokedIds 的 grant 是用户主动撤销过的，不在这里恢复：
+  // 撤销名单里的 grant 本来就没有 dailyDelegation 可迁。
+  function migrateDailyRecipient(nextKey) {
+    if (!nextKey||!healthSharing.dailyRecipient||healthSharing.dailyRecipient===nextKey) return;
+    const grant=cleanDailyDelegation(healthSharing.dailyDelegation);
+    if (!grant||healthSharing.dailyRevokedIds?.includes(grant.id)) return;
+    saveHealthSharing({...healthSharing,dailyRecipient:nextKey});
   }
   function dailyReceipt(run,grant) {
     const p=run?.input?.snapshot?.planning;
@@ -2226,7 +2313,7 @@ function createHealthReview(goalKey) {
     if (!receipt||healthSharing.dailyRevokedIds?.includes(grant.id)||Date.parse(receipt.action.evaluatedAt)>Date.now()||
         Date.parse(receipt.action.evaluatedAt)<=(healthSharing.dailyRevokedAt||0)) return false;
     if (planningState.dailyRecord?.action?.delegationId===grant.id&&Date.parse(planningState.dailyRecord.action.evaluatedAt)>Date.parse(receipt.action.evaluatedAt)) return true;
-    saveHealthSharing({...healthSharing,dailyDelegation:grant,dailyRecipient:agentConfig.fingerprint});
+    saveHealthSharing({...healthSharing,dailyDelegation:grant,dailyRecipient:bindingKeyOf(agentConfig)});
     const previous=planningState;
     // A Mac handoff acknowledges this daily instruction only. Preserve an
     // unrelated pending adopt/reject proposal or working health review.
@@ -2266,7 +2353,7 @@ function createHealthReview(goalKey) {
       if (!old) return;
       const removed=stopping.slice(1).filter(Boolean).map(toTopic);
       const topics=old.topics.filter(t=>!removed.includes(t));
-      if (topics.length) saveHealthSharing({...healthSharing,dailyRecipient:agentConfig.fingerprint,
+      if (topics.length) saveHealthSharing({...healthSharing,dailyRecipient:bindingKeyOf(agentConfig),
         dailyDelegation:cleanDailyDelegation({id:newId('daily'),goalKey,topics,weeklyWorkoutMinutes:topics.includes('workout')?old.weeklyWorkoutMinutes:null})});
       return;
     }
@@ -2274,7 +2361,7 @@ function createHealthReview(goalKey) {
     const topics=[...new Set([...(old?.topics||[]),...starting.slice(1).filter(Boolean).map(toTopic)])].sort();
     if (!topics.every(t=>scopedSnapshot(goalKey).selectedTypes.includes(t))||JSON.stringify(topics)===JSON.stringify(old?.topics)) return;
     if (old) revokeDaily();
-    saveHealthSharing({...healthSharing,dailyRecipient:agentConfig.fingerprint,
+    saveHealthSharing({...healthSharing,dailyRecipient:bindingKeyOf(agentConfig),
       dailyDelegation:cleanDailyDelegation({id:newId('daily'),goalKey,topics,weeklyWorkoutMinutes:topics.includes('workout')?workoutTarget():null})});
   }
   function includesInstruction(request) {
@@ -2310,7 +2397,7 @@ function createHealthReview(goalKey) {
     // Do not hash/serialize local-only text or the pairing token. The native version
     // covers the precise approved plan and the recipient, independently of sample time.
     const {previous:ignored,...policy}=planning;
-    const identity=JSON.stringify([goalKey,healthSharing.scope||0,agentConfig.fingerprint,goal,policy,after.selectedTypes,after.comparisonHistoryAllowed]);
+    const identity=JSON.stringify([goalKey,healthSharing.scope||0,bindingKeyOf(agentConfig),goal,policy,after.selectedTypes,after.comparisonHistoryAllowed]);
     let stored=readStored(BG_TEMPLATE_KEY,null);
     if (!stored||stored.identity!==identity) {
       stored={identity,version:newId('bg-scope')};
@@ -2656,7 +2743,7 @@ function createHealthReview(goalKey) {
     saveGoalCustom();saveTicket(null);render();notice('下一步已更新');
   }
   return {get state(){return planningState;},get sharing(){return healthSharing;},get ticket(){return pendingTask;},
-    localHealthPlan,shareableHealthTask,accessOptions,workoutTarget,latestDecision,setAccess,dailyDelegation,todayActions,claimDailyDelegation,revokeDaily,canRecoverConnection,backgroundTemplate,retireNative,claimBackground,reviewHealthContext,refreshHealthReview,accept,dismiss,answer,instruct,clear,retireConnection,restrict,goalUpdated};
+    localHealthPlan,shareableHealthTask,accessOptions,workoutTarget,latestDecision,setAccess,dailyDelegation,todayActions,claimDailyDelegation,revokeDaily,migrateDailyRecipient,canRecoverConnection,backgroundTemplate,retireNative,claimBackground,reviewHealthContext,refreshHealthReview,accept,dismiss,answer,instruct,clear,retireConnection,restrict,goalUpdated};
 }
 window.addEventListener('along-health-update', async event => {
   if (document.visibilityState==='hidden'||state.loop?.experiment === EXPERIMENT) return;
@@ -2738,7 +2825,9 @@ if (recoveredInitialCustomGoal) notice('已恢复新目标和动态任务');
 async function restoreAlongConnection() {
   try {
     const saved=await loadNativeConnection();
-    if (saved?.baseURL&&saved?.fingerprint&&saved?.token) {
+    // 系统信任形态下没有叶指纹（docs/iphone-ca-profile-design.md §2.2）；
+    // 归属靠 bindingScopeId，凭证靠 token。
+    if (saved?.baseURL&&saved?.token&&(saved?.bindingScopeId||saved?.fingerprint)) {
       const runtime=!localStorage.getItem(AGENT_RUNTIME_KEY)&&saved.runtime===DSH_RUNTIME?DSH_RUNTIME:agentRuntime;
       activateAgentConfig(saved,{runtime});
       render();

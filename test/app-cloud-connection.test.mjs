@@ -2,8 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {installDomStub} from './dom-stub.mjs';
 
-const MAC={baseURL:'https://192.168.1.2:4176',fingerprint:'A'.repeat(64),token:'b'.repeat(64)};
-const CLOUD={baseURL:'https://along.example.com',fingerprint:'C'.repeat(64),token:'d'.repeat(64)};
+// 归属标识改用 bindingScopeId（docs/iphone-ca-profile-design.md §2.2）：叶指纹不再充当绑定身份。
+// 这里用可预期的假值即可——网页只把它当作不透明的归属标识。
+const MAC={baseURL:'https://192.168.1.2:4176',fingerprint:'A'.repeat(64),token:'b'.repeat(64),bindingScopeId:'scope-mac'};
+const CLOUD={baseURL:'https://along.example.com',fingerprint:'C'.repeat(64),token:'d'.repeat(64),bindingScopeId:'scope-cloud'};
 const runtime='dsh-superagent';
 const AGENT_KEY='along.agent.v1';
 const RUNTIME_KEY='along.agent-runtime.v1';
@@ -49,7 +51,10 @@ test('a paired event workspace can change Hosts and keeps serving the Mac after 
       if (action==='load') return native;
       assert.deepEqual(read(dom,AGENT_KEY),MAC,'the WebView must still use the old connection during native save');
       if (rejectSave) throw Error('钥匙串写入失败');
-      native=value;return value;
+      // 原生会补上 bindingScopeId（docs/iphone-ca-profile-design.md §2.2），
+      // 网页用的是原生确认过的值，不是自己猜的。
+      native={...value,bindingScopeId:value.baseURL===MAC.baseURL?MAC.bindingScopeId:CLOUD.bindingScopeId};
+      return native;
     },
     request:async input=>{
       requests.push(input);
@@ -74,12 +79,12 @@ test('a paired event workspace can change Hosts and keeps serving the Mac after 
   assert.ok(dom.app.innerHTML.includes('说说你想做什么'));
   await pair(dom,CLOUD);
   assert.deepEqual(native,MAC);
-  assert.deepEqual(read(dom,EVENT_KEY),{fingerprint:MAC.fingerprint,userId:'u_mac'});
+  assert.deepEqual(read(dom,EVENT_KEY),{bindingScopeId:MAC.bindingScopeId,userId:'u_mac'});
   assert.match(dom.app.innerHTML,/说说你想做什么/);
   rejectPair=false;
   await pair(dom,CLOUD);
   assert.deepEqual(read(dom,AGENT_KEY),MAC);
-  assert.deepEqual(read(dom,EVENT_KEY),{fingerprint:MAC.fingerprint,userId:'u_mac'});
+  assert.deepEqual(read(dom,EVENT_KEY),{bindingScopeId:MAC.bindingScopeId,userId:'u_mac'});
   assert.match(dom.app.innerHTML,/说说你想做什么/);
 
   rejectSave=false;holdMacSync=true;
@@ -102,7 +107,11 @@ test('a paired event workspace can change Hosts and keeps serving the Mac after 
 test('cloud re-pairing to Mac detaches a pending cloud status response and restores the event workspace',async()=>{
   let finishPoll;
   const requests=[];
-  const dom=start(CLOUD,{request:async input=>{
+  const dom=start(CLOUD,{connection:async (action,value)=>{
+    if (action==='load') return null;
+    // 原生会补上 bindingScopeId（docs/iphone-ca-profile-design.md §2.2）。
+    return {...value,bindingScopeId:value.baseURL===MAC.baseURL?MAC.bindingScopeId:CLOUD.bindingScopeId};
+  },request:async input=>{
     requests.push(input);
     if (input.path==='/connection/status') return input.baseURL===MAC.baseURL?macStatus:cloudStatus;
     if (input.path==='/pair') return {token:MAC.token};
@@ -118,7 +127,7 @@ test('cloud re-pairing to Mac detaches a pending cloud status response and resto
   finishPoll(done({requestId:'req_old',goal:{domain:'health'}}));
   await settle();
   assert.deepEqual(read(dom,AGENT_KEY),MAC);
-  assert.deepEqual(read(dom,EVENT_KEY),{fingerprint:MAC.fingerprint,userId:'u_mac'});
+  assert.deepEqual(read(dom,EVENT_KEY),{bindingScopeId:MAC.bindingScopeId,userId:'u_mac'});
   assert.ok(requests.some(input=>input.path==='/sync'&&input.token===MAC.token));
   assert.doesNotMatch(dom.app.innerHTML,/已整理这次目标|本周完成三次练习/);
   assert.equal(read(dom,GOALS_KEY)?.health,undefined);
@@ -172,13 +181,13 @@ test('an existing Mac binding can verify an address change using its current cre
     if (input.path==='/connection/verify') {verified=input;return {paired:true};}
     if (input.path==='/sync') return {items:[]};
     throw Error(input.path);
-  }},{[EVENT_KEY]:JSON.stringify({userId:'u_mac',fingerprint:MAC.fingerprint})});
+  }},{[EVENT_KEY]:JSON.stringify({userId:'u_mac',bindingScopeId:MAC.bindingScopeId})});
   await import('../web/app.mjs?cloud-address-repair');
   await settle();
   await submit(dom,'host-address-form',{baseURL:newAddress});
   assert.deepEqual(verified,{...MAC,baseURL:newAddress,path:'/connection/verify',body:{}});
   assert.deepEqual(read(dom,AGENT_KEY),{...MAC,baseURL:newAddress});
-  assert.deepEqual(read(dom,EVENT_KEY),{fingerprint:MAC.fingerprint,userId:'u_mac'});
+  assert.deepEqual(read(dom,EVENT_KEY),{bindingScopeId:MAC.bindingScopeId,userId:'u_mac'});
   assert.match(dom.app.innerHTML,/说说你想做什么/);
 });
 

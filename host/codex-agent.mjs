@@ -17,18 +17,21 @@ function codexBinary() {
 async function runCodexJSON(prompt,schema,{timeoutMs=105_000}={}) {
   const dir=await mkdtemp(join(tmpdir(),'along-codex-'));
   const output=join(dir,'response.json');
-  let stderr='';
+  // 子进程 env 剔除本 host 的凭证命名空间 ALONG_*（G-11：否则 ALONG_KIMI_CODE_TOKEN 等经全量继承进 codex）；
+  // 其余 env 原样继承——codex 的认证/代理/证书 env（OPENAI_API_KEY、HTTPS_PROXY、SSL_CERT_FILE 等）无法穷举，
+  // 白名单会弄坏真实调用（docs/cloud-security-hardening.md §3.4-(3)）。
+  const env=Object.fromEntries(Object.entries(process.env).filter(([key])=>!key.startsWith('ALONG_')));
   try {
     const args=['exec','--ephemeral','--ignore-user-config','--ignore-rules','--sandbox','read-only','--skip-git-repo-check','--output-schema',schema,'--output-last-message',output,'--color','never','-C',dir,'-'];
     await new Promise((resolve,reject)=>{
-      const child=spawn(codexBinary(),args,{stdio:['pipe','ignore','pipe'],env:process.env});
+      const child=spawn(codexBinary(),args,{stdio:['pipe','ignore','ignore'],env});
       const timer=setTimeout(()=>{child.kill('SIGTERM');reject(Error('Along 生成超时'));},timeoutMs);
-      child.stderr.on('data',chunk=>{if(stderr.length<16_000)stderr+=chunk;});
       child.on('error',error=>{clearTimeout(timer);reject(error);});
       child.on('exit',code=>{
         clearTimeout(timer);
+        // 非零退出：stderr 直接丢弃，客户端文案固定、服务端只记无内容的退出码，不把上游输出带回用户或日志（G-11）。
         if(code===0)resolve();
-        else reject(Error(`Along 暂时不可用${stderr.trim()?`：${stderr.trim().slice(-600)}`:''}`));
+        else { console.warn(`Along 任务代理异常退出（码 ${code}）`); reject(Error('Along 暂时不可用')); }
       });
       child.stdin.end(prompt);
     });

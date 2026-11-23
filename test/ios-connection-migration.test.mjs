@@ -35,6 +35,7 @@ function storeSnippet() {
 
 const storeHarness=`import Foundation
 import Security
+import CryptoKit
 
 final class FakeDefaults {
     static let shared = FakeDefaults()
@@ -80,7 +81,7 @@ test('the old connection is only dropped after it is safely stored in the keycha
 
 // M6（docs/cloud-deploy-multi-user.md §4/§5.6）：连接地址在 RFC1918 私网 IPv4 之外放行合法 DNS 域名，
 // https-only 与其余校验不变。两份守卫（clean/agentRequest）都编译真实源码后断言。
-test('the paired host accepts RFC1918 IPv4 and legal DNS domains, nothing else',{skip:hasSwift?false:'本机没有 Swift 工具链，跳过原生侧行为测试'},()=>{
+test('the paired host accepts RFC1918 IPv4, public IPv4 and legal DNS domains',{skip:hasSwift?false:'本机没有 Swift 工具链，跳过原生侧行为测试'},()=>{
   const output=compileStore(`extension AlongConnectionStore {
     static func exposeClean(_ value: [String: Any]) -> [String: String]? { clean(value) }
 }
@@ -92,8 +93,20 @@ let cases: [(String, Bool)] = [
     ("https://10.0.0.5:4176", true),
     ("https://172.16.0.9:4176", true),
     ("https://172.31.255.255:4176", true),
-    ("https://172.32.0.1:4176", false),
-    ("https://8.8.8.8:4176", false),
+    ("https://172.32.0.1:4176", true),
+    ("https://8.8.8.8:4176", true),
+    ("https://0.1.2.3:4176", false),
+    ("https://8.008.8.8:4176", false),
+    ("https://127.0.0.1:4176", false),
+    ("https://100.64.0.1:4176", false),
+    ("https://169.254.0.1:4176", false),
+    ("https://192.0.2.1:4176", false),
+    ("https://198.18.0.1:4176", false),
+    ("https://198.51.100.1:4176", false),
+    ("https://203.0.113.1:4176", false),
+    ("https://224.1.2.3:4176", false),
+    ("https://240.1.2.3:4176", false),
+    ("https://0x7f.0x1:4176", false),
     ("https://1.2.3.4.5:4176", false),
     ("https://[::1]:4176", false),
     ("https://along.example.com:4176", true),
@@ -150,8 +163,8 @@ let cases: [(String, String, Bool)] = [
     ("http://along.example.com:4176", "/goal/event", false),
     ("https://user:pass@along.example.com:4176", "/goal/event", false),
     ("https://along.example.com/pair", "/goal/event", false),
-    ("https://172.32.0.1:4176", "/goal/event", false),
-    ("https://8.8.8.8:4176", "/goal/event", false),
+    ("https://172.32.0.1:4176", "/goal/event", true),
+    ("https://8.8.8.8:4176", "/goal/event", true),
     ("https://along..example.com:4176", "/goal/event", false),
     ("https://along.example.com:4176", "/not/whitelisted", false),
     ("https://along.example.com:4176", "/notifications/device", false),
@@ -226,7 +239,7 @@ let cases: [(String, Bool)] = [
     ("https://2130706433:4176", false),           // 整数 IP 形态：单段，拒绝
     ("https://192.168.1.2:4176", true),           // 私网 IPv4 行为不变
     ("https://172.16.0.9:4176", true),
-    ("https://8.8.8.8:4176", false),
+    ("https://8.8.8.8:4176", true),
 ]
 for (baseURL, expected) in cases {
     let accepted = AlongConnectionStore.exposeClean(["baseURL": baseURL, "fingerprint": fingerprint, "token": token]) != nil
@@ -265,13 +278,22 @@ let cases: [(String, String, String, String, Bool)] = [
     ("https://along.example.com", "/goal/event", good, tok, true),   // 无端口域名走通文档验收例
     ("https://along.example.com", "/pair", good, tok, true),         // 多用户配对复用 /pair，域名下必须可达
     ("https://192.168.1.2", "/goal/event", good, tok, true),         // 无端口私网 IPv4 不变（端口从不要求）
-    ("https://along.example.com:4176", "/goal/event", String(repeating:"F",count:63), tok, false), // 指纹仍须 64hex（入口守卫既有校验）
+    // 云端域名走系统信任评估：叶指纹不再是信任依据，入口守卫不再校验它
+    // （docs/iphone-ca-profile-design.md §2.1/§2.2）。旧 pin 形态（Mac 私网）仍须 64hex。
+    ("https://along.example.com:4176", "/goal/event", String(repeating:"F",count:63), tok, true),
+    ("https://192.168.1.2:4176", "/goal/event", String(repeating:"F",count:63), tok, false),
     // token 的 64hex 校验在连接存储时（clean()，:458-459）；agentRequest 入口守卫从不校验 token，
     // 只在 :977 读取后放进 Bearer 头——这是 M6 之前就有的行为（已对 HEAD 核实），文档 §3.4「指纹与
     // token 仍须 64hex」的行号引用容易误读成入口也校验 token，此处按真实既有语义断言。
     ("https://along.example.com:4176", "/goal/event", good, String(repeating:"f",count:63), true),
     ("https://along.example.com:4176/", "/goal/event", good, tok, false), // path "/" 在入口守卫拒绝
-    ("https://8.8.8.8", "/goal/event", good, tok, false),            // 非私网数字 IP 在入口守卫拒绝
+    ("https://8.8.8.8", "/pair", "", "", true),
+    ("https://8.8.8.8", "/connection/verify", "", tok, true),
+    ("https://8.8.8.8", "/sync", "", tok, true),
+    ("https://8.8.8.8", "/sync/ack", "", tok, true),
+    ("https://8.8.8.8", "/events", "", tok, true),
+    ("https://100.64.0.1", "/sync", good, tok, false),
+    ("http://8.8.8.8", "/sync", "", tok, false),
 ]
 for (baseURL, path, fp, tk, expected) in cases {
     let ok = probe(["baseURL": baseURL, "fingerprint": fp, "token": tk, "path": path, "body": [:] as [String: Any]]) == expected
@@ -283,6 +305,19 @@ for (baseURL, path, fp, tk, expected) in cases {
     assert.match(output,/^ok https:\/\/along\.example\.com \/goal\/event$/m,'无端口域名要走通入口守卫');
     assert.match(output,/^ok https:\/\/along\.example\.com \/pair$/m,'配对端点在域名下仍可达');
   } finally { rmSync(dir,{recursive:true,force:true}); }
+});
+
+test('public IP uses system trust and preserves the Keychain scope across leaf rotation',{skip:!hasSwift},()=>{
+  const output=compileStore(`
+let token = "${'b'.repeat(64)}"
+let first = AlongConnectionStore.save(["baseURL":"https://8.8.8.8","token":token,"fingerprint":"${'A'.repeat(64)}","trustPolicy":AlongConnectionStore.legacyPinPolicy])
+let next = AlongConnectionStore.save(["baseURL":"https://8.8.8.8:443","token":token,"fingerprint":"${'C'.repeat(64)}"])
+let local = AlongConnectionStore.save(["baseURL":"https://192.168.1.2","token":token,"fingerprint":"${'A'.repeat(64)}","trustPolicy":AlongConnectionStore.systemTrustPolicy])
+print(first?["trustPolicy"] == AlongConnectionStore.systemTrustPolicy && first?["fingerprint"] == nil)
+print(first.flatMap(AlongConnectionStore.scopeSeed) != nil && first.flatMap(AlongConnectionStore.scopeSeed) == next.flatMap(AlongConnectionStore.scopeSeed))
+print(local?["trustPolicy"] == AlongConnectionStore.legacyPinPolicy && local?["fingerprint"] != nil)
+`);
+  assert.deepEqual(output.trim().split('\n'),['true','true','true']);
 });
 
 test('native rebuild linkage: bundled page cache marker and bundle version both moved',()=>{
@@ -331,13 +366,16 @@ test('the endpoint whitelist remains the documented 12+4 paths',()=>{
 });
 
 test('certificate pinning, redirect blocking and DIRECT-only proxy remain wired into every agent request',()=>{
-  // M6 要求钉扎/禁重定向/PAC=DIRECT 全不动；这里钉住真实的接线位置，防止后续松动。
+  // M6 要求禁重定向/PAC=DIRECT 全不动；CA 方案（docs/iphone-ca-profile-design.md §2.1/§2.2）把
+  // 「叶指纹钉扎」按主机形态拆成两条：云端 DNS 走系统信任评估，Mac 私网保留旧 pin。
+  // 这里钉住真实的接线位置，防止后续松动，也防止云端悄悄退回旧 pin。
   const funcStart=swiftSource.indexOf('        static func agentRequest(');
   assert.notEqual(funcStart,-1,'找不到 agentRequest');
   const funcEnd=swiftSource.indexOf('        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!)',funcStart);
   assert.ok(funcEnd>funcStart,'找不到 agentRequest 结束边界');
   const body=swiftSource.slice(funcStart,funcEnd);
-  assert.match(body,/let delegate = PinnedAgentDelegate\(fingerprint: fingerprint\.uppercased\(\)\)/,'每次请求仍要构造钉扎 delegate');
+  assert.match(body,/let delegate: URLSessionDelegate = fingerprint\.map \{ PinnedAgentDelegate\(fingerprint: \$0\) \} \?\? SystemTrustAgentDelegate\(expectedHost: host\)/,'按主机形态选 delegate：私网 pin，云端系统信任');
+  assert.match(body,/policy: AlongConnectionStore\.trustPolicy\(forHost: host\)/,'信任策略由原生按主机形态推导，不接受网页自报');
   assert.match(body,/URLSession\(configuration: configuration, delegate: delegate, delegateQueue: nil\)/,'钉扎 delegate 仍要挂在实际发请求的 session 上');
   assert.match(body,/connectionProxyDictionary[\s\S]*?return 'DIRECT'/,'仍强制 PAC=DIRECT');
   assert.match(body,/configuration\.waitsForConnectivity = !background/,'前后台等待语义不变');
@@ -347,6 +385,16 @@ test('certificate pinning, redirect blocking and DIRECT-only proxy remain wired 
   const delegate=swiftSource.slice(delegateStart,delegateEnd);
   assert.match(delegate,/completionHandler\(digest == fingerprint \? \.useCredential : \.cancelAuthenticationChallenge/,'叶子证书指纹不匹配仍取消连接');
   assert.match(delegate,/willPerformHTTPRedirection[\s\S]*?completionHandler\(nil\)/,'重定向仍被丢弃');
+  // 云端系统信任委托：不做自己的信任判断，也不返回 useCredential。
+  const systemStart=swiftSource.indexOf('final class SystemTrustAgentDelegate');
+  assert.notEqual(systemStart,-1,'找不到 SystemTrustAgentDelegate');
+  const systemEnd=swiftSource.indexOf('\n}\n',systemStart);
+  const system=swiftSource.slice(systemStart,systemEnd);
+  assert.match(system,/completionHandler\(\.performDefaultHandling, nil\)/,'云端走系统默认信任评估，不自行放行');
+  assert.doesNotMatch(system,/useCredential/,'云端不得自行返回 useCredential');
+  assert.doesNotMatch(system,/SecTrustSetAnchorCertificates/,'云端不得塞入自己的信任锚');
+  assert.match(system,/guard host == expectedHost/,'挑战主机必须与当前连接的期望主机一致');
+  assert.match(system,/willPerformHTTPRedirection[\s\S]*?completionHandler\(nil\)/,'重定向仍被丢弃');
 });
 
 test('iPhone foreground requests retain their deadlines and background work stops promptly offline',{skip:!hasSwift},()=>{

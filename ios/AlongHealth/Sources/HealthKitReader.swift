@@ -367,9 +367,10 @@ enum BackgroundReviewAdmission {
         Set((defaults.stringArray(forKey: "along.health.selectedTypes") ?? []).compactMap(HealthMetric.init(rawValue:)))
     }
     private func pairedMac() throws -> ([String: String], String) {
-        guard let connection = AlongConnectionStore.load(), let base = connection["baseURL"], let pin = connection["fingerprint"], let token = connection["token"] else { throw AgentBridgeError.invalidConfiguration }
+        guard let connection = AlongConnectionStore.load(),
+              let seed = AlongConnectionStore.scopeSeed(connection) else { throw AgentBridgeError.invalidConfiguration }
         let epoch = defaults.string(forKey: "along.health.backgroundEpoch.v1") ?? ""
-        let digest = SHA256.hash(data: Data([base, pin, token, epoch].joined(separator: "\n").utf8)).map { String(format: "%02x", $0) }.joined()
+        let digest = SHA256.hash(data: Data([seed, epoch].joined(separator: "\n").utf8)).map { String(format: "%02x", $0) }.joined()
         return (connection, digest)
     }
     private func stateURL() throws -> URL {
@@ -784,8 +785,9 @@ enum BackgroundReviewAdmission {
         return Set((defaults.stringArray(forKey: "along.health.selectedTypes") ?? []).compactMap(HealthMetric.init(rawValue:)))
     }
     private func connection() throws -> ([String: String], String) {
-        guard let c = AlongConnectionStore.load(), let base = c["baseURL"], let pin = c["fingerprint"], let token = c["token"] else { throw AgentBridgeError.invalidConfiguration }
-        let hash = SHA256.hash(data: Data([base, pin, token].joined(separator: "\n").utf8)).map { String(format: "%02x", $0) }.joined()
+        guard let c = AlongConnectionStore.load(),
+              let seed = AlongConnectionStore.scopeSeed(c) else { throw AgentBridgeError.invalidConfiguration }
+        let hash = SHA256.hash(data: Data([seed].joined(separator: "\n").utf8)).map { String(format: "%02x", $0) }.joined()
         return (c, hash)
     }
     private func stateURL() throws -> URL {

@@ -39,7 +39,10 @@ import UserNotifications
     }
 
     private func verified(_ connection: [String:String], user: String) async throws -> String {
-        let scope = DailyReminderScope.hash([connection["fingerprint"] ?? "", connection["token"] ?? "", user].joined(separator: "\n"))
+        // 作用域种子不再用叶指纹：云端系统信任形态改用 bindingScopeId，
+        // 换叶证书不会被误判成换用户（docs/iphone-ca-profile-design.md §2.2）。
+        guard let seed = AlongConnectionStore.scopeSeed(connection) else { throw AgentBridgeError.invalidConfiguration }
+        let scope = DailyReminderScope.hash([seed, user].joined(separator: "\n"))
         if checkedScope == scope { return scope }
         var input: [String:Any] = connection
         input["path"] = "/connection/status"; input["body"] = ["runtime":"dsh-superagent"]
@@ -73,7 +76,8 @@ import UserNotifications
     private func refreshRegistration() async {
         guard !registering, Date() >= retryRegistration, let user = deviceUser, let scope = checkedScope,
               let connection = AlongConnectionStore.load(),
-              scope == DailyReminderScope.hash([connection["fingerprint"] ?? "",connection["token"] ?? "",user].joined(separator:"\n")) else { return }
+              let seed = AlongConnectionStore.scopeSeed(connection),
+              scope == DailyReminderScope.hash([seed, user].joined(separator:"\n")) else { return }
         let desired = scope + (registrationAllowed ? (deviceToken ?? "") : "off")
         guard registered != desired || Date() >= registrationExpires else { return }
         var body: [String:Any] = ["expectedUserId":user]
@@ -146,7 +150,10 @@ import UserNotifications
 
     private func reconcile(_ value: [String:Any]) async throws -> [String:Any] {
         guard let c = AlongConnectionStore.load(), let user = value["userId"] as? String, valid(user),
-              let pin = value["fingerprint"] as? String, pin.uppercased() == c["fingerprint"],
+              // 归属核对改用作用域 ID：叶指纹不再是绑定身份，云端系统信任形态下网页也可能不再带它
+              // （docs/iphone-ca-profile-design.md §2.2）。旧 pin 形态继续按 bindingScopeId 对齐。
+              let scopeId = value["bindingScopeId"] as? String,
+              scopeId == (c["bindingScopeId"] ?? AlongConnectionStore.bindingScopeId(baseURL: c["baseURL"] ?? "", token: c["token"] ?? "")),
               let version = value["cursor"] as? Int, version >= 0,
               let rows = value["reminders"] as? [[String:Any]], let activeTasks = value["activeTasks"] as? [[String:Any]], let results = value["results"] as? [[String:Any]] else {
             throw AgentBridgeError.invalidConfiguration

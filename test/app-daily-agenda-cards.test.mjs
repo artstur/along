@@ -15,13 +15,14 @@ async function open({day=localDay(new Date()),status='scheduled',workoutMinutes=
     {id:'sleep',title:'安排充足睡眠时间',when:'每晚',detail:'老的睡眠说明',state:'planned'},
     ...(extra?[{id:'other',title:'提前睡觉',when:'每周',detail:'另一个独立任务',state:'planned'}]:[])
   ]};
-  const config={baseURL:'https://192.0.2.1:4176',fingerprint:'A'.repeat(64),token:'a'.repeat(64)};
+  // 归属标识用 bindingScopeId（docs/iphone-ca-profile-design.md §2.2）：叶指纹不再充当绑定身份。
+  const config={baseURL:'https://192.0.2.1:4176',fingerprint:'A'.repeat(64),token:'a'.repeat(64),bindingScopeId:'scope-daily'};
   const snapshot={contextReviewAllowed:true,selectedTypes:topicAllowed?['sleep','workout']:['workout'],capturedAt:new Date().toISOString(),workoutMinutes:73};
   const action={sleepReminderAt:when(26),bedtimeAt:when(56),workoutMinutes,workoutReminderAt:workoutMinutes===0?null:when(8),
     reason:'根据已选记录限制今天的运动量。',localDate:day,timezone:tz,evaluatedAt:when(-2),delegationId:grant.id,runtime:DSH_RUNTIME,requestId:'confirmed-run',ticketId:'confirmed-ticket'};
   const dom=installDomStub({storage:{[KEY]:JSON.stringify({version:1,source:'healthkit',snapshot,goals:[]}),
     [GOALS_KEY]:JSON.stringify({health:{title:layout.title}}),[AGENT_KEY]:JSON.stringify(config),[AGENT_RUNTIME_KEY]:DSH_RUNTIME,
-    [ADAPTIVE_LAYOUTS_KEY]:JSON.stringify({health:layout}),'along.health-sharing.v1':JSON.stringify({dailyDelegation:grant,dailyRecipient:config.fingerprint}),
+    [ADAPTIVE_LAYOUTS_KEY]:JSON.stringify({health:layout}),'along.health-sharing.v1':JSON.stringify({dailyDelegation:grant,dailyRecipient:config.bindingScopeId}),
     [PLANNING_STATE_KEY]:JSON.stringify({dailyRecord:{action,evidence:snapshot}})}});
   window.AlongAgentBridge={request:async()=>({along:true,ready:true,runtime:DSH_RUNTIME}),...(device?{dailyReminderStatus:async({goalKey,localDate,timezone})=>({goalKey,localDate,timezone,items:{
     sleep:{status,scheduledFor:action.sleepReminderAt,requestId:action.requestId},workout:{status,scheduledFor:action.workoutReminderAt,requestId:action.requestId}}}),

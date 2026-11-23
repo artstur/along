@@ -1,5 +1,5 @@
 import {createHash,randomBytes} from 'node:crypto';
-import {constants,openSync,closeSync,readFileSync,writeFileSync,mkdirSync,lstatSync,fstatSync,chmodSync,renameSync,unlinkSync,fsyncSync} from 'node:fs';
+import {constants,existsSync,openSync,closeSync,readFileSync,writeFileSync,mkdirSync,lstatSync,fstatSync,chmodSync,renameSync,unlinkSync,fsyncSync} from 'node:fs';
 import {resolve,join} from 'node:path';
 import {validOkxHistory,okxDataDigest,hasOkxHistory} from './okx-history.mjs';
 
@@ -27,6 +27,9 @@ function appendFifo(map,key,value,order=Object.keys(map)){
 export function createDeviceSourceGateway({dir,journal,now=Date.now}={}) {
   if(typeof dir!=='string'||!dir||typeof now!=='function'||!journal||!['recordVerifiedState','prepareAbsent','commitAbsent'].every(k=>typeof journal[k]==='function'))fail('invalid_request');
   const root=resolve(dir);
+  // Cloud (multi-user) form is decided once at creation from users.json in the parent state
+  // directory — the same determination agent-host makes; no runtime switch (docs/cloud-security-hardening.md §3.5).
+  const cloud=existsSync(join(root,'..','users.json'));
   function clock(){const n=Number(now());if(!Number.isFinite(n)||!Number.isFinite(new Date(n).getTime()))fail('invalid_request');return n;}
   function scope(userId,goalId){if(!validId(userId??'')||!validId(goalId??''))fail('invalid_request');return join(root,hash([userId,goalId,'okx'])+'.json');}
   function directory(){mkdirSync(root,{recursive:true,mode:0o700});const s=lstatSync(root);if(!s.isDirectory()||s.isSymbolicLink()||!owner(s))fail('storage_unavailable');chmodSync(root,0o700);}
@@ -39,7 +42,9 @@ export function createDeviceSourceGateway({dir,journal,now=Date.now}={}) {
       validOrder(r.openOrder,r.opens)&&validOrder(r.eventOrder,r.events)&&
       (r.sourceStamp===null||stamp(r.sourceStamp))&&['pending','accepted','stale'].includes(r.admission)&&r.provenance==='ios-native-device-report'&&
       (r.metadata===null?r.state==='pending':validMetadata(r.metadata,r))&&
-      (r.history===undefined||validOkxHistory(r.history,r.observedAt))&&
+      // Cloud reads fail closed on stored history (e.g. a mis-migrated Mac record): treated
+      // like a corrupt record instead of silently dropping the field.
+      (r.history===undefined||(!cloud&&validOkxHistory(r.history,r.observedAt)))&&
       (r.state!=='connected'||r.metadata?.state==='ready'&&validSummary(r.summary)&&digest(r.summary,r.history)===r.metadata.digest&&iso(r.observedAt)&&r.observedAt===r.metadata.observedAt&&r.permission==='read_only'&&
         (r.metadata.capabilities===undefined&&!r.history||JSON.stringify(r.metadata.capabilities)===JSON.stringify(hasOkxHistory(r.history)?['trading_account_summary','trading_history']:['trading_account_summary'])));
   }
@@ -89,6 +94,9 @@ export function createDeviceSourceGateway({dir,journal,now=Date.now}={}) {
     if(input.action==='open'&&(!Object.hasOwn(input,'expectedGrantId')||input.expectedGrantId!==null&&(typeof input.expectedGrantId!=='string'||!GRANT.test(input.expectedGrantId))))fail('invalid_request');
     if(input.action==='status'&&input.requestId!==undefined&&!validId(input.requestId))fail('invalid_request');
     if(['publish','disconnect'].includes(input.action)&&(!GRANT.test(input.grantId??'')||!validId(input.eventId??'')||!Number.isSafeInteger(input.sequence)||input.sequence<1))fail('invalid_request');
+    // Cloud accepts the three-field summary only: any publish carrying a history key is refused
+    // outright (history is atomic with the summary digest, so stripping it is not possible).
+    if(input.action==='publish'&&cloud&&Object.hasOwn(input,'history'))fail('invalid_request');
     if(input.action==='publish'&&(!iso(input.observedAt)||Date.parse(input.observedAt)>clock()+300000||input.permission!=='read_only'||!validSummary(input.summary)||Object.hasOwn(input,'history')&&!validOkxHistory(input.history,input.observedAt)))fail('invalid_request');
     return copy(input);
   }

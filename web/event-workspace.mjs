@@ -451,7 +451,9 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
       const activeTasks=active.flatMap(g=>g.tasks.filter(t=>t.status==='open').map(t=>({goalId:g.id,taskId:t.id,revision:t.revision})));
       const queued=state.notificationResults??[];
       const results=queued.filter(r=>applicableResult(r,state.goals));
-      await onNotifications({userId:config.userId,fingerprint:config.fingerprint,cursor:state.cursor,reminders,activeTasks,results});
+      // 归属标识用 bindingScopeId，不再用叶指纹：换叶证书不会被当成新用户
+      // （docs/iphone-ca-profile-design.md §2.2）。
+      await onNotifications({userId:config.userId,bindingScopeId:config.bindingScopeId,cursor:state.cursor,reminders,activeTasks,results});
       if (!disposed&&queued.length) {
         const receipts=new Set(state.notificationReceipts??[]);
         for (const r of queued) if (r.fallback) receipts.add(r.eventId);

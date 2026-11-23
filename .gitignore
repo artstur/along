@@ -13,3 +13,6 @@ ios/*.xcodeproj/project.xcworkspace/xcuserdata/
 
 # Xcode 的本机构建产物，不要提交
 ios/build/
+
+# Tier 2 隔离 Linux Compose 集成验证的工作目录（ALONG_TIER2_INTEGRATION=1 时生成）
+.tier2-integration/

@@ -33,8 +33,21 @@ enum HealthMetric: String { case workout, sleep }
 }
 enum AgentBridgeError: Error { case invalidConfiguration }
 @MainActor enum AlongConnectionStore {
- static var pair = ["baseURL":"https://192.0.2.1:4176","token":"synthetic","fingerprint":"expected"]
+ // 真实连接的叶指纹是 64 位十六进制（AlongConnectionStore.clean 的既有校验）。
+ static var pair = ["baseURL":"https://192.0.2.1:4176","token":"synthetic","fingerprint":String(repeating:"A",count:64)]
  static func load() -> [String:String]? { pair }
+ // 作用域种子与真实实现同语义（docs/iphone-ca-profile-design.md §2.2）：
+ // 旧 pin 形态用 base|fingerprint|token，系统信任形态用 bindingScopeId。
+ static func scopeSeed(_ connection: [String: String]) -> String? {
+  guard let base = connection["baseURL"], let token = connection["token"] else { return nil }
+  let policy = connection["trustPolicy"] ?? "legacy-local-pin-v1"
+  if policy == "legacy-local-pin-v1" {
+   guard let pin = connection["fingerprint"], pin.count == 64 else { return nil }
+   return [base, pin, token].joined(separator: "\\n")
+  }
+  guard let scope = connection["bindingScopeId"] else { return nil }
+  return scope
+ }
 }
 @MainActor final class HealthKitReader {
  static var update: ((@escaping () -> Void) -> Void)?

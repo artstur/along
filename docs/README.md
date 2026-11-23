@@ -11,6 +11,8 @@
 | 授权健康摘要、可靠补传与自动跟进 | [阶段 C](stage-c-tech-design.md) | 自动测试、合成模型与真机证据分列 |
 | iPhone OKX 只读成交、账单与复盘口径 | [历史接入契约](okx-trade-history.md) | 明细私有、窗口与分页覆盖、分币种确定性报告 |
 | 云端部署与 2 用户（host/agent 上云、配对多绑定、Runbook） | [云端部署与多用户](cloud-deploy-multi-user.md) | 设计与施工记录；上线按 Runbook §6.4 由用户手动执行 |
+| 云端公网安全加固（应用准入、配对会话、容器与凭证面；G-1～G-22） | [云端安全加固](cloud-security-hardening.md) | 设计、实施偏差记录（§8）与上线手动步骤；CA 信任迁移另见下行 |
+| iPhone 根证书描述文件、系统信任与旧叶指纹迁移 | [CA 描述文件与 TLS 迁移](iphone-ca-profile-design.md) | 用户已选路线；代码与自动化回归已完成（PR #42），真机安装/完全信任/撤根仍待执行，不能视为已部署 |
 | iPhone 安装、桥接、HealthKit 与签名 | [iPhone README](../ios/README.md) | 系统和设备要求以当前工具链为准 |
 | Agent 运行时、派工及长期记忆 | [Along Agent 当前运行图](https://github.com/artstur/along-superagent/blob/main/docs/along/009-current-runtime.md) | 在独立 Agent 仓库维护 |
 
