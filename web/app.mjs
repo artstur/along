@@ -107,15 +107,41 @@ function originOf(baseURL) {
 function eventConnection(config=agentConfig) {
   const saved=readStored(EVENT_CONNECTION_KEY,null);
   if (!saved?.userId) return null;
+  if (saved.bindingOrigin&&saved.bindingOrigin!==originOf(config?.baseURL)) return null;
   if (saved.bindingScopeId) return saved.bindingScopeId===bindingKeyOf(config)?saved:null;
   // 迁移期的临时双读（docs/iphone-ca-profile-design.md §2.2）：旧记录只有叶指纹，
   // 没有 bindingScopeId。叶指纹不能继续当归属身份，但同一次配对留下的本地记录
   // 需要一次性映射到当前绑定作用域，否则用户会看到本机目标与事件工作区「凭空消失」。
   // 映射只在指纹与当前连接完全一致时生效，写入后统一是 v2 结构。
   if (!saved.fingerprint||!config?.fingerprint||saved.fingerprint!==config.fingerprint||!config.token) return null;
-  const migrated={bindingScopeId:bindingKeyOf(config),userId:saved.userId};
+  const bindingOrigin=originOf(config?.baseURL);
+  if (!bindingOrigin) return null;
+  const migrated={bindingScopeId:bindingKeyOf(config),userId:saved.userId,bindingOrigin};
   localStorage.setItem(EVENT_CONNECTION_KEY,JSON.stringify(migrated));
   return migrated;
+}
+// Only origin-bearing token-era records can migrate without native ownership evidence.
+// A token alone cannot identify the original Host after an interrupted endpoint change.
+function migrateEventConnection(previous,config) {
+  if (!sameBindingIdentity(previous,config)||!config.bindingScopeId) return;
+  const saved=readStored(EVENT_CONNECTION_KEY,null);
+  if (!saved?.userId||saved.bindingScopeId!==previous.token||
+      saved.bindingOrigin!==originOf(previous.baseURL)) return;
+  localStorage.setItem(EVENT_CONNECTION_KEY,JSON.stringify({...saved,bindingScopeId:config.bindingScopeId}));
+}
+async function restoreLegacyEventConnection(config) {
+  const saved=readStored(EVENT_CONNECTION_KEY,null);
+  if (!saved?.userId||!config.bindingScopeId||saved.bindingScopeId!==config.token||
+      !originOf(config.baseURL)||saved.bindingOrigin&&saved.bindingOrigin!==originOf(config.baseURL)) return;
+  // Build78 discarded the origin when it wrote the token-era event binding. The
+  // protected native outbox remembers the user previously verified for the full binding.
+  // This reads ownership only; it cannot configure HealthKit, upload or modify that outbox.
+  const owner=await window.AlongAgentBridge?.connection?.('workspace');
+  if (agentConfig!==config||JSON.stringify(readStored(EVENT_CONNECTION_KEY,null))!==JSON.stringify(saved)||
+      owner?.userId!==saved.userId||owner?.bindingScopeId!==config.bindingScopeId||
+      originOf(owner?.baseURL)!==originOf(config.baseURL)) return;
+  localStorage.setItem(EVENT_CONNECTION_KEY,JSON.stringify({bindingScopeId:config.bindingScopeId,userId:saved.userId,
+    bindingOrigin:originOf(config.baseURL)}));
 }
 function disconnectEventWorkspace() {
   eventWorkspace?.dispose();
@@ -127,7 +153,7 @@ function disconnectEventWorkspace() {
   lastNotificationProjection='';lastNotificationCheck=0;
 }
 function connectEventWorkspace(userId) {
-  const binding={bindingScopeId:bindingKeyOf(agentConfig),userId};
+  const binding={bindingScopeId:bindingKeyOf(agentConfig),userId,bindingOrigin:originOf(agentConfig.baseURL)};
   const previous=eventConnection();
   localStorage.setItem(EVENT_CONNECTION_KEY,JSON.stringify(binding));
   const bindingKey=JSON.stringify([agentConfig.baseURL,bindingKeyOf(agentConfig),agentConfig.token,userId]);
@@ -188,6 +214,7 @@ function activateAgentConfig(config,{rebind=false,runtime=agentRuntime}={}) {
   // 同一绑定 + 同一运行时的口径升级不算换端：归属键只是从 token 补齐成 bindingScopeId，
   // 事件工作区与本地归属都要延续，不能按新用户处理（docs/iphone-ca-profile-design.md §2.2）。
   const sameBinding=sameBindingIdentity(previous,config);
+  if (!rebind&&sameBinding) migrateEventConnection(previous,config);
   if (!rebind&&runtime===agentRuntime&&sameBinding&&['baseURL','token','runtime'].every(field=>previous[field]===config[field])&&
       bindingKeyOf(previous)===bindingKeyOf(config)) return;
   const replaceBinding=rebind||previous.token&&!sameBinding;
@@ -2829,7 +2856,11 @@ async function restoreAlongConnection() {
     // 归属靠 bindingScopeId，凭证靠 token。
     if (saved?.baseURL&&saved?.token&&(saved?.bindingScopeId||saved?.fingerprint)) {
       const runtime=!localStorage.getItem(AGENT_RUNTIME_KEY)&&saved.runtime===DSH_RUNTIME?DSH_RUNTIME:agentRuntime;
+      const previous=agentConfig;
       activateAgentConfig(saved,{runtime});
+      // A real endpoint change removes its event binding above. Unknown scopes and
+      // users remain isolated even if the network is unavailable.
+      if (sameBindingIdentity(previous,agentConfig)) await restoreLegacyEventConnection(agentConfig);
       render();
     } else if (agentConfig.token) {
       await saveNativeConnection(agentConfig);

@@ -790,16 +790,18 @@ enum BackgroundReviewAdmission {
         let hash = SHA256.hash(data: Data([seed].joined(separator: "\n").utf8)).map { String(format: "%02x", $0) }.joined()
         return (c, hash)
     }
-    private func stateURL() throws -> URL {
-        let dir = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+    private func stateURL(createDirectory: Bool = true) throws -> URL {
+        let dir = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: createDirectory)
             .appendingPathComponent("AlongHealthEvents", isDirectory: true)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.protectionKey: FileProtectionType.complete])
-        var excluded = dir, values = URLResourceValues(); values.isExcludedFromBackup = true; try excluded.setResourceValues(values)
+        if createDirectory {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.protectionKey: FileProtectionType.complete])
+            var excluded = dir, values = URLResourceValues(); values.isExcludedFromBackup = true; try excluded.setResourceValues(values)
+        }
         return dir.appendingPathComponent("outbox.json")
     }
-    private func load() throws -> [String: Any] {
+    private func load(createDirectory: Bool = true) throws -> [String: Any] {
         do {
-            let data = try Data(contentsOf: stateURL())
+            let data = try Data(contentsOf: stateURL(createDirectory: createDirectory))
             guard let state = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw AgentBridgeError.invalidConfiguration }
             return state
         } catch let error as CocoaError where error.code == .fileReadNoSuchFile { return [:] }
@@ -811,6 +813,20 @@ enum BackgroundReviewAdmission {
         var input = connection.reduce(into: [String: Any]()) { $0[$1.key] = $1.value }
         input["path"] = path; input["body"] = body
         return try await AlongWebView.Coordinator.agentRequest(input, background: UIApplication.shared.applicationState == .background)
+    }
+    // Read-only recovery proof for Build78's origin-less Web event binding. No health
+    // samples, permissions, observers, delivery requests or outbox writes occur here.
+    func cachedWorkspaceBinding(_ c: [String: String]) -> [String: String] {
+        guard UIApplication.shared.isProtectedDataAvailable,
+              let base = c["baseURL"], let token = c["token"], let scope = c["bindingScopeId"],
+              AlongConnectionStore.bindingScopeId(baseURL: base, token: token) == scope,
+              let seed = AlongConnectionStore.scopeSeed(c) else { return [:] }
+        let hash = SHA256.hash(data: Data(seed.utf8)).map { String(format: "%02x", $0) }.joined()
+        guard defaults.string(forKey: enabledKey) == hash,
+              let state = try? load(createDirectory: false), state["binding"] as? String == hash,
+              let user = state["user"] as? String,
+              user.range(of: #"^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$"#, options: .regularExpression) != nil else { return [:] }
+        return ["baseURL": base, "bindingScopeId": scope, "userId": user]
     }
     func configure() async throws -> [String: Any] {
         let (c, hash) = try connection()

@@ -48,6 +48,8 @@ ${pure}
 });
 
 test('the real native outbox persists before sending, retries the same id after restart, isolates pairing and defers locked reads',{skip:!hasSwift},()=>{
+ const shell=readFileSync(new URL('../ios/AlongHealth/Sources/AlongShellView.swift',import.meta.url),'utf8');
+ const bindingScope=shell.match(/    static func bindingScopeId\([\s\S]*?\n    }/)[0];
  const source=readFileSync(new URL('../ios/AlongHealth/Sources/HealthKitReader.swift',import.meta.url),'utf8');
  const collectors=readFileSync(new URL('../ios/AlongHealth/Sources/DeviceDataCollectors.swift',import.meta.url),'utf8').split('@MainActor struct OKXDeviceDataCollector')[0];
  const core=source.slice(source.indexOf('@MainActor final class HealthEventDelivery {'))
@@ -67,6 +69,7 @@ enum AgentBridgeError:Error {case invalidConfiguration; case receipt([String:Any
 @MainActor enum AlongConnectionStore {
  static var pair=["baseURL":"https://192.0.2.1:4176","token":"synthetic","fingerprint":String(repeating:"A",count:64)]
  static func load()->[String:String]? {pair}
+ ${bindingScope}
  // 作用域种子与真实实现同语义（docs/iphone-ca-profile-design.md §2.2）。
  static func scopeSeed(_ connection:[String:String])->String? {
   guard let base=connection["baseURL"],let token=connection["token"] else {return nil}
