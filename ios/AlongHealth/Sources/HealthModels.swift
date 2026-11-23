@@ -1,5 +1,79 @@
 import Foundation
 
+// Device-local inputs are deliberately not Codable. Only the bounded, allowlisted
+// aggregate projection below can cross the bridge; no sample identity or metadata.
+struct WorkoutObservation {
+    let activity: String
+    let start: Date
+    let end: Date
+    let durationSeconds: Double
+    let location: String
+    var distanceMeters: Double? = nil
+    var activeEnergyKcal: Double? = nil
+    var averageHeartRateBpm: Double? = nil
+    var maximumHeartRateBpm: Double? = nil
+    var effortScore: Double? = nil
+    var estimatedEffortScore: Double? = nil
+
+    func payload(observedAt: Date) -> [String: Any]? {
+        guard start <= end, end <= observedAt, durationSeconds.isFinite, durationSeconds >= 0,
+              durationSeconds <= 40320 * 60, durationSeconds <= end.timeIntervalSince(start) + 1 else { return nil }
+        let iso = ISO8601DateFormatter()
+        var result: [String: Any] = ["activity": activity, "startAt": iso.string(from: start),
+            "endAt": iso.string(from: end), "durationMinutes": (durationSeconds / 60 * 100).rounded(.down) / 100,
+            "location": ["indoor", "outdoor"].contains(location) ? location : "unknown"]
+        func add(_ key: String, _ value: Double?, _ lower: Double, _ upper: Double) {
+            if let value, value.isFinite, value >= lower, value <= upper {
+                result[key] = (value * 100).rounded() / 100
+            }
+        }
+        add("distanceMeters", distanceMeters, 0, 1_000_000)
+        add("activeEnergyKcal", activeEnergyKcal, 0, 100_000)
+        add("averageHeartRateBpm", averageHeartRateBpm, 0.01, 400)
+        add("maximumHeartRateBpm", maximumHeartRateBpm, 0.01, 400)
+        if let average = result["averageHeartRateBpm"] as? Double,
+           let maximum = result["maximumHeartRateBpm"] as? Double, average > maximum {
+            result.removeValue(forKey: "averageHeartRateBpm")
+            result.removeValue(forKey: "maximumHeartRateBpm")
+        }
+        add("effortScore", effortScore, 1, 10)
+        add("estimatedEffortScore", estimatedEffortScore, 1, 10)
+        return result
+    }
+}
+
+struct SleepStageObservation {
+    let interval: DateInterval
+    let stage: String
+}
+
+// Interval partitioning prevents overlapping devices and unspecified/specific
+// stages from multiplying minutes. Conflicting specific stages stay uncertain.
+private func sleepStageAggregate(_ records: [SleepStageObservation], lower: Date, upper: Date) -> (minutes: [String: Double], overlap: Bool) {
+    let known: Set<String> = ["core", "deep", "rem", "unspecified", "awake"]
+    let clipped = records.compactMap { record -> SleepStageObservation? in
+        let start = max(record.interval.start, lower), end = min(record.interval.end, upper)
+        return known.contains(record.stage) && start < end
+            ? SleepStageObservation(interval: DateInterval(start: start, end: end), stage: record.stage) : nil
+    }
+    let edges = Set(clipped.flatMap { [$0.interval.start, $0.interval.end] }).sorted()
+    var seconds: [String: Double] = [:]
+    var overlap = false
+    guard edges.count > 1 else { return ([:], false) }
+    for index in 0..<(edges.count - 1) {
+        let start = edges[index], end = edges[index + 1]
+        let active = Set(clipped.filter { $0.interval.start < end && $0.interval.end > start }.map(\.stage))
+        let specific = active.subtracting(["awake", "unspecified"])
+        let stage: String?
+        if specific.count > 1 { stage = "unspecified"; overlap = true }
+        else if let value = specific.first { stage = value }
+        else if active.contains("unspecified") { stage = "unspecified" }
+        else { stage = active.contains("awake") ? "awake" : nil }
+        if let stage { seconds[stage, default: 0] += end.timeIntervalSince(start) }
+    }
+    return (seconds.mapValues { ($0 / 60 * 100).rounded(.down) / 100 }, overlap)
+}
+
 // Half-open windows count complete local days. Calendar day arithmetic also
 // handles the 23- and 25-hour days around daylight saving transitions.
 struct HealthHistoryWindows {
@@ -68,7 +142,7 @@ struct SleepObservationWindow {
         start = calendar.date(byAdding: .day, value: -7, to: averageThrough)!
     }
 
-    func summarize(_ records: [DateInterval], includeHistory: Bool) -> (latestMinutes: Int?, summary: [String: Any]?, history: [String: Any]?) {
+    func summarize(_ records: [DateInterval], includeHistory: Bool, stages: [SleepStageObservation] = []) -> (latestMinutes: Int?, summary: [String: Any]?, history: [String: Any]?) {
         let windows = HealthHistoryWindows(endingAt: averageThrough, calendar: calendar)
         let lowerBound = includeHistory ? windows.start : start
         var merged: [DateInterval] = []
@@ -106,11 +180,21 @@ struct SleepObservationWindow {
         let firstStart = latest.first.flatMap { $0.start >= previousBoundary ? timestamp.string(from: $0.start) : nil }
         let lastEnd = latest.last.flatMap { $0.end <= latestEnd ? timestamp.string(from: $0.end) : nil }
         let average = completedDays.isEmpty ? nil : completedDays.reduce(0, +) / completedDays.count
-        let summary: [String: Any] = ["windowDays": 7, "daysWithData": completedDays.count,
+        var summary: [String: Any] = ["windowDays": 7, "daysWithData": completedDays.count,
             "averageThroughAt": timestamp.string(from: averageThrough), "latestWindowOpen": latestEnd < latestBoundary,
             "averageMinutes": average as Any? ?? NSNull(), "latestNightMinutes": latestMinutes as Any? ?? NSNull(),
             "previousNightMinutes": asleepMinutes(from: beforePrevious, through: previousBoundary) as Any? ?? NSNull(),
             "latestSleepStartAt": firstStart as Any? ?? NSNull(), "latestWakeAt": lastEnd as Any? ?? NSNull()]
+        if latestMinutes != nil && !stages.isEmpty {
+            summary["latestAsleepSegmentCount"] = min(latest.count, 10000)
+            let longest = latest.map { max(0, min($0.end, latestEnd).timeIntervalSince(max($0.start, previousBoundary))) }.max() ?? 0
+            summary["latestLongestAsleepMinutes"] = (longest / 60 * 100).rounded(.down) / 100
+            let aggregate = sleepStageAggregate(stages, lower: previousBoundary, upper: latestEnd)
+            if !aggregate.minutes.isEmpty {
+                summary["latestStageMinutes"] = aggregate.minutes
+                summary["latestStageOverlap"] = aggregate.overlap
+            }
+        }
         return (latestMinutes, summary, history)
     }
 }
@@ -133,7 +217,7 @@ enum HealthMetric: String, CaseIterable, Identifiable {
     var period: String {
         switch self {
         case .steps: "今天的总步数"
-        case .workout: "本周运动、近两周对比与近 28 天时段汇总"
+        case .workout: "本周运动、近期活动时长与可用强度、近 28 天时段汇总"
         case .activeEnergy: "今天主动活动消耗的千卡数"
         case .weight: "最近一次体重、近两周按日汇总的平均体重"
         case .restingHeartRate: "近 7 天最近一次估计值"
@@ -223,7 +307,8 @@ struct HealthSummary {
         case .sleep:
             source = sleepSummary
             fields = ["windowDays", "daysWithData", "averageThroughAt", "latestWindowOpen", "averageMinutes",
-                      "latestNightMinutes", "previousNightMinutes", "latestSleepStartAt", "latestWakeAt"]
+                      "latestNightMinutes", "previousNightMinutes", "latestSleepStartAt", "latestWakeAt",
+                      "latestAsleepSegmentCount", "latestLongestAsleepMinutes", "latestStageOverlap"]
         case .workout:
             source = workoutSummary
             fields = ["windowDays", "weekStartAt", "todayMinutes", "todayCount", "yesterdayMinutes", "latestWorkoutAt"]
@@ -232,10 +317,22 @@ struct HealthSummary {
         }
         guard let source else { return nil }
         var context = source.filter { fields.contains($0.key) && !($0.value is NSNull) }
+        if metric == .sleep, let stages = source["latestStageMinutes"] as? [String: Any] {
+            let stageFields: Set<String> = ["core", "deep", "rem", "unspecified", "awake"]
+            let safe = stages.filter { stageFields.contains($0.key) && !($0.value is NSNull) }
+            if !safe.isEmpty { context["latestStageMinutes"] = safe }
+        }
         if metric == .workout, let patterns = source["patterns"] as? [[String: Any]] {
             let patternFields: Set<String> = ["activity", "weekday", "hour", "count", "recentCount", "averageMinutes", "lastObservedAt"]
             context["patterns"] = patterns.prefix(40).map { pattern in
                 pattern.filter { patternFields.contains($0.key) && !($0.value is NSNull) }
+            }
+        }
+        if metric == .workout, let sessions = source["recentSessions"] as? [[String: Any]] {
+            let sessionFields: Set<String> = ["activity", "startAt", "endAt", "durationMinutes", "location",
+                "distanceMeters", "activeEnergyKcal", "averageHeartRateBpm", "maximumHeartRateBpm", "effortScore", "estimatedEffortScore"]
+            context["recentSessions"] = sessions.prefix(7).map { session in
+                session.filter { sessionFields.contains($0.key) && !($0.value is NSNull) }
             }
         }
         return context.isEmpty ? nil : context

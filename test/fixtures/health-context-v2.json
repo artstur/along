@@ -1,0 +1,25 @@
+{
+  "observedAt": "2026-11-24T04:00:00Z",
+  "timezone": "Asia/Shanghai",
+  "workout": {
+    "type": "workout", "metric_version": "2026-11-24T04:00:00Z", "timezone": "Asia/Shanghai",
+    "unit": "min", "statistic": "sum", "window": {"start": "2026-11-22T16:00:00Z", "end": "2026-11-29T16:00:00Z"},
+    "value": 45, "availability": "ok", "summarizer_version": "along-health-v1",
+    "context": {"windowDays": 28, "weekStartAt": "2026-11-22T16:00:00Z", "todayMinutes": 45, "todayCount": 1,
+      "yesterdayMinutes": 0, "latestWorkoutAt": "2026-11-24T01:00:00Z", "patterns": [],
+      "recentSessions": [{"activity": "strength_training", "startAt": "2026-11-24T01:00:00Z", "endAt": "2026-11-24T02:00:00Z",
+        "durationMinutes": 45, "location": "indoor", "activeEnergyKcal": 250, "averageHeartRateBpm": 120, "maximumHeartRateBpm": 160, "effortScore": 6}]
+    }
+  },
+  "sleep": {
+    "type": "sleep", "metric_version": "2026-11-24T04:00:00Z", "timezone": "Asia/Shanghai",
+    "unit": "min", "statistic": "sum", "window": {"start": "2026-11-23T10:00:00Z", "end": "2026-11-24T10:00:00Z"},
+    "value": 150, "availability": "ok", "summarizer_version": "along-health-v1",
+    "context": {"windowDays": 7, "daysWithData": 0, "averageThroughAt": "2026-11-23T10:00:00Z", "latestWindowOpen": true,
+      "latestNightMinutes": 150, "latestSleepStartAt": "2026-11-23T18:00:00Z", "latestWakeAt": "2026-11-23T21:30:00Z",
+      "latestAsleepSegmentCount": 2, "latestLongestAsleepMinutes": 120,
+      "latestStageMinutes": {"core": 60, "unspecified": 60, "awake": 60}, "latestStageOverlap": true}
+  },
+  "invalidWorkoutPatches": [{"sampleUUID": "not-allowed"}, {"latitude": 23.1}, {"durationMinutes": 61}, {"location": "gym-name"}, {"effortScore": 11}, {"averageHeartRateBpm": 180, "maximumHeartRateBpm": 160}],
+  "invalidSleepPatches": [{"latestAsleepSegmentCount": 0}, {"latestStageMinutes": {"core": 152}}, {"latestStageMinutes": {"rawSamples": []}}, {"latestStageOverlap": "yes"}]
+}
