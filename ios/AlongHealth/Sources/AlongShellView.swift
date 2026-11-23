@@ -559,7 +559,7 @@ enum AlongConnectionStore {
 
 struct AlongWebView: UIViewRepresentable {
     @ObservedObject var bridge: AlongBridgeModel
-    private let site = URL(string: "along://app/index.html?build=87")!
+    private let site = URL(string: "along://app/index.html?build=88")!
 
     func makeCoordinator() -> Coordinator { Coordinator(bridge: bridge) }
 
@@ -782,7 +782,12 @@ struct AlongWebView: UIViewRepresentable {
                 }
                 if body["operation"] as? String == "connection" {
                     let result: [String: Any]
-                    do { result = ["ok": true, "value": try Self.connectionOperation(body)] }
+                    do {
+                        if body["action"] as? String == "workspace", origin.protocol != "along" || origin.host != "app" {
+                            throw AgentBridgeError.invalidConfiguration
+                        }
+                        result = ["ok": true, "value": try Self.connectionOperation(body)]
+                    }
                     catch { result = ["ok": false, "error": error.localizedDescription] }
                     Self.deliverAlongResult(id: id, result: result, webView: webView)
                     return
@@ -806,6 +811,9 @@ struct AlongWebView: UIViewRepresentable {
                 let saved = AlongConnectionStore.load()
                 print("Along connection delivered to web: \(saved != nil)")
                 return saved ?? [:]
+            case "workspace":
+                guard let saved = AlongConnectionStore.load() else { return [:] }
+                return HealthEventDelivery.shared.cachedWorkspaceBinding(saved)
             case "save":
                 guard let value = input["value"] as? [String: Any],
                       let saved = AlongConnectionStore.save(value) else { throw AgentBridgeError.invalidConfiguration }

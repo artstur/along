@@ -79,12 +79,12 @@ test('a paired event workspace can change Hosts and keeps serving the Mac after 
   assert.ok(dom.app.innerHTML.includes('说说你想做什么'));
   await pair(dom,CLOUD);
   assert.deepEqual(native,MAC);
-  assert.deepEqual(read(dom,EVENT_KEY),{bindingScopeId:MAC.bindingScopeId,userId:'u_mac'});
+  assert.deepEqual(read(dom,EVENT_KEY),{bindingScopeId:MAC.bindingScopeId,userId:'u_mac',bindingOrigin:'https://192.168.1.2:4176'});
   assert.match(dom.app.innerHTML,/说说你想做什么/);
   rejectPair=false;
   await pair(dom,CLOUD);
   assert.deepEqual(read(dom,AGENT_KEY),MAC);
-  assert.deepEqual(read(dom,EVENT_KEY),{bindingScopeId:MAC.bindingScopeId,userId:'u_mac'});
+  assert.deepEqual(read(dom,EVENT_KEY),{bindingScopeId:MAC.bindingScopeId,userId:'u_mac',bindingOrigin:'https://192.168.1.2:4176'});
   assert.match(dom.app.innerHTML,/说说你想做什么/);
 
   rejectSave=false;holdMacSync=true;
@@ -127,7 +127,7 @@ test('cloud re-pairing to Mac detaches a pending cloud status response and resto
   finishPoll(done({requestId:'req_old',goal:{domain:'health'}}));
   await settle();
   assert.deepEqual(read(dom,AGENT_KEY),MAC);
-  assert.deepEqual(read(dom,EVENT_KEY),{bindingScopeId:MAC.bindingScopeId,userId:'u_mac'});
+  assert.deepEqual(read(dom,EVENT_KEY),{bindingScopeId:MAC.bindingScopeId,userId:'u_mac',bindingOrigin:'https://192.168.1.2:4176'});
   assert.ok(requests.some(input=>input.path==='/sync'&&input.token===MAC.token));
   assert.doesNotMatch(dom.app.innerHTML,/已整理这次目标|本周完成三次练习/);
   assert.equal(read(dom,GOALS_KEY)?.health,undefined);
@@ -187,7 +187,7 @@ test('an existing Mac binding can verify an address change using its current cre
   await submit(dom,'host-address-form',{baseURL:newAddress});
   assert.deepEqual(verified,{...MAC,baseURL:newAddress,path:'/connection/verify',body:{}});
   assert.deepEqual(read(dom,AGENT_KEY),{...MAC,baseURL:newAddress});
-  assert.deepEqual(read(dom,EVENT_KEY),{bindingScopeId:MAC.bindingScopeId,userId:'u_mac'});
+  assert.deepEqual(read(dom,EVENT_KEY),{bindingScopeId:MAC.bindingScopeId,userId:'u_mac',bindingOrigin:'https://192.168.1.3:4176'});
   assert.match(dom.app.innerHTML,/说说你想做什么/);
 });
 
