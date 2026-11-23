@@ -175,7 +175,6 @@ async function spawnHost(t,{dir,agentPort}) {
     ALONG_APNS_TEAM_ID:'ABCDEFGHIJ',
     ALONG_APNS_KEY_ID:'1234567890',
     CODEX_BIN:join(dir,'codex-stub.mjs'),
-    ALONG_TEST_CODEX_DELAY:'800',
   },stdio:['ignore','pipe','pipe']});
   const output=[];
   child.stdout.on('data',data=>output.push(String(data)));
@@ -214,17 +213,18 @@ function issueCodeViaCli(dir,userId) {
     {env:{...process.env,ALONG_AGENT_STATE_DIR:dir},encoding:'utf8'});
 }
 
-const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
-
 // /goal/event 的最小健康输入：before 0 → after 20（目标 100）触发 replan，remaining=80。
 const goalEventInput=()=>({goal:{domain:'health',title:'本周运动目标',target:100},
   before:{selectedTypes:['workout'],workoutMinutes:0},after:{selectedTypes:['workout'],workoutMinutes:20}});
 
 test('多用户隔离全链路：回环身份头、通知分文件、每日委托索引、/goal/event 各自锁',async t=>{
   const dir=mkdtempSync(join(tmpdir(),'along-multi-user-iso-'));
-  // 测试桩 codex：按 prompt 里的 remaining 回任务 JSON，延迟制造并发窗口。
+  // 测试桩 codex：用开始/释放屏障确认请求确实在途，不靠 CPU 时序碰并发窗口。
   writeFileSync(join(dir,'codex-stub.mjs'),`#!/usr/bin/env node
-import {writeFileSync} from 'node:fs';
+import {writeFileSync, existsSync} from 'node:fs';
+import {dirname, join} from 'node:path';
+import {fileURLToPath} from 'node:url';
+const root=dirname(fileURLToPath(import.meta.url));
 let output=null;
 const argv=process.argv.slice(2);
 for (let i=0;i<argv.length;i++) if (argv[i]==='--output-last-message') output=argv[i+1];
@@ -233,8 +233,13 @@ process.stdin.setEncoding('utf8');
 process.stdin.on('data',chunk=>raw+=chunk);
 process.stdin.on('end',()=>{
   const remaining=Number(/"remaining":(\\d+)/.exec(raw)?.[1]??0);
-  setTimeout(()=>{writeFileSync(output,JSON.stringify({task:'按当前节奏继续',reason:'测试桩建议',remaining}));},
-    Number(process.env.ALONG_TEST_CODEX_DELAY??0));
+  writeFileSync(join(root,'codex-started-'+process.pid),'started');
+  const deadline=Date.now()+20_000;
+  const timer=setInterval(()=>{
+    if (!existsSync(join(root,'codex-release-'+process.pid)) && Date.now()<deadline) return;
+    clearInterval(timer);
+    writeFileSync(output,JSON.stringify({task:'按当前节奏继续',reason:'测试桩建议',remaining}));
+  },20);
 });
 `,{mode:0o600});
   chmodSync(join(dir,'codex-stub.mjs'),0o700);
@@ -244,7 +249,9 @@ process.stdin.on('end',()=>{
   const host=await spawnHost(t,{dir,agentPort:agent.port});
   // 统一收尾：先停 host（回环连接排空），再关桩 Along Agent、删临时目录；
   // 少关任何一个监听都会让 node --test 进程挂着不退出。
-  t.after(async()=>{ await host.stop(); await agent.close(); rmSync(dir,{recursive:true,force:true}); });
+  const started=()=>readdirSync(dir).filter(name=>/^codex-started-\d+$/.test(name));
+  const release=()=>{for(const name of started())writeFileSync(join(dir,name.replace('started','release')),'release');};
+  t.after(async()=>{ release(); await host.stop(); await agent.close(); rmSync(dir,{recursive:true,force:true}); });
   const call=(token,path,body)=>phoneCall(host.port,path,{method:'POST',headers:{authorization:`Bearer ${token}`},body});
 
   // CLI 发码 → 两人各自配对，两个 token 同时有效。
@@ -295,15 +302,17 @@ process.stdin.on('end',()=>{
 
   // /goal/event 每用户一把锁：A、B 并发都推进；同一用户并发第二条 429。
   const a1=call(tokenA,'/goal/event',goalEventInput());
-  await sleep(200);
+  await waitFor(()=>started().length===1,'A 的第一条请求实际进入执行');
   const b1=call(tokenB,'/goal/event',goalEventInput());
   const a2=call(tokenA,'/goal/event',goalEventInput());
-  const [b1r,a2r]=await Promise.all([b1,a2]);
+  const a2r=await a2;
   assert.equal(a2r.status,429,'同一用户并发第二条 429');
   assert.match(a2r.json.error,/正在处理/);
+  await waitFor(()=>started().length===2,'A 尚未完成时，B 能独立进入执行');
+  release();
+  const [b1r,a1r]=await Promise.all([b1,a1]);
   assert.equal(b1r.status,200,'B 不被 A 的在途请求阻塞');
   assert.equal(b1r.json.suggestion.remaining,80);
-  const a1r=await a1;
   assert.equal(a1r.status,200,'A 的第一条请求正常完成');
   assert.equal(a1r.json.suggestion.remaining,80);
   assert.equal(a1r.json.decision,'replan');

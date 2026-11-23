@@ -50,6 +50,57 @@ test('the display extension is saved separately from execution classification an
   assert.deepEqual(reopened.view().messages[0].resultPresentation,presentation);
 });
 
+test('the complete result carrier restores full text while the wire preview stays compatible with old clients',async()=>{
+  installDomStub();
+  const body='完整说明。'.repeat(900)+'最后一步仍保留。';
+  const preview='结果预览：保留原有安排。完整内容可在更新后的任务详情阅读。';
+  const item=wire(preview,{result_text:body,result_presentation:presentation});
+  assert.ok(item.payload.message.text.length<=1200&&body.length>2000);
+  bridge([item]);const workspace=createEventWorkspace({config});await workspace.sync();
+  assert.equal(workspace.view().messages[0].text,body);
+  assert.deepEqual(workspace.view().messages[0].resultPresentation,presentation);
+  window.AlongAgentBridge.request=async()=>{throw Error('offline');};
+  const reopened=createEventWorkspace({config});await reopened.sync();
+  assert.equal(reopened.view().messages[0].text,body);
+});
+
+test('an unscoped complete body never replaces ordinary chat or another task preview',async()=>{
+  for(const mutate of [
+    item=>{item.payload.message.audience='conversation';},
+    item=>{item.taskId='t_foreign';},
+    item=>{delete item.payload.task_execution_revision;},
+    item=>{item.payload.calculation_receipt_id='calc_'+'b'.repeat(40);},
+  ]) {
+    installDomStub();const item=wire('安全预览。',{result_text:'不可越权的完整正文。'.repeat(300),result_presentation:presentation});
+    mutate(item);bridge([item]);const workspace=createEventWorkspace({config});await workspace.sync();
+    assert.equal(workspace.view().messages[0]?.text,'安全预览。');
+    assert.equal(workspace.view().messages[0]?.resultPresentation,undefined);
+  }
+});
+
+test('a scoped complete body rejects invalid or oversized values instead of clipping them',async()=>{
+  for(const value of ['字'.repeat(16001),'',null,{body:'not a string'},'坏\ud800','坏\udc00']) {
+    installDomStub();bridge([wire('安全预览。',{result_text:value})]);
+    const workspace=createEventWorkspace({config});await workspace.sync();
+    assert.equal(workspace.view().cursor,0);
+    assert.equal(workspace.view().messages.length,0);
+    assert.match(workspace.view().error,/执行结果正文格式不正确/);
+  }
+});
+
+test('invalid optional Unicode presentation in a cache is removed without losing the workspace or legacy body',async()=>{
+  installDomStub();bridge([wire('保留旧正文',{result_presentation:presentation})]);
+  const workspace=createEventWorkspace({config});await workspace.sync();
+  const saved=JSON.parse(localStorage.getItem(key));
+  saved.messages[resultId].resultPresentation.title='坏\ud800';
+  saved.messages[resultId].text='旧预览\ud800';
+  localStorage.setItem(key,JSON.stringify(saved));
+  const reopened=createEventWorkspace({config});
+  assert.equal(reopened.view().messages[0]?.text,'旧预览\ud800');
+  assert.equal(reopened.view().messages[0]?.resultPresentation,undefined);
+  assert.equal(reopened.view().goals.g_readable.tasks[0].id,'t_readable');
+});
+
 test('legacy task results render headings and steps and keep the complete tail in the task detail',async()=>{
   const dom=installDomStub({storage:{'along.agent.v1':JSON.stringify(config)}});
   const body='## 今晚的安排\n\n这是合成数据的说明。\n\n1. 保留原有任务\n2. 留出准备时间\n\n'+

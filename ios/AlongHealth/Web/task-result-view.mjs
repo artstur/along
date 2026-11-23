@@ -5,17 +5,32 @@ const strict=(value,keys)=>record(value)&&Object.keys(value).every(key=>keys.inc
 const esc=value=>value.replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
 export const RESULT_TEXT_LIMIT=16000;
 
+// Keep this product-wire check independent of browser support for String.isWellFormed.
+// Legacy text rendering remains permissive; invalid optional new structures can fall back safely.
+export function wellFormedResultText(value) {
+  if(typeof value!=='string')return false;
+  for(let index=0;index<value.length;index++) {
+    const unit=value.charCodeAt(index);
+    if(unit>=0xd800&&unit<=0xdbff) {
+      const next=value.charCodeAt(++index);
+      if(!(next>=0xdc00&&next<=0xdfff))return false;
+    } else if(unit>=0xdc00&&unit<=0xdfff)return false;
+  }
+  return true;
+}
+const displayText=(value,max)=>text(value,max)&&wellFormedResultText(value);
+
 export function safeResultPresentation(value) {
   try {
     if(!strict(value,['version','title','summary','actions','sections'])||value.version!==1||
-      !text(value.title,120)||!text(value.summary,360)||!Array.isArray(value.actions)||value.actions.length>5||
+      !displayText(value.title,120)||!displayText(value.summary,360)||!Array.isArray(value.actions)||value.actions.length>5||
       !Array.isArray(value.sections)||value.sections.length>6)return null;
     const actions=value.actions.map(action=>{
-      if(!strict(action,['text','when'])||!text(action.text,240)||action.when!==undefined&&!text(action.when,120))throw Error();
+      if(!strict(action,['text','when'])||!displayText(action.text,240)||action.when!==undefined&&!displayText(action.when,120))throw Error();
       return {text:action.text.trim(),...(action.when!==undefined?{when:action.when.trim()}:{})};
     });
     const sections=value.sections.map(section=>{
-      if(!strict(section,['heading','body'])||!text(section.heading,80)||!text(section.body,8000))throw Error();
+      if(!strict(section,['heading','body'])||!displayText(section.heading,80)||!displayText(section.body,8000))throw Error();
       return {heading:section.heading.trim(),body:section.body.trim()};
     });
     const size=value.title.length+value.summary.length+
