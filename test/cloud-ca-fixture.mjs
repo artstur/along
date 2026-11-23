@@ -19,9 +19,14 @@ function openssl(args,cwd) {
 // （docs/iphone-ca-profile-design.md §10：默认扩展随版本与配置变化）。
 export function makeTestCa(root,host='along.test.local') {
   mkdirSync(root,{recursive:true});
+  // A machine's req.x509_extensions plus -addext can duplicate the same OIDs.
+  // Own the complete config and select one section instead of layering defaults.
+  writeFileSync(join(root,'ca.cnf'),
+    '[req]\ndistinguished_name=dn\n[dn]\n[root_ca]\n'+
+    'basicConstraints=critical,CA:TRUE,pathlen:0\nkeyUsage=critical,keyCertSign,cRLSign\n'+
+    'subjectKeyIdentifier=hash\n');
   openssl(['req','-x509','-newkey','rsa:2048','-nodes','-keyout','ca.key','-out','ca.crt','-days','3650',
-    '-subj','/CN=Along Test Root CA','-addext','basicConstraints=critical,CA:TRUE,pathlen:0',
-    '-addext','keyUsage=critical,keyCertSign,cRLSign'],root);
+    '-subj','/CN=Along Test Root CA','-config','ca.cnf','-extensions','root_ca'],root);
   openssl(['req','-new','-newkey','rsa:2048','-nodes','-keyout','leaf.key','-out','leaf.csr','-subj',`/CN=${host}`],root);
   writeFileSync(join(root,'ext.cnf'),
     `basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=${isIP(host)?'IP':'DNS'}:${host}\n`);
