@@ -114,13 +114,15 @@ services:
       ALONG_BRIDGE_TOKEN_FILE: /run/secrets/bridge-token
       ALONG_EVENT_INGEST: "on"             # 新链路：/events、/sync、/notifications 生效
       ALONG_SUPERAGENT_URL: http://127.0.0.1:3082   # 必须回环（private_loopback_required）
-      # 远程推送（APNs）：把 Apple Developer 后台签发的 .p8 放到 ../../secrets/apns-key.p8，
-      # 再把下面两行 10 位 ID 换成真值即可。凭证不合法时 host/apns.mjs 只 warn 并降级为
-      # 「远程通知不可用」，其余功能不受影响（不设这三项则完全不发推送）。
-      ALONG_APNS_KEY_FILE: /run/secrets/apns-key
-      ALONG_APNS_TEAM_ID: "XXXXXXXXXX"
-      ALONG_APNS_KEY_ID: "XXXXXXXXXX"
-    secrets: [runner-token, bridge-token, apns-key]
+    # 远程推送（APNs）本部署**不启用**：Apple 的推送能力要付费开发者团队（免费 personal team
+    # 的描述文件里没有 aps-environment，App 拿不到 device token）。手机侧走 App 自己的
+    # 本地通知 + 前台同步补收（同步页的 remoteNotifications 为 false 即为此语义）。
+    # 将来开了付费账号要接上时：把 .p8 放到 ../../secrets/apns-key.p8，在下面三处加回
+    #   ALONG_APNS_KEY_FILE: /run/secrets/apns-key
+    #   ALONG_APNS_TEAM_ID: "<10 位>"
+    #   ALONG_APNS_KEY_ID: "<10 位>"
+    # 并把 apns-key 加进本服务的 secrets 列表（缺失的 file secret 会让 compose up 直接报错）。
+    secrets: [runner-token, bridge-token]
     volumes: ["../../data/host:/data"]
     read_only: true
     tmpfs: ["/tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777"]
@@ -146,8 +148,6 @@ secrets:
   runner-token: {file: ../../secrets/runner-token}
   # Hy-Memory 的供应商配置（0600）：LLM 走 MiniMax，embedder 走阿里云百炼。
   memory-env: {file: ../../secrets/memory-env}
-  # APNs 签名私钥（.p8，0600，prime256v1）：Apple Developer 后台签发，只能下载一次。
-  apns-key: {file: ../../secrets/apns-key.p8}
   # 与 Super Agent 读的是同一份文件：它就在 superagent 的 alongStateDir 里
   # （data/superagent/along/data/bridge-token）。两侧各挂一份、内容同一份，
   # 否则 Host 的每一次桥接调用都会被 401（host/along-bridge.mjs 与 Runtime 的 bridgeTokenOf）。
