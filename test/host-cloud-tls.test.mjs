@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import {spawn, execFileSync} from 'node:child_process';
 import {request as tlsRequest} from 'node:https';
 import net from 'node:net';
-import {createHash} from 'node:crypto';
-import {mkdtempSync, rmSync} from 'node:fs';
+import {createHash, X509Certificate} from 'node:crypto';
+import {mkdtempSync, rmSync, readFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -44,10 +44,11 @@ function healthCall(port) {
 
 // 直接从证书文件独立读取（不经 host 进程）：CN、notAfter、SHA-256 指纹。
 function certInfo(cert) {
-  const subject=execFileSync('openssl',['x509','-in',cert,'-noout','-subject']).toString().trim();
+  // Parse the certificate itself, independent of OpenSSL/LibreSSL's display spacing.
+  const subject=new X509Certificate(readFileSync(cert)).subject;
   const notAfterText=execFileSync('openssl',['x509','-in',cert,'-noout','-enddate']).toString().trim().replace(/^notAfter=/,'');
   const der=execFileSync('openssl',['x509','-in',cert,'-outform','DER']);
-  return {cn:/subject=CN=(.*)$/.exec(subject)?.[1]??null, notAfterText, notAfter:Date.parse(notAfterText),
+  return {cn:/^CN=(.*)$/m.exec(subject)?.[1]??null, notAfterText, notAfter:Date.parse(notAfterText),
     fingerprint:createHash('sha256').update(der).digest('hex').toUpperCase()};
 }
 

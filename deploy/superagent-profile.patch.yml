@@ -21,6 +21,16 @@
   config:
     host: 127.0.0.1
     port: 3082
+# Along research requires an explicit remote provider; Auto/http is insufficient.
+# Provider keys remain in the existing credential store. Never forward a private
+# initiating question implicitly alongside a deliberately minimized public query.
+- id: web
+  config:
+    searchProvider: deepseek-search-api
+    fetchProvider: deepseek-fetch-api
+- id: web-deepseek-api
+  config:
+    sendOriginalQuestion: false
 - id: dsh-superagent
   config:
     stateDir: /var/lib/dsh/state
