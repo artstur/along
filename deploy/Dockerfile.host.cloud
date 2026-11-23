@@ -1,0 +1,24 @@
+# 云端 Host 镜像（Linux 实测形态，2026-11-23）。
+#
+# 与 deploy/Dockerfile.host 的差别只有两处，都是这台 ECS 的硬约束逼出来的：
+#
+# 1. 基础镜像用服务器上已有的 node:24-bookworm-slim（along 的 engines 是 >=22.19，24 满足）。
+#    原镜像 pin 的是 node:22-bookworm-slim，这里换 24 是为了不额外拉一个 300MB 基础镜像
+#    （这台机到 deb.debian.org / registry 的下载都慢）。
+# 2. 不装 openssl。原镜像那条 `apt-get install openssl` 在这台机上 20 分钟装不完
+#    （docs/superagent-cloud-deploy.md §3 记录的实测）。云端形态不需要它：
+#    host/agent-host.mjs 的现场自签只在本地单用户形态走，云端形态的证书是预签发材料，
+#    由 host/tls-material.mjs 用 node:crypto 加载校验，全程不调用 openssl。
+#    代价：本镜像只能跑云端形态（ALONG_DSH_RUNNER_URL 已设 → 走 cloud TLS 分支）；
+#    要跑本地自签路径就需要另建带 openssl 的镜像。
+#
+# 其余与原镜像一致：锁文件锁定的生产依赖、Host 模块、web 共享依赖（这里整目录 COPY，
+# 白名单见 .dockerignore；原镜像按 grep 出来的 7 个文件平铺，web 资源一多就得跟着改）。
+FROM node:24-bookworm-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev --ignore-scripts
+COPY host/ host/
+COPY web/ web/
+EXPOSE 4176
+CMD ["node", "host/agent-host.mjs"]

@@ -18,6 +18,12 @@
 | `superagent-seed.mjs` | Tier 2 设置播种：第一次 boot 之前把「Along Source 开、GitHub Source 关」写进编排库（`assembleAlong` 读的是已存好的设置）；已有设置时不覆盖 |
 | `superagent-preset-lockdown.mjs` | Tier 2 读取面收紧：推导出去掉文件/shell/终端/文档/子代理能力后的 preset 覆盖行（读上游自己的 patch 推导，不抄一份）；推导结果为空即拒绝启动 |
 | `env.example` | environment 段非敏感参考值（必改项：`ALONG_TLS_CN` 换真实域名） |
+| `Dockerfile.host.cloud` | 云端 Host 镜像（Linux 实测形态）：node:24 基础镜像、**不装 openssl**（云端证书是预签发材料，由 `node:crypto` 加载校验）；整目录 COPY `web/` |
+| `docker-compose.cloud.yml` | 云端栈编排（Linux 实测形态）：`anchor` + `superagent` + `host` 三服务。命名空间由**第三方锚点容器**持有，host 与 superagent 都加入它（桥接只接受回环端点；命名空间若由任一方持有，对方一重启就被静默落下）；两个服务的健康检查探锚点跳板，落下即自愈 |
+| `netns-proxy.mjs` | 锚点里的裸 TCP 跳板：`0.0.0.0:3083 → 127.0.0.1:3082`，让宿主够得到绑回环的 DSH 管理面 |
+| `nginx/along-10531.conf` | 云端对外入口：TLS 在宿主 nginx 用 Let's Encrypt IP 证书终结，反代到 Host（对内是私 CA 自签叶证书——`host/tls-material.mjs` 要求根直接签叶，LE 链不满足） |
+| `embed-shim.mjs` | MiniMax embeddings → OpenAI 形状的翻译垫片：hy-memory 的 embedder 只走 OpenAI 形状（`input` / `data`），MiniMax 是自家形状（`texts` / `vectors`）。只监听回环，与 superagent 同命名空间 |
+| `superagent-profile.patch.yml` | Super Agent profile 的 patch 层**规范副本**：容器启动时复制进 profile 目录，所以「改配置 → 重启 → 生效」不依赖手工编辑状态目录。含 Hy-Memory 接线（`alongMemory`）与 MiniMax 路由 |
 | `../.dockerignore` | 两个主构建上下文都用仓库根目录的白名单，只放行 npm 清单、Host 模块及任务协议、web 模块和 runner 入口。 |
 | `agent-runner.mjs` | 内网 HTTP runner，使用 Along 专用 DSH profile；模块自检 `node --check deploy/agent-runner.mjs` |
 | `agent-dsh/` | dsh 安装清单：`package.json` + `package-lock.json` 锁定 `@deepseek-ai/dsh@0.2.2-rc.5`，镜像内 `npm ci --ignore-scripts` 安装。升级 dsh 版本时在本目录 `npm install --package-lock-only --ignore-scripts` 重新生成 lock 并入库，同时同步 `Dockerfile.agent` 的 pin 与 compose 的 `ALONG_DSH_VERSION` |

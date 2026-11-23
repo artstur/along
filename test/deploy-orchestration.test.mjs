@@ -352,6 +352,8 @@ test('两个 Docker 构建共享根目录白名单，目录中的任意文件不
   const lines=source.split('\n').map(line=>line.trim()).filter(line=>line&&!line.startsWith('#'));
   assert.deepEqual(lines,[
     '*','!package.json','!package-lock.json','!host/*.mjs','!host/schemas/task-reply.schema.json','!web/*.mjs',
+    // 云端 Host 镜像整目录 COPY web/，静态资源也要放行（deploy/Dockerfile.host.cloud）。
+    '!web/*.html','!web/*.css','!web/*.png','!web/*.webmanifest',
     '!deploy/agent-runner.mjs',
     '!deploy/agent-dsh/package.json','!deploy/agent-dsh/package-lock.json',
     // Tier 2 长驻镜像（deploy/Dockerfile.superagent）的启动脚本与设置播种脚本。

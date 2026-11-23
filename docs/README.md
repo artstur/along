@@ -13,6 +13,7 @@
 | 云端部署与 2 用户（host/agent 上云、配对多绑定、Runbook） | [云端部署与多用户](cloud-deploy-multi-user.md) | 设计与施工记录；上线按 Runbook §6.4 由用户手动执行 |
 | 云端公网安全加固（应用准入、配对会话、容器与凭证面；G-1～G-22） | [云端安全加固](cloud-security-hardening.md) | 设计、实施偏差记录（§8）与上线手动步骤；CA 信任迁移另见下行 |
 | Linux 云端部署实测（V-1 通过、settings seed、资源与网络约束） | [Superagent 云端部署经验](superagent-cloud-deploy.md) | 实测事实与踩过的坑；编排见 `origin/feature/tier2-cloud-orchestration` 分支 |
+| Along Host 云端部署实测（三容器栈、两层证书、命名空间锚点、MiniMax 接线） | [Host 云端部署经验](host-cloud-deploy.md) | 实测事实与踩过的坑；编排见 `deploy/docker-compose.cloud.yml` |
 | iPhone 根证书描述文件、系统信任与旧叶指纹迁移 | [CA 描述文件与 TLS 迁移](iphone-ca-profile-design.md) | 用户已选路线；代码与自动化回归已完成（PR #42），真机安装/完全信任/撤根仍待执行，不能视为已部署 |
 | iPhone 安装、桥接、HealthKit 与签名 | [iPhone README](../ios/README.md) | 系统和设备要求以当前工具链为准 |
 | Agent 运行时、派工及长期记忆 | [Along Agent 当前运行图](https://github.com/artstur/along-superagent/blob/main/docs/along/009-current-runtime.md) | 在独立 Agent 仓库维护 |
