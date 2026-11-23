@@ -136,42 +136,10 @@ services:
       timeout: 10s
       retries: 3
 
-# embeddings 翻译垫片：MiniMax 的 embeddings 是自家形状（请求体要 texts、响应是
-  # vectors），而 hy-memory 的 embedder 只走 OpenAI 形状（请求体 input、响应 data）。
-  # 这个垫片只做形状翻译（deploy/embed-shim.mjs）。它与 superagent 同在锚点的命名
-  # 空间里 → 只监听回环，不对外；记忆服务用 http://127.0.0.1:3090/v1 访问。
-  embed-shim:
-    image: node:24-bookworm-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54
-    container_name: along-embed-shim
-    network_mode: "service:anchor"
-    depends_on:
-      anchor:
-        condition: service_started
-    command: ["node", "/opt/embed-shim.mjs"]
-    volumes: ["./embed-shim.mjs:/opt/embed-shim.mjs:ro"]
-    environment:
-      ALONG_EMBED_SHIM_PORT: "3090"
-      ALONG_MODEL_API_KEY_FILE: /run/secrets/model-credentials
-      ALONG_EMBED_SHIM_TOKEN_FILE: /run/secrets/embed-shim-token
-    secrets: [model-credentials, embed-shim-token]
-    read_only: true
-    tmpfs: ["/tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777"]
-    security_opt: ["no-new-privileges:true"]
-    cap_drop: ["ALL"]
-    mem_limit: 64m
-    cpus: "0.2"
-    pids_limit: 32
-    restart: unless-stopped
-    logging: {driver: json-file, options: {max-size: "10m", max-file: "3"}}
-
 secrets:
   runner-token: {file: ../../secrets/runner-token}
-  # Hy-Memory 的供应商配置（0600）：LLM 走 MiniMax，embedder 走本机垫片。
+  # Hy-Memory 的供应商配置（0600）：LLM 走 MiniMax，embedder 走阿里云百炼。
   memory-env: {file: ../../secrets/memory-env}
-  # 垫片的调用令牌（0600）：与 memory-env 里的 MEMORY_EMBEDDER_API_KEY 同一份值。
-  embed-shim-token: {file: ../../secrets/embed-shim-token}
-  # MiniMax key 的第二处使用点：垫片自己要用它调上游。
-  model-credentials: {file: ../../secrets/model-credentials}
   # 与 Super Agent 读的是同一份文件：它就在 superagent 的 alongStateDir 里
   # （data/superagent/along/data/bridge-token）。两侧各挂一份、内容同一份，
   # 否则 Host 的每一次桥接调用都会被 401（host/along-bridge.mjs 与 Runtime 的 bridgeTokenOf）。
