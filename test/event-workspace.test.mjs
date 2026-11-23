@@ -559,7 +559,7 @@ test('execution-v1 ACKed private history replays the same result and current pro
 test('only this projection version can resume its interrupted execution replay cursor',async()=>{
  const goal=safeWorkspaceGoal(snapshot()),key='along.event-workspace.v1:'+config.userId;
  for(const marker of [undefined,1,2]){
-  const saved={version:1,recommendationsVersion:1,conversationVersion:1,dataSourcesVersion:1,taskCapabilityVersion:1,executionVersion:1,executionReplayAfter:40,...(marker?{executionReplayVersion:marker}:{}),userId:config.userId,cursor:109,activeGoalId:goal.id,conversationId:null,goals:{[goal.id]:goal},messages:{},drafts:{}};
+  const saved={version:1,recommendationsVersion:1,conversationVersion:1,dataSourcesVersion:1,taskCapabilityVersion:1,resultPresentationVersion:1,executionVersion:1,executionReplayAfter:40,...(marker?{executionReplayVersion:marker}:{}),userId:config.userId,cursor:109,activeGoalId:goal.id,conversationId:null,goals:{[goal.id]:goal},messages:{},drafts:{}};
   installDomStub({storage:{[key]:JSON.stringify(saved)}});const after=[];window.AlongAgentBridge={request:async r=>{if(r.path==='/sync'){after.push(r.body.after_seq);return {items:[]};}if(r.path==='/sync/ack')return {acked:0};throw Error(r.path);}};
   const w=createEventWorkspace({config});await w.sync();assert.equal(after[0],marker===2?40:0);const cache=JSON.parse(localStorage.getItem(key));assert.equal(cache.executionVersion,2);assert.equal(cache.executionReplayVersion,undefined);
  }

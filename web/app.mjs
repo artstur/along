@@ -6,6 +6,7 @@ import {createEventWorkspace} from './event-workspace.mjs';
 import {recommendationCard} from './recommendations.mjs';
 import {dataSourceProvider} from './data-sources.mjs';
 import {taskResultBodyRelevant} from './task-results.mjs';
+import {taskResultCard,captureResultReading,restoreResultReading} from './task-result-view.mjs';
 import {AGENT_KEY, GOALS_KEY, CONVERSATIONS_KEY, readStored, agentCall, loadNativeConnection, saveNativeConnection} from './agent-client.mjs';
 import {ADAPTIVE_LAYOUTS_KEY, customGoalEntries, findInitialCustomGoalCandidate, goalDomain, isCustomGoalKey, safeAdaptiveLayout, validateAdaptiveLayout} from './adaptive-ui.mjs';
 import {GOAL_SUPER_AGENT_RUNS_KEY, SUPER_AGENT_RUNS_KEY, createFailedGoalSuperAgentRun, createFailedSuperAgentRun,
@@ -1517,7 +1518,7 @@ function eventTaskDetail(goal,messages) {
   const result=candidates.find(m=>m.eventId===focusedEventRecommendation)??candidates.at(-1);
   const execution=task.execution;
   const history=execution?.records??[];
-  return `${backButton('event-task-back','返回动态任务')}<section class="goal-card" tabindex="-1" id="event-task-${esc(task.id)}"><p class="goal-note">${esc(goal.title)}</p><h1>${esc(task.content)}</h1><p>执行时间 · ${esc(eventTaskTime(task))}</p>${isEventTimedTask(task)?'<span class="task-schedule-tag">定时任务</span>':''}${taskReminderLine(task)}</section><section class="task-section"><div class="section-heading"><h2>已记录 ${execution?.count??0} 次执行</h2></div>${history.length?`<ol class="task-execution-list">${history.map(record=>`<li><strong>${esc(record.summary??(record.kind==='research'?'已整理推荐方案':record.kind==='calculation'?'已完成计算':'已确认完成'))}</strong><p>${esc(eventTaskStamp(record.executedAt,task.reminderPlan?.timezone))}</p></li>`).join('')}</ol>`:'<p class="goal-note">暂无可核实的执行记录</p>'}</section>${result?`<section class="task-section" id="event-message-${esc(result.notificationEventId??result.eventId)}">${result.recommendation?recommendationCard(result.recommendation,{eventId:result.eventId}):`<div class="section-heading"><h2>执行结果</h2></div><p>${esc(result.text).replaceAll('\n','<br>')}</p>`}</section>`:''}`;
+  return `${backButton('event-task-back','返回动态任务')}<section class="goal-card" tabindex="-1" id="event-task-${esc(task.id)}"><p class="goal-note">${esc(goal.title)}</p><h1>${esc(task.content)}</h1><p>执行时间 · ${esc(eventTaskTime(task))}</p>${isEventTimedTask(task)?'<span class="task-schedule-tag">定时任务</span>':''}${taskReminderLine(task)}</section>${result?`<section class="task-section" id="event-message-${esc(result.notificationEventId??result.eventId)}">${result.recommendation?recommendationCard(result.recommendation,{eventId:result.eventId}):taskResultCard(result)}</section>`:''}<section class="task-section"><div class="section-heading"><h2>已记录 ${execution?.count??0} 次执行</h2></div>${history.length?`<ol class="task-execution-list">${history.map(record=>`<li><strong>${esc(record.summary??(record.kind==='research'?'已整理推荐方案':record.kind==='calculation'?'已完成计算':'已确认完成'))}</strong><p>${esc(eventTaskStamp(record.executedAt,task.reminderPlan?.timezone))}</p></li>`).join('')}</ol>`:'<p class="goal-note">暂无可核实的执行记录</p>'}</section>`;
 }
 function recommendationValidity(view) {
   const now=Date.now();
@@ -1564,7 +1565,9 @@ function renderEventUpdate() {
   const scroller=app.querySelector('.agent-scroll');
   const scrollTop=scroller?.scrollTop??0;
   const follow=scroller&&(scroller.scrollHeight-scroller.scrollTop-scroller.clientHeight<80);
+  const reading=captureResultReading(app,{activeElement:document.activeElement,scrollY:window.scrollY});
   render();
+  restoreResultReading(app,reading,{scrollTo:options=>window.scrollTo(options)});
   const next=app.querySelector('#agent-form textarea');
   if (sameScope&&next&&typeof draft==='string') {next.value=draft;if (focused) {next.focus();next.setSelectionRange?.(selection,selection);}}
   const nextScroller=app.querySelector('.agent-scroll');

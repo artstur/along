@@ -180,7 +180,10 @@ test('network recovery continues the same repaired user cache and cursor without
   assert.deepEqual(projection?.results,[]);
   assert.equal(projection?.reminders.length,2);
   assert.ok(projection.reminders.every(row=>Date.parse(row.scheduledAt)===Date.parse('2099-01-01T12:00:00Z')));
+  assert.equal(calls.find(call=>call.path==='/sync').body.after_seq,0,'new result projection hydrates once without reducing the acknowledged cursor');
+  await again.tick(3000);await settle();
   assert.ok(calls.some(call=>call.path==='/sync'&&call.body.after_seq===7));
+  assert.equal(again.read(CACHE).cursor,7);
   assert.ok(!calls.some(call=>call.path==='/events'));
 });
 
