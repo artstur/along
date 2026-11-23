@@ -189,7 +189,7 @@ Worker（`settings.executor.model`）留空时跟随默认模型。
 | 磁盘 | 40 GB，已用 21 GB，剩 17 GB（hy-memory 依赖树 778 MB 不在镜像里，是独立卷） |
 | 一条用户消息 → 目标 + 3 任务 + 提醒 + 回复 | 分钟量级（模型多步规划） |
 | 一条含长期偏好的消息 → 记忆提取与治理 | 分钟量级（批次 processed=1、saved=2、attempts=1） |
-| 记忆向量维度 | 1024（百炼 text-embedding-v4，Chroma 集合 `agent_memories_1024`） |
+| 记忆向量 | 百炼 `qwen3.7-text-embedding` / 1024 维（Chroma 集合 `agent_memories_1024`） |
 | 对外入口 | `https://8.155.140.214:10531`，LE 链验证通过（`ssl_verify_result=0`） |
 | 面板入口 | `https://8.155.140.214:10530`，LE 链验证通过；未带 token 时 401 |
 
@@ -212,31 +212,36 @@ Python 进程跑 bundle 里的 `scripts/along-memory-service.py`（JSONL over st
 ### 6.2 embedder 用阿里云百炼，天然不需要翻译层
 
 第一版接的是 MiniMax 自己的 `embo-01`，为此写过一个形状翻译垫片（`deploy/embed-shim.mjs`，
-本轮已删除）：
-MiniMax 的 embeddings 是自家形状（请求体要 `texts`、响应是 `vectors`），而 hy-memory 的 embedder
-**只走 OpenAI 形状**（请求体 `input`、响应 `data[].embedding`）——实测用 `input` 直接报
-`missing required parameter texts`。
+本轮已删除）：MiniMax 的 embeddings 是自家形状（请求体要 `texts`、响应是 `vectors`），而
+hy-memory 的 embedder **只走 OpenAI 形状**（请求体 `input`、响应 `data[].embedding`）——实测用
+`input` 直接报 `missing required parameter texts`。
 
-后来换成**阿里云百炼 `text-embedding-v4`**，垫片整个删掉了（容器、文件、compose 服务、令牌 secret 四样）。
-百炼的 `/compatible-mode/v1` 本来就是 OpenAI 形状，hy-memory 直连。
+换成**阿里云百炼**后垫片整个删掉了（容器、文件、compose 服务、令牌 secret 四样）。百炼的
+`/compatible-mode/v1` 本来就是 OpenAI 形状，hy-memory 直连。
 
-两边实测（同一组样本，本机实测）：
+四个候选的实测对照（同一组样本，本机实测；维度都取 1024）：
 
-| | 百炼 `text-embedding-v4` | MiniMax `embo-01` |
-| --- | --- | --- |
-| 协议 | OpenAI 兼容（`input` → `data`） | 自家（`texts` → `vectors`），要翻译 |
-| 维度 | 2048/1536/**1024 默认**/768/512/256/128/64，`dimensions` 可调 | 1536 固定 |
-| 单请求行数 | **10**（第 11 条报 `batch size ... not be larger than 10`） | 实测 512 可过 |
-| 延迟 | 1 条 224ms、10 条 306ms | 1 条 374ms、10 条 343ms、64 条 908ms |
-| 单价 | 0.0005 元/千 Token（Batch 0.00025），各 100 万 Token 免费额度 | 公开文档里**没有**这个端点（不在开放平台 API 目录中），规格与价格无从核实 |
-| 检索区分度（实测） | 相关 0.7785 / 无关 0.16～0.28 | 相关 0.9816 / 无关 0.04 |
-| 需要翻译层 | **不需要** | 需要 |
+| | 协议 | 维度 | 单请求行数 | 1 条延迟 | 单价 | 检索 Top1 | 平均 margin | 最小 margin |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| **百炼 qwen3.7-text-embedding** | OpenAI 兼容 | 1024–2560 可调 | **20** | **159ms** | 0.0005 元/千 Token | **10/10** | 0.359 | **+0.076** |
+| 百炼 text-embedding-v4 | OpenAI 兼容 | 64–2048 可调 | 10 | 224ms | 0.0005 元/千 Token | 9/10 | 0.343 | −0.023 |
+| 百炼 qwen3.7-text-embedding-flash | OpenAI 兼容 | 固定 1024（要更大维度**静默退回 1024**） | ≥21 | 134ms | 0.000125 元/千 Token | 9/10 | 0.276 | −0.042 |
+| MiniMax embo-01 | 自家形状，要翻译层 | 固定 1536 | 512 | 374ms | 公开文档查不到 | 9/10 | 0.637 | −0.229 |
 
-选百炼的决定性理由不是质量（两边区分度都够用），而是：协议兼容 → 少一层自维护代码与一个常驻容器；
-成本可核实（MiniMax 那条端点的价格在官方文档里查不到）；维度可调（将来换模型不必重建索引）。
-检索按排序工作、默认无分数阈值（`score_threshold=0.0`），百炼余弦基线偏高不影响排序；
+检索的 Top1 与 margin 用同一组 10 组问答算（每组 1 条相关文档 + 3 条干扰，看相关文档是否排在
+无关文档前面、差多少）。结论：
+
+- **取 `qwen3.7-text-embedding`**：唯一 10/10 且**最小 margin 为正**（每组都排对，没有贴脸翻车），
+  同价、同 1024 维（索引不用重建）、更快、批量上限翻倍。
+- **不取 flash**：最便宜，但四个里最弱（平均 margin 最低且有一组翻车）；而且它请求更大维度时
+  **静默退回 1024**（官方只支持 1024/768/512/256）——这种静默降级比报错更危险。
+- **MiniMax 均值最漂亮但不稳**：平均 margin 0.637 最高，却有一组 −0.229（错得最狠）。均值好看
+  不等于每次都对，而记忆检索错一次就等于把一条无关记忆注入对话。
+- 价格不是决策因素（每天几十条消息，一年在几分钱），**「Top1 稳不稳」和「账单能不能核实」才是**。
+
+检索按排序工作、默认无分数阈值（`score_threshold=0.0`），余弦基线高低不影响排序；
 `merge_threshold=0.95` 只管 **Entity Store**（mem0 风格实体集合，包内没有调用方且 graph 已关），
-不是记忆去重路径——所以两边的差异不落在业务语义上。
+不是记忆去重路径——所以上面这些差异不落在业务语义上。
 
 ### 6.3 端到端验证结果
 
@@ -251,9 +256,9 @@ MiniMax 的 embeddings 是自家形状（请求体要 `texts`、响应是 `vecto
 批次 `status=done`（processed=1、saved=2），两条记忆都带 `evidence_message_id`（治理分类要求有真实
 消息证据才成立）。Hy-Memory 的向量库落盘在 `data/superagent/memory/data/`（1.4 MB）。
 
-换成百炼后用同一句话再跑一轮，结果相同（同样两条事实、同样带证据），批次 `attempts=1`（第一轮因
-镜像缺 git 失败过，见 §6.4）。**向量库那一层的直接证据**：Chroma 集合名是 `agent_memories_1024`、
-维度 1024（MiniMax 那轮是 1536）→ 确认向量确实来自百炼。
+换成百炼（v4、`qwen3.7-text-embedding` 各一轮）后用同一句话再跑，结果相同：同样两条事实、同样带
+证据、批次 `attempts=1`（第一轮因镜像缺 git 失败过，见 §6.4）。**向量库那一层的直接证据**：
+Chroma 集合名是 `agent_memories_1024`、维度 1024（MiniMax 那轮是 1536）→ 确认向量确实来自百炼。
 
 ### 6.4 顺带修掉的一个真问题：worker 沙箱没有 git
 
@@ -277,7 +282,8 @@ worker 派工一启动就失败：`Error: spawn git ENOENT`。node 基础镜像�
   所以本机内存仍有余量，但它与定时维护批次同时跑时要注意。
 - **embedder 的选择理由与百炼无关的部分**：百炼的 `text-embedding-v4` 每次最多 10 条（记忆服务脚本
   的 `batch_size=10` 正是照它调的），单请求超 10 条会报 `batch size is invalid`；量大时要改批次策略。
-- **百炼的向量质量只验过一轮**：与 MiniMax 用的是同一组样本、同一条链路，没做过规模化检索压测。
+- **百炼的向量质量只验过 10 组样本**：测的是 Top1 排序与 margin，没做过规模化检索压测，也没测过
+  中文长文本与多轮对话语境下的表现。
 - **网页 UI 不在云端形态内**：`host/agent-host.mjs` 只提供 API，静态页面由 `host/server.mjs`
   提供（Mac 形态）。iPhone App 是自带 UI 的原生壳，不依赖网页。
 - **worker 的 bash 沙箱在 Linux 上只验过启动**：git 缺失已修，但真实的文件/命令执行行为没有系统验收。
