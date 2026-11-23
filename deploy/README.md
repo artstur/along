@@ -22,7 +22,6 @@
 | `docker-compose.cloud.yml` | 云端栈编排（Linux 实测形态）：`anchor` + `superagent` + `host` 三服务。命名空间由**第三方锚点容器**持有，host 与 superagent 都加入它（桥接只接受回环端点；命名空间若由任一方持有，对方一重启就被静默落下）；两个服务的健康检查探锚点跳板，落下即自愈 |
 | `netns-proxy.mjs` | 锚点里的裸 TCP 跳板：`0.0.0.0:3083 → 127.0.0.1:3082`，让宿主够得到绑回环的 DSH 管理面 |
 | `nginx/along-10531.conf` | 云端对外入口：TLS 在宿主 nginx 用 Let's Encrypt IP 证书终结，反代到 Host（对内是私 CA 自签叶证书——`host/tls-material.mjs` 要求根直接签叶，LE 链不满足） |
-| `embed-shim.mjs` | MiniMax embeddings → OpenAI 形状的翻译垫片：hy-memory 的 embedder 只走 OpenAI 形状（`input` / `data`），MiniMax 是自家形状（`texts` / `vectors`）。只监听回环，与 superagent 同命名空间 |
 | `superagent-profile.patch.yml` | Super Agent profile 的 patch 层**规范副本**：容器启动时复制进 profile 目录，所以「改配置 → 重启 → 生效」不依赖手工编辑状态目录。含 Hy-Memory 接线（`alongMemory`）与 MiniMax 路由 |
 | `../.dockerignore` | 两个主构建上下文都用仓库根目录的白名单，只放行 npm 清单、Host 模块及任务协议、web 模块和 runner 入口。 |
 | `agent-runner.mjs` | 内网 HTTP runner，使用 Along 专用 DSH profile；模块自检 `node --check deploy/agent-runner.mjs` |
