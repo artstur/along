@@ -406,3 +406,38 @@ footer { padding: 0 0 26px; color: #aaa; text-align: center; font-size: 10px; }
 .event-task-meta .task-row-status { font-size:12px; line-height:1.5; color:#999; }
 .task-detail-link:focus { text-decoration:none; }
 .task-detail-chevron { margin-left:4px; font-size:14px; line-height:1; }
+
+/* Results share the compact detail typography; long content stays in the page scroll. */
+.event-task-detail, .event-task-detail .task-section, .event-task-detail .goal-card { min-width:0; overflow-wrap:anywhere; }
+.task-result-card { background:#fff; border:1px solid #e7e7e6; border-radius:16px; padding:18px 16px; min-width:0; overflow-wrap:anywhere; }
+.task-result-card h2 { font-size:16px; line-height:1.5; margin:0 0 10px; }
+.task-result-card p, .task-result-card li, .task-result-card td, .task-result-card th { font-size:14px; line-height:1.75; }
+.task-result-summary { color:#333; }
+.task-result-actions { margin:14px 0; padding-left:22px; }
+.task-result-actions li { padding:3px 0; }
+.task-result-actions li > span { display:block; color:#888; font-size:12px; }
+.task-result-prose p, .task-result-preview p { margin:10px 0; white-space:pre-wrap; }
+.task-result-prose h3, .task-result-preview h3 { font-size:14px; line-height:1.6; margin:18px 0 8px; }
+.task-result-prose > :first-child, .task-result-preview > :first-child { margin-top:0; }
+.task-result-prose ul, .task-result-prose ol, .task-result-preview ul, .task-result-preview ol { padding-left:22px; margin:10px 0; }
+.task-result-prose li + li, .task-result-preview li + li { margin-top:5px; }
+.task-result-prose pre, .task-result-preview pre { margin:12px 0; padding:12px; background:#f6f6f5; border-radius:8px; white-space:pre-wrap; overflow-wrap:anywhere; font-size:12px; line-height:1.65; }
+.task-result-prose code, .task-result-preview code { white-space:pre-wrap; overflow-wrap:anywhere; font-size:.92em; }
+.task-result-prose blockquote, .task-result-preview blockquote { border-left:2px solid #ddd; margin:12px 0; padding-left:12px; color:#666; }
+.task-result-explanation, .task-result-full { margin-top:14px; border-top:1px solid #ececeb; padding-top:12px; }
+.task-result-explanation > summary, .task-result-full > summary { color:#777; font-size:12px; line-height:1.7; cursor:pointer; padding:5px 0; }
+.task-result-explanation[open] > summary, .task-result-full[open] > summary { margin-bottom:10px; }
+.task-result-card summary:focus-visible, .task-result-table:focus-visible { outline:2px solid #aaa; outline-offset:3px; border-radius:2px; }
+.task-result-card .task-result-preview-label { margin-bottom:8px; font-size:11px; color:#999; }
+.task-result-table { width:100%; overflow-x:auto; -webkit-overflow-scrolling:touch; margin:12px 0; }
+.task-result-table table { width:100%; border-collapse:collapse; text-align:left; }
+.task-result-table th, .task-result-table td { min-width:5em; padding:8px; border-bottom:1px solid #eee; vertical-align:top; }
+.task-result-table th { color:#777; font-size:12px; font-weight:600; }
+.recommendation-context { border-top:1px solid #ececeb; padding:12px 0; }
+.recommendation-context > summary { font-size:12px; color:#777; line-height:1.7; cursor:pointer; }
+.recommendation-context[open] > summary { margin-bottom:10px; }
+.recommendation-card .recommendation-next { margin:14px 0; padding:12px; border-radius:10px; background:#f6f6f5; color:#333; }
+.recommendation-next > strong { font-size:11px; color:#888; }
+.recommendation-intro { min-width:0; }
+.recommendation-option dl > div { display:grid; grid-template-columns:minmax(4em,.35fr) minmax(0,1fr); }
+.recommendation-option dd { min-width:0; }

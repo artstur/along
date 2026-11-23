@@ -120,3 +120,12 @@ test('weather evidence reused by another candidate remains visibly stale in fact
   assert.match(html,/<strong>共用天气依据的路线<\/strong><span>天气待更新<\/span>/);
   assert.match(html,/上次资料（待更新）：上次气温20度/);assert.doesNotMatch(html,/>适合考虑</);
 });
+
+test('long recommendation text remains fully readable while the next action precedes optional evidence',()=>{
+  const r=recommendation();r.summary='这是一段完整方案说明。'.repeat(45)+'末尾说明也保留。';
+  const html=recommendationCard(r,{now:Date.parse('2099-01-01T01:00:00Z')});
+  assert.match(html,/<summary>阅读完整方案说明<\/summary>/);assert.match(html,/末尾说明也保留。/);
+  assert.ok(html.indexOf('recommendation-next')<html.indexOf('recommendation-option'));
+  assert.match(html,/<summary>筛选条件<\/summary>/);
+  assert.match(html,/依据来源/);assert.match(html,/适合考虑/);
+});
