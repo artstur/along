@@ -1,0 +1,67 @@
+# Super Agent profile 的 patch 层（规范副本）。
+#
+# 这份文件是**仓库里的唯一真相**：容器启动时把它复制进 profile 目录
+# （deploy/docker-compose.cloud.yml 的 host 命令行），所以「改配置 → 重启 → 生效」
+# 不依赖任何手工编辑状态目录的操作。
+#
+# 为什么需要单独一份：profile 的 cordis.patch.yml 是运行时状态（在 DSH home 卷上），
+# 只存在于那台机器上的话，部署就无法复现。仓库里这份是规范副本，容器启动时覆盖。
+#
+# 各段的作用：
+# - webserver：面板与 Along 数据面都要求绑回环（along-superagent 的 src/app/http.ts:234
+#   与 src/along/api.ts:287），否则 Runtime 启动即抛错。
+# - dsh-superagent：业务存储与桥接凭证路径。alongMemory 一段是 Hy-Memory 的接线
+#   （python 解释器、私有投影目录、0600 凭证文件）；不配这一段就退回 SQLite 降级。
+# - dsh-superagent-github / -along：只开 Along Source，关 GitHub Source
+#   （assembleAlong 要求 github 显式为 false，「没配」不等于「关了」）。
+# - llm-pi-ai：MiniMax 的 OpenAI 兼容路由。密钥名 MINIMAX_API_KEY 由 DSH 凭证存储
+#   提供（/var/lib/dsh/.credentials.yaml 的 refs 段），密钥值不进本文件。
+# - agent-default-model：新会话的默认模型（worker 见 settings.executor.model）。
+- id: webserver
+  config:
+    host: 127.0.0.1
+    port: 3082
+- id: dsh-superagent
+  config:
+    stateDir: /var/lib/dsh/state
+    alongStateDir: /var/lib/along/data
+    alongBridgeTokenFile: /var/lib/along/data/bridge-token
+    # Hy-Memory：superagent 自己拉起这个 python 进程跑 scripts/along-memory-service.py
+    # （JSONL over stdio）。python 解释器随镜像提供（cp312 wheel 需要 3.12），
+    # 依赖树作为只读卷挂在解释器的 site-packages 上；envFile 是 0600 的供应商配置，
+    # 凭证值不进本文件、不进环境变量。
+    alongMemory:
+      python: /usr/local/bin/python3.12
+      dataDir: /var/lib/memory/data
+      envFile: /run/secrets/memory-env
+- id: dsh-superagent-github
+  disabled: true
+- id: dsh-superagent-along
+  disabled: false
+- id: ui-settings-general
+  name: "@deepseek-ai/dsh-client-ui-settings-general"
+  config:
+    welcomeNoticeVersion: 2026-09-28.1
+- id: agent-preset-registry
+  name: "@deepseek-ai/dsh-agent-preset-registry"
+  config:
+    default: standard
+    selectedDefault: cordis
+- insert:
+    - id: llm-pi-ai
+      name: '@deepseek-ai/dsh-llm-pi-ai'
+      config:
+        providers:
+          minimax:
+            apiKeyEnv: MINIMAX_API_KEY
+            api: openai-completions
+            baseURL: https://api.minimaxi.com/v1
+            models:
+              - id: MiniMax-M3.1-Flash
+                name: MiniMax M3.1 Flash
+                contextWindow: 204800
+- id: agent-default-model
+  name: '@deepseek-ai/dsh-agent-default-model'
+  config:
+    provider: minimax
+    model: MiniMax-M3.1-Flash

@@ -14,15 +14,19 @@
 Along Agent → MiniMax 后，自动建出目标《改善睡眠，每晚睡够七小时》、拆出 3 个任务、约了每天
 22:30 的睡前提醒，并回了一条说明消息。目标、任务、消息在容器重建后仍在（bind 卷持久化）。
 
-成品的形状是三个容器 + 宿主 nginx：
+成品的形状是三个容器 + 一个翻译垫片 + 宿主 nginx：
 
 ```
 iPhone ──https──▶ 宿主 nginx:10531（Let's Encrypt IP 证书）
                      └─▶ 127.0.0.1:4176 ─▶ along-host（私 CA 自签 HTTPS，对内）
                                           └─▶ 127.0.0.1:3082 ─▶ along-superagent
+                                                                  └─▶ 127.0.0.1:3090 ─▶ along-embed-shim
 ```
 
 外加一个 `along-netns` 锚点容器，只为持有共享网络命名空间（见 §3.3）。
+
+DSH 管理面板另有入口：宿主 nginx 的 10530 → 锚点跳板 3083 → 容器内 DSH 的回环 3082
+（2026-11-23 已放行到公网；面板要 `?token=` 登录）。
 
 ## 2. 三个硬约束，以及各自绕不过去的解法
 
@@ -157,6 +161,59 @@ Worker（`settings.executor.model`）留空时跟随默认模型。
 | 一条用户消息 → 目标 + 3 任务 + 提醒 + 回复 | 分钟量级（模型多步规划） |
 | 对外入口 | `https://8.155.140.214:10531`，LE 链验证通过（`ssl_verify_result=0`） |
 
+## 5. Hy-Memory 接通（真实模型下跑通）
+
+上一轮只验证了「管道能跑」（offline 探针用合成 HTTP 响应，真实模型质量未验）。本轮把它真正接上，
+并用真实模型跑完了一轮记忆提取与治理。
+
+### 5.1 接法
+
+`dsh-superagent` 插件的配置项是 `alongMemory: {python, dataDir, envFile}`：superagent 自己拉起一个
+Python 进程跑 bundle 里的 `scripts/along-memory-service.py`（JSONL over stdio）。三件事都要解决：
+
+| 接线点 | 做法 |
+| --- | --- |
+| python 解释器 | hy-memory 2.0.16 的依赖树是 **cp312 wheel**，Debian 12 只有 3.11 → 镜像里并存 node 与 python3.12：解释器从 `python:3.12-slim-bookworm` **拷运行时**（编译期前缀 /usr/local，拷到同路径即无需 PYTHONHOME），扩展模块缺的三个系统库（libexpat1 / libsqlite3-0 / libgomp1）apt 装，走阿里云镜像 |
+| 依赖树 | 778 MB 不进镜像，作为只读卷挂在**解释器的 site-packages** 上：`/usr/local/lib/python3.12/site-packages`。**不能靠 PYTHONPATH**——记忆服务的 spawn 环境是白名单（`PATH/HOME/TMPDIR/LANG/LC_ALL/SSL_CERT_FILE`），`PYTHONPATH` 不会继承，只能挂到解释器默认会找的位置 |
+| 供应商配置 | 0600 的 envFile（只放行 `MEMORY_*` 前缀）：LLM 走 MiniMax（chat/completions 本来就是 OpenAI 形状，直接指过去）；embedder 见下 |
+
+### 5.2 MiniMax 的 embeddings 要一层翻译
+
+hy-memory 的 embedder **只走 OpenAI 形状**（请求体 `input`、响应 `data[].embedding`），
+MiniMax 的 embeddings 是自家形状（请求体要 `texts`、响应是 `vectors`）——实测用 `input` 直接报
+`missing required parameter texts`。`embo-01` 的向量是 **1536 维**。
+
+解法是一个只做形状翻译的垫片（`deploy/embed-shim.mjs`）：`{model, input}` → MiniMax
+`{model:'embo-01', texts, type:'db'}` → `{object:'list', data:[...]}`。它与 superagent 同在锚点的
+命名空间里，只监听回环 3090，不对外发布；调用令牌与 MiniMax key 分开存（embedder 侧的 API key 是
+垫片令牌，垫片自己再拿真 key 去调上游）。
+
+### 5.3 端到端验证结果
+
+一句含长期偏好的话（"我习惯 23 点睡，早上 6 点起，家里养了一只猫叫豆豆"）→ 拨快记忆调度
+（`maintenance_schedule.next_due_at`）→ 维护批次用真实模型跑完 → 提取出两条长期事实：
+
+```
+"我习惯 23 点睡，早上 6 点起"
+"家里养了一只猫叫豆豆"
+```
+
+批次 `status=done`（processed=1、saved=2），两条记忆都带 `evidence_message_id`（治理分类要求有真实
+消息证据才成立）。Hy-Memory 的向量库落盘在 `data/superagent/memory/data/`（1.4 MB）。
+
+### 5.4 顺带修掉的一个真问题：worker 沙箱没有 git
+
+worker 派工一启动就失败：`Error: spawn git ENOENT`。node 基础镜像里没有 git，而 worker 准备工作目录
+时要 spawn 它。**这条与 Hy-Memory 无关，但挡住了所有派工**（上一轮那个「研究型任务」其实也是这么
+失败的，只是当时被当成模型问题查了半天）。修法：镜像里 `apt-get install --no-install-recommends git`。
+
+### 5.5 两个容器权限相关的坑
+
+- **挂进容器的文件必须 644**：容器是 `cap_drop: ALL`，root 没有 `CAP_DAC_OVERRIDE`，读不了别人拥有的
+  0600 文件 → 容器里的 root 只认「other」位。
+- **secret 文件必须 root 拥有**：compose 的 file secret 是 bind mount，宿主文件是 `ecs-user` 拥有时，
+  容器里的 root 同样读不到（权限过宽/过窄都过 0600 校验的思路）→ 统一 `chown root:root`。
+
 ## 6. 已知限制（本轮未覆盖 / 不适用）
 
 - **iOS 是否信任 LE 的新根**（ISRG Root YE / X2）取决于手机系统版本。宿主 CA 验证是 OK 的，
@@ -164,13 +221,18 @@ Worker（`settings.executor.model`）留空时跟随默认模型。
   （`tools/ca-profile.mjs profile` 生成 `.mobileconfig` 装到手机），材料已备好。
 - **经 nginx 后 Host 看到的客户端 IP 是 127.0.0.1**：`host/agent-host.mjs` 只用 socket 地址，
   不读 `X-Forwarded-For`。所以 `/pair` 的按来源失败分桶实际上是全局的。单用户自用无妨。
-- **没配 Hy-Memory**（走 SQLite 降级）、**没配 APNs**（没有远程推送）、
-  **面板 10530 未放行到公网**（只在本机可达）。
-- **worker 的 bash 沙箱在 Linux 上未验证**：研究型任务的实际派工执行还没跑过。
+- **没配 APNs**（没有远程推送）：要 Apple Developer 的 p8 私钥 + 10 位 team id + 10 位 key id，
+  topic 硬编码 `com.artstur.AlongHealth`，且 iOS App 必须带推送 entitlement 重新签名。
+- **Hy-Memory 已接上，但只验过一轮**：单条消息、两个事实的规模。真实模型下的**记忆质量**
+  （分类是否准确、有没有把临时表述误当长期偏好、冲突与更正的裁决）没有系统验收——仓库口径里
+  记忆治理的判定标准很严，本轮只证明「链路通、结果合理」。
+- **Hy-Memory 的 python 进程按需拉起**（用完即退），不是常驻；峰值 ~230 MB（Mac 实测口径），
+  所以本机内存仍有余量，但它与定时维护批次同时跑时要注意。
+- **embeddings 只能走 MiniMax**：垫片只翻译形状，不做缓存与降级；MiniMax 的 embeddings 接口形状或
+  模型名变了，垫片要跟着改。
 - **网页 UI 不在云端形态内**：`host/agent-host.mjs` 只提供 API，静态页面由 `host/server.mjs`
   提供（Mac 形态）。iPhone App 是自带 UI 的原生壳，不依赖网页。
-- **模型仍是 DeepSeek 语义之外的第一方适配**：`dsh-llm-pi-ai` 这条路可用，但 MiniMax 的
-  工具调用与长上下文行为没有系统验收，只验证了目标/任务创建这条主链路。
+- **worker 的 bash 沙箱在 Linux 上只验过启动**：git 缺失已修，但真实的文件/命令执行行为没有系统验收。
 
 ## 7. 运维命令
 
@@ -188,6 +250,13 @@ docker exec along-host node host/pair-code.mjs u_1a2b3c4d
 
 # 吊销某用户的绑定
 docker exec along-host node host/pair-code.mjs --revoke u_1a2b3c4d
+
+# 立即跑一次记忆维护（平时是每天 03:00）：把调度拨到过去
+docker exec along-superagent node -e '
+const {DatabaseSync}=require("node:sqlite");
+const db=new DatabaseSync("/var/lib/along/data/along.sqlite");
+db.prepare("UPDATE maintenance_schedule SET next_due_at=? WHERE user_id=?")
+  .run(new Date(Date.now()-60000).toISOString(),"u_1a2b3c4d");'
 
 # 看状态 / 日志
 docker compose -f deploy/docker-compose.cloud.yml ps
