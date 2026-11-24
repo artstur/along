@@ -266,15 +266,66 @@ worker 派工一启动就失败：`Error: spawn git ENOENT`。node 基础镜像�
 时要 spawn 它。**这条与 Hy-Memory 无关，但挡住了所有派工**（上一轮那个「研究型任务」其实也是这么
 失败的，只是当时被当成模型问题查了半天）。修法：镜像里 `apt-get install --no-install-recommends git`。
 
-## 7. 已知限制（本轮未覆盖 / 不适用）
+## 7. 远程推送：本部署不启用，走本地提醒 + 前台补收
+
+**结论：不启用 APNs，这是账号能力问题，不是缺个文件。**
+
+Apple 的推送能力（`aps-environment` entitlement）只在**付费的 Apple Developer Program** 团队里
+才有。免费 personal team 签出来的描述文件里没有这一项，App 调 `registerForRemoteNotifications()`
+拿不到 device token（`ios/AlongHealth/Sources/EventTaskNotifications.swift:86` 每 30 秒重试一次）。
+所以这条路在付费之前根本不存在，不是「配一下就能通」。
+
+### 7.1 手机侧现在的实际语义
+
+| 提醒类型 | 现在能不能准点收到 | 机制 |
+| --- | --- | --- |
+| 每日续排提醒、任务到期提醒 | ✅ 能 | App 自己排程的**本地通知**（`UNUserNotificationCenter`，`ios/AlongHealth/Sources/AlongShellView.swift:963`），与苹果账号无关 |
+| 服务器新产生的推荐 / 任务结果 | ❌ 挂起时收不到 | 要靠服务器推送（APNs）；现在等你**下次打开 App 同步时补收** |
+
+同步页里的 `remoteNotifications` 字段就是这条语义的标志：`host/task-notifications.mjs:121` 用
+`active(who)` 回答「远程通道有没有」，`web/event-workspace.mjs:411` 据此决定这条提醒是服务器推、
+还是 App 本地补一条。本部署实测：同步页返回 `remoteNotifications: false` → App 走本地排程 ✓。
+
+### 7.2 配 APNs 需要的，和为什么绕不开
+
+三样东西都在 Apple Developer 后台，不在 Along 里：`.p8` 私钥（**只能下载一次**）、Key ID、Team ID。
+而且 `.p8` 必须和**签 AlongHealth 那个 App 的团队是同一个**——`host/apns.mjs:6` 的 topic 硬编码
+`com.artstur.AlongHealth`，bundle id 必须匹配；别的团队的 key 推不动这个 App。
+
+**第三方推送服务（个推 / 极光 / OneSignal / 阿里云移动推送）也绕不开**：它们在 iOS 上同样是转手
+APNs，只是替你做签名、token 管理、失效重注册与送达回执——那 $99 省的只是开发量，不是费用。
+
+### 7.3 将来开了付费账号怎么接（步骤已经写好）
+
+1. App 用**带推送能力的描述文件**重签并安装（免费 profile 不行）；
+2. Apple 后台建一把 APNs key → 下载 `.p8` → 放到 `secrets/apns-key.p8`（0600）；
+3. 编排里加回三处引用（`deploy/docker-compose.cloud.yml` 的 host 服务）：
+
+   ```yaml
+   ALONG_APNS_KEY_FILE: /run/secrets/apns-key
+   ALONG_APNS_TEAM_ID: "<10 位>"
+   ALONG_APNS_KEY_ID: "<10 位>"
+   # 并把 apns-key 加进该服务的 secrets 列表（file secret 缺失会让 compose up 直接报错）
+   ```
+
+4. 重启 Host → 验收：App 启动后 `data/host/notification-device.<userId>.json` 出现 token →
+   定时任务到期时手机弹「Along 任务提醒」。
+
+**注意 `environment` 必须与 App 的签名环境一致**（开发包 `development`、发布包 `production`）——
+沙箱与正式是两条独立链路。另外 `Info.plist` 的 `UIBackgroundModes` 只有 `fetch`、没有
+`remote-notification` → **alert 推送能弹横幅，但静默推送（后台唤醒 App）不工作**。
+
+## 8. 已知限制（本轮未覆盖 / 不适用）
 
 - **iOS 是否信任 LE 的新根**（ISRG Root YE / X2）取决于手机系统版本。宿主 CA 验证是 OK 的，
   老 iOS 可能不认；退路是仓库原生的私有 CA 描述文件方案
   （`tools/ca-profile.mjs profile` 生成 `.mobileconfig` 装到手机），材料已备好。
 - **经 nginx 后 Host 看到的客户端 IP 是 127.0.0.1**：`host/agent-host.mjs` 只用 socket 地址，
   不读 `X-Forwarded-For`。所以 `/pair` 的按来源失败分桶实际上是全局的。单用户自用无妨。
-- **没配 APNs**（没有远程推送）：要 Apple Developer 的 p8 私钥 + 10 位 team id + 10 位 key id，
-  topic 硬编码 `com.artstur.AlongHealth`，且 iOS App 必须带推送 entitlement 重新签名。
+- **APNs 未启用且不是缺凭证**：Apple 的推送能力要付费开发者团队，免费 personal team 的描述文件里
+  没有 `aps-environment`，App 拿不到 device token（详见 §7）。现在的缺口只有一类：**服务器新产生
+  的推荐 / 任务结果在 App 挂起时收不到**，要等下次前台同步补收；App 自己排程的每日提醒与到期提醒
+  不受影响。
 - **Hy-Memory 已接上，但只验过一轮**：单条消息、两个事实的规模。真实模型下的**记忆质量**
   （分类是否准确、有没有把临时表述误当长期偏好、冲突与更正的裁决）没有系统验收——仓库口径里
   记忆治理的判定标准很严，本轮只证明「链路通、结果合理」。
@@ -288,7 +339,7 @@ worker 派工一启动就失败：`Error: spawn git ENOENT`。node 基础镜像�
   提供（Mac 形态）。iPhone App 是自带 UI 的原生壳，不依赖网页。
 - **worker 的 bash 沙箱在 Linux 上只验过启动**：git 缺失已修，但真实的文件/命令执行行为没有系统验收。
 
-## 8. 运维命令
+## 9. 运维命令
 
 ```sh
 cd /home/ecs-user/workspace/along      # 这台机的布局；仓库的规范布局是 /opt/along/along
