@@ -119,6 +119,52 @@ import UserNotifications
         prefix + "task." + DailyReminderScope.hash([scope,goal,task].joined(separator:"\n"))
     }
 
+    // A migration baseline must not depend on Host connectivity or run reconcile.
+    // In particular this never requests permission, adds/cancels notifications, or marks a tap.
+    func readOnlyInventory() async -> [String: Any] {
+        let settings = await center.notificationSettings()
+        let pending = await center.pendingNotificationRequests()
+        let delivered = await center.deliveredNotifications()
+        func row(_ request: UNNotificationRequest) -> [String: Any] {
+            var result: [String: Any] = ["requestId": request.identifier]
+            let info = request.content.userInfo
+            let route = info["along"] as? [String: Any] ?? [:]
+            var identity: [String: Any] = [:]
+            for key in ["userId", "goalId", "taskId", "eventId", "kind"] {
+                if let value = route[key] as? String, value.count <= 180 { identity[key] = value }
+            }
+            if let revision = route["revision"] as? Int { identity["revision"] = revision }
+            for key in ["goalKey", "taskId", "requestId"] {
+                if let value = info[key] as? String, value.count <= 180 { identity["legacy_" + key] = value }
+            }
+            result["identity"] = identity
+            if let trigger = request.trigger as? UNCalendarNotificationTrigger {
+                var components: [String: Any] = [:]
+                let p = trigger.dateComponents
+                for (key, value) in [("year", p.year), ("month", p.month), ("day", p.day), ("weekday", p.weekday),
+                                     ("hour", p.hour), ("minute", p.minute), ("second", p.second)] {
+                    if let value { components[key] = value }
+                }
+                if let zone = p.timeZone { components["timezone"] = zone.identifier }
+                result["calendar"] = components; result["repeats"] = trigger.repeats
+                if let date = trigger.nextTriggerDate() { result["nextTriggerDate"] = ISO8601DateFormatter().string(from: date) }
+            } else if let trigger = request.trigger as? UNTimeIntervalNotificationTrigger {
+                result["repeats"] = trigger.repeats; result["interval"] = trigger.timeInterval
+                if let date = trigger.nextTriggerDate() { result["nextTriggerDate"] = ISO8601DateFormatter().string(from: date) }
+            }
+            return result
+        }
+        let ownedPending = pending.filter { $0.identifier.hasPrefix("along.") }.sorted { $0.identifier < $1.identifier }
+        let ownedDelivered = delivered.filter { $0.request.identifier.hasPrefix("along.") }.sorted { $0.date < $1.date }
+        return ["purpose": "along-notification-inventory/v1", "checkedAt": ISO8601DateFormatter().string(from: Date()),
+                "authorization": settings.authorizationStatus.rawValue, "alertSetting": settings.alertSetting.rawValue,
+                "pending": ownedPending.prefix(128).map(row),
+                "delivered": ownedDelivered.suffix(256).map { notice -> [String: Any] in
+                    var value = row(notice.request); value["notificationCenterDate"] = ISO8601DateFormatter().string(from: notice.date); return value
+                }, "truncated": ownedPending.count > 128 || ownedDelivered.count > 256,
+                "otherPendingCount": pending.count - ownedPending.count]
+    }
+
     func synchronize(_ value: [String:Any]) async throws -> [String:Any] {
         try await DailyHealthReminders.serialized { try await self.reconcile(value) }
     }

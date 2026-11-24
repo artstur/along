@@ -125,6 +125,25 @@ function verifiedLocalTransport(previous,config,proof) {
     (previous.trustPolicy??'legacy-local-pin-v1')==='legacy-local-pin-v1'&&config.trustPolicy==='legacy-local-pin-v1'&&
     originOf(previous.baseURL)&&originOf(config.baseURL);
 }
+function verifiedWorkspaceHandoff(previous,config,proof) {
+  if(!proof||proof.purpose!=='along-personal-workspace-handoff/v1'||
+    !/^[A-Za-z0-9][A-Za-z0-9_-]{7,95}$/.test(proof.migrationId??'')||
+    !['manifestSHA256','snapshotSHA256','syncPrefixSHA256'].every(key=>/^[0-9a-f]{64}$/.test(proof[key]??''))||
+    !Number.isSafeInteger(proof.syncHighWaterMark)||proof.syncHighWaterMark<0||config.trustPolicy!=='system-pki-v1')return false;
+  const saved=readStored(EVENT_CONNECTION_KEY,null),workspace=readStored(`along.event-workspace.v1:${proof.userId}`,null);
+  const persisted=workspace?.workspaceHandoff;
+  const recovered=persisted&&Object.keys(persisted).length===Object.keys(proof).length&&Object.keys(proof).every(k=>persisted[k]===proof[k])&&
+    previous.baseURL===proof.toBaseURL&&bindingKeyOf(previous)===proof.toBindingScopeId&&
+    saved?.bindingOrigin===originOf(proof.toBaseURL)&&saved?.bindingScopeId===proof.toBindingScopeId;
+  return saved?.userId===proof.userId&&workspace?.userId===proof.userId&&Number.isSafeInteger(workspace.cursor)&&
+    (workspace.cursor<=proof.syncHighWaterMark||recovered)&&
+    [[proof.fromBaseURL,proof.fromBindingScopeId],[proof.toBaseURL,proof.toBindingScopeId]]
+      .some(([base,scope])=>base===previous.baseURL&&scope===bindingKeyOf(previous))&&
+    [[proof.fromBaseURL,proof.fromBindingScopeId],[proof.toBaseURL,proof.toBindingScopeId]]
+      .some(([base,scope])=>originOf(base)===saved.bindingOrigin&&scope===saved.bindingScopeId)&&
+    proof.toBaseURL===config.baseURL&&proof.toBindingScopeId===bindingKeyOf(config)&&originOf(config.baseURL)&&
+    /^u_[0-9a-f]{8}$/.test(proof.userId)&&/^d_[0-9a-f]{8}$/.test(proof.deviceId);
+}
 function eventConnection(config=agentConfig) {
   const saved=readStored(EVENT_CONNECTION_KEY,null);
   if (!saved?.userId) return null;
@@ -230,18 +249,26 @@ function persistAgentConfig(config,{preserveTransport=false}={}) {
   if (!preserveTransport&&!sameBindingIdentity(previous,config)) localStorage.removeItem(BG_TEMPLATE_KEY);
   localStorage.setItem(AGENT_KEY,JSON.stringify(config));
 }
-function activateAgentConfig(config,{rebind=false,runtime=agentRuntime,transportMigration=null}={}) {
+function activateAgentConfig(config,{rebind=false,runtime=agentRuntime,transportMigration=null,workspaceHandoff=null}={}) {
   const previous=agentConfig;
   // 同一绑定 + 同一运行时的口径升级不算换端：归属键只是从 token 补齐成 bindingScopeId，
   // 事件工作区与本地归属都要延续，不能按新用户处理（docs/iphone-ca-profile-design.md §2.2）。
-  const preserveTransport=!rebind&&verifiedLocalTransport(previous,config,transportMigration);
+  const handoff=!rebind&&verifiedWorkspaceHandoff(previous,config,workspaceHandoff);
+  if(workspaceHandoff&&!handoff)throw Error('原工作区与云交接证明不一致，已保留原缓存');
+  const preserveTransport=handoff||!rebind&&verifiedLocalTransport(previous,config,transportMigration);
+  const migration=handoff?workspaceHandoff:transportMigration;
   const sameBinding=preserveTransport||sameBindingIdentity(previous,config);
   if (preserveTransport) {
-    localStorage.setItem(EVENT_CONNECTION_KEY,JSON.stringify({bindingScopeId:bindingKeyOf(config),userId:transportMigration.userId,
+    if(handoff) {
+      const key=`along.event-workspace.v1:${migration.userId}`,cached=readStored(key,null);
+      localStorage.setItem(key,JSON.stringify({...cached,workspaceHandoff:migration,
+        notificationHandoffThrough:Math.max(cached.notificationHandoffThrough??0,migration.syncHighWaterMark)}));
+    }
+    localStorage.setItem(EVENT_CONNECTION_KEY,JSON.stringify({bindingScopeId:bindingKeyOf(config),userId:migration.userId,
       bindingOrigin:originOf(config.baseURL)}));
     // Finish every surviving original grant before the same-config early return.
     // Replays skip recipients already moved and never adopt an unrelated scope.
-    migrateDailyRecipient(bindingKeyOf(config),transportMigration.fromBindingScopeId);
+    migrateDailyRecipient(bindingKeyOf(config),migration.fromBindingScopeId);
   } else if (!rebind&&sameBinding) migrateEventConnection(previous,config);
   if (!rebind&&runtime===agentRuntime&&sameBinding&&['baseURL','token','runtime'].every(field=>previous[field]===config[field])&&
       bindingKeyOf(previous)===bindingKeyOf(config)) return;
@@ -1963,9 +1990,9 @@ app.addEventListener('submit', async event => {
       }
       const saved=await saveNativeConnection(config);
       // 原生确认过的连接（带 trustPolicy 与 bindingScopeId）才是生效值。
-      const {transportMigration,...confirmed}=saved&&typeof saved==='object'?saved:{};
+      const {transportMigration,workspaceHandoff,...confirmed}=saved&&typeof saved==='object'?saved:{};
       if (confirmed.baseURL) config={...config,...confirmed};
-      activateAgentConfig(config,{rebind:pairing,runtime,transportMigration});
+      activateAgentConfig(config,{rebind:pairing,runtime,transportMigration,workspaceHandoff});
       await refreshAgentConnection();
       if (!eventWorkspace) void reviewAll();
       notice(pairing?'已连接 Along，之后会自动恢复':'已更新 Along 服务地址');
@@ -2889,8 +2916,8 @@ async function restoreAlongConnection() {
     if (saved?.baseURL&&saved?.token&&(saved?.bindingScopeId||saved?.fingerprint)) {
       const runtime=!localStorage.getItem(AGENT_RUNTIME_KEY)&&saved.runtime===DSH_RUNTIME?DSH_RUNTIME:agentRuntime;
       const previous=agentConfig;
-      const {transportMigration,...confirmed}=saved;
-      activateAgentConfig(confirmed,{runtime,transportMigration});
+      const {transportMigration,workspaceHandoff,...confirmed}=saved;
+      activateAgentConfig(confirmed,{runtime,transportMigration,workspaceHandoff});
       // A real endpoint change removes its event binding above. Unknown scopes and
       // users remain isolated even if the network is unavailable.
       if (sameBindingIdentity(previous,agentConfig)) await restoreLegacyEventConnection(agentConfig);
@@ -2904,6 +2931,12 @@ async function restoreAlongConnection() {
   nativeConnectionRestored=true;queueBackgroundSync();
 }
 const connectionRestoration=restoreAlongConnection();
+window.addEventListener('along-native-connection-update',()=>{
+  void restoreAlongConnection().then(async()=>{
+    if(eventConnection())connectEventWorkspace(eventConnection().userId);
+    render();await refreshAgentConnection();
+  });
+});
 void connectionRestoration.then(async()=>{
   const config=agentConfig;
   if (config.token) {

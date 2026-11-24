@@ -58,9 +58,10 @@ ${native}
 }
 @main struct Fixture {
  static func main()async throws {
-  let input:[String:Any]=["baseURL":CommandLine.arguments[1],"fingerprint":CommandLine.arguments[2],"token":"synthetic-token-only","path":"/connection/status","body":["runtime":"dsh-superagent"]]
+  let handoff=CommandLine.arguments.last=="handoff"
+  let input:[String:Any]=["baseURL":CommandLine.arguments[1],"fingerprint":CommandLine.arguments[2],"token":handoff ? "new-cloud-synthetic-token" : "synthetic-token-only","path":handoff ? "/workspace-handoff/status" : "/connection/status","body":handoff ? [:] : ["runtime":"dsh-superagent"]]
   do {
-   let status=try await Probe.agentRequest(input,background:true)
+   let status=try await Probe.agentRequest(input,background:true,privateWorkspaceHandoffRequest:handoff)
    precondition(status["userId"] as? String=="synthetic-user" && status["ready"] as? Bool==true)
    print("authenticated")
   }catch AgentBridgeError.invalidConfiguration {print("preflight-blocked")}
@@ -81,6 +82,8 @@ ${native}
   assert.equal(requests.length,1,'a mismatched leaf must receive zero application bytes/token');
   assert.match((await execAsync(join(dir,'tls'),[url,pin,'public-target'],{timeout:20000})).stdout,/preflight-blocked/);
   assert.equal(requests.length,1,'changing a local paired bearer to PKI must be blocked before any request');
+  assert.match((await execAsync(join(dir,'tls'),[url,pin,'handoff'],{timeout:20000})).stdout,/refused/);
+  assert.equal(requests.length,1,'the new cloud credential handoff probe still requires system PKI and never falls back to the old pin');
  } finally {
   if(server)await new Promise(resolve=>server.close(resolve));
   rmSync(dir,{recursive:true,force:true});

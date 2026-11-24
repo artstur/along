@@ -589,7 +589,7 @@ enum AlongConnectionStore {
 
 struct AlongWebView: UIViewRepresentable {
     @ObservedObject var bridge: AlongBridgeModel
-    private let site = URL(string: "along://app/index.html?build=90")!
+    private let site = URL(string: "along://app/index.html?build=91")!
 
     func makeCoordinator() -> Coordinator { Coordinator(bridge: bridge) }
 
@@ -612,14 +612,21 @@ struct AlongWebView: UIViewRepresentable {
         webView.navigationDelegate = context.coordinator
         webView.uiDelegate = context.coordinator
         let request = URLRequest(url: site, cachePolicy: .reloadIgnoringLocalCacheData)
-#if DEBUG
         Task { @MainActor in
+            try? await HealthEventDelivery.shared.recoverWorkspaceHandoff(onlyIfAlreadyTarget: true)
+#if DEBUG
             await AlongConnectionStore.bootstrapFromEnvironment()
-            webView.load(request)
-        }
-#else
-        webView.load(request)
+            await Coordinator.processWorkspaceHandoffRequest()
 #endif
+            webView.load(request)
+            let before = AlongConnectionStore.load()
+            do {
+                try await HealthEventDelivery.shared.recoverWorkspaceHandoff()
+                if AlongConnectionStore.load() != before {
+                    _ = try? await webView.evaluateJavaScript("window.dispatchEvent(new Event('along-native-connection-update'))")
+                }
+            } catch { /* Original cache remains usable; the authenticated journal retries next launch. */ }
+        }
         return webView
     }
 
@@ -776,7 +783,7 @@ struct AlongWebView: UIViewRepresentable {
                     return
                 }
                 if body["operation"] as? String == "notification" {
-                    if ["upcomingGoalReminder","eventTaskSync","eventTaskOpened","pendingLegacyNotification","legacyNotificationOpened"].contains(body["action"] as? String ?? ""), origin.protocol != "along" || origin.host != "app" {
+                    if ["readOnlyInventory","upcomingGoalReminder","eventTaskSync","eventTaskOpened","pendingLegacyNotification","legacyNotificationOpened"].contains(body["action"] as? String ?? ""), origin.protocol != "along" || origin.host != "app" {
                         Self.deliverAlongResult(id: id, result: ["ok":false,"error":"请在 Along 中查看提醒"], webView: webView)
                         return
                     }
@@ -812,7 +819,7 @@ struct AlongWebView: UIViewRepresentable {
                 }
                 if body["operation"] as? String == "connection" {
                     Task { @MainActor in
-                        let result: [String: Any]
+                        var result: [String: Any]
                         do {
                             if body["action"] as? String == "workspace", origin.protocol != "along" || origin.host != "app" {
                                 throw AgentBridgeError.invalidConfiguration
@@ -822,6 +829,9 @@ struct AlongWebView: UIViewRepresentable {
                                       let value = body["value"] as? [String: Any] else { throw AgentBridgeError.invalidConfiguration }
                                 result = ["ok": true, "value": try await HealthEventDelivery.shared.saveConnection(value)]
                             } else { result = ["ok": true, "value": try Self.connectionOperation(body)] }
+                            if origin.protocol != "along" || origin.host != "app", var value = result["value"] as? [String: Any] {
+                                value.removeValue(forKey: "workspaceHandoff"); result["value"] = value
+                            }
                         }
                         catch { result = ["ok": false, "error": error.localizedDescription] }
                         Self.deliverAlongResult(id: id, result: result, webView: webView)
@@ -841,6 +851,56 @@ struct AlongWebView: UIViewRepresentable {
             }
         }
 
+#if DEBUG
+        // Deployment copies a request and (for commit) a private offer to these fixed app-container
+        // files. Only the action is a request; no target credential enters argv/env or Web input.
+        @MainActor static func processWorkspaceHandoffRequest() async {
+            guard UIApplication.shared.isProtectedDataAvailable,
+                  let cache = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else { return }
+            let manager = FileManager.default
+            let request = cache.appendingPathComponent("AlongWorkspaceHandoff.request.json")
+            guard manager.fileExists(atPath: request.path) else { return }
+            func read(_ url: URL) throws -> [String: Any] {
+                let a = try manager.attributesOfItem(atPath: url.path)
+                guard a[.type] as? FileAttributeType == .typeRegular,
+                      let size = a[.size] as? NSNumber, size.intValue > 0, size.intValue <= 256 * 1024 else { throw WorkspaceHandoffError.invalidState }
+                try manager.setAttributes([.protectionKey: FileProtectionType.complete, .posixPermissions: 0o600], ofItemAtPath: url.path)
+                guard let value = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any] else { throw WorkspaceHandoffError.invalidState }
+                return value
+            }
+            func write(_ name: String, _ value: [String: Any]) throws {
+                let url = cache.appendingPathComponent(name)
+                try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]).write(to: url, options: [.atomic, .completeFileProtection])
+                try manager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+            }
+            do {
+                let input = try read(request)
+                guard let action = input["action"] as? String else { throw WorkspaceHandoffError.invalidState }
+                switch action {
+                case "inventory":
+                    guard Set(input.keys) == ["action"] else { throw WorkspaceHandoffError.invalidState }
+                    try write("AlongWorkspaceHandoff.inventory.json", await EventTaskNotifications.shared.readOnlyInventory())
+                case "prepare":
+                    guard Set(input.keys) == ["action", "targetOrigin"], let target = input["targetOrigin"] as? String else { throw WorkspaceHandoffError.invalidState }
+                    try write("AlongWorkspaceHandoff.challenge.json", HealthEventDelivery.shared.prepareWorkspaceHandoff(targetOrigin: target))
+                case "commit":
+                    guard Set(input.keys) == ["action"] else { throw WorkspaceHandoffError.invalidState }
+                    let file = cache.appendingPathComponent("AlongWorkspaceHandoff.offer.json")
+                    let result = try await HealthEventDelivery.shared.commitWorkspaceHandoff(read(file))
+                    guard result["workspaceHandoff"] != nil else { throw WorkspaceHandoffError.invalidState }
+                    try manager.removeItem(at: file)
+                default: throw WorkspaceHandoffError.invalidState
+                }
+                try write("AlongWorkspaceHandoff.result.json", ["purpose": WorkspaceHandoffProof.purpose, "action": action,
+                    "status": "completed", "checkedAt": ISO8601DateFormatter().string(from: Date())])
+                try manager.removeItem(at: request)
+            } catch {
+                try? write("AlongWorkspaceHandoff.result.json", ["purpose": WorkspaceHandoffProof.purpose,
+                    "status": "not_completed", "checkedAt": ISO8601DateFormatter().string(from: Date())])
+            }
+        }
+#endif
+
         static func connectionOperation(_ input: [String: Any]) throws -> [String: Any] {
             switch input["action"] as? String {
             case "load":
@@ -857,6 +917,8 @@ struct AlongWebView: UIViewRepresentable {
         static func notificationOperation(_ input: [String: Any]) async throws -> [String: Any] {
             let center = UNUserNotificationCenter.current()
             switch input["action"] as? String {
+            case "readOnlyInventory":
+                return await EventTaskNotifications.shared.readOnlyInventory()
             case "pendingLegacyNotification":
                 return EventTaskNotifications.shared.legacyOpen.map { ["route":$0] } ?? [:]
             case "legacyNotificationOpened":
@@ -1091,7 +1153,7 @@ struct AlongWebView: UIViewRepresentable {
             try await PhoneSourceCoordinator.shared.status(goalID: goalID)
         }
 
-        static func agentRequest(_ input: [String: Any], background: Bool = false, privateNotificationRequest: Bool = false, privateSourceRequest: Bool = false) async throws -> [String: Any] {
+        static func agentRequest(_ input: [String: Any], background: Bool = false, privateNotificationRequest: Bool = false, privateSourceRequest: Bool = false, privateWorkspaceHandoffRequest: Bool = false) async throws -> [String: Any] {
             guard let base = input["baseURL"] as? String, let components = URLComponents(string: base),
                   components.scheme == "https", let host = components.host,
                   AlongConnectionStore.hostAccepted(host),
@@ -1100,7 +1162,7 @@ struct AlongWebView: UIViewRepresentable {
                   let path = input["path"] as? String,
                   // 新链路端点（docs/stage-a-tech-design.md §2.4.2）：全部 POST，语义与旧路径一致——仅网络转发。
                   (["/pair", "/connection/verify", "/connection/status", "/goal/event", "/super-agent/tasks", "/super-agent/tasks/status", "/super-agent/daily-delegation",
-                   "/super-agent/goals", "/super-agent/goals/status", "/events", "/sync", "/sync/ack"].contains(path) || (privateNotificationRequest && ["/notifications/device","/notifications/scheduled"].contains(path)) || (privateSourceRequest && ["/sources/okx", "/sources/device"].contains(path))),
+                   "/super-agent/goals", "/super-agent/goals/status", "/events", "/sync", "/sync/ack"].contains(path) || (privateWorkspaceHandoffRequest && ["/workspace-handoff/status"].contains(path)) || (privateNotificationRequest && ["/notifications/device","/notifications/scheduled"].contains(path)) || (privateSourceRequest && ["/sources/okx", "/sources/device"].contains(path))),
                   let body = input["body"] as? [String: Any],
                   let url = URL(string: base + path),
                   // 旧 pin 形态（Mac 私网）必须带合法 64hex 叶指纹；云端系统信任形态不需要。
@@ -1116,7 +1178,7 @@ struct AlongWebView: UIViewRepresentable {
             let fingerprint = AlongConnectionStore.pinnedFingerprint(input["fingerprint"] as? String, policy: policy)
             var request = URLRequest(url: url)
             request.httpMethod = "POST"
-            request.timeoutInterval = background ? 8 : (["/connection/verify", "/sources/device"].contains(path) ? 12 : 120)
+            request.timeoutInterval = background ? 8 : (["/connection/verify", "/sources/device", "/workspace-handoff/status"].contains(path) ? 12 : 120)
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             if let token = input["token"] as? String, !token.isEmpty {
                 request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
@@ -1125,7 +1187,7 @@ struct AlongWebView: UIViewRepresentable {
             let delegate: URLSessionDelegate = fingerprint.map { PinnedAgentDelegate(fingerprint: $0) } ?? SystemTrustAgentDelegate(expectedHost: host)
             let configuration = URLSessionConfiguration.ephemeral
             configuration.waitsForConnectivity = !background
-            configuration.timeoutIntervalForResource = background ? 10 : (["/connection/verify", "/sources/device"].contains(path) ? 15 : 120)
+            configuration.timeoutIntervalForResource = background ? 10 : (["/connection/verify", "/sources/device", "/workspace-handoff/status"].contains(path) ? 15 : 120)
             // Every session is tied to one validated origin and disallows redirects.
             configuration.connectionProxyDictionary = [
                 kCFNetworkProxiesProxyAutoConfigEnable as String: true,

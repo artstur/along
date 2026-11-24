@@ -1,4 +1,4 @@
-import {agentCall, queueEvent, flushEventQueue, pendingEvents, readEventFailures} from './agent-client.mjs';
+import {agentCall, queueEvent, flushEventQueue, pendingEvents, readEventFailures,bindEventAuthority,retireEventAuthority} from './agent-client.mjs';
 import {assembleEnvelope} from './event-envelope.mjs';
 import {validateGoalReply} from './goal-agent-core.mjs';
 import {safeAdaptiveLayout} from './adaptive-ui.mjs';
@@ -229,6 +229,7 @@ function localResult(item,remote) {
 
 export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
   if (!id(config?.userId)) throw Error('缺少服务端绑定用户');
+  bindEventAuthority(config);
   const key=`along.event-workspace.v1:${config.userId}`;
   let state=empty(config.userId),flight=null,lastError='',disposed=false;
   try {
@@ -449,7 +450,7 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
           if (goal.id!==item.goalId) throw Error('目标同步关联不正确');
           if (!next.goals[goal.id]||goal.revision>=next.goals[goal.id].revision) next.goals[goal.id]=goal;
         }
-        if (onNotifications&&(!replay||item.seq>state.cursor)) {
+        if (onNotifications&&(!replay||item.seq>state.cursor)&&item.seq>(state.notificationHandoffThrough??0)) {
           const notice=localResult(item,item.remoteNotifications??page.remoteNotifications);
           if (notice) {
             const queue=next.notificationResults??[];
@@ -511,5 +512,5 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
       .finally(()=>{flight=null;if(!disposed&&lastError!==beforeError) onChange();});
     return flight;
   }
-  return {view,draft,setDraft,select,leaveConversation,prepareRecommendationFeedback,submit,sync,dispose:()=>{disposed=true;}};
+  return {view,draft,setDraft,select,leaveConversation,prepareRecommendationFeedback,submit,sync,dispose:()=>{disposed=true;retireEventAuthority(config);}};
 }

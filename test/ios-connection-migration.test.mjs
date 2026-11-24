@@ -149,7 +149,7 @@ test('the agent request gate admits DNS domains without loosening host, credenti
 
 ${storeSnippet()}
 
-func probe(_ input: [String: Any], privateNotificationRequest: Bool = false, privateSourceRequest: Bool = false) -> Bool {
+func probe(_ input: [String: Any], privateNotificationRequest: Bool = false, privateSourceRequest: Bool = false, privateWorkspaceHandoffRequest: Bool = false) -> Bool {
     ${guardSource}
     return true
 }
@@ -168,6 +168,7 @@ let cases: [(String, String, Bool)] = [
     ("https://along..example.com:4176", "/goal/event", false),
     ("https://along.example.com:4176", "/not/whitelisted", false),
     ("https://along.example.com:4176", "/notifications/device", false),
+    ("https://along.example.com:4176", "/workspace-handoff/status", false),
 ]
 for (baseURL, path, expected) in cases {
     let verdict = probe(["baseURL": baseURL, "fingerprint": fingerprint, "token": token, "path": path, "body": [:] as [String: Any]]) == expected ? "ok" : "FAIL"
@@ -266,7 +267,7 @@ test('the agent gate keeps credential, path and endpoint rules when the host is 
 
 ${storeSnippet()}
 
-func probe(_ input: [String: Any], privateNotificationRequest: Bool = false, privateSourceRequest: Bool = false) -> Bool {
+func probe(_ input: [String: Any], privateNotificationRequest: Bool = false, privateSourceRequest: Bool = false, privateWorkspaceHandoffRequest: Bool = false) -> Bool {
     ${gateSource}
     return true
 }
@@ -346,7 +347,7 @@ print(AlongConnectionStore.save(unknown)?["runtime"] ?? "missing")
   assert.equal(output.trim(),'dsh-superagent\nmissing');
 });
 
-test('the endpoint whitelist remains the documented 12+4 paths',()=>{
+test('ordinary endpoint whitelist retains 12+4 paths and handoff status requires a separate Native-only flag',()=>{
   // 文档 §2.1：路径白名单 12+4 条（主路径 12 + 通知 2 + 设备来源 2），M6 零新增、零删除。
   const funcStart=swiftSource.indexOf('        static func agentRequest(');
   assert.notEqual(funcStart,-1,'找不到 agentRequest');
@@ -357,12 +358,14 @@ test('the endpoint whitelist remains the documented 12+4 paths',()=>{
   const condition=swiftSource.slice(condStart,condEnd+'.contains(path)))'.length);
   const groups=[...condition.matchAll(/\[([^\[\]]*)\]\.contains\(path\)/g)]
     .map(m=>m[1].split(',').map(s=>s.trim().replaceAll('"','')));
-  assert.equal(groups.length,3,'白名单必须仍是「无条件 || 通知开关 || 设备来源开关」三组');
+  assert.equal(groups.length,4,'新增的唯一组须为Native专用交接状态；普通Web路径不增加');
   assert.deepEqual(groups[0],
     ['/pair','/connection/verify','/connection/status','/goal/event','/super-agent/tasks','/super-agent/tasks/status','/super-agent/daily-delegation','/super-agent/goals','/super-agent/goals/status','/events','/sync','/sync/ack'],
     '主路径 12 条零新增零删除（/pair 是多用户配对的唯一入口）');
-  assert.deepEqual(groups[1],['/notifications/device','/notifications/scheduled'],'通知端点零新增');
-  assert.deepEqual(groups[2],['/sources/okx','/sources/device'],'设备来源端点零新增');
+  assert.deepEqual(groups[1],['/workspace-handoff/status'],'交接仅一个只读状态端点');
+  assert.match(condition,/privateWorkspaceHandoffRequest && \["\/workspace-handoff\/status"\]/);
+  assert.deepEqual(groups[2],['/notifications/device','/notifications/scheduled'],'通知端点零新增');
+  assert.deepEqual(groups[3],['/sources/okx','/sources/device'],'设备来源端点零新增');
 });
 
 test('certificate pinning, redirect blocking and DIRECT-only proxy remain wired into every agent request',()=>{

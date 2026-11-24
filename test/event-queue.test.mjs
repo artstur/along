@@ -17,7 +17,7 @@ globalThis.localStorage = {
 globalThis.window = {};
 const {assembleEnvelope, validateEnvelope, newEventId, EVENT_SCHEMA_VERSION, EVENT_TYPES, MESSAGE_KINDS, HEALTH_SUMMARY_TYPES} =
   await import(new URL('../web/event-envelope.mjs', import.meta.url));
-const {queueEvent, flushEventQueue, readEventFailures, EVENT_QUEUE_KEY, EVENT_FAILED_KEY, readStored} =
+const {queueEvent, flushEventQueue, readEventFailures, EVENT_QUEUE_KEY, EVENT_FAILED_KEY, readStored,bindEventAuthority,retireEventAuthority} =
   await import(new URL('../web/agent-client.mjs', import.meta.url));
 
 const CONFIG = {baseURL: 'https://192.168.8.2:4176', fingerprint: 'a'.repeat(64), token: 'b'.repeat(64)};
@@ -109,7 +109,7 @@ test('assembleEnvelope 补齐版本与稳定事件号，坏信封不入队', () 
 
 test('BC-08-01：200 accepted 到达才从待同步队列删除，回执原样返回', async () => {
   storage.clear();
-  const requests = bridge(() => ({status: 'accepted', event_id: 'evt-1', received_seq: 4}));
+  const requests = bridge(input => ({status: 'accepted', event_id: input.body.event_id, received_seq: 4}));
   const outcome = await queueEvent(CONFIG, USER_MESSAGE());
   assert.deepEqual(outcome, {ok: true, event_id: outcome.event_id, queued: true, status: 'accepted', received_seq: 4});
   assert.deepEqual(pending(), [], '回执到达后本地项删除');
@@ -237,4 +237,23 @@ test('校验不合格的信封不入队：发了也只会被拒，重试没有�
   assert.deepEqual(pending(), []);
   assert.equal(readEventFailures().length, 0, '未入队也没有失败状态');
   assert.equal(requests.length, 0);
+});
+
+test('wrong receipt identity and an altered same-id envelope never delete the durable event',async()=>{
+  storage.clear();bridge(()=>({status:'accepted',event_id:'wrong-id'}));
+  const first=await queueEvent(CONFIG,{...USER_MESSAGE(),event_id:'exact-event'});assert.equal(first.status,'retry');assert.equal(pending().length,1);
+  bridge(()=>{const rows=pending();rows[0].envelope.payload.text='legitimate replacement';localStorage.setItem(EVENT_QUEUE_KEY,JSON.stringify(rows));
+    return {status:'accepted',event_id:'exact-event'};});
+  await flushEventQueue(CONFIG);assert.equal(pending().length,1);assert.equal(pending()[0].envelope.payload.text,'legitimate replacement');
+});
+test('retired Mac ACK cannot delete cloud authority queue; new cloud duplicate receipt can',async()=>{
+  storage.clear();const old={...CONFIG,userId:'u_queue0001'},next={...old,baseURL:'https://cloud.example.com',token:'c'.repeat(64)};
+  bindEventAuthority(old);let release,started;
+  const began=new Promise(resolve=>started=resolve),held=new Promise(resolve=>release=resolve);
+  bridge(async input=>{started();await held;return {status:'accepted',event_id:input.body.event_id};});
+  const pendingSend=queueEvent(old,{...USER_MESSAGE(),event_id:'handoff-in-flight'});
+  await began;retireEventAuthority(old);bindEventAuthority(next);release();await pendingSend;
+  const {pendingEvents}=await import('../web/agent-client.mjs');assert.equal(pendingEvents(next).length,1);
+  bridge(input=>({status:'duplicate',event_id:input.body.event_id}));await flushEventQueue(next);assert.equal(pendingEvents(next).length,0);
+  retireEventAuthority(next);
 });

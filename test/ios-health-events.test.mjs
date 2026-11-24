@@ -7,6 +7,7 @@ import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 
 const hasSwift=spawnSync('swiftc',['--version']).status===0;
+const handoff=readFileSync(new URL('../ios/AlongHealth/Sources/WorkspaceHandoff.swift',import.meta.url),'utf8');
 test('native event summaries preserve windows, latest-reading dates, unknowns, scalar-only data and matching receipts',{skip:!hasSwift},()=>{
  const source=readFileSync(new URL('../ios/AlongHealth/Sources/HealthKitReader.swift',import.meta.url),'utf8');
  const pure=source.slice(source.indexOf('enum HealthEventOutbox {'));
@@ -61,6 +62,7 @@ test('the real native outbox persists before sending, retries the same id after 
  try {
   writeFileSync(join(dir,'Check.swift'),`import Foundation
 import CryptoKit
+${handoff}
 @MainActor enum TestEnvironment {static let settings=UserDefaults(suiteName:CommandLine.arguments[2])!}
 @MainActor final class UIApplication {
  enum State {case active,background};static let shared=UIApplication();var applicationState=State.background;var isProtectedDataAvailable=true
@@ -69,7 +71,8 @@ enum AgentBridgeError:Error {case invalidConfiguration; case receipt([String:Any
 @MainActor enum AlongConnectionStore {
  static var pair=["baseURL":"https://192.0.2.1:4176","token":"synthetic","fingerprint":String(repeating:"A",count:64)]
  static var saveRevision:UInt64=0
- static let legacyPinPolicy="legacy-local-pin-v1"
+ static let legacyPinPolicy="legacy-local-pin-v1",systemTrustPolicy="system-pki-v1"
+ static func hostAccepted(_ host:String)->Bool {!host.isEmpty}
  static func trustPolicy(forHost:String)->String {forHost.hasPrefix("192.168.") ? legacyPinPolicy : "system-pki-v1"}
  static func permitsPairedTransport(_ input:[String:Any])->Bool {true}
  static func clean(_ value:[String:Any])->[String:String]? {value as? [String:String]}
@@ -103,7 +106,7 @@ enum AgentBridgeError:Error {case invalidConfiguration; case receipt([String:Any
 }
 @MainActor enum AlongWebView {enum Coordinator {
  static var fail=true, wrong=false, reject=false;static var ids=[String]()
- static func agentRequest(_ input:[String:Any],background:Bool)async throws->[String:Any] {
+ static func agentRequest(_ input:[String:Any],background:Bool,privateWorkspaceHandoffRequest:Bool=false)async throws->[String:Any] {
   if input["path"] as? String=="/connection/status" {return ["eventProtocol":1,"ready":true,"userId":"synthetic-user"]}
   let event=input["body"] as! [String:Any], id=event["event_id"] as! String
   let file=URL(fileURLWithPath:CommandLine.arguments[1]).appendingPathComponent("AlongHealthEvents/outbox.json")

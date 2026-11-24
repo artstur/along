@@ -8,6 +8,7 @@ import {join} from 'node:path';
 const hasSwift=process.platform==='darwin'&&spawnSync('swift',['--version']).status===0;
 const shell=readFileSync(new URL('../ios/AlongHealth/Sources/AlongShellView.swift',import.meta.url),'utf8');
 const health=readFileSync(new URL('../ios/AlongHealth/Sources/HealthKitReader.swift',import.meta.url),'utf8');
+const handoff=readFileSync(new URL('../ios/AlongHealth/Sources/WorkspaceHandoff.swift',import.meta.url),'utf8');
 function method(source,marker) {
   const start=source.indexOf(marker);assert.ok(start>=0,marker+' must exist in shipped source');
   const brace=source.indexOf('{',start);let depth=1,end=brace+1;
@@ -28,6 +29,7 @@ test('native offline owner proof reads only an existing full-binding outbox and 
   try {
     const source=`import Foundation
 import CryptoKit
+${handoff}
 
 enum AlongConnectionStore {
   static let legacyPinPolicy="legacy-local-pin-v1",systemTrustPolicy="system-pki-v1"
@@ -52,6 +54,7 @@ final class Probe {
   }
   ${method(health,'    private func localCredential(')}
   ${method(health,'    private func owns(')}
+  ${method(health,'    private func workspaceHandoffRecord(')}
   ${proof}
 }
 let old:[String:String]=["baseURL":"https://192.168.1.2:4176","fingerprint":String(repeating:"A",count:64),"token":String(repeating:"b",count:64)]
@@ -98,6 +101,7 @@ test('the actual native outbox read path leaves missing directories, existing fi
   try {
     const source=`import Foundation
 import CryptoKit
+${handoff}
 
 enum AgentBridgeError:Error {case invalidConfiguration}
 enum AlongConnectionStore {
@@ -126,6 +130,7 @@ final class Probe {
  ${method(native,'    private func load(')}
  ${method(native,'    private func localCredential(')}
  ${method(native,'    private func owns(')}
+ ${method(native,'    private func workspaceHandoffRecord(')}
  ${method(native,'    func cachedWorkspaceBinding(')}
 }
 let base="https://192.168.1.2:4176",token=String(repeating:"b",count:64)
