@@ -117,8 +117,9 @@ function verifiedLocalTransport(previous,config,proof) {
     [proof.toBindingScopeId,originOf(proof.toBaseURL)],
   ].some(([scope,origin])=>origin&&saved.bindingScopeId===scope&&saved.bindingOrigin===origin);
   return proof&&savedEndpoint&&saved.userId===proof.userId&&
-    proof.fromBaseURL===previous.baseURL&&proof.toBaseURL===config.baseURL&&
-    proof.fromBindingScopeId===bindingKeyOf(previous)&&proof.toBindingScopeId===bindingKeyOf(config)&&
+    [[proof.fromBaseURL,proof.fromBindingScopeId],[proof.toBaseURL,proof.toBindingScopeId]]
+      .some(([base,scope])=>base===previous.baseURL&&scope===bindingKeyOf(previous))&&
+    proof.toBaseURL===config.baseURL&&proof.toBindingScopeId===bindingKeyOf(config)&&
     typeof previous.fingerprint==='string'&&/^[A-Fa-f0-9]{64}$/.test(previous.fingerprint)&&
     previous.fingerprint===config.fingerprint&&previous.token===config.token&&
     (previous.trustPolicy??'legacy-local-pin-v1')==='legacy-local-pin-v1'&&config.trustPolicy==='legacy-local-pin-v1'&&
@@ -238,6 +239,9 @@ function activateAgentConfig(config,{rebind=false,runtime=agentRuntime,transport
   if (preserveTransport) {
     localStorage.setItem(EVENT_CONNECTION_KEY,JSON.stringify({bindingScopeId:bindingKeyOf(config),userId:transportMigration.userId,
       bindingOrigin:originOf(config.baseURL)}));
+    // Finish every surviving original grant before the same-config early return.
+    // Replays skip recipients already moved and never adopt an unrelated scope.
+    migrateDailyRecipient(bindingKeyOf(config),transportMigration.fromBindingScopeId);
   } else if (!rebind&&sameBinding) migrateEventConnection(previous,config);
   if (!rebind&&runtime===agentRuntime&&sameBinding&&['baseURL','token','runtime'].every(field=>previous[field]===config[field])&&
       bindingKeyOf(previous)===bindingKeyOf(config)) return;
@@ -265,7 +269,7 @@ function activateAgentConfig(config,{rebind=false,runtime=agentRuntime,transport
     for (const key of healthGoalKeys()) reviewFor(key).retireConnection();
     backgroundReplace=null;
     void Promise.resolve(window.AlongHealthBridge?.backgroundReview?.('disarm',{})).catch(()=>{});
-  } else if (sameBinding) {
+  } else if (sameBinding&&!preserveTransport) {
     // 同一绑定的口径升级：把每日委托的接收人从旧键迁移到新键，并保留原授权与提醒时间。
     // 用户主动撤销过的授权不进 dailyRevokedIds 的回滚范围——这里只迁移接收人键，
     // 不恢复任何已被撤销的 grant。
@@ -355,8 +359,8 @@ function reviewFor(key) {
 }
 // 同一绑定的口径升级：把所有健康目标的每日委托接收人迁到新归属键。
 // 用户主动撤销过的授权不在恢复范围（各目标的 migrateDailyRecipient 只改接收人键）。
-function migrateDailyRecipient(nextKey) {
-  for (const key of healthGoalKeys()) reviewFor(key).migrateDailyRecipient(nextKey);
+function migrateDailyRecipient(nextKey,previousKey=null) {
+  for (const key of healthGoalKeys()) reviewFor(key).migrateDailyRecipient(nextKey,previousKey);
 }
 // 当前目标可能是一个还没确认的新目标（草稿）。
 // - 有内容可恢复（写下的消息、没跑完的运行）：回到那一页，用户写下的东西
@@ -2323,8 +2327,9 @@ function createHealthReview(goalKey) {
   // 只改「授权给谁」这一个键，不动 grant 本身——授权内容与提醒时间原样保留。
   // 已经存在于 dailyRevokedIds 的 grant 是用户主动撤销过的，不在这里恢复：
   // 撤销名单里的 grant 本来就没有 dailyDelegation 可迁。
-  function migrateDailyRecipient(nextKey) {
-    if (!nextKey||!healthSharing.dailyRecipient||healthSharing.dailyRecipient===nextKey) return;
+  function migrateDailyRecipient(nextKey,previousKey=null) {
+    if (!nextKey||!healthSharing.dailyRecipient||healthSharing.dailyRecipient===nextKey||
+        previousKey&&healthSharing.dailyRecipient!==previousKey) return;
     const grant=cleanDailyDelegation(healthSharing.dailyDelegation);
     if (!grant||healthSharing.dailyRevokedIds?.includes(grant.id)) return;
     saveHealthSharing({...healthSharing,dailyRecipient:nextKey});
