@@ -65,3 +65,5 @@
 交付为 App81/Web90，四处版本和两份内置资源同步，无新增界面。运行完整 `npm run check`、`npm run build`、逐资源比对、Xcode simulator build 与独立固定 SHA 复核。源码任务只提交、推送 PR；合并、正式 Host、原手机安装、自然健康上传及真实用户流程由 release/client delivery 执行并分别记录，合成验证不替代真机验收。
 
 前置请求边界：地址表单和 DEBUG 入口在 save 前已有 `/connection/verify`。因此原生 agentRequest 在创建 URLRequest 和附加 bearer 之前执行 `permitsPairedTransport`：复用当前配对 token 时，旧 legacy 私网必须保持私网 pin 策略和原 pin；旧系统信任配对只允许原规范 origin，跨 origin 必须真正新配对。saveConnection 也在写入前执行同一预检。调用方自报 policy、同值 nil pin 或 sameUser 不能绕过；同公网 origin 换叶、新 token 配对的正例保留。
+
+B3 中断恢复补充：native proof 同时允许精确 from/to 两个当前连接端点，用于完成已提交新 AGENT/EVENT、尚未写完 daily recipient 的状态。经该证明核实后，在同连接早退前逐 goal 幂等迁移；只移动 `proof.fromBindingScopeId` 的原 recipient，已到新 scope 的跳过，未知 scope、无 grant、撤销名单内 grant 均不改。多个 goal 中途写失败后从同证明继续，原授权内容不变。
