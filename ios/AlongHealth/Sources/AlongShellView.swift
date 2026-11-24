@@ -291,6 +291,7 @@ final class AlongBridgeModel: ObservableObject {
 }
 
 enum AlongConnectionStore {
+    private(set) static var saveRevision: UInt64 = 0
     private static let legacyKey = "along.connection.v1"
     private static let service = "com.artstur.AlongHealth.connection"
     private static let account = "Along"
@@ -329,6 +330,29 @@ enum AlongConnectionStore {
     static func pinnedFingerprint(_ value: String?, policy: String) -> String? {
         guard policy == legacyPinPolicy, let pin = value, pin.count == 64, pin.allSatisfy(\.isHexDigit) else { return nil }
         return pin.uppercased()
+    }
+
+    // Reusing this Mac's bearer at another endpoint must retain the original
+    // local pin policy and certificate. Run before creating/sending any request,
+    // including the Web/DEBUG address form's earlier /connection/verify call.
+    static func permitsPairedTransport(_ input: [String: Any]) -> Bool {
+        guard let current = load(), let base = current["baseURL"],
+              let oldHost = URLComponents(string: base)?.host,
+              let token = input["token"] as? String,
+              token.lowercased() == current["token"]?.lowercased() else { return true }
+        guard let nextBase = input["baseURL"] as? String,
+              let host = URLComponents(string: nextBase)?.host else { return false }
+        if trustPolicy(forHost: oldHost) == legacyPinPolicy {
+            guard trustPolicy(forHost: host) == legacyPinPolicy,
+                  let pin = input["fingerprint"] as? String,
+                  pin.uppercased() == current["fingerprint"]?.uppercased() else { return false }
+            return true
+        }
+        // A public CA authenticates only its own origin. Reusing an existing
+        // PKI bearer across origins requires a new pairing, even with no pins.
+        guard let oldScope = bindingScopeId(baseURL: base, token: token),
+              let nextScope = bindingScopeId(baseURL: nextBase, token: token) else { return false }
+        return oldScope == nextScope
     }
 
     // 入口守卫用：系统信任形态一律放行（不需要叶指纹）；旧 pin 形态必须带合法 64hex。
@@ -403,6 +427,7 @@ enum AlongConnectionStore {
             item.merge(attributes) { _, new in new }
             guard SecItemAdd(item as CFDictionary, nil) == errSecSuccess else { return nil }
         } else if status != errSecSuccess { return nil }
+        saveRevision &+= 1
         return clean
     }
 
@@ -478,7 +503,12 @@ enum AlongConnectionStore {
             input["path"] = "/connection/verify"
             input["body"] = [:] as [String: Any]
             guard let result = try? await AlongWebView.Coordinator.agentRequest(input),
-                  result["paired"] as? Bool == true, load() == saved, save(next) != nil else {
+                  result["paired"] as? Bool == true, load() == saved else {
+                print("Along host migration could not verify or persist the pairing")
+                return
+            }
+            do { _ = try await HealthEventDelivery.shared.saveConnection(next) }
+            catch {
                 print("Along host migration could not verify or persist the pairing")
                 return
             }
@@ -489,7 +519,7 @@ enum AlongConnectionStore {
               let data = json.data(using: .utf8),
               let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return }
-        _ = save(value)
+        _ = try? await HealthEventDelivery.shared.saveConnection(value)
     }
 #endif
 
@@ -526,7 +556,7 @@ enum AlongConnectionStore {
         return last.contains { c in ("a"..."z").contains(c) || ("A"..."Z").contains(c) }
     }
 
-    private static func clean(_ value: [String: Any]) -> [String: String]? {
+    static func clean(_ value: [String: Any]) -> [String: String]? {
         guard let baseURL = value["baseURL"] as? String,
               let components = URLComponents(string: baseURL),
               components.scheme == "https", let host = components.host,
@@ -781,15 +811,21 @@ struct AlongWebView: UIViewRepresentable {
                     return
                 }
                 if body["operation"] as? String == "connection" {
-                    let result: [String: Any]
-                    do {
-                        if body["action"] as? String == "workspace", origin.protocol != "along" || origin.host != "app" {
-                            throw AgentBridgeError.invalidConfiguration
+                    Task { @MainActor in
+                        let result: [String: Any]
+                        do {
+                            if body["action"] as? String == "workspace", origin.protocol != "along" || origin.host != "app" {
+                                throw AgentBridgeError.invalidConfiguration
+                            }
+                            if body["action"] as? String == "save" {
+                                guard origin.protocol == "along", origin.host == "app",
+                                      let value = body["value"] as? [String: Any] else { throw AgentBridgeError.invalidConfiguration }
+                                result = ["ok": true, "value": try await HealthEventDelivery.shared.saveConnection(value)]
+                            } else { result = ["ok": true, "value": try Self.connectionOperation(body)] }
                         }
-                        result = ["ok": true, "value": try Self.connectionOperation(body)]
+                        catch { result = ["ok": false, "error": error.localizedDescription] }
+                        Self.deliverAlongResult(id: id, result: result, webView: webView)
                     }
-                    catch { result = ["ok": false, "error": error.localizedDescription] }
-                    Self.deliverAlongResult(id: id, result: result, webView: webView)
                     return
                 }
                 Task {
@@ -805,19 +841,15 @@ struct AlongWebView: UIViewRepresentable {
             }
         }
 
-        static func connectionOperation(_ input: [String: Any]) throws -> [String: String] {
+        static func connectionOperation(_ input: [String: Any]) throws -> [String: Any] {
             switch input["action"] as? String {
             case "load":
                 let saved = AlongConnectionStore.load()
                 print("Along connection delivered to web: \(saved != nil)")
-                return saved ?? [:]
+                return saved.map { HealthEventDelivery.shared.connectionForWeb($0) } ?? [:]
             case "workspace":
                 guard let saved = AlongConnectionStore.load() else { return [:] }
                 return HealthEventDelivery.shared.cachedWorkspaceBinding(saved)
-            case "save":
-                guard let value = input["value"] as? [String: Any],
-                      let saved = AlongConnectionStore.save(value) else { throw AgentBridgeError.invalidConfiguration }
-                return saved
             default: throw AgentBridgeError.invalidConfiguration
             }
         }
@@ -1079,6 +1111,7 @@ struct AlongWebView: UIViewRepresentable {
             // 信任策略由主机形态推导（docs/iphone-ca-profile-design.md §2.2）：
             // 私网 IPv4 走旧叶指纹 pin，云端主机交给系统信任评估。
             // 不接受 JavaScript 自报 trustPolicy——放宽策略必须走原生自己的判定。
+            guard AlongConnectionStore.permitsPairedTransport(input) else { throw AgentBridgeError.invalidConfiguration }
             let policy = AlongConnectionStore.trustPolicy(forHost: host)
             let fingerprint = AlongConnectionStore.pinnedFingerprint(input["fingerprint"] as? String, policy: policy)
             var request = URLRequest(url: url)

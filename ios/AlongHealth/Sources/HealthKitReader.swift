@@ -861,11 +861,87 @@ enum BackgroundReviewAdmission {
         guard defaults.bool(forKey: "along.health.contextReview.v1") else { return [] }
         return Set((defaults.stringArray(forKey: "along.health.selectedTypes") ?? []).compactMap(HealthMetric.init(rawValue:)))
     }
+    private func connectionHash(_ c: [String: String]) throws -> String {
+        guard let seed = AlongConnectionStore.scopeSeed(c) else { throw AgentBridgeError.invalidConfiguration }
+        return SHA256.hash(data: Data(seed.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
     private func connection() throws -> ([String: String], String) {
-        guard let c = AlongConnectionStore.load(),
-              let seed = AlongConnectionStore.scopeSeed(c) else { throw AgentBridgeError.invalidConfiguration }
-        let hash = SHA256.hash(data: Data([seed].joined(separator: "\n").utf8)).map { String(format: "%02x", $0) }.joined()
-        return (c, hash)
+        guard let c = AlongConnectionStore.load() else { throw AgentBridgeError.invalidConfiguration }
+        return (c, try connectionHash(c))
+    }
+    // Only a valid local pinned credential can identify the same Mac at another
+    // transport. Public PKI authenticates an origin, not this paired Mac.
+    private func localCredential(_ c: [String: String]) -> String? {
+        guard (c["trustPolicy"] ?? AlongConnectionStore.legacyPinPolicy) == AlongConnectionStore.legacyPinPolicy,
+              let base = c["baseURL"], let host = URLComponents(string: base)?.host,
+              AlongConnectionStore.trustPolicy(forHost: host) == AlongConnectionStore.legacyPinPolicy,
+              let pin = c["fingerprint"], pin.count == 64, pin.allSatisfy(\.isHexDigit),
+              let token = c["token"], token.count == 64, token.allSatisfy(\.isHexDigit) else { return nil }
+        return SHA256.hash(data: Data([AlongConnectionStore.legacyPinPolicy, pin, token].joined(separator: "\n").utf8))
+            .map { String(format: "%02x", $0) }.joined()
+    }
+    private func owns(_ state: [String: Any], connection c: [String: String], hash: String) -> Bool {
+        guard let identity = state["binding"] as? String, defaults.string(forKey: enabledKey) == identity else { return false }
+        if identity == hash { return true }
+        guard let proof = state["verifiedLocalTransports"] as? [String: Any],
+              proof["identity"] as? String == identity,
+              let credential = localCredential(c), proof["credential"] as? String == credential,
+              let transports = proof["hashes"] as? [String], transports.contains(hash) else { return false }
+        return true
+    }
+    // Called by the native connection-save bridge before replacing its Keychain
+    // value. Never infer an old transport from an opaque binding hash.
+    func saveConnection(_ value: [String: Any]) async throws -> [String: Any] {
+        guard AlongConnectionStore.permitsPairedTransport(value), let next = AlongConnectionStore.clean(value) else { throw AgentBridgeError.invalidConfiguration }
+        if let current = AlongConnectionStore.load(), current["baseURL"] != next["baseURL"],
+           let credential = localCredential(current), credential == localCredential(next) {
+            let oldHash = try connectionHash(current), nextHash = try connectionHash(next)
+            let state = try load(createDirectory: false)
+            if owns(state, connection: current, hash: oldHash), let user = state["user"] as? String, !user.isEmpty {
+                let revision = AlongConnectionStore.saveRevision
+                let before = try JSONSerialization.data(withJSONObject: state, options: [.sortedKeys])
+                let status = try await call(next, path: "/connection/status", body: ["runtime": "dsh-superagent"])
+                guard status["eventProtocol"] as? Int == 1, status["ready"] as? Bool == true,
+                      status["userId"] as? String == user, AlongConnectionStore.load() == current,
+                      AlongConnectionStore.saveRevision == revision,
+                      defaults.string(forKey: enabledKey) == state["binding"] as? String,
+                      try JSONSerialization.data(withJSONObject: load(createDirectory: false), options: [.sortedKeys]) == before
+                else { throw AgentBridgeError.invalidConfiguration }
+                var migrated = state
+                let previousProof = state["verifiedLocalTransports"] as? [String: Any]
+                let oldSeed = AlongConnectionStore.scopeSeed(current)!
+                let notificationScope = previousProof?["notificationScope"] as? String ?? SHA256.hash(data: Data([oldSeed, user].joined(separator: "\n").utf8)).map { String(format: "%02x", $0) }.joined()
+                migrated["verifiedLocalTransports"] = ["identity": state["binding"]!, "credential": credential,
+                    "hashes": [oldHash, nextHash], "notificationScope": notificationScope,
+                    "webMigration": ["fromBaseURL": current["baseURL"]!, "fromBindingScopeId": current["bindingScopeId"] ?? "",
+                        "toBaseURL": next["baseURL"]!, "toBindingScopeId": next["bindingScopeId"] ?? "", "userId": user]]
+                // Atomic queue commit precedes Keychain replacement. Both old and
+                // verified new transports work if power or the Keychain write fails.
+                try save(migrated)
+            }
+        }
+        guard let saved = AlongConnectionStore.save(value) else { throw AgentBridgeError.invalidConfiguration }
+        return connectionForWeb(saved)
+    }
+    // Tokenless evidence is returned only to the built-in connection bridge. Its
+    // source is the atomic, authenticated migration record, never a JS claim.
+    func connectionForWeb(_ c: [String: String]) -> [String: Any] {
+        var result: [String: Any] = c
+        guard let hash = try? connectionHash(c), let state = try? load(createDirectory: false),
+              owns(state, connection: c, hash: hash),
+              let proof = state["verifiedLocalTransports"] as? [String: Any],
+              let migration = proof["webMigration"] as? [String: String],
+              migration["toBaseURL"] == c["baseURL"], migration["toBindingScopeId"] == c["bindingScopeId"],
+              migration["userId"] == state["user"] as? String else { return result }
+        result["transportMigration"] = migration
+        return result
+    }
+    func notificationScope(_ c: [String: String], user: String) -> String? {
+        guard let hash = try? connectionHash(c), let state = try? load(createDirectory: false),
+              owns(state, connection: c, hash: hash), state["user"] as? String == user,
+              let proof = state["verifiedLocalTransports"] as? [String: Any],
+              let scope = proof["notificationScope"] as? String, scope.count == 64 else { return nil }
+        return scope
     }
     private func stateURL(createDirectory: Bool = true) throws -> URL {
         let dir = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: createDirectory)
@@ -899,8 +975,7 @@ enum BackgroundReviewAdmission {
               AlongConnectionStore.bindingScopeId(baseURL: base, token: token) == scope,
               let seed = AlongConnectionStore.scopeSeed(c) else { return [:] }
         let hash = SHA256.hash(data: Data(seed.utf8)).map { String(format: "%02x", $0) }.joined()
-        guard defaults.string(forKey: enabledKey) == hash,
-              let state = try? load(createDirectory: false), state["binding"] as? String == hash,
+        guard let state = try? load(createDirectory: false), owns(state, connection: c, hash: hash),
               let user = state["user"] as? String,
               user.range(of: #"^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$"#, options: .regularExpression) != nil else { return [:] }
         return ["baseURL": base, "bindingScopeId": scope, "userId": user]
@@ -909,9 +984,9 @@ enum BackgroundReviewAdmission {
         let (c, hash) = try connection()
         let status = try await call(c, path: "/connection/status", body: ["runtime": "dsh-superagent"])
         guard status["eventProtocol"] as? Int == 1, status["ready"] as? Bool == true,
-              let user = status["userId"] as? String, !user.isEmpty, try connection().1 == hash else { throw AgentBridgeError.invalidConfiguration }
+              let user = status["userId"] as? String, !user.isEmpty, try connection().0 == c else { throw AgentBridgeError.invalidConfiguration }
         var state = try load()
-        if state["binding"] as? String != hash {
+        if !owns(state, connection: c, hash: hash) || state["user"] as? String != user {
             // Keep an old outbox on disk for its original identity instead of sending it to the new one.
             if !state.isEmpty {
                 let archived = try stateURL().deletingLastPathComponent().appendingPathComponent("previous-" + UUID().uuidString + ".json")
@@ -920,7 +995,7 @@ enum BackgroundReviewAdmission {
             state = ["binding": hash, "user": user, "pending": []]
             try save(state)
         }
-        defaults.set(hash, forKey: enabledKey)
+        defaults.set(state["binding"] as? String, forKey: enabledKey)
         BackgroundHealthReviews.shared.usesEventProtocol = { HealthEventDelivery.shared.enabled }
         BackgroundHealthReviews.shared.disarm()
         BackgroundHealthReviews.shared.configureObservers()
@@ -954,13 +1029,18 @@ enum BackgroundReviewAdmission {
     }
     private func deliver() async throws {
         let (c, hash) = try connection()
-        guard defaults.string(forKey: enabledKey) == hash else { return }
         var state = try load()
-        guard state["binding"] as? String == hash else { return }
+        guard owns(state, connection: c, hash: hash), let identity = state["binding"] as? String,
+              let user = state["user"] as? String else { return }
         let types = selected
         if !types.isEmpty {
             let summary = try await HealthDeviceDataCollector(reader: reader, types: types).collect()
-            guard types == selected, try connection().1 == hash else { return }
+            guard types == selected, try connection().0 == c else { return }
+            // A configure/save may have run during the read. Preserve its durable
+            // transport proof and do not write a stale in-memory queue over it.
+            state = try load()
+            guard owns(state, connection: c, hash: hash), state["binding"] as? String == identity,
+                  state["user"] as? String == user else { return }
             let summaries = summary.eventSummaries()
             let content = try HealthEventOutbox.content(summaries)
             if state["lastContent"] as? String != content {
@@ -973,28 +1053,36 @@ enum BackgroundReviewAdmission {
             }
         }
         while let event = (state["pending"] as? [[String: Any]])?.first {
-            guard types == selected, !types.isEmpty, try connection().1 == hash else { return }
+            guard types == selected, !types.isEmpty, try connection().0 == c else { return }
             if !HealthEventOutbox.permitted(event, types: types) {
                 var held = state["held"] as? [[String: Any]] ?? []; held.append(event); state["held"] = held
                 var pending = state["pending"] as? [[String: Any]] ?? []; pending.removeFirst(); state["pending"] = pending
                 try save(state); continue
             }
-            let response: [String: Any]
-            do { response = try await call(c, path: "/events", body: event) }
-            catch AgentBridgeError.receipt(let receipt) {
-                guard try connection().1 == hash, HealthEventOutbox.terminal(event, receipt: receipt) else { throw AgentBridgeError.receipt(receipt) }
-                // A permanent refusal must not poison later valid snapshots. Retain the complete failed event locally.
-                var held = state["held"] as? [[String: Any]] ?? []; held.append(["event": event, "receipt": receipt]); state["held"] = held
-                var pending = state["pending"] as? [[String: Any]] ?? []; pending.removeFirst(); state["pending"] = pending
-                try save(state); continue
+            let receipt: [String: Any]
+            do { receipt = try await call(c, path: "/events", body: event) }
+            catch AgentBridgeError.receipt(let failure) {
+                guard HealthEventOutbox.terminal(event, receipt: failure) else { throw AgentBridgeError.receipt(failure) }
+                receipt = failure
             }
-            guard try connection().1 == hash else { return }
-            guard HealthEventOutbox.acknowledged(event, by: response) else { throw AgentBridgeError.invalidConfiguration }
+            // An ACK may arrive from the previous verified address. Re-read the
+            // current identity and exact event; never overwrite a newer queue.
+            state = try load()
+            let (current, currentHash) = try connection()
+            guard owns(state, connection: current, hash: currentHash), state["binding"] as? String == identity,
+                  state["user"] as? String == user,
+                  let first = (state["pending"] as? [[String: Any]])?.first,
+                  try JSONSerialization.data(withJSONObject: first, options: [.sortedKeys]) == JSONSerialization.data(withJSONObject: event, options: [.sortedKeys])
+            else { return }
+            if HealthEventOutbox.terminal(event, receipt: receipt) {
+                var held = state["held"] as? [[String: Any]] ?? []; held.append(["event": event, "receipt": receipt]); state["held"] = held
+            } else if !HealthEventOutbox.acknowledged(event, by: receipt) { throw AgentBridgeError.invalidConfiguration }
             var pending = state["pending"] as? [[String: Any]] ?? []; pending.removeFirst(); state["pending"] = pending
             try save(state) // A failed save causes a safe same-id duplicate next time.
         }
         defaults.set(false, forKey: dirtyKey)
     }
+
 }
 
 // Pure Foundation contract, executed from the actual source by the native queue regression tests.

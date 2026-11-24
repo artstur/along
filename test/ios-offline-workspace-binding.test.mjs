@@ -30,7 +30,9 @@ test('native offline owner proof reads only an existing full-binding outbox and 
 import CryptoKit
 
 enum AlongConnectionStore {
-  static let legacyPinPolicy="legacy-local-pin-v1"
+  static let legacyPinPolicy="legacy-local-pin-v1",systemTrustPolicy="system-pki-v1"
+  ${method(shell,'    static func trustPolicy(')}
+  ${method(shell,'    static func isPrivateIPv4(')}
   ${method(shell,'    static func bindingScopeId(')}
   ${method(shell,'    static func scopeSeed(')}
 }
@@ -48,6 +50,8 @@ final class Probe {
     if failRead { throw NSError(domain:"locked",code:1) }
     return state
   }
+  ${method(health,'    private func localCredential(')}
+  ${method(health,'    private func owns(')}
   ${proof}
 }
 let old:[String:String]=["baseURL":"https://192.168.1.2:4176","fingerprint":String(repeating:"A",count:64),"token":String(repeating:"b",count:64)]
@@ -97,7 +101,9 @@ import CryptoKit
 
 enum AgentBridgeError:Error {case invalidConfiguration}
 enum AlongConnectionStore {
-  static let legacyPinPolicy="legacy-local-pin-v1"
+  static let legacyPinPolicy="legacy-local-pin-v1",systemTrustPolicy="system-pki-v1"
+  ${method(shell,'    static func trustPolicy(')}
+  ${method(shell,'    static func isPrivateIPv4(')}
   ${method(shell,'    static func bindingScopeId(')}
   ${method(shell,'    static func scopeSeed(')}
 }
@@ -118,6 +124,8 @@ final class Probe {
  let defaults=FakeDefaults(),enabledKey="enabled"
  ${method(native,'    private func stateURL(')}
  ${method(native,'    private func load(')}
+ ${method(native,'    private func localCredential(')}
+ ${method(native,'    private func owns(')}
  ${method(native,'    func cachedWorkspaceBinding(')}
 }
 let base="https://192.168.1.2:4176",token=String(repeating:"b",count:64)
