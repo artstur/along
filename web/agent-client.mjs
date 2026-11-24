@@ -39,10 +39,16 @@ export async function agentCall(config, path, body) {
 // ---- 事件待同步队列（BC-08-01/02 的客户端断言）----------------------------------------------------------
 
 const eventKey = (base, config) => config?.userId ? `${base}:${config.userId}` : base;
+const eventAuthorities=new Map();
+const authority=config=>JSON.stringify([config?.baseURL,config?.bindingScopeId,config?.token]);
+export function bindEventAuthority(config) {eventAuthorities.set(config.userId,authority(config));}
+export function retireEventAuthority(config) {
+  if(eventAuthorities.get(config.userId)===authority(config))eventAuthorities.set(config.userId,null);
+}
 export function pendingEvents(config) { return readStored(eventKey(EVENT_QUEUE_KEY,config), []); }
 
-function dropPending(eventId,config) {
-  writeStored(eventKey(EVENT_QUEUE_KEY,config), pendingEvents(config).filter(item => item.event_id !== eventId));
+function dropPending(eventId,config,envelope) {
+  writeStored(eventKey(EVENT_QUEUE_KEY,config), pendingEvents(config).filter(item => item.event_id !== eventId||JSON.stringify(item.envelope)!==envelope));
 }
 
 function recordFailure(eventId, receipt,config) {
@@ -60,6 +66,7 @@ function recordFailure(eventId, receipt,config) {
  * iOS 桥把非 2xx 的回执体挂在 Error.receipt 上（仅协议层透传，不带状态码时一律按可重试处理）。
  */
 async function sendQueuedEvent(config, item) {
+  const envelope=JSON.stringify(item.envelope);
   let receipt;
   try {
     receipt = await agentCall(config, '/events', item.envelope);
@@ -69,13 +76,19 @@ async function sendQueuedEvent(config, item) {
       return {event_id:item.event_id, status:'retry', error:error?.message ?? '网络失败'};
     }
   }
+  // A reply from the retired Mac must not acknowledge the new cloud authority's queue.
+  // The exact current envelope is re-read as well, so a same-id replacement is never lost.
+  if(eventAuthorities.has(config.userId)&&eventAuthorities.get(config.userId)!==authority(config)||
+    !pendingEvents(config).some(row=>row.event_id===item.event_id&&JSON.stringify(row.envelope)===envelope))
+    return {event_id:item.event_id,status:'retry',error:'投递归属或事件已更新'};
+  if(receipt?.event_id!==item.event_id)return {event_id:item.event_id,status:'retry',error:'回执事件不匹配'};
   if (receipt?.status === 'accepted' || receipt?.status === 'duplicate') {
-    dropPending(item.event_id,config);
+    dropPending(item.event_id,config,envelope);
     return {event_id:item.event_id, status:receipt.status, ...(receipt.received_seq !== undefined ? {received_seq:receipt.received_seq} : {})};
   }
   if (receipt?.status === 'rejected' || receipt?.status === 'conflict') {
     recordFailure(item.event_id, receipt,config);
-    dropPending(item.event_id,config);
+    dropPending(item.event_id,config,envelope);
     return {event_id:item.event_id, status:receipt.status, reason:receipt.reason};
   }
   return {event_id:item.event_id, status:'retry', error:'回执不可识别'};

@@ -4,6 +4,7 @@ import BackgroundTasks
 import HealthKit
 import JavaScriptCore
 import CryptoKit
+import Security
 import UIKit
 
 final class HealthKitReader {
@@ -883,6 +884,7 @@ enum BackgroundReviewAdmission {
     private func owns(_ state: [String: Any], connection c: [String: String], hash: String) -> Bool {
         guard let identity = state["binding"] as? String, defaults.string(forKey: enabledKey) == identity else { return false }
         if identity == hash { return true }
+        if workspaceHandoffRecord(state, connection: c) != nil { return true }
         guard let proof = state["verifiedLocalTransports"] as? [String: Any],
               proof["identity"] as? String == identity,
               let credential = localCredential(c), proof["credential"] as? String == credential,
@@ -927,6 +929,10 @@ enum BackgroundReviewAdmission {
     // source is the atomic, authenticated migration record, never a JS claim.
     func connectionForWeb(_ c: [String: String]) -> [String: Any] {
         var result: [String: Any] = c
+        if let state = try? load(createDirectory: false), let record = workspaceHandoffRecord(state, connection: c),
+           let migration = record["webMigration"] as? [String: Any] {
+            result["workspaceHandoff"] = migration
+        }
         guard let hash = try? connectionHash(c), let state = try? load(createDirectory: false),
               owns(state, connection: c, hash: hash),
               let proof = state["verifiedLocalTransports"] as? [String: Any],
@@ -937,11 +943,147 @@ enum BackgroundReviewAdmission {
         return result
     }
     func notificationScope(_ c: [String: String], user: String) -> String? {
+        if let state = try? load(createDirectory: false), state["user"] as? String == user,
+           let record = workspaceHandoffRecord(state, connection: c), let scope = record["notificationScope"] as? String { return scope }
         guard let hash = try? connectionHash(c), let state = try? load(createDirectory: false),
               owns(state, connection: c, hash: hash), state["user"] as? String == user,
               let proof = state["verifiedLocalTransports"] as? [String: Any],
               let scope = proof["notificationScope"] as? String, scope.count == 64 else { return nil }
         return scope
+    }
+    private func workspaceHandoffRecord(_ state: [String: Any], connection c: [String: String]) -> [String: Any]? {
+        guard let record = state["workspaceHandoff"] as? [String: Any],
+              ["prepared", "committed"].contains(record["phase"] as? String ?? ""),
+              record["binding"] as? String == state["binding"] as? String,
+              record["userId"] as? String == state["user"] as? String,
+              defaults.string(forKey: enabledKey) == state["binding"] as? String,
+              c["trustPolicy"] == AlongConnectionStore.systemTrustPolicy,
+              let token = c["token"], WorkspaceHandoffProof.hash(token) == record["targetCredentialSHA256"] as? String,
+              c["baseURL"] == record["targetBaseURL"] as? String,
+              c["bindingScopeId"] == record["targetBindingScopeId"] as? String,
+              WorkspaceHandoffProof.isHash(record["notificationScope"] as? String) else { return nil }
+        return record
+    }
+    func prepareWorkspaceHandoff(targetOrigin: String) throws -> [String: Any] {
+        let (c, hash) = try connection()
+        var state = try load(createDirectory: false)
+        guard c["trustPolicy"] == AlongConnectionStore.legacyPinPolicy,
+              AlongConnectionStore.trustPolicy(forHost: URLComponents(string: targetOrigin)?.host ?? "") == AlongConnectionStore.systemTrustPolicy,
+              AlongConnectionStore.hostAccepted(URLComponents(string: targetOrigin)?.host ?? ""),
+              WorkspaceHandoffProof.origin(targetOrigin) == targetOrigin,
+              let source = c["baseURL"].flatMap(WorkspaceHandoffProof.origin), let token = c["token"], let pin = c["fingerprint"],
+              owns(state, connection: c, hash: hash), let user = state["user"] as? String,
+              state["workspaceHandoff"] == nil else { throw WorkspaceHandoffError.invalidState }
+        if let prior = state["workspaceHandoffChallenge"] as? [String: Any], prior["purpose"] as? String == WorkspaceHandoffProof.purpose,
+           prior["sourceOrigin"] as? String == source, prior["targetOrigin"] as? String == targetOrigin,
+           prior["sourceFingerprint"] as? String == pin, prior["sourceCredentialSHA256"] as? String == WorkspaceHandoffProof.hash(token),
+           prior["userId"] as? String == user, WorkspaceHandoffProof.isHash(prior["nonce"] as? String),
+           let expires = prior["expiresAt"] as? Int, expires > Int(Date().timeIntervalSince1970) { return prior }
+        var nonce = Data(count: 32)
+        guard nonce.withUnsafeMutableBytes({ SecRandomCopyBytes(kSecRandomDefault, 32, $0.baseAddress!) }) == errSecSuccess else { throw WorkspaceHandoffError.invalidState }
+        let now = Int(Date().timeIntervalSince1970)
+        let challenge: [String: Any] = ["purpose": WorkspaceHandoffProof.purpose, "sourceOrigin": source, "targetOrigin": targetOrigin,
+            "sourceFingerprint": pin, "sourceCredentialSHA256": WorkspaceHandoffProof.hash(token), "userId": user,
+            "nonce": nonce.map { String(format: "%02x", $0) }.joined(), "createdAt": now, "expiresAt": now + 86400]
+        state["workspaceHandoffChallenge"] = challenge; try save(state)
+        return challenge
+    }
+    func commitWorkspaceHandoff(_ offer: [String: Any]) async throws -> [String: Any] {
+        guard Set(offer.keys) == ["format", "connection", "proof", "manifestUTF8"], offer["format"] as? String == "along-native-workspace-handoff/v1",
+              let manifestText = offer["manifestUTF8"] as? String,
+              let offered = offer["connection"] as? [String: Any], Set(offered.keys) == ["baseURL", "token", "runtime"],
+              let next = AlongConnectionStore.clean(offered), next["trustPolicy"] == AlongConnectionStore.systemTrustPolicy,
+              let proof = offer["proof"] as? [String: Any] else { throw WorkspaceHandoffError.invalidProof }
+        let (current, hash) = try connection()
+        var state = try load(createDirectory: false)
+        if let record = workspaceHandoffRecord(state, connection: current),
+           let originalProof = record["proof"] as? [String: Any],
+           ["algorithm", "payload", "certificateDER", "signature"].allSatisfy({ originalProof[$0] as? String == proof[$0] as? String }),
+           Set(originalProof.keys) == Set(proof.keys), current == next {
+            try await recoverWorkspaceHandoff(); return connectionForWeb(next)
+        }
+        guard current["trustPolicy"] == AlongConnectionStore.legacyPinPolicy, let pin = current["fingerprint"],
+              let token = current["token"], let user = state["user"] as? String, owns(state, connection: current, hash: hash),
+              let challenge = state["workspaceHandoffChallenge"] as? [String: Any],
+              let expires = challenge["expiresAt"] as? Int, expires > Int(Date().timeIntervalSince1970),
+              state["workspaceHandoff"] == nil else { throw WorkspaceHandoffError.invalidState }
+        let claims = try WorkspaceHandoffProof.verifySignature(proof, sourcePin: pin)
+        let manifest = try WorkspaceHandoffProof.manifest(manifestText, claims: claims)
+        guard claims["sourceOrigin"] == current["baseURL"].flatMap(WorkspaceHandoffProof.origin),
+              claims["sourceCredentialSHA256"] == WorkspaceHandoffProof.hash(token), claims["userId"] == user,
+              claims["targetOrigin"] == next["baseURL"].flatMap(WorkspaceHandoffProof.origin),
+              claims["targetCredentialSHA256"] == next["token"].map(WorkspaceHandoffProof.hash),
+              claims["nonce"] == challenge["nonce"] as? String, claims["targetOrigin"] == challenge["targetOrigin"] as? String,
+              challenge["sourceCredentialSHA256"] as? String == claims["sourceCredentialSHA256"] else { throw WorkspaceHandoffError.invalidProof }
+        let revision = AlongConnectionStore.saveRevision
+        let permission = defaults.bool(forKey: "along.health.contextReview.v1")
+        let selection = defaults.stringArray(forKey: "along.health.selectedTypes")
+        let status = try await call(next, path: "/workspace-handoff/status", body: [:])
+        guard WorkspaceHandoffProof.matchesStatus(status, claims: claims, manifest: manifest), AlongConnectionStore.load() == current,
+              AlongConnectionStore.saveRevision == revision,
+              defaults.bool(forKey: "along.health.contextReview.v1") == permission,
+              defaults.stringArray(forKey: "along.health.selectedTypes") == selection else { throw WorkspaceHandoffError.invalidState }
+        // Re-read after the network wait. Legitimate append/ACK changes are retained, not used as
+        // a reason to freeze the entire queue or overwrite it with a stale snapshot.
+        state = try load(createDirectory: false)
+        guard owns(state, connection: current, hash: hash), state["user"] as? String == user,
+              (state["workspaceHandoffChallenge"] as? [String: Any])?["nonce"] as? String == claims["nonce"],
+              state["workspaceHandoff"] == nil else { throw WorkspaceHandoffError.invalidState }
+        let id = claims["migrationId"]!
+        try WorkspaceHandoffVault.save(["source": current, "target": next], id: id)
+        let oldScope = notificationScope(current, user: user) ?? WorkspaceHandoffProof.hash([AlongConnectionStore.scopeSeed(current)!, user].joined(separator: "\n"))
+        let web: [String: Any] = ["purpose": WorkspaceHandoffProof.purpose, "migrationId": id,
+            "fromBaseURL": current["baseURL"]!, "toBaseURL": next["baseURL"]!, "fromBindingScopeId": current["bindingScopeId"]!,
+            "toBindingScopeId": next["bindingScopeId"]!, "userId": user, "deviceId": claims["deviceId"]!,
+            "manifestSHA256": claims["manifestSHA256"]!, "snapshotSHA256": claims["snapshotSHA256"]!,
+            "syncPrefixSHA256": claims["syncPrefixSHA256"]!, "syncHighWaterMark": Int(claims["syncHighWaterMark"]!)!]
+        state["workspaceHandoff"] = ["phase": "prepared", "migrationId": id, "binding": state["binding"]!, "userId": user,
+            "targetCredentialSHA256": claims["targetCredentialSHA256"]!, "targetBaseURL": next["baseURL"]!,
+            "targetBindingScopeId": next["bindingScopeId"]!, "notificationScope": oldScope, "proof": proof, "manifestUTF8": manifestText, "webMigration": web]
+        try save(state) // durable authorization proof precedes replacement of the sole live connection.
+        try await recoverWorkspaceHandoff()
+        guard AlongConnectionStore.load() == next else { throw WorkspaceHandoffError.invalidState }
+        return connectionForWeb(next)
+    }
+    func recoverWorkspaceHandoff(onlyIfAlreadyTarget: Bool = false) async throws {
+        var state = try load(createDirectory: false)
+        guard var record = state["workspaceHandoff"] as? [String: Any], record["phase"] as? String == "prepared",
+              let id = record["migrationId"] as? String else { return }
+        let secrets = try WorkspaceHandoffVault.load(id)
+        guard let source = secrets["source"] as? [String: String], let target = secrets["target"] as? [String: String],
+              let current = AlongConnectionStore.load(), current == source || current == target,
+              let proof = record["proof"] as? [String: Any], let manifestText = record["manifestUTF8"] as? String,
+              let pin = source["fingerprint"] else { throw WorkspaceHandoffError.invalidState }
+        let claims = try WorkspaceHandoffProof.verifySignature(proof, sourcePin: pin, allowExpired: true)
+        let manifest = try WorkspaceHandoffProof.manifest(manifestText, claims: claims)
+        guard claims["migrationId"] == id, claims["userId"] == state["user"] as? String,
+              claims["sourceCredentialSHA256"] == source["token"].map(WorkspaceHandoffProof.hash),
+              claims["targetCredentialSHA256"] == target["token"].map(WorkspaceHandoffProof.hash),
+              WorkspaceHandoffProof.origin(target["baseURL"]!) == claims["targetOrigin"],
+              defaults.string(forKey: enabledKey) == state["binding"] as? String else { throw WorkspaceHandoffError.invalidState }
+        if current == source {
+            // A normal launch can render its original offline cache first. This option does
+            // not change a connection; the full recovery below retains the live readiness,
+            // connection generation, latest journal and ownership checks before committing.
+            if onlyIfAlreadyTarget { return }
+            let revision = AlongConnectionStore.saveRevision
+            let status = try await call(target, path: "/workspace-handoff/status", body: [:])
+            guard WorkspaceHandoffProof.matchesStatus(status, claims: claims, manifest: manifest), AlongConnectionStore.load() == source,
+                  AlongConnectionStore.saveRevision == revision else { throw WorkspaceHandoffError.invalidState }
+            state = try load(createDirectory: false)
+            guard let latest = state["workspaceHandoff"] as? [String: Any], latest["migrationId"] as? String == id,
+                  latest["phase"] as? String == "prepared", defaults.string(forKey: enabledKey) == state["binding"] as? String,
+                  state["user"] as? String == claims["userId"] else { throw WorkspaceHandoffError.invalidState }
+            record = latest
+            guard AlongConnectionStore.save(target) == target else { throw WorkspaceHandoffError.secretUnavailable }
+        }
+        // Keychain may already have committed before a prior process exited. No new network
+        // or re-pairing is needed to finish the authenticated local journal in that case.
+        state = try load(createDirectory: false)
+        guard AlongConnectionStore.load() == target,
+              (state["workspaceHandoff"] as? [String: Any])?["migrationId"] as? String == id else { throw WorkspaceHandoffError.invalidState }
+        record["phase"] = "committed"; state["workspaceHandoff"] = record
+        state.removeValue(forKey: "workspaceHandoffChallenge"); try save(state)
     }
     private func stateURL(createDirectory: Bool = true) throws -> URL {
         let dir = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: createDirectory)
@@ -965,7 +1107,8 @@ enum BackgroundReviewAdmission {
     private func call(_ connection: [String: String], path: String, body: [String: Any]) async throws -> [String: Any] {
         var input = connection.reduce(into: [String: Any]()) { $0[$1.key] = $1.value }
         input["path"] = path; input["body"] = body
-        return try await AlongWebView.Coordinator.agentRequest(input, background: UIApplication.shared.applicationState == .background)
+        return try await AlongWebView.Coordinator.agentRequest(input, background: UIApplication.shared.applicationState == .background,
+            privateWorkspaceHandoffRequest: path == "/workspace-handoff/status")
     }
     // Read-only recovery proof for Build78's origin-less Web event binding. No health
     // samples, permissions, observers, delivery requests or outbox writes occur here.
@@ -1030,6 +1173,7 @@ enum BackgroundReviewAdmission {
     private func deliver() async throws {
         let (c, hash) = try connection()
         var state = try load()
+        if (state["workspaceHandoff"] as? [String: Any])?["phase"] as? String == "prepared" { return }
         guard owns(state, connection: c, hash: hash), let identity = state["binding"] as? String,
               let user = state["user"] as? String else { return }
         let types = selected
@@ -1069,6 +1213,7 @@ enum BackgroundReviewAdmission {
             // current identity and exact event; never overwrite a newer queue.
             state = try load()
             let (current, currentHash) = try connection()
+            if state["workspaceHandoff"] != nil, try connectionHash(c) != currentHash { return }
             guard owns(state, connection: current, hash: currentHash), state["binding"] as? String == identity,
                   state["user"] as? String == user,
                   let first = (state["pending"] as? [[String: Any]])?.first,

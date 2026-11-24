@@ -27,6 +27,7 @@ import {validateOkxSourceRequest,requireOkxGoal,requireOwnedSourceGoal,reconcile
 import {createBridge, readBridgeToken} from './along-bridge.mjs';
 import {agentHealthSnapshot,cleanHealthContext,cleanPlanningContext,validateReassessment,SLEEP_REMINDER_CRITERIA,DAILY_ACTIONS_CRITERIA,parseDailyActionReply} from '../web/contextual-planning.mjs';
 import {loadCloudTlsMaterial} from './tls-material.mjs';
+import {readHostHandoffStatus,runtimeHandoffMatches} from './workspace-handoff.mjs';
 
 const dir = stateDir();
 mkdirSync(dir, {recursive:true, mode:0o700});
@@ -590,6 +591,29 @@ const server=createServer(proxySocket?{}:{key:tlsKey,cert:tlsCert},async(req,res
     renewBindingIfNeeded(binding);
     const who={userId:binding.user_id,deviceId:binding.device_id};
     const recipient=binding.hash;
+    if(req.method==='POST'&&path==='/workspace-handoff/status') {
+      requireEventIngest();requireBridgeCredential();
+      const input=await body(req);
+      if(!input||Object.keys(input).length!==0)throw new HostError('交接状态请求无效',400);
+      let status;
+      try{status=readHostHandoffStatus(dir,who,{tokenHash:binding.hash});}
+      catch{throw new HostError('云Host交接元数据尚未完整核对',503);}
+      if(!status)throw new HostError('此设备没有匹配的个人工作区交接',404);
+      // A staged business database cannot start its Runtime. Expose its immutable receipt,
+      // but only the activated writer plus a real Source readiness probe may authorize commit.
+      if(status.phase==='target_active') {
+        let witness;
+        try {witness=await bridge.call('/along-source/api/workspace-handoff/status',{method:'GET',identity:who,timeout:5_000});}
+        catch {throw new HostError('云端实际工作区尚无匹配的导入连续性证明',503);}
+        if(!runtimeHandoffMatches(status,witness))throw new HostError('云端实际工作区与交接回执不一致',409);
+        await ensurePairingRegistered(who);
+        if(!registeredUsers.has(who.userId))throw new HostError('云端原设备身份尚未就绪',503);
+        await upstream(()=>bridge.readyStrict({identity:who}));
+        status.handoffReady=true;
+      }
+      if(!stillPaired(who)||authorized(req)?.hash!==binding.hash)throw new HostError('交接设备绑定已变更',409);
+      return respond(res,200,status);
+    }
     if(req.method==='POST'&&path==='/sources/device') {
       requireEventIngest();requireBridgeCredential();
       await ensurePairingRegistered(who);

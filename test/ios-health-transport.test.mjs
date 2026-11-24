@@ -8,6 +8,7 @@ import {fileURLToPath} from 'node:url';
 
 const hasSwift=process.platform==='darwin'&&spawnSync('swiftc',['--version']).status===0;
 const shell=readFileSync(new URL('../ios/AlongHealth/Sources/AlongShellView.swift',import.meta.url),'utf8');
+const handoff=readFileSync(new URL('../ios/AlongHealth/Sources/WorkspaceHandoff.swift',import.meta.url),'utf8');
 function method(source,marker) {
  const start=source.indexOf(marker);assert.ok(start>=0,marker);
  const brace=source.indexOf('{',start);let depth=1,end=brace+1;
@@ -29,6 +30,7 @@ test('verified same-Mac address updates retain the original active health event 
  try {
   writeFileSync(join(dir,'Check.swift'),`import Foundation
 import CryptoKit
+${handoff}
 @MainActor enum TestEnvironment {static let settings=UserDefaults(suiteName:CommandLine.arguments[2])!}
 @MainActor final class UIApplication {
  enum State {case active,background};static let shared=UIApplication();var applicationState=State.background;var isProtectedDataAvailable=true
@@ -60,7 +62,7 @@ enum AgentBridgeError:Error {case invalidConfiguration;case receipt([String:Any]
  static var events=[[String:Any]](),statusCalls=0
  static var onStatus:(()async throws->Void)?,onEvent:(()async throws->Void)?
  static func notificationOperation(_ input:[String:Any])async throws->[String:Any] {["status":"authorized"]}
- static func agentRequest(_ input:[String:Any],background:Bool=false)async throws->[String:Any] {
+ static func agentRequest(_ input:[String:Any],background:Bool=false,privateWorkspaceHandoffRequest:Bool=false)async throws->[String:Any] {
   if input["path"] as? String=="/connection/verify" {return ["paired":true]}
   if input["path"] as? String=="/connection/status" {
    statusCalls+=1
