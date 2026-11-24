@@ -49,3 +49,19 @@
 隔离验证 profile 使用 Harness 0.2.2-rc.3 / MiniMax-M3.1-Flash，只输入合成目标、任务与健康摘要，不接触真实健康数据。只有既有目标和健康事件，没有新用户聊天：真实 Worker 读取运动汇总，校验后移除过时的“本周还需运动45分钟”安排，保留原目标，并持久登记评估基线。初次与复测证明分别在 Along Agent 忽略目录 `.artifacts/along-health-runtime/proof.json`、`.artifacts/along-health-runtime-final/proof.json`，均 `ok:true`、5 条断言通过、0 次工具错误。最终交付构建的复测 `.artifacts/along-health-runtime-delivery/proof.json` 同样 `ok:true`，5 条断言通过、0 次工具错误；各隔离验证进程均已停止。
 
 本轮通过当前功能分支交付代码、文档与生成资源；未切换正式 DSH profile 或手机数据，也未在实际 iPhone 安装、配对或触发 HealthKit 后台事件。真机 HTTPS/断网重连/锁屏与系统唤醒机会、长期模型语义稳定性仍需验收；模型样例成功不能替代这些证据。使用时需启动同一套新协议 Host/profile、现有主动模式为 auto，并重新安装 App，在既有 Apple Health 卡片中导入允许使用的类型。
+
+## 本地 Mac 地址更新与健康队列归属（2026-11-24）
+
+分类 client/data，依赖 Along Agent #34、Along #50–55。用户可观察的验收是：原配对 Mac 换局域网地址后，已授权、未确认的健康事件仍以原 event_id 补传并收到对应 ACK，原目标、任务、提醒、授权和未发送内容保留。
+
+现有健康 binding 含 transport URL，不能在换地址后创建空队列。实现保留 binding 作为不可变队列 identity，仅为 `legacy-local-pin-v1` 的有效原 pin、token 逐字相同且信任策略不变的候选地址记录受验证 transport。原生通过既有固定证书网络请求认证新地址的 `/connection/status`（ready、eventProtocol 1、相同 user），不信任网页自报 user。await 后重新核实原连接、完整队列与 enabled。验证失败不写连接或队列；先原子保存完整队列与证明，再保存连接，同时保留原 transport，以恢复断电、写失败或 Keychain 写失败。系统信任跨 origin、不同 pin/token/user/policy 和未知旧 hash 继续隔离、保留原归档。
+
+原生 save/load 仅向内置网页返回 tokenless `transportMigration`：from/to baseURL、bindingScopeId、userId，来自已原子提交的认证记录。网页剥离证明，不写进连接配置，仅在原/新精确端点、同 pin/token/policy 与原 owner 全匹配时保留 event 指针和 daily recipient。grant 内容、撤销名单、workspace cursor、草稿和聊天不变；撤销过的 grant 不恢复。两次 localStorage 写之间中断，允许证明内已写的新 event 指针配合旧连接恢复，其他 origin/scope 不认领。既有 DEBUG 启动迁址也调用同一 native 事务。
+
+健康发送在每次 await 后重新读盘，只推进仍属于原 identity/user 的相同完整 event；旧地址的 ACK 不覆盖新 proof、事件或 payload。Web 旧 workspace 的 pendingACK 回来后先检查 disposed，防止覆盖新草稿。全局 `bindingScopeId/scopeSeed`、普通 origin guards、OKX 作用域不改。通知只在同一 native proof 下复用原 scope/since/results，输入 scopeId 仍校验当前连接；Build79 只读 owner 证据增加已认证 transport 支持，未知端点隔离、无采集/写入/网络副作用不变。
+
+验证使用实际发布 Swift 函数及网页 DOM 接线，在一次性目录、UserDefaults suite、合成证书和 loopback HTTPS 中运行：最新 e6 原代码换地址丢 active event 的红例、原事件完整 ACK、held/lastContent、离线冷开、异身份隔离、认证/并发/写失败、Keychain 失败、权限缩窄、陈旧 ACK、native bootstrap、通知 scope/回执与 Web 两键中断重启。实际 TLS 用原样 agentRequest 与 pinned delegate，只有测试地址接受/路由适配 loopback；错指纹在发送应用数据前拒绝。无真实健康事件进入夹具。
+
+交付为 App81/Web90，四处版本和两份内置资源同步，无新增界面。运行完整 `npm run check`、`npm run build`、逐资源比对、Xcode simulator build 与独立固定 SHA 复核。源码任务只提交、推送 PR；合并、正式 Host、原手机安装、自然健康上传及真实用户流程由 release/client delivery 执行并分别记录，合成验证不替代真机验收。
+
+前置请求边界：地址表单和 DEBUG 入口在 save 前已有 `/connection/verify`。因此原生 agentRequest 在创建 URLRequest 和附加 bearer 之前执行 `permitsPairedTransport`：复用当前配对 token 时，旧 legacy 私网必须保持私网 pin 策略和原 pin；旧系统信任配对只允许原规范 origin，跨 origin 必须真正新配对。saveConnection 也在写入前执行同一预检。调用方自报 policy、同值 nil pin 或 sameUser 不能绕过；同公网 origin 换叶、新 token 配对的正例保留。
