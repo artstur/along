@@ -12,7 +12,7 @@
 
 ## 固定接口和单写次序
 
-依赖 Along Agent PR35（契约合成fixture源提交`640b637dcf6ace7dc38adef6284615fcdcf4839f`）；该提交不是本PR的云部署声明。`test/fixtures/personal-handoff-{manifest,history-receipt}.json`从该固定提交逐字节复制，实际Swift验证其完整manifest和有history时的targetReceipt。发布时deploy的Agent pin须由release owner更新到审阅合并后的完整main SHA。
+依赖 Along Agent PR35，已审阅合并的真实main为`9b5217695e16559caa954c1ef46d703f44a137b5`，deploy两种镜像的默认Agent pin均为该完整SHA。契约合成fixture源提交`640b637dcf6ace7dc38adef6284615fcdcf4839f`与该main同tree；`test/fixtures/personal-handoff-{manifest,history-receipt}.json`从固定作者提交逐字节复制，实际Swift验证其完整manifest和有history时的targetReceipt。默认pin和构建通过均不是已部署声明；本轮未改原Mac/云运行时。
 
 1. 原手机只读保全后，Native生成24小时nonce challenge；nonce不含token。
 2. 停写并保全原Host/Agent，Host导出已静止的最小companion。P1 inspect/freeze接收其canonical SHA256，完整manifest必有`hostCompanionSHA256`。P1包是`{manifest,data}`，本Host工具的`manifestFile`仅接受独立manifest头，不能把整包当头。
