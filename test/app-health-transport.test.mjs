@@ -15,13 +15,19 @@ const cache={version:1,recommendationsVersion:1,conversationVersion:1,dataSource
  drafts:{['goal:'+goal.id]:'原合成草稿'}};
 const settle=()=>new Promise(resolve=>setImmediate(resolve));
 let serial=0;
-async function app({migration=proof,restore=false,revoked=false,failed=false,torn=false,storage={}}={}) {
+async function app({migration=proof,restore=false,revoked=false,failed=false,torn=false,tornDailyKey=null,storage={}}={}) {
  const dom=installDomStub({storage:{[agentKey]:JSON.stringify(old),'along.agent-runtime.v1':'dsh-superagent',
   [eventKey]:JSON.stringify({bindingScopeId:old.bindingScopeId,userId:'same-user',bindingOrigin:old.baseURL}),
   [workspaceKey]:JSON.stringify(cache),[sharingKey]:JSON.stringify({dailyDelegation:grant,dailyRecipient:old.bindingScopeId,...(revoked?{dailyRevokedIds:[grant.id]}:{})}),...storage}});
- if(torn) {
+ if(torn||tornDailyKey) {
   const originalSet=localStorage.setItem;let fail=true;
-  localStorage.setItem=(key,value)=>{if(fail&&key===agentKey&&JSON.parse(value).baseURL===next.baseURL){fail=false;throw Error('synthetic interrupted write');}originalSet(key,value);};
+  localStorage.setItem=(key,value)=>{
+   const parsed=key===agentKey||key===tornDailyKey?JSON.parse(value):{};
+   if(fail&&(torn&&key===agentKey&&parsed.baseURL===next.baseURL||key===tornDailyKey&&parsed.dailyRecipient===next.bindingScopeId)) {
+    fail=false;throw Error('synthetic interrupted write');
+   }
+   originalSet(key,value);
+  };
  }
  document.visibilityState='visible';
  const calls=[];let native=restore?next:old,holdOldAck;
@@ -117,4 +123,35 @@ test('an interrupted Web connection write recovers the native-proved new event p
  assert.equal(restarted.read(sharingKey).dailyRevokedIds,undefined);
  assert.deepEqual(restarted.read(workspaceKey).drafts,cache.drafts);
  assert.match(restarted.app.innerHTML,/原合成目标/);
+});
+
+
+test('same-config cold recovery finishes an authenticated old daily recipient before the early return',async()=>{
+ const dom=await app({restore:true,storage:{[agentKey]:JSON.stringify(next),[eventKey]:JSON.stringify({bindingScopeId:next.bindingScopeId,userId:'same-user',bindingOrigin:next.baseURL})}});
+ assert.equal(dom.read(sharingKey).dailyRecipient,next.bindingScopeId);
+ assert.deepEqual(dom.read(sharingKey).dailyDelegation,grant);
+ assert.equal(dom.read(sharingKey).dailyRevokedIds,undefined);
+});
+
+test('a partial daily recipient write across two goals resumes from the exact native proof',async()=>{
+ const custom='custom:second',customKey=sharingKey+':'+custom;
+ const customGrant={id:'second-grant',goalKey:custom,topics:['sleep']};
+ const first=await app({tornDailyKey:customKey,storage:{'along.goal-custom.v1':JSON.stringify({[custom]:{title:'second synthetic health goal',healthTypes:['sleep']}}),[customKey]:JSON.stringify({dailyDelegation:customGrant,dailyRecipient:old.bindingScopeId})}});
+ await update(first);
+ assert.equal(first.read(sharingKey).dailyRecipient,next.bindingScopeId);
+ assert.equal(first.read(customKey).dailyRecipient,old.bindingScopeId);
+ const keys=[agentKey,eventKey,workspaceKey,sharingKey,customKey,'along.goal-custom.v1','along.agent-runtime.v1'];
+ const restored=await app({restore:true,storage:Object.fromEntries(keys.map(key=>[key,first.storage.get(key)]).filter(([,value])=>value!==null))});
+ assert.equal(restored.read(sharingKey).dailyRecipient,next.bindingScopeId);
+ assert.equal(restored.read(customKey).dailyRecipient,next.bindingScopeId);
+ assert.deepEqual(restored.read(customKey).dailyDelegation,customGrant);
+ assert.equal(restored.read(customKey).dailyRevokedIds,undefined);
+});
+
+test('same-config proof recovery never adopts an unknown daily recipient or revives a revoked grant',async()=>{
+ for(const revoked of [false,true]) {
+  const dom=await app({restore:true,storage:{[agentKey]:JSON.stringify(next),[eventKey]:JSON.stringify({bindingScopeId:next.bindingScopeId,userId:'same-user',bindingOrigin:next.baseURL}),[sharingKey]:JSON.stringify({dailyDelegation:grant,dailyRecipient:revoked?old.bindingScopeId:'unknown-scope',...(revoked?{dailyRevokedIds:[grant.id]}:{})})}});
+  assert.equal(dom.read(sharingKey).dailyRecipient,revoked?old.bindingScopeId:'unknown-scope');
+  if(revoked)assert.deepEqual(dom.read(sharingKey).dailyRevokedIds,[grant.id]);
+ }
 });
