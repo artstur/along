@@ -105,6 +105,25 @@ function originOf(baseURL) {
     return `${url.protocol}//${url.hostname.toLowerCase()}:${port}`;
   } catch { return null; }
 }
+// Only native-authenticated local transport evidence can preserve a binding
+// across origins. Ordinary sameBindingIdentity/eventConnection guards stay strict.
+function verifiedLocalTransport(previous,config,proof) {
+  const saved=readStored(EVENT_CONNECTION_KEY,null);
+  // EVENT and AGENT are separate localStorage writes. After a crash the pointer
+  // may already name the new transport while the connection is still old. Both
+  // exact endpoints are covered by the same native proof; no other scope is.
+  const savedEndpoint=proof&&saved&&[
+    [proof.fromBindingScopeId,originOf(proof.fromBaseURL)],
+    [proof.toBindingScopeId,originOf(proof.toBaseURL)],
+  ].some(([scope,origin])=>origin&&saved.bindingScopeId===scope&&saved.bindingOrigin===origin);
+  return proof&&savedEndpoint&&saved.userId===proof.userId&&
+    proof.fromBaseURL===previous.baseURL&&proof.toBaseURL===config.baseURL&&
+    proof.fromBindingScopeId===bindingKeyOf(previous)&&proof.toBindingScopeId===bindingKeyOf(config)&&
+    typeof previous.fingerprint==='string'&&/^[A-Fa-f0-9]{64}$/.test(previous.fingerprint)&&
+    previous.fingerprint===config.fingerprint&&previous.token===config.token&&
+    (previous.trustPolicy??'legacy-local-pin-v1')==='legacy-local-pin-v1'&&config.trustPolicy==='legacy-local-pin-v1'&&
+    originOf(previous.baseURL)&&originOf(config.baseURL);
+}
 function eventConnection(config=agentConfig) {
   const saved=readStored(EVENT_CONNECTION_KEY,null);
   if (!saved?.userId) return null;
@@ -199,27 +218,31 @@ let sourceGeneration=0;
 const BG_TEMPLATE_KEY='along.health-background-template.v1';
 let nativeConnectionRestored=false;
 let backgroundReplace=null,backgroundClaim=null,backgroundSyncQueued=false;
-function persistAgentConfig(config) {
+function persistAgentConfig(config,{preserveTransport=false}={}) {
   const previous=readStored(AGENT_KEY,{});
   // 只有真换端才撤销每日委托：换 origin 或换 token。
   // 同一绑定的口径升级（旧记录没有 bindingScopeId，升级当次原生回填）保留授权与提醒时间——
   // 否则 CA 迁移升级会静默删掉用户已授权的每日提醒（复核报告「高」风险项）。
-  if (previous.token&&!sameBindingIdentity(previous,config)) {
+  if (previous.token&&!preserveTransport&&!sameBindingIdentity(previous,config)) {
     for (const key of healthGoalKeys()) reviewFor(key).revokeDaily();
   }
-  if (!sameBindingIdentity(previous,config)) localStorage.removeItem(BG_TEMPLATE_KEY);
+  if (!preserveTransport&&!sameBindingIdentity(previous,config)) localStorage.removeItem(BG_TEMPLATE_KEY);
   localStorage.setItem(AGENT_KEY,JSON.stringify(config));
 }
-function activateAgentConfig(config,{rebind=false,runtime=agentRuntime}={}) {
+function activateAgentConfig(config,{rebind=false,runtime=agentRuntime,transportMigration=null}={}) {
   const previous=agentConfig;
   // 同一绑定 + 同一运行时的口径升级不算换端：归属键只是从 token 补齐成 bindingScopeId，
   // 事件工作区与本地归属都要延续，不能按新用户处理（docs/iphone-ca-profile-design.md §2.2）。
-  const sameBinding=sameBindingIdentity(previous,config);
-  if (!rebind&&sameBinding) migrateEventConnection(previous,config);
+  const preserveTransport=!rebind&&verifiedLocalTransport(previous,config,transportMigration);
+  const sameBinding=preserveTransport||sameBindingIdentity(previous,config);
+  if (preserveTransport) {
+    localStorage.setItem(EVENT_CONNECTION_KEY,JSON.stringify({bindingScopeId:bindingKeyOf(config),userId:transportMigration.userId,
+      bindingOrigin:originOf(config.baseURL)}));
+  } else if (!rebind&&sameBinding) migrateEventConnection(previous,config);
   if (!rebind&&runtime===agentRuntime&&sameBinding&&['baseURL','token','runtime'].every(field=>previous[field]===config[field])&&
       bindingKeyOf(previous)===bindingKeyOf(config)) return;
   const replaceBinding=rebind||previous.token&&!sameBinding;
-  persistAgentConfig(config);
+  persistAgentConfig(config,{preserveTransport});
   if (replaceBinding) {
     if (eventWorkspace) screen='agent';
     disconnectEventWorkspace();
@@ -1936,8 +1959,9 @@ app.addEventListener('submit', async event => {
       }
       const saved=await saveNativeConnection(config);
       // 原生确认过的连接（带 trustPolicy 与 bindingScopeId）才是生效值。
-      if (saved&&typeof saved==='object'&&saved.baseURL) config={...config,...saved};
-      activateAgentConfig(config,{rebind:pairing,runtime});
+      const {transportMigration,...confirmed}=saved&&typeof saved==='object'?saved:{};
+      if (confirmed.baseURL) config={...config,...confirmed};
+      activateAgentConfig(config,{rebind:pairing,runtime,transportMigration});
       await refreshAgentConnection();
       if (!eventWorkspace) void reviewAll();
       notice(pairing?'已连接 Along，之后会自动恢复':'已更新 Along 服务地址');
@@ -2860,7 +2884,8 @@ async function restoreAlongConnection() {
     if (saved?.baseURL&&saved?.token&&(saved?.bindingScopeId||saved?.fingerprint)) {
       const runtime=!localStorage.getItem(AGENT_RUNTIME_KEY)&&saved.runtime===DSH_RUNTIME?DSH_RUNTIME:agentRuntime;
       const previous=agentConfig;
-      activateAgentConfig(saved,{runtime});
+      const {transportMigration,...confirmed}=saved;
+      activateAgentConfig(confirmed,{runtime,transportMigration});
       // A real endpoint change removes its event binding above. Unknown scopes and
       // users remain isolated even if the network is unavailable.
       if (sameBindingIdentity(previous,agentConfig)) await restoreLegacyEventConnection(agentConfig);
