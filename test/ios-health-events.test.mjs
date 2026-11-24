@@ -68,6 +68,12 @@ import CryptoKit
 enum AgentBridgeError:Error {case invalidConfiguration; case receipt([String:Any])}
 @MainActor enum AlongConnectionStore {
  static var pair=["baseURL":"https://192.0.2.1:4176","token":"synthetic","fingerprint":String(repeating:"A",count:64)]
+ static var saveRevision:UInt64=0
+ static let legacyPinPolicy="legacy-local-pin-v1"
+ static func trustPolicy(forHost:String)->String {forHost.hasPrefix("192.168.") ? legacyPinPolicy : "system-pki-v1"}
+ static func permitsPairedTransport(_ input:[String:Any])->Bool {true}
+ static func clean(_ value:[String:Any])->[String:String]? {value as? [String:String]}
+ static func save(_ value:[String:Any])->[String:String]? {guard let c=clean(value) else{return nil};pair=c;return c}
  static func load()->[String:String]? {pair}
  ${bindingScope}
  // 作用域种子与真实实现同语义（docs/iphone-ca-profile-design.md §2.2）。

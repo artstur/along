@@ -42,7 +42,7 @@ import UserNotifications
         // 作用域种子不再用叶指纹：云端系统信任形态改用 bindingScopeId，
         // 换叶证书不会被误判成换用户（docs/iphone-ca-profile-design.md §2.2）。
         guard let seed = AlongConnectionStore.scopeSeed(connection) else { throw AgentBridgeError.invalidConfiguration }
-        let scope = DailyReminderScope.hash([seed, user].joined(separator: "\n"))
+        let scope = HealthEventDelivery.shared.notificationScope(connection, user: user) ?? DailyReminderScope.hash([seed, user].joined(separator: "\n"))
         if checkedScope == scope { return scope }
         var input: [String:Any] = connection
         input["path"] = "/connection/status"; input["body"] = ["runtime":"dsh-superagent"]
@@ -77,7 +77,7 @@ import UserNotifications
         guard !registering, Date() >= retryRegistration, let user = deviceUser, let scope = checkedScope,
               let connection = AlongConnectionStore.load(),
               let seed = AlongConnectionStore.scopeSeed(connection),
-              scope == DailyReminderScope.hash([seed, user].joined(separator:"\n")) else { return }
+              scope == (HealthEventDelivery.shared.notificationScope(connection, user: user) ?? DailyReminderScope.hash([seed, user].joined(separator:"\n"))) else { return }
         let desired = scope + (registrationAllowed ? (deviceToken ?? "") : "off")
         guard registered != desired || Date() >= registrationExpires else { return }
         var body: [String:Any] = ["expectedUserId":user]
