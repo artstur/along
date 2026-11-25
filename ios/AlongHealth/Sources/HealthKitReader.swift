@@ -911,8 +911,9 @@ enum BackgroundReviewAdmission {
                 else { throw AgentBridgeError.invalidConfiguration }
                 var migrated = state
                 let previousProof = state["verifiedLocalTransports"] as? [String: Any]
+                let persistedScope = defaults.string(forKey: "along.event.notification.scope")
                 let oldSeed = AlongConnectionStore.scopeSeed(current)!
-                let notificationScope = previousProof?["notificationScope"] as? String ?? SHA256.hash(data: Data([oldSeed, user].joined(separator: "\n").utf8)).map { String(format: "%02x", $0) }.joined()
+                let notificationScope = (WorkspaceHandoffProof.isHash(persistedScope) ? persistedScope : nil) ?? previousProof?["notificationScope"] as? String ?? SHA256.hash(data: Data([oldSeed, user].joined(separator: "\n").utf8)).map { String(format: "%02x", $0) }.joined()
                 migrated["verifiedLocalTransports"] = ["identity": state["binding"]!, "credential": credential,
                     "hashes": [oldHash, nextHash], "notificationScope": notificationScope,
                     "webMigration": ["fromBaseURL": current["baseURL"]!, "fromBindingScopeId": current["bindingScopeId"] ?? "",
@@ -1031,7 +1032,10 @@ enum BackgroundReviewAdmission {
               state["workspaceHandoff"] == nil else { throw WorkspaceHandoffError.invalidState }
         let id = claims["migrationId"]!
         try WorkspaceHandoffVault.save(["source": current, "target": next], id: id)
-        let oldScope = notificationScope(current, user: user) ?? WorkspaceHandoffProof.hash([AlongConnectionStore.scopeSeed(current)!, user].joined(separator: "\n"))
+        // A prior verified transport may already have retained a namespace that cannot be
+        // reconstructed from today's URL/credential. Capture what the phone actually uses.
+        let persistedScope = defaults.string(forKey: "along.event.notification.scope")
+        let oldScope = (WorkspaceHandoffProof.isHash(persistedScope) ? persistedScope : nil) ?? notificationScope(current, user: user) ?? WorkspaceHandoffProof.hash([AlongConnectionStore.scopeSeed(current)!, user].joined(separator: "\n"))
         let web: [String: Any] = ["purpose": WorkspaceHandoffProof.purpose, "migrationId": id,
             "fromBaseURL": current["baseURL"]!, "toBaseURL": next["baseURL"]!, "fromBindingScopeId": current["bindingScopeId"]!,
             "toBindingScopeId": next["bindingScopeId"]!, "userId": user, "deviceId": claims["deviceId"]!,
@@ -1085,6 +1089,60 @@ enum BackgroundReviewAdmission {
         record["phase"] = "committed"; state["workspaceHandoff"] = record
         state.removeValue(forKey: "workspaceHandoffChallenge"); try save(state)
     }
+#if DEBUG
+    // Fixed private deployment action only, never a Web bridge or a new handoff. Older committed
+    // journals did not capture the live namespace; its original value must come from the backup.
+    func repairWorkspaceHandoffNotificationScope(_ input: [String: Any]) async throws -> [String: Any] {
+        guard Set(input.keys) == ["format", "migrationId", "proofPayloadSHA256", "manifestSHA256", "targetCredentialSHA256", "expectedNotificationScope", "originalNotificationScope"],
+              input["format"] as? String == "along-handoff-notification-scope-repair/v1",
+              ["proofPayloadSHA256", "manifestSHA256", "targetCredentialSHA256", "expectedNotificationScope", "originalNotificationScope"].allSatisfy({ WorkspaceHandoffProof.isHash(input[$0] as? String) }),
+              let id = input["migrationId"] as? String,
+              let expected = input["expectedNotificationScope"] as? String, let original = input["originalNotificationScope"] as? String,
+              expected != original, let current = AlongConnectionStore.load() else { throw WorkspaceHandoffError.invalidState }
+        var state = try load(createDirectory: false)
+        guard var record = workspaceHandoffRecord(state, connection: current), record["phase"] as? String == "committed",
+              record["migrationId"] as? String == id, let proof = record["proof"] as? [String: Any],
+              let payload = proof["payload"] as? String, WorkspaceHandoffProof.hash(payload) == input["proofPayloadSHA256"] as? String,
+              let manifestText = record["manifestUTF8"] as? String,
+              WorkspaceHandoffProof.hash(manifestText) == input["manifestSHA256"] as? String,
+              record["targetCredentialSHA256"] as? String == input["targetCredentialSHA256"] as? String else { throw WorkspaceHandoffError.invalidState }
+        let secrets = try WorkspaceHandoffVault.load(id)
+        guard let source = secrets["source"] as? [String: String], let target = secrets["target"] as? [String: String],
+              target == current, let pin = source["fingerprint"] else { throw WorkspaceHandoffError.invalidState }
+        // The freshness window gates the initial commit, not recovery of an already committed
+        // authorization. Verify its original signature and every current authority commitment.
+        let claims = try WorkspaceHandoffProof.verifySignature(proof, sourcePin: pin, allowExpired: true)
+        _ = try WorkspaceHandoffProof.manifest(manifestText, claims: claims)
+        guard claims["migrationId"] == id, claims["userId"] == state["user"] as? String,
+              claims["sourceOrigin"] == source["baseURL"].flatMap(WorkspaceHandoffProof.origin),
+              claims["sourceCredentialSHA256"] == source["token"].map(WorkspaceHandoffProof.hash),
+              claims["targetOrigin"] == current["baseURL"].flatMap(WorkspaceHandoffProof.origin),
+              claims["targetCredentialSHA256"] == input["targetCredentialSHA256"] as? String else { throw WorkspaceHandoffError.invalidProof }
+        if let repair = record["notificationScopeRepair"] as? [String: Any] {
+            guard let request = repair["request"] as? NSDictionary, request == input as NSDictionary,
+                  ["prepared", "completed"].contains(repair["phase"] as? String ?? ""),
+                  record["notificationScope"] as? String == original,
+                  [expected, original].contains(defaults.string(forKey: "along.event.notification.scope") ?? "") else { throw WorkspaceHandoffError.invalidState }
+        } else {
+            guard record["notificationScope"] as? String == expected,
+                  defaults.string(forKey: "along.event.notification.scope") == expected else { throw WorkspaceHandoffError.invalidState }
+        }
+        record["notificationScope"] = original
+        record["notificationScopeRepair"] = ["phase": "prepared", "request": input]
+        state["workspaceHandoff"] = record; try save(state)
+        defaults.set(original, forKey: "along.event.notification.scope")
+        let result = try await EventTaskNotifications.shared.repairHandoffScope(from: expected, to: original, user: claims["userId"]!, connection: current)
+        // Preserve legitimate queue/ACK changes during UNCenter awaits. Never restore a snapshot.
+        state = try load(createDirectory: false)
+        guard AlongConnectionStore.load() == current, var latest = workspaceHandoffRecord(state, connection: current),
+              latest["phase"] as? String == "committed", latest["migrationId"] as? String == id,
+              latest["notificationScope"] as? String == original,
+              (latest["notificationScopeRepair"] as? [String: Any])?["request"] as? NSDictionary == input as NSDictionary else { throw WorkspaceHandoffError.invalidState }
+        latest["notificationScopeRepair"] = ["phase": "completed", "request": input]
+        state["workspaceHandoff"] = latest; try save(state)
+        return result
+    }
+#endif
     private func stateURL(createDirectory: Bool = true) throws -> URL {
         let dir = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: createDirectory)
             .appendingPathComponent("AlongHealthEvents", isDirectory: true)
