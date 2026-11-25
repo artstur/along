@@ -54,3 +54,20 @@ Host本机工具只收一个owner-only配置文件，不把新token作为命令�
 已committed旧journal没有可靠的原namespace，不能猜测。Debug固定Caches交付入口增加有界`repairNotificationScope`动作：只接受原迁移ID、原proof.payload精确UTF8摘要、manifest摘要、当前目标凭据承诺、预期错误namespace及从原备份取得的原namespace。核对当前committed journal／原来源签名／当前Keychain目标，过期已提交证明可恢复，但不能发起新交接、换凭据或恢复旧writer。先耐久保存绑定修复标记和原namespace，再恢复偏好并只重编号精确匹配错误namespace的同用户任务提醒；保留正文、路由与日历trigger，其他作用域及所有业务数据不变。请求重试须与原修复标记完全相同，正常启动不再漂移。
 
 验收：自定义已存scope优先于推导；commit→正常重开；旧committed修复→重开，含已过期原proof；错迁移／proof／manifest／凭据／预期scope／已换目标拒绝且不写；中断重试；其他作用域不取消。Swift隔离fixture运行真实原生方法，`npm run check`／`npm run build`及iOS编译通过；Web91源码和两端22资源逐字节不变。正式手机由唯一phone owner从最终main签名覆盖后另验库存、重开和原内容，不用合成测试冒充真机。
+
+请求契约：Debug固定`Library/Caches/AlongWorkspaceHandoff.request.json`，普通文件、1–256KiB、complete保护／0600。精确八字段如下；不接受额外键，也不包含token、目标正文或健康值：
+
+```json
+{
+  "action": "repairNotificationScope",
+  "format": "along-handoff-notification-scope-repair/v1",
+  "migrationId": "<current committed migrationId>",
+  "proofPayloadSHA256": "<SHA256 of exact UTF8 committed proof.payload>",
+  "manifestSHA256": "<SHA256 of exact committed manifestUTF8>",
+  "targetCredentialSHA256": "<current committed target credential commitment>",
+  "expectedNotificationScope": "<wrong committed journal scope>",
+  "originalNotificationScope": "<original precommit preference from private backup>"
+}
+```
+
+成功后固定`.repair.json`仅写`rekeyedCount`和`preservedOtherCount`；`.result.json`写既有purpose/action/completed/checkedAt，消耗request文件。失败仍为`not_completed`且保留request供明确重试；不自动改凭据或回滚。修复会保留原proof／manifest原文字节及其他journal、最新健康队列和ACK字段。通知先按原scope建立并核对同正文／路由／日历trigger的请求，再只移除错scope的精确requestID；若目标ID已被另一新计划占用或64槽位不足，拒绝并保留原请求，不能静默重排。中断后的重试须与journal内原请求完全一致。安装和入口启动由唯一phone owner操作，最终库存、正常重开及到点送达仍单独取证。
