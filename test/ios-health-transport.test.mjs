@@ -264,6 +264,10 @@ enum DailyReminderScope {
    precondition((try read()["pending"] as! [[String:Any]]).count==1,"old ACK must not remove replaced event/owner")
   }
   print("PASS: stale ACK cannot advance replaced payload, user or identity")
+  _=try seed();let inherited=String(repeating:"e",count:64)
+  settings.set(inherited,forKey:"along.event.notification.scope")
+  _=try await mgr.saveConnection(next)
+  precondition(mgr.notificationScope(next,user:"synthetic-user")==inherited,"same-Mac transport captures the actual live namespace")
  }
 }
 `.replaceAll(/^.*precondition.*$/gm,line=>line.slice(0,line.indexOf('precondition'))+line.slice(line.indexOf('precondition')).replace(/\btry(?![!?])/g,'try!')));

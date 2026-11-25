@@ -5,6 +5,7 @@ import {spawnSync,execFileSync} from 'node:child_process';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {fileURLToPath} from 'node:url';
+import {sign} from 'node:crypto';
 import {fixture} from './helpers/workspace-handoff-fixture.mjs';
 import {handoffDigest,signWorkspaceHandoff,canonicalHandoffJSON} from '../host/workspace-handoff.mjs';
 const hasSwift=process.platform==='darwin'&&spawnSync('swiftc',['--version']).status===0;
@@ -17,10 +18,12 @@ test('real Native handoff preserves exact latest health queue, original namespac
   const f=fixture(dir),{c,manifest}=f,oldToken='b'.repeat(64),newToken='c'.repeat(64);
   c.sourceCredentialSHA256=handoffDigest(oldToken);c.targetCredentialSHA256=handoffDigest(newToken);
   const proof=signWorkspaceHandoff(c,{certificatePEM:f.cert,privateKeyPEM:f.key,now:f.now});
+  const expiredPayload=proof.payload.replace(`issuedAt=${c.issuedAt}\n`,`issuedAt=${f.now-3600}\n`).replace(`expiresAt=${c.expiresAt}\n`,`expiresAt=${f.now-3000}\n`);
+  const expiredProof={...proof,payload:expiredPayload,signature:sign('RSA-SHA256',Buffer.from(expiredPayload),f.key).toString('base64')};
   const offer={format:'along-native-workspace-handoff/v1',connection:{baseURL:c.targetOrigin,token:newToken,runtime:'dsh-superagent'},proof,manifestUTF8:canonicalHandoffJSON(manifest)};
   const status={purpose:c.purpose,phase:'target_active',handoffReady:true,eventProtocol:1,syncHighWaterMark:117,hostCompanionSHA256:manifest.hostCompanionSHA256,importReceiptUTF8:f.importReceiptUTF8,
     ...Object.fromEntries(['migrationId','userId','deviceId','manifestSHA256','importReceiptSHA256','snapshotSHA256','syncPrefixSHA256','activationPermitSHA256'].map(k=>[k,c[k]]))};
-  writeFileSync(join(dir,'input.json'),JSON.stringify({offer,status,sourcePin:handoffDigest(Buffer.from(proof.certificateDER,'base64')).toUpperCase(),nonce:c.nonce}),{mode:0o600});
+  writeFileSync(join(dir,'input.json'),JSON.stringify({offer,status,expiredProof,sourcePin:handoffDigest(Buffer.from(proof.certificateDER,'base64')).toUpperCase(),nonce:c.nonce}),{mode:0o600});
   const shell=read('../ios/AlongHealth/Sources/AlongShellView.swift'),source=read('../ios/AlongHealth/Sources/HealthKitReader.swift');
   const core=source.slice(source.indexOf('@MainActor final class HealthEventDelivery {')).replaceAll('UserDefaults.standard','TestEnvironment.settings')
    .replace(/let dir = try FileManager.default.url\(for:[^\n]+/,'let dir = URL(fileURLWithPath: CommandLine.arguments[1])')
@@ -65,6 +68,15 @@ enum AgentBridgeError:Error {case invalidConfiguration;case receipt([String:Any]
   throw WorkspaceHandoffError.invalidState
  }
 }}
+@MainActor final class EventTaskNotifications {
+ static let shared=EventTaskNotifications();var calls=0,failOnce=false,onRepair:(()throws->Void)?
+ func repairHandoffScope(from:String,to:String,user:String,connection:[String:String])async throws->[String:Any] {
+  calls+=1;precondition(from != to && user=="u_12345678" && connection==AlongConnectionStore.pair)
+  try onRepair?()
+  if failOnce {failOnce=false;throw WorkspaceHandoffError.invalidState}
+  return ["rekeyedCount":6,"preservedOtherCount":1]
+ }
+}
 ${collectors}
 ${core}
 @main struct Fixture {
@@ -78,6 +90,8 @@ ${core}
  @MainActor static func reset()throws {
   try? FileManager.default.removeItem(at:file.deletingLastPathComponent());try FileManager.default.createDirectory(at:file.deletingLastPathComponent(),withIntermediateDirectories:true)
   AlongConnectionStore.pair=old;AlongConnectionStore.failSave=false;WorkspaceHandoffVault.fail=false;WorkspaceHandoffVault.records=[:]
+  settings.removeObject(forKey:"along.event.notification.scope")
+  EventTaskNotifications.shared.calls=0;EventTaskNotifications.shared.failOnce=false;EventTaskNotifications.shared.onRepair=nil
   AlongWebView.Coordinator.status=input["status"] as! [String:Any];AlongWebView.Coordinator.onStatus=nil;AlongWebView.Coordinator.onEvent=nil;AlongWebView.Coordinator.failStatus=false;AlongWebView.Coordinator.eventCalls=0
   let binding=WorkspaceHandoffProof.hash(AlongConnectionStore.scopeSeed(old)!)
   settings.set(binding,forKey:"along.health.events.binding.v1");settings.set(true,forKey:"along.health.contextReview.v1");settings.set(["steps"],forKey:"along.health.selectedTypes")
@@ -104,10 +118,55 @@ ${core}
   // Legal appends during both active checks must survive; no stale queue snapshot is written.
   try reset();var appended=false
   AlongWebView.Coordinator.onStatus={if !appended {appended=true;var s=try readState();var p=s["pending"] as! [[String:Any]];p.append(["event_id":"legitimate-added","payload":["summaries":HealthKitReader.snapshot.eventSummaries()]]);s["pending"]=p;try write(s)}}
-  let oldScope=WorkspaceHandoffProof.hash([AlongConnectionStore.scopeSeed(old)!,"u_12345678"].joined(separator:"\\n"))
+  // The phone can already have a live namespace inherited from an earlier transport.
+  // It cannot be reconstructed from the current source URL/credential.
+  let oldScope=String(repeating:"e",count:64)
+  settings.set(oldScope,forKey:"along.event.notification.scope")
   let result=try await mgr.commitWorkspaceHandoff(offer);precondition(AlongConnectionStore.pair==next);try assertQueue(2)
   precondition(mgr.notificationScope(next,user:"u_12345678")==oldScope);precondition((result["workspaceHandoff"] as! [String:Any])["deviceId"] as? String=="d_12345678")
+  try await HealthEventDelivery().recoverWorkspaceHandoff(onlyIfAlreadyTarget:true)
+  precondition(HealthEventDelivery().notificationScope(next,user:"u_12345678")==oldScope,"restart must retain actual live namespace")
   _ = try await mgr.commitWorkspaceHandoff(offer);try assertQueue(2)
+  // Existing committed journals need an explicit backup-bound repair. An expired initial
+  // proof remains valid for committed local recovery; no target HTTP request or re-pair occurs.
+  try reset();_ = try await mgr.commitWorkspaceHandoff(offer)
+  var committedState=try readState(),legacyJournal=committedState["workspaceHandoff"] as! [String:Any]
+  legacyJournal["proof"]=input["expiredProof"]!;committedState["workspaceHandoff"]=legacyJournal;try write(committedState)
+  let expected=legacyJournal["notificationScope"] as! String
+  settings.set(expected,forKey:"along.event.notification.scope")
+  let request:[String:Any] = ["format":"along-handoff-notification-scope-repair/v1","migrationId":legacyJournal["migrationId"]!,
+   "proofPayloadSHA256":WorkspaceHandoffProof.hash((input["expiredProof"] as! [String:Any])["payload"] as! String),
+   "manifestSHA256":WorkspaceHandoffProof.hash(legacyJournal["manifestUTF8"] as! String),"targetCredentialSHA256":legacyJournal["targetCredentialSHA256"]!,
+   "expectedNotificationScope":expected,"originalNotificationScope":oldScope]
+  for key in ["format","migrationId","proofPayloadSHA256","manifestSHA256","targetCredentialSHA256","expectedNotificationScope"] {
+   var bad=request;bad[key]=key=="format" || key=="migrationId" ? "wrong-value" : String(repeating:"0",count:64)
+   let before=try Data(contentsOf:file)
+   await fail{_ = try await mgr.repairWorkspaceHandoffNotificationScope(bad)}
+   precondition(try! Data(contentsOf:file)==before);precondition(settings.string(forKey:"along.event.notification.scope")==expected)
+  }
+  let preserved=try Data(contentsOf:file)
+  AlongConnectionStore.pair=next.merging(["token":String(repeating:"d",count:64)]){_,new in new}
+  await fail{_ = try await mgr.repairWorkspaceHandoffNotificationScope(request)}
+  precondition(try! Data(contentsOf:file)==preserved);AlongConnectionStore.pair=next
+  precondition(EventTaskNotifications.shared.calls==0)
+  // A UNCenter failure after the atomic namespace journal is retryable with only the exact
+  // same request; concurrent ACK metadata is retained when native awaits complete.
+  EventTaskNotifications.shared.failOnce=true
+  await fail{_ = try await mgr.repairWorkspaceHandoffNotificationScope(request)}
+  precondition(settings.string(forKey:"along.event.notification.scope")==oldScope)
+  var different=request;different["originalNotificationScope"]=String(repeating:"f",count:64)
+  await fail{_ = try await mgr.repairWorkspaceHandoffNotificationScope(different)}
+  EventTaskNotifications.shared.onRepair={var s=try readState();s["latestACK"]="preserve-concurrent";try write(s)}
+  let repairResult=try await mgr.repairWorkspaceHandoffNotificationScope(request)
+  precondition(repairResult["rekeyedCount"] as? Int==6 && AlongConnectionStore.pair==next)
+  let repaired=try readState(),repairedJournal=repaired["workspaceHandoff"] as! [String:Any]
+  precondition((repairedJournal["notificationScopeRepair"] as! [String:Any])["phase"] as? String=="completed")
+  precondition(repairedJournal["proof"] as! NSDictionary==legacyJournal["proof"] as! NSDictionary)
+  precondition(repaired["latestACK"] as? String=="preserve-concurrent");try assertQueue(1)
+  try await HealthEventDelivery().recoverWorkspaceHandoff(onlyIfAlreadyTarget:true)
+  precondition(HealthEventDelivery().notificationScope(next,user:"u_12345678")==oldScope)
+  _ = try await mgr.repairWorkspaceHandoffNotificationScope(request)
+  print("PASS committed expired-proof repair, exact authority gates, interruption retry and restart")
   // Saving credentials can fail only after the durable prepared journal. Cold lightweight
   // launch cannot switch source; full recovery still requires the authenticated live receipt.
   try reset();AlongConnectionStore.failSave=true;await fail{_ = try await mgr.commitWorkspaceHandoff(offer)}
@@ -136,7 +195,7 @@ ${core}
   print("PASS latest queue preservation, active authority, prepared recovery, ABA, namespace, no archive")
  }
 }`);
-  const binary=join(dir,'check');execFileSync('swiftc',['-parse-as-library',fileURLToPath(new URL('../ios/AlongHealth/Sources/DeviceEventQueue.swift',import.meta.url)),
+  const binary=join(dir,'check');execFileSync('swiftc',['-D','DEBUG','-parse-as-library',fileURLToPath(new URL('../ios/AlongHealth/Sources/DeviceEventQueue.swift',import.meta.url)),
    fileURLToPath(new URL('../ios/AlongHealth/Sources/HealthModels.swift',import.meta.url)),join(dir,'Check.swift'),'-o',binary],{timeout:90000});
   assert.match(execFileSync(binary,[dir,'along.handoff.test.'+Date.now()],{encoding:'utf8',timeout:30000}),/PASS latest queue preservation/);
  }finally{rmSync(dir,{recursive:true,force:true});}

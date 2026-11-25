@@ -889,6 +889,10 @@ struct AlongWebView: UIViewRepresentable {
                     let result = try await HealthEventDelivery.shared.commitWorkspaceHandoff(read(file))
                     guard result["workspaceHandoff"] != nil else { throw WorkspaceHandoffError.invalidState }
                     try manager.removeItem(at: file)
+                case "repairNotificationScope":
+                    var repair = input
+                    repair.removeValue(forKey: "action")
+                    try write("AlongWorkspaceHandoff.repair.json", await HealthEventDelivery.shared.repairWorkspaceHandoffNotificationScope(repair))
                 default: throw WorkspaceHandoffError.invalidState
                 }
                 try write("AlongWorkspaceHandoff.result.json", ["purpose": WorkspaceHandoffProof.purpose, "action": action,

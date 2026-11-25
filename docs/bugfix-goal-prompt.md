@@ -193,6 +193,8 @@ Along 是手机优先的目标工作台：把一个目标拆成「目标 / 来�
 
 ## 7. 这个仓库已经踩过的坑（别再踩一遍）
 
+- **交接必须保留手机实际使用的通知namespace**：它可能来自更早的传输身份，不能从当前URL／凭据重新推导。prepared／committed journal须捕获合法的当前偏好；已有committed修复绑定原签名、manifest和当前Keychain目标，按已提交授权恢复而不是重做初次签名时效检查。系统提醒清理按namespace＋user＋goal/task的精确requestID归属，不把全部`along.event.task.*`视作当前用户排程。
+
 - **模型的执行时限和手机的网络时限要分开**：Cloud Runner 接单后先返回可查询的 `working` 回执，再在后台完成模型调用。用真实 Host 与 Runner 验证首个回执和终态，App 关闭或首包丢失后按原号恢复。只在 DOM 桩里返回 `working` 会漏掉 Runner 仍在同步等待的问题。
 - **原子替换不能保护跨进程的读改写**：CLI 和 Host 共用一份码状态时，两边都要先获取同一把锁，再读盘。启动云端 Host 时还要独立检查用户表，空挂载应在监听前中止。
 - **构建上下文决定 ignore 的查找位置**：Compose 把仓库根作为上下文时，应在那里放通用 `.dockerignore`。Docker 的 `COPY` 复制目录内容，按构建入口反查容器内目录是否保留。

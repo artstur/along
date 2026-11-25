@@ -48,7 +48,8 @@ import UserNotifications
         input["path"] = "/connection/status"; input["body"] = ["runtime":"dsh-superagent"]
         let response = try await AlongWebView.Coordinator.agentRequest(input)
         guard response["ready"] as? Bool == true, response["eventProtocol"] as? Int == 1,
-              response["userId"] as? String == user, AlongConnectionStore.load() == connection else {
+              response["userId"] as? String == user, AlongConnectionStore.load() == connection,
+              scope == (HealthEventDelivery.shared.notificationScope(connection, user: user) ?? DailyReminderScope.hash([seed, user].joined(separator: "\n"))) else {
             throw AgentBridgeError.invalidConfiguration
         }
         checkedScope = scope; cursor = -1; sentPlan = nil; planExpires = .distantPast
@@ -118,6 +119,65 @@ import UserNotifications
     private func requestID(scope: String, goal: String, task: String) -> String {
         prefix + "task." + DailyReminderScope.hash([scope,goal,task].joined(separator:"\n"))
     }
+
+    private func ownsTaskRequest(_ request: UNNotificationRequest, scope: String, user: String) -> Bool {
+        guard let route = request.content.userInfo["along"] as? [String: Any],
+              route["kind"] as? String == "reminder", route["userId"] as? String == user,
+              let goal = route["goalId"] as? String, valid(goal), let task = route["taskId"] as? String, valid(task) else { return false }
+        return request.identifier == requestID(scope: scope, goal: goal, task: task)
+    }
+    private func ownsResultRequest(_ request: UNNotificationRequest, scope: String, user: String) -> Bool {
+        guard let route = request.content.userInfo["along"] as? [String: Any], route["userId"] as? String == user,
+              let kind = route["kind"] as? String, ["recommendation_ready", "task_result"].contains(kind),
+              let event = route["eventId"] as? String else { return false }
+        return request.identifier == prefix + "result." + DailyReminderScope.hash(scope + "\n" + event)
+    }
+
+#if DEBUG
+    func repairHandoffScope(from: String, to: String, user: String, connection: [String: String]) async throws -> [String: Any] {
+        try await DailyHealthReminders.serialized { try await self.rekeyHandoffScope(from: from, to: to, user: user, connection: connection) }
+    }
+    private func rekeyHandoffScope(from: String, to: String, user: String, connection: [String: String]) async throws -> [String: Any] {
+        guard WorkspaceHandoffProof.isHash(from), WorkspaceHandoffProof.isHash(to), from != to,
+              AlongConnectionStore.load() == connection,
+              defaults.string(forKey: scopeKey) == to,
+              HealthEventDelivery.shared.notificationScope(connection, user: user) == to else { throw WorkspaceHandoffError.invalidState }
+        let pending = await center.pendingNotificationRequests()
+        let wrong = pending.filter { ownsTaskRequest($0, scope: from, user: user) }
+        let existing = Dictionary(uniqueKeysWithValues: pending.map { ($0.identifier, $0) })
+        var replacements: [UNNotificationRequest] = []
+        for request in wrong {
+            guard var route = request.content.userInfo["along"] as? [String: Any],
+                  let revision = route["revision"] as? Int, revision >= 0,
+                  let trigger = request.trigger as? UNCalendarNotificationTrigger,
+                  let content = request.content.mutableCopy() as? UNMutableNotificationContent else { throw WorkspaceHandoffError.invalidState }
+            let identifier = requestID(scope: to, goal: route["goalId"] as! String, task: route["taskId"] as! String)
+            route["eventId"] = DailyReminderScope.hash(identifier + "|" + String(revision))
+            content.userInfo["along"] = route
+            let replacement = UNNotificationRequest(identifier: identifier, content: content, trigger: trigger)
+            if let old = existing[identifier], !sameRequest(old, replacement) { throw WorkspaceHandoffError.invalidState }
+            replacements.append(replacement)
+        }
+        // Add/read back before removing the wrong IDs. A failure retains the original requests;
+        // the persisted exact repair marker and fixed request make the next launch retry safely.
+        let missing = replacements.filter { existing[$0.identifier] == nil }
+        guard pending.count + missing.count <= 64 else { throw WorkspaceHandoffError.invalidState }
+        for request in missing {
+            guard AlongConnectionStore.load() == connection else { throw WorkspaceHandoffError.invalidState }
+            try await center.add(request)
+        }
+        let confirmed = Dictionary(uniqueKeysWithValues: await center.pendingNotificationRequests().map { ($0.identifier, $0) })
+        guard AlongConnectionStore.load() == connection,
+              replacements.allSatisfy({ request in confirmed[request.identifier].map { sameRequest($0, request) } ?? false }) else { throw WorkspaceHandoffError.invalidState }
+        center.removePendingNotificationRequests(withIdentifiers: wrong.map(\.identifier))
+        let after = await center.pendingNotificationRequests()
+        guard AlongConnectionStore.load() == connection,
+              !after.contains(where: { ownsTaskRequest($0, scope: from, user: user) }),
+              replacements.allSatisfy({ request in after.contains { $0.identifier == request.identifier && sameRequest($0, request) } }) else { throw WorkspaceHandoffError.invalidState }
+        checkedScope = nil; registered = nil; cursor = -1; sentPlan = nil; planExpires = .distantPast
+        return ["rekeyedCount": wrong.count, "preservedOtherCount": pending.count - wrong.count]
+    }
+#endif
 
     // A migration baseline must not depend on Host connectivity or run reconcile.
     // In particular this never requests permission, adds/cancels notifications, or marks a tap.
@@ -261,11 +321,11 @@ import UserNotifications
             }
         } else { defaults.removeObject(forKey: sinceKey) }
         // Keep slots already occupied by other app features. iOS retains at most 64 pending requests per app.
-        let otherCount = pending.filter { !$0.identifier.hasPrefix(prefix+"task.") }.count
+        let otherCount = pending.filter { !ownsTaskRequest($0, scope: scope, user: user) }.count
         let planned = desired.sorted { ($0.0,$0.1.identifier) < ($1.0,$1.1.identifier) }.prefix(max(0,64-otherCount)).map(\.1)
         let ids = Set(planned.map(\.identifier))
-        let obsolete = pending.filter { $0.identifier.hasPrefix(prefix+"task.") && !ids.contains($0.identifier) ||
-            !allowed && $0.identifier.hasPrefix(prefix+"result.") }
+        let obsolete = pending.filter { ownsTaskRequest($0, scope: scope, user: user) && !ids.contains($0.identifier) ||
+            !allowed && ownsResultRequest($0, scope: scope, user: user) }
         guard AlongConnectionStore.load() == c else { throw AgentBridgeError.invalidConfiguration }
         if !obsolete.isEmpty { center.removePendingNotificationRequests(withIdentifiers:obsolete.map(\.identifier)) }
         for item in planned {
