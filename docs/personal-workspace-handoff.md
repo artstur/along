@@ -12,7 +12,11 @@
 
 ## 固定接口和单写次序
 
-依赖 Along Agent PR35，已审阅合并的真实main为`9b5217695e16559caa954c1ef46d703f44a137b5`，deploy两种镜像的默认Agent pin均为该完整SHA。契约合成fixture源提交`640b637dcf6ace7dc38adef6284615fcdcf4839f`与该main同tree；`test/fixtures/personal-handoff-{manifest,history-receipt}.json`从固定作者提交逐字节复制，实际Swift验证其完整manifest和有history时的targetReceipt。默认pin和构建通过均不是已部署声明；本轮未改原Mac/云运行时。
+依赖 Along Agent [PR35](https://github.com/artstur/along-superagent/pull/35) 的交接契约和 [PR36](https://github.com/artstur/along-superagent/pull/36) 的冷停排空守卫兼容修复。2026-11-25 核实 PR36 已合入，真实main为`ccc57ba64494ce528e7c27eff5539455bb09e3e9`，deploy两种镜像的默认Agent pin均为该完整SHA。验收为两处默认构建来源一致且包含该修复，通过`npm run check`、`npm run build`及22项Web/dist/iOS资源比对；实际云部署和原工作区交接另行验收。
+
+PR36 按实际Runtime的退役语义判定`health_dispatch.result=NULL`：有效关联的due/repair/source review中任一已退役时，该dispatch不再算pending，原NULL结果与全部review历史保留。真实pending（仅有active review或没有关联）、无效退役标记、无效事件ID、目标归属不符及缺失/跨作用域source引用仍阻塞交接；不能靠SQL补值或删除历史绕过守卫。schema 18、manifest、摘要、冷锁、单写围栏、Source witness和companion绑定不变。
+
+契约合成fixture仍来自PR35固定作者提交`640b637dcf6ace7dc38adef6284615fcdcf4839f`（与PR35合入main `9b5217695e16559caa954c1ef46d703f44a137b5`同tree）；`test/fixtures/personal-handoff-{manifest,history-receipt}.json`保持逐字节不变，实际Swift验证其完整manifest和有history时的targetReceipt。默认pin和构建通过均不是已部署声明；本轮未改原Mac/云运行时，也不改变App82/Web91或重新签名安装手机。
 
 1. 原手机只读保全后，Native生成24小时nonce challenge；nonce不含token。
 2. 停写并保全原Host/Agent，Host导出已静止的最小companion。P1 inspect/freeze接收其canonical SHA256，完整manifest必有`hostCompanionSHA256`。P1包是`{manifest,data}`，本Host工具的`manifestFile`仅接受独立manifest头，不能把整包当头。
