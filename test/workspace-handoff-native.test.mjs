@@ -78,6 +78,7 @@ ${core}
  @MainActor static func reset()throws {
   try? FileManager.default.removeItem(at:file.deletingLastPathComponent());try FileManager.default.createDirectory(at:file.deletingLastPathComponent(),withIntermediateDirectories:true)
   AlongConnectionStore.pair=old;AlongConnectionStore.failSave=false;WorkspaceHandoffVault.fail=false;WorkspaceHandoffVault.records=[:]
+  settings.removeObject(forKey:"along.event.notification.scope")
   AlongWebView.Coordinator.status=input["status"] as! [String:Any];AlongWebView.Coordinator.onStatus=nil;AlongWebView.Coordinator.onEvent=nil;AlongWebView.Coordinator.failStatus=false;AlongWebView.Coordinator.eventCalls=0
   let binding=WorkspaceHandoffProof.hash(AlongConnectionStore.scopeSeed(old)!)
   settings.set(binding,forKey:"along.health.events.binding.v1");settings.set(true,forKey:"along.health.contextReview.v1");settings.set(["steps"],forKey:"along.health.selectedTypes")
@@ -104,9 +105,14 @@ ${core}
   // Legal appends during both active checks must survive; no stale queue snapshot is written.
   try reset();var appended=false
   AlongWebView.Coordinator.onStatus={if !appended {appended=true;var s=try readState();var p=s["pending"] as! [[String:Any]];p.append(["event_id":"legitimate-added","payload":["summaries":HealthKitReader.snapshot.eventSummaries()]]);s["pending"]=p;try write(s)}}
-  let oldScope=WorkspaceHandoffProof.hash([AlongConnectionStore.scopeSeed(old)!,"u_12345678"].joined(separator:"\\n"))
+  // The phone can already have a live namespace inherited from an earlier transport.
+  // It cannot be reconstructed from the current source URL/credential.
+  let oldScope=String(repeating:"e",count:64)
+  settings.set(oldScope,forKey:"along.event.notification.scope")
   let result=try await mgr.commitWorkspaceHandoff(offer);precondition(AlongConnectionStore.pair==next);try assertQueue(2)
   precondition(mgr.notificationScope(next,user:"u_12345678")==oldScope);precondition((result["workspaceHandoff"] as! [String:Any])["deviceId"] as? String=="d_12345678")
+  try await HealthEventDelivery().recoverWorkspaceHandoff(onlyIfAlreadyTarget:true)
+  precondition(HealthEventDelivery().notificationScope(next,user:"u_12345678")==oldScope,"restart must retain actual live namespace")
   _ = try await mgr.commitWorkspaceHandoff(offer);try assertQueue(2)
   // Saving credentials can fail only after the durable prepared journal. Cold lightweight
   // launch cannot switch source; full recovery still requires the authenticated live receipt.

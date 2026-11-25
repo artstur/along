@@ -46,3 +46,11 @@ P1 `sourceHolds`指向的原ready history必须与Host原generation/revision一�
 Host本机工具只收一个owner-only配置文件，不把新token作为命令参数或日志输出：`node host/workspace-handoff-admin.mjs export-companion|stage-target|sign-source PRIVATE_CONFIG`。配置键以工具的精确白名单为准。产物/配置0600，父目录0700；单次迁移复用相同私有输出，不能用普通configure代替交接或重新pair。操作员须先独立核云Host域名、实际Source及空专用目标，正式源停写/迁云/手机提交只在固定head审阅和发布条件通过后执行。
 
 重复prepare在同源/同目标且原challenge未过期时返回同一nonce。超过challenge/15分钟签名有效期而尚未Native提交时，只为同一manifest、新Native nonce和原有cloud offer重新运行source-retired签发；不重新pair、不重新导入，不把已active云再stage。prepared持久授权的冷恢复使用原journal和Keychain副本，仍执行目标active证明。
+
+## 2026-11-25 · 已提交交接的提醒作用域保全修复（Build83 / Web91）
+
+真实故障：提交时原生偏好仍沿用旧提醒namespace，但journal只按连接推导；下一次正常同步采用journal，使同任务系统requestID变化。不变量是保留实际正在使用的namespace和任务身份，不能用连接推导值覆盖它。新交接须在仍持有已认证源工作区时优先捕获合法的既有notification scope，缺失才沿用已验证迁移值／连接推导。
+
+已committed旧journal没有可靠的原namespace，不能猜测。Debug固定Caches交付入口增加有界`repairNotificationScope`动作：只接受原迁移ID、原proof.payload精确UTF8摘要、manifest摘要、当前目标凭据承诺、预期错误namespace及从原备份取得的原namespace。核对当前committed journal／原来源签名／当前Keychain目标，过期已提交证明可恢复，但不能发起新交接、换凭据或恢复旧writer。先耐久保存绑定修复标记和原namespace，再恢复偏好并只重编号精确匹配错误namespace的同用户任务提醒；保留正文、路由与日历trigger，其他作用域及所有业务数据不变。请求重试须与原修复标记完全相同，正常启动不再漂移。
+
+验收：自定义已存scope优先于推导；commit→正常重开；旧committed修复→重开，含已过期原proof；错迁移／proof／manifest／凭据／预期scope／已换目标拒绝且不写；中断重试；其他作用域不取消。Swift隔离fixture运行真实原生方法，`npm run check`／`npm run build`及iOS编译通过；Web91源码和两端22资源逐字节不变。正式手机由唯一phone owner从最终main签名覆盖后另验库存、重开和原内容，不用合成测试冒充真机。
