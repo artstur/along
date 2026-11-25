@@ -1,11 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
-import {existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync} from 'node:fs';
+import {existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {parseDocument} from 'yaml';
+import {copyTokens, copyWebFiles, hostWebDependencies} from './helpers/dockerfile-web-dependencies.mjs';
 
 // 安全加固配对测试：M3 deploy-hardening（docs/cloud-security-hardening.md §3.3 机制、§4-M3 验收标准）。
 // 与 test/deploy-orchestration.test.mjs 互补：本文件只按 §4-M3 的验收标准逐条断言，不迁就实现：
@@ -36,39 +37,7 @@ const dockerAgent=readFileSync(join(DEPLOY_DIR,'Dockerfile.agent'),'utf8');
 const dshManifest=JSON.parse(readFileSync(join(DEPLOY_DIR,'agent-dsh','package.json'),'utf8'));
 const DSH_PIN='0.2.2-rc.5';   // 设计文档 §3.3-(3)/§4-M3 指定的 dsh 版本
 
-function copyTokens(dockerfile) {
-  return dockerfile.split('\n').filter(line=>line.startsWith('COPY '))
-    .flatMap(line=>line.split(/\s+/).slice(1));
-}
-function copyWebFiles(dockerfile) {
-  return copyTokens(dockerfile).filter(token=>token.startsWith('web/')&&token!=='web/')
-    .map(token=>token.slice('web/'.length));
-}
-
-// host→web import 闭包（既有断言的同款算法）：从镜像携带的全部 host/ 顶层模块出发，
-// 沿 ./ 与 ../web/ 的静态与动态 import 展开；web 文件继续沿 ./ 展开 web→web 依赖。
-const IMPORT_RE=/(?:from|import\()\s*'([^']+\.(?:mjs|json))'/g;
-function webClosure() {
-  const reachable=new Set();
-  const queue=[];
-  for (const file of readdirSync(join(ROOT,'host'))) if (file.endsWith('.mjs')) queue.push(['host',file]);
-  const seen=new Set();
-  while (queue.length) {
-    const [dir,file]=queue.pop();
-    const key=`${dir}/${file}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    if (dir==='web') reachable.add(file);
-    const src=readFileSync(join(ROOT,dir,file),'utf8');
-    for (const match of src.matchAll(IMPORT_RE)) {
-      const ref=match[1];
-      if (ref.startsWith('../web/')) queue.push(['web',ref.slice('../web/'.length)]);
-      else if (ref.startsWith('./')) queue.push([dir,ref.slice(2)]);
-    }
-  }
-  return reachable;
-}
-const webClosureSet=webClosure();
+const webClosureSet=hostWebDependencies(ROOT);
 
 // compose mem_limit 接受字节数字或 '512m'/'2g' 后缀字符串（验收 1：只要求可解析且为正值）
 function memLimitBytes(value) {

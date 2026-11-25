@@ -1,11 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
-import {existsSync, readFileSync, readdirSync, mkdtempSync, writeFileSync, rmSync} from 'node:fs';
+import {existsSync, readFileSync, mkdtempSync, writeFileSync, rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {parseDocument} from 'yaml';
+import {copyTokens, copyWebFiles, hostWebDependencies} from './helpers/dockerfile-web-dependencies.mjs';
 
 // Docker 编排与部署产物的配对测试（docs/cloud-deploy-multi-user.md §3.1/§4-M5 验收 #5 +
 // docs/cloud-security-hardening.md §3.3/§4-M3，G-2/G-8 与 G-1/G-3/G-6 的编排配合）。
@@ -46,42 +47,7 @@ const BUNDLE_ROOT='/opt/along-superagent/';
 const bundleCopies=dockerAgent.split('\n').filter(line=>line.startsWith('COPY --from=along '))
   .map(line=>line.trim().split(/\s+/).slice(2));
 
-function copyTokens(dockerfile) {
-  return dockerfile.split('\n').filter(line=>line.startsWith('COPY '))
-    .flatMap(line=>line.split(/\s+/).slice(1));
-}
-function copyWebFiles(dockerfile) {
-  return copyTokens(dockerfile).filter(token=>token.startsWith('web/')&&token!=='web/')
-    .map(token=>token.slice('web/'.length));
-}
-
-// import 闭包（BFS）：从镜像携带的全部 host/ 顶层模块出发，
-// 沿 ./ 与 ../web/ 的静态与动态 import 展开；web 文件继续沿 ./ 展开 web→web 依赖。
-const IMPORT_RE=/(?:from|import\()\s*'([^']+\.(?:mjs|json))'/g;
-function webClosure() {
-  const reachable=new Set();
-  const queue=[];
-  for (const file of readdirSync(join(ROOT,'host'))) if (file.endsWith('.mjs')) queue.push(['host',file]);
-  const seen=new Set();
-  while (queue.length) {
-    const [dir,file]=queue.pop();
-    const key=`${dir}/${file}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    if (dir==='web') reachable.add(file);
-    const src=readFileSync(join(ROOT,dir,file),'utf8');
-    for (const match of src.matchAll(IMPORT_RE)) {
-      const ref=match[1];
-      if (ref.startsWith('../web/')) {
-        queue.push(['web',ref.slice('../web/'.length)]);
-      } else if (ref.startsWith('./')) {
-        queue.push([dir,ref.slice(2)]);
-      }
-    }
-  }
-  return {reachable,seen};
-}
-const {reachable:webClosureSet}=webClosure();
+const webClosureSet=hostWebDependencies(ROOT);
 
 // compose CLI 探测：优先 ALONG_COMPOSE_BIN（standalone 二进制），再 docker compose 插件，再 docker-compose。
 function probeCompose() {

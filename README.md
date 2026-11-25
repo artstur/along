@@ -252,17 +252,7 @@ npm run check   # CI 同款：语法检查 + 全部测试
 npm run build   # 产出 dist/（GitHub Pages）与 ios/AlongHealth/Web/（App 内置页面）
 ```
 
-> [!IMPORTANT]
-> `npm test` 跑全部测试，`npm run check` 在此之上再加一遍语法检查。`check` 按目录匹配：`web/`、`host/` 下的 `.mjs` 自动做语法检查，`test/*.test.mjs` 自动运行，新文件放对目录即可。
-
-**一份源码，两份产物。** `tools/build.mjs` 按白名单把 `web/` 里的文件复制到 `dist/` 和 `ios/AlongHealth/Web/`，不要手改这两个目录。新增前端文件时，放进 `web/`，并同时登记到 `tools/build.mjs` 的 `files` 和 `web/sw.js` 的 `FILES`。
-
-**用户可见的改动要让旧缓存失效**，以下版本号一起提高，漏一处手机上就可能还是旧页面：
-
-- `web/index.html` 的 `?v=`
-- `web/sw.js` 的 `CACHE`
-- `ios/AlongHealth/Sources/AlongShellView.swift` 的 `build=`
-- 需要重新安装 App 时，再提高 `ios/AlongHealth/Info.plist` 的 `CFBundleVersion`
+新增前端文件或更新资源版本时，按[项目约定](AGENTS.md)第 2 节同步构建白名单、离线缓存与 iOS 壳。第 3 节列出 CI 检查的范围。
 
 **推送 `main` 不会自动部署：**
 
