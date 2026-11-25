@@ -1,0 +1,535 @@
+diff --git a/README.md b/README.md
+index fe68cf4..e0fe37d 100644
+--- a/README.md
++++ b/README.md
+@@ -9 +9,2 @@
+-- 健康示例是「本周累计运动 120 分钟」。在 [iPhone 原生薄壳](ios/README.md)连接 Apple Health 后，按用户选择的摘要计算进度和下一步；连接页支持一键选择全部可读指标，已保存的选项再次打开时保持开启。普通网页可主动选择演示健康数据。
++- 健康示例是「本周累计运动 100 分钟」。在 [iPhone 原生薄壳](ios/README.md)连接 Apple Health 后，按用户选择的摘要计算进度和下一步；连接页支持一键选择全部可读指标，已保存的选项再次打开时保持开启。普通网页可主动选择演示健康数据。
++- 健康首页使用合成活动、地点和天气展示周期回顾、休息提醒与活动建议。用户可授权在示例时刻接收本地提醒。
+diff --git a/app.mjs b/app.mjs
+index 0a39b3d..73880e7 100644
+--- a/app.mjs
++++ b/app.mjs
+@@ -1,0 +2 @@ import {KEY, loadState, setSnapshot} from './health.mjs';
++import {HEALTH_REMINDER_KEY, healthCompanionDataset, healthTaskContext} from './health-companion.mjs';
+@@ -24,0 +26 @@ let activeAgentRun = null;
++let homeScrollPosition = 0;
+@@ -33,0 +36 @@ let goalSuperAgentRuns = readStored(GOAL_SUPER_AGENT_RUNS_KEY, {});
++let healthReminder = readStored(HEALTH_REMINDER_KEY, {});
+@@ -82,0 +86 @@ function currentTaskRecords() {
++  if (activeGoal==='health') return currentHealthDataset().tasks;
+@@ -94,0 +99,4 @@ function currentTaskRecords() {
++function currentHealthDataset() {
++  const target=state.goals.find(item=>item.type==='workout')?.target||100;
++  return healthCompanionDataset(state,target,healthReminder);
++}
+@@ -95,0 +104,4 @@ function saveSuperAgentRuns() { localStorage.setItem(SUPER_AGENT_RUNS_KEY,JSON.s
++function saveHealthReminder(value) {
++  healthReminder=value;
++  localStorage.setItem(HEALTH_REMINDER_KEY,JSON.stringify(value));
++}
+@@ -99 +111,4 @@ const superAgentRequests=new Set();
+-function taskRequest(task) { return createSuperAgentRequest({task,domain:goalDomain(activeGoal),goal:currentGoal(),context:currentSummary()}); }
++function taskRequest(task) {
++  const context=activeGoal==='health'?healthTaskContext(task,currentHealthDataset()):currentSummary();
++  return createSuperAgentRequest({task,domain:goalDomain(activeGoal),goal:currentGoal(),context});
++}
+@@ -132,0 +148,33 @@ async function refreshSuperAgentTask(task) {
++async function enableSleepReminder() {
++  const bridge=window.AlongAgentBridge?.reminder;
++  if (!bridge) { notice('请在 iPhone App 中开启，网页无法保证定时通知'); return; }
++  try {
++    const result=await bridge('schedule',{id:'along-reminder-fixture',hour:14,minute:15,title:'Along 提醒你休息',body:'示例休息提醒。'});
++    saveHealthReminder({status:'scheduled',hour:14,minute:15,updatedAt:new Date().toISOString(),native:result});
++    render();notice('每天 14:15 的休息提醒已开启');
++  } catch(error) { notice(error.message||'通知提醒未开启'); }
++}
++
++function maybeRunAutonomousHealthTask() {
++  if (activeGoal!=='health' || !agentConfig.token || document.visibilityState==='hidden') return;
++  const task=currentHealthDataset().tasks.find(item=>item.kind==='autonomous'&&item.orchestration.status==='ready');
++  if (!task || safeSuperAgentRun(superAgentRuns[`health:${task.id}`])) return;
++  void submitSuperAgentTask(task).then(()=>{ if (screen==='home'&&activeGoal==='health') render(); });
++}
++async function syncCuratedHealthRuns() {
++  if (activeGoal!=='health' || !agentConfig.token) return;
++  let changed=false;
++  for (const task of currentHealthDataset().tasks.filter(item=>item.requestId)) {
++    try {
++      const run=await agentCall(agentConfig,'/super-agent/tasks/status',{requestId:task.requestId});
++      if (!run?.actual) continue;
++      superAgentRuns={...superAgentRuns,[`health:${task.id}`]:run};
++      changed=true;
++    } catch { /* A scheduled run may not exist yet. */ }
++  }
++  if (changed) {
++    saveSuperAgentRuns();
++    if (screen==='home'&&activeGoal==='health') render();
++  }
++  maybeRunAutonomousHealthTask();
++}
+@@ -226,0 +275,21 @@ function adaptiveConnectionSection(layout) {
++function healthTaskRun(task) {
++  return safeSuperAgentRun(superAgentRuns[`health:${task.id}`]);
++}
++function compactText(value,max=220) {
++  const text=String(value??'').split(/\n+/).map(item=>item.trim()).filter(Boolean).slice(0,2).join(' ');
++  return text.length>max?`${text.slice(0,max).trim()}…`:text;
++}
++function healthTaskSection(dataset) {
++  const cards=dataset.tasks.map(task=>{
++    const run=healthTaskRun(task);
++    const status=run?.actual?(run.status==='done'?'Agent 已完成':run.status==='working'?'真实运行中':'需要处理'):task.kindLabel;
++    const result=run?.report?.summary?compactText(run.report.summary):task.preview;
++    const reminderAction=task.id==='rest-reminder-fixture' && healthReminder.status!=='scheduled'
++      ? '<button class="agent-action reminder-action" data-action="enable-sleep-reminder">开启 14:15 提醒</button>' : '';
++    return `<article class="companion-task ${esc(task.kind)}"><div class="companion-task-head"><span class="task-kind">${esc(task.kindLabel)}</span><span class="task-run-state ${run?.status||task.orchestration.status}">${esc(status)}</span></div><p class="task-when">${esc(task.when)}</p><h3>${esc(task.title)}</h3><p class="task-detail">${esc(task.detail)}</p><div class="task-result"><span>${run?.actual?'Agent 运行结果':'当前交付物'}</span><p>${esc(result)}</p></div><div class="companion-task-actions"><button class="task-detail-action" data-action="open-task" data-task-id="${esc(task.id)}">${run?.actual?'查看真实编排':'查看依据与编排'} <b>→</b></button>${reminderAction}</div></article>`;
++  }).join('');
++  return `<section class="task-section companion-tasks" aria-label="健康动态任务"><div class="section-heading"><h2>动态任务</h2><span>不同任务，不同授权边界</span></div><div class="dataset-disclosure"><strong>${esc(dataset.label)}</strong><p>${esc(dataset.disclosure)}</p></div><div class="companion-task-list">${cards}</div></section>`;
++}
++function healthSuggestedSources(dataset) {
++  return `<section class="connection-section suggested-sources" aria-label="建议数据源"><div class="section-heading"><h2>让推荐更准</h2><span>缺少授权时只建议，不冒充已连接</span></div><div class="source-grid">${dataset.suggestedSources.map(source=>`<div class="source-card"><span class="source-status ${esc(source.status)}">${source.status==='online-evidence'?'已用公开信源':'建议连接'}</span><strong>${esc(source.name)}</strong><p>${esc(source.reason)}</p></div>`).join('')}</div></section>`;
++}
+@@ -245 +314,2 @@ function home() {
+-  const taskContent=layout?adaptiveTaskSection(layout):`<section class="task-section" aria-label="动态任务">
++  const healthDataset=activeGoal==='health'?currentHealthDataset():null;
++  const taskContent=healthDataset?healthTaskSection(healthDataset):layout?adaptiveTaskSection(layout):`<section class="task-section" aria-label="动态任务">
+@@ -258,0 +329 @@ function home() {
++  const healthSourceSuggestions=healthDataset?healthSuggestedSources(healthDataset):'';
+@@ -265,0 +337 @@ function home() {
++      ${healthSourceSuggestions}
+@@ -271 +343 @@ function taskAgentCard(agent) {
+-  return `<article class="worker-card ${agent.status}"><div class="worker-card-head"><span class="worker-mark" aria-hidden="true">A</span><div><strong>Along</strong><span>协作单元</span></div><span class="worker-state">${esc(agentStateLabel[agent.status]||agent.status)}</span></div><p class="worker-objective">${esc(agent.objective)}</p><div class="worker-progress"><span style="width:${progress}%"></span></div><p class="worker-now"><span>当前</span>${esc(agent.work)}</p>${agent.report?`<p class="worker-output"><span>报告</span>${esc(agent.report.summary)}</p>`:''}</article>`;
++  return `<article class="worker-card ${agent.status}"><div class="worker-card-head"><span class="worker-mark" aria-hidden="true">A</span><div><strong>Along</strong><span>协作单元</span></div><span class="worker-state">${esc(agentStateLabel[agent.status]||agent.status)}</span></div><p class="worker-objective">${esc(agent.objective)}</p><div class="worker-progress"><span style="width:${progress}%"></span></div><p class="worker-now"><span>当前</span>${esc(compactText(agent.work,260))}</p>${agent.report?`<p class="worker-output"><span>报告</span>${esc(compactText(agent.report.summary,260))}</p>`:''}</article>`;
+@@ -281,0 +354,5 @@ function taskDetailPage() {
++  const orchestration=task.orchestration;
++  const evidence=orchestration?.inputs||[];
++  const evidenceLabel=item=>item.kind==='demo'?'演示档案':item.kind==='online'?'联网证据':item.kind==='connected'?'已连接':item.kind==='needed'?'待连接':'权威知识';
++  const evidencePanel=orchestration?`<section class="task-evidence-section"><div class="section-heading"><h2>这项任务怎么做</h2><span>触发、数据与边界</span></div><div class="task-contract"><div><span>触发</span><strong>${esc(orchestration.trigger)}</strong></div><div><span>运行方式</span><strong>${esc(task.kindLabel||orchestration.runPolicy)}</strong></div><div><span>授权边界</span><strong>${esc(orchestration.boundary)}</strong></div></div><div class="evidence-list">${evidence.map(item=>`<div><span class="evidence-kind ${esc(item.kind)}">${evidenceLabel(item)}</span><strong>${esc(item.label)}</strong><p>${esc(item.detail)}</p></div>`).join('')}</div>${orchestration.missing?.length?`<div class="missing-strip">要变得更准，还需要：${esc(orchestration.missing.join(' · '))}</div>`:''}</section>`:'';
++  const deliveryPanel=run.report?.summary?`<section class="delivery-section"><div class="section-heading"><h2>Agent 最终交付</h2><span>来自真实 Ticket Report</span></div><div class="delivery-card">${esc(run.report.summary)}</div></section>`:'';
+@@ -285,0 +363,2 @@ function taskDetailPage() {
++    ${evidencePanel}
++
+@@ -294,0 +374,2 @@ function taskDetailPage() {
++    ${deliveryPanel}
++
+@@ -359,0 +441 @@ function currentGoal() {
++  if (activeGoal==='health') return {domain:'health',title:goalCustom.health?.title || `本周累计运动 ${state.goals.find(item=>item.type==='workout')?.target||100} 分钟`,target:state.goals.find(item=>item.type==='workout')?.target||100};
+@@ -490,0 +573 @@ app.addEventListener('click', event => {
++    homeScrollPosition=window.scrollY;
+@@ -494,0 +578 @@ app.addEventListener('click', event => {
++    requestAnimationFrame(()=>window.scrollTo({top:0,left:0,behavior:'instant'}));
+@@ -498 +582,2 @@ app.addEventListener('click', event => {
+-  if (action === 'task-back') { selectedTaskId=null;screen='home';render(); }
++  if (action === 'enable-sleep-reminder') { void enableSleepReminder(); return; }
++  if (action === 'task-back') { selectedTaskId=null;screen='home';render();requestAnimationFrame(()=>window.scrollTo({top:homeScrollPosition,left:0,behavior:'instant'})); }
+@@ -595 +680 @@ window.addEventListener('along-health-update', async event => {
+-  const goal={domain:'health',title:goalCustom.health?.title || '本周运动',target:state.goals.find(item=>item.type==='workout')?.target||120};
++  const goal={domain:'health',title:goalCustom.health?.title || '本周运动',target:state.goals.find(item=>item.type==='workout')?.target||100};
+@@ -626,0 +712 @@ async function restoreAlongConnection() {
++    void syncCuratedHealthRuns();
+@@ -634,0 +721 @@ async function restoreAlongConnection() {
++    void syncCuratedHealthRuns();
+@@ -639,0 +727 @@ void restoreAlongConnection();
++setTimeout(()=>void syncCuratedHealthRuns(),500);
+diff --git a/build.mjs b/build.mjs
+index 447527f..b28425c 100644
+--- a/build.mjs
++++ b/build.mjs
+@@ -2 +2 @@ import { mkdir, rm, copyFile, readFile, writeFile } from 'node:fs/promises';
+-const files=['index.html','style.css','app.mjs','health.mjs','workspace.mjs','loop.mjs','goal-agent-core.mjs','adaptive-ui.mjs','super-agent.mjs','agent-client.mjs','agent-replay.json','app-icon.png','icon.svg','icon-192.png','icon-512.png','manifest.webmanifest','sw.js'];
++const files=['index.html','style.css','app.mjs','health.mjs','health-companion.mjs','workspace.mjs','loop.mjs','goal-agent-core.mjs','adaptive-ui.mjs','super-agent.mjs','agent-client.mjs','agent-replay.json','app-icon.png','icon.svg','icon-192.png','icon-512.png','manifest.webmanifest','sw.js'];
+diff --git a/health-companion.mjs b/health-companion.mjs
+new file mode 100644
+index 0000000..343d3eb
+--- /dev/null
++++ b/health-companion.mjs
+@@ -0,0 +1,115 @@
++export const HEALTH_COMPANION_VERSION = 1;
++export const HEALTH_REMINDER_KEY = 'along.health-reminder.v1';
++
++const WEATHER_URL = 'https://example.org/archive/weather';
++const TRAIL_URL = 'https://example.org/archive/route';
++const WHO_URL = 'https://www.who.int/europe/publications/i/item/9789240014886';
++const SLEEP_URL = 'https://www.nhc.gov.cn/guihuaxxs/c100133/202503/70d5836afe804a858b899ee951a24a13.shtml';
++
++function workoutSnapshot(state, target) {
++  const selected=state?.snapshot?.selectedTypes;
++  const readable=state?.snapshot && Number.isFinite(state.snapshot.workoutMinutes) &&
++    (state.source!=='healthkit' || !Array.isArray(selected) || selected.includes('workout'));
++  const minutes=readable?state.snapshot.workoutMinutes:null;
++  return {
++    source:state?.source==='healthkit'?'Apple Health 最小摘要':state?.source==='demo'?'演示健康数据':'尚未连接',
++    capturedAt:state?.snapshot?.updatedAt||null,
++    workoutMinutes:minutes,
++    workoutCount:readable&&Number.isFinite(state.snapshot.workoutCount)?state.snapshot.workoutCount:null,
++    target,
++    remaining:minutes==null?null:Math.max(0,target-minutes),
++    percent:minutes==null?null:Math.min(100,Math.round(minutes/target*100)),
++  };
++}
++
++function healthEvidence(snapshot) {
++  const known=snapshot.workoutMinutes!=null;
++  return {
++    id:'apple-health', label:'Apple Health', kind:known?'connected':'needed',
++    detail:known?`本周 ${snapshot.workoutMinutes} 分钟 · ${snapshot.workoutCount??'—'} 次 · 目标 ${snapshot.target} 分钟`:'等待本周健身时长摘要',
++    capturedAt:snapshot.capturedAt,
++  };
++}
++
++function taskBase(value) {
++  return {state:'planned',...value,orchestration:{version:1,...value.orchestration}};
++}
++
++/**
++ * A transparent product scenario: connected summaries stay factual; visit history and
++ * preferences are explicitly labelled demo data until the user replaces them.
++ */
++export function healthCompanionDataset(state, target=100, reminder={}) {
++  const snapshot=workoutSnapshot(state,target);
++  const remaining=snapshot.remaining;
++  const progressKnown=remaining!=null;
++  const reviewResult=progressKnown
++    ? `已读取本周 ${snapshot.workoutMinutes}/${target} 分钟（${snapshot.percent}%），${remaining?`还差 ${remaining} 分钟`:'目标已达成'}。`
++    : '尚无可读取的本周健身时长，Agent 保持安静并等待数据。';
++  const reminderEnabled=reminder?.status==='scheduled';
++  const health=healthEvidence(snapshot);
++  const demoHistory={id:'demo-history',label:'合成活动档案',kind:'demo',detail:'测试选项 A'};
++  const visited={id:'visited-places',label:'合成地点记录',kind:'demo',detail:'地点 A 已访问，地点 B 待选'};
++  const weather={id:'weather',label:'测试天气',kind:'demo',url:WEATHER_URL,checkedAt:'2000-01-01T00:00:00Z',detail:'合成条件 A'};
++  const poi={id:'poi',label:'示例地点 B',kind:'demo',url:TRAIL_URL,checkedAt:'2000-01-01T00:00:00Z',detail:'合成路线 B'};
++  const activityGuidance={id:'who-activity',label:'WHO 活动指南',kind:'knowledge',url:WHO_URL,detail:'成人每周至少 150–300 分钟中等强度有氧活动；任何活动都比完全不活动更好'};
++  const sleepGuidance={id:'nhc-sleep',label:'国家卫健委睡眠信息',kind:'knowledge',url:SLEEP_URL,detail:'成年人一般需要 7–8 小时睡眠，规律入睡和起床时间有助于稳定节律'};
++
++  const tasks=[
++    taskBase({
++      id:'weekly-health-review',requestId:'fixture-health-review',kind:'autonomous',kindLabel:'Agent 自主完成',
++      when:'测试周期开始 · 数据刷新后',title:'本周节奏检查',
++      detail:reviewResult,state:progressKnown?'temporary':'deferred',
++      preview:progressKnown&&remaining>0?`不用临时突击，先保留 ${Math.min(remaining,30)} 分钟的轻量活动窗口。`:'有新记录时再计算，不凭空生成训练建议。',
++      orchestration:{runPolicy:'automatic',trigger:'周期到期或健身时长发生有意义变化',status:progressKnown?'ready':'waiting-data',
++        inputs:[health,activityGuidance],missing:progressKnown?[]:['本周健身时长'],
++        boundary:'可自主读取最小摘要并生成报告；不自动更改健康目标，不给医学诊断。'},
++    }),
++    taskBase({
++      id:'rest-reminder-fixture',kind:'reminder',kindLabel:'需要提醒你',when:'每天 14:15',
++      title:reminderEnabled?'休息提醒已开启':'在示例时刻提醒我休息',
++      detail:reminderEnabled?'已交给 iPhone 本地通知；即使 Along 没有打开也能触发。':'需要你允许 iPhone 通知，Along 才能真正发出提醒。',
++      preview:reminderEnabled?'下一次将在 14:15 提醒。':'提醒文案：“示例休息提醒。”',
++      orchestration:{runPolicy:'user-consent',trigger:'每天 14:15 的本地时间',status:reminderEnabled?'scheduled':'needs-consent',inputs:[sleepGuidance],
++        missing:['是否需要仅在工作日提醒'],boundary:'只安排本地通知；不存储睡眠诊断，不强制用户休息。'},
++    }),
++    taskBase({
++      id:'activity-fixture-recommendation',requestId:'fixture-health-activity',kind:'recommendation',kindLabel:'为你推荐',
++      when:'测试周期结束 · 条件更新后',title:'体验示例活动 B',
++      detail:'根据合成天气和地点记录，选择示例路线 B。',
++      preview:'主选活动 B，备用活动 C。',
++      orchestration:{runPolicy:'scheduled-agent',trigger:'测试天气条件就绪',status:'agent-ready',inputs:[health,demoHistory,visited,weather,poi],
++        missing:['真实历史到访地点','出发位置','可用时段','备选活动条件'],
++        boundary:'可联网查询天气与 POI 并生成推荐；不自动预订课程、发起导航或将演示档案当作真实历史。'},
++    }),
++    taskBase({
++      id:'sleep-knowledge',kind:'recommendation',kindLabel:'针对性知识',when:'测试周期内',
++      title:'为什么先固定上床时间',
++      detail:'当前没有可读取的睡眠时长，Along 不会生成“睡眠评分”。示例提醒使用独立的测试时刻。',
++      preview:'国家卫健委建议成年人通常保证 7–8 小时睡眠，并保持规律的入睡与起床时间。',
++      orchestration:{runPolicy:'recommendation',trigger:'睡眠数据缺失且存在晚睡提醒目标',status:'ready',inputs:[sleepGuidance],missing:['Apple Health 睡眠时长'],
++        boundary:'只提供权威来源的一般健康知识；不生成 Apple 睡眠评分，持续睡眠障碍应寻求专业帮助。'},
++    }),
++  ];
++
++  return {
++    version:HEALTH_COMPANION_VERSION,label:'合成健康样例 · 分层证据',snapshot,
++    disclosure:'Apple Health 摘要按实际连接显示；近四周运动、偏好与到访历史为产品演示数据，待用户确认后才可转为真实档案。',
++    tasks,
++    suggestedSources:[
++      {id:'calendar',name:'日历空闲时段',reason:'避免推荐与已有安排冲突',status:'recommended'},
++      {id:'maps',name:'地图 / POI 与到访历史',reason:'计算路程并排除已去过的地点',status:'recommended'},
++      {id:'weather',name:'实时天气与降水预报',reason:'在执行前二次复核户外条件',status:'online-evidence'},
++      {id:'classes',name:'备用活动目录',reason:'按预算、距离、时段和课程难度生成雨天备选',status:'recommended'},
++    ],
++  };
++}
++
++export function healthTaskContext(task,dataset) {
++  return {
++    dataset:{version:dataset.version,label:dataset.label,disclosure:dataset.disclosure},
++    connectedHealthSummary:dataset.snapshot,
++    taskOrchestration:task.orchestration,
++    outputRequirement:'输出时分开已验证事实、演示档案和待确认信息；不声称完成未执行的预订、导航或医疗行为。',
++  };
++}
+diff --git a/health-companion.test.mjs b/health-companion.test.mjs
+new file mode 100644
+index 0000000..e818b83
+--- /dev/null
++++ b/health-companion.test.mjs
+@@ -0,0 +1,22 @@
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import {healthCompanionDataset,healthTaskContext} from './health-companion.mjs';
++
++const connected={source:'healthkit',snapshot:{workoutMinutes:20,workoutCount:1,updatedAt:'2000-01-01T00:00:00Z',selectedTypes:['workout']}};
++
++test('builds distinct autonomous, reminder and recommendation tasks from grounded inputs',()=>{
++  const dataset=healthCompanionDataset(connected,100,{status:'scheduled'});
++  assert.deepEqual([...new Set(dataset.tasks.map(task=>task.kind))],['autonomous','reminder','recommendation']);
++  assert.match(dataset.tasks[0].detail,/20\/100/);
++  assert.equal(dataset.tasks[1].orchestration.status,'scheduled');
++  assert.equal(dataset.tasks[2].requestId,'fixture-health-activity');
++  assert.ok(dataset.tasks[2].orchestration.inputs.some(input=>input.id==='weather'));
++});
++
++test('keeps demo profile fields explicit and never invents missing HealthKit progress',()=>{
++  const dataset=healthCompanionDataset({source:null,snapshot:null},100,{});
++  assert.equal(dataset.snapshot.workoutMinutes,null);
++  assert.equal(dataset.tasks[0].orchestration.status,'waiting-data');
++  assert.match(dataset.disclosure,/演示数据/);
++  assert.match(healthTaskContext(dataset.tasks[2],dataset).outputRequirement,/待确认/);
++});
+diff --git a/index.html b/index.html
+index e0ed7f6..aeb3a16 100644
+--- a/index.html
++++ b/index.html
+@@ -11,2 +11,2 @@
+-  <link rel="icon" type="image/png" href="./app-icon.png?v=11">
+-  <link rel="apple-touch-icon" href="./app-icon.png?v=11">
++  <link rel="icon" type="image/png" href="./app-icon.png?v=13">
++  <link rel="apple-touch-icon" href="./app-icon.png?v=13">
+@@ -14 +14 @@
+-  <link rel="stylesheet" href="./style.css?v=11">
++  <link rel="stylesheet" href="./style.css?v=13">
+@@ -20 +20 @@
+-  <script type="module" src="./app.mjs?v=11"></script>
++  <script type="module" src="./app.mjs?v=13"></script>
+diff --git a/ios/AlongHealth/Sources/AlongShellView.swift b/ios/AlongHealth/Sources/AlongShellView.swift
+index 6e0bc6f..a390efc 100644
+--- a/ios/AlongHealth/Sources/AlongShellView.swift
++++ b/ios/AlongHealth/Sources/AlongShellView.swift
+@@ -5,0 +6 @@ import ObjectiveC
++import UserNotifications
+@@ -272 +273,5 @@ struct AlongWebView: UIViewRepresentable {
+-        webView.load(URLRequest(url: site))
++        let request = URLRequest(url: site, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: 30)
++        let cacheTypes: Set<String> = [WKWebsiteDataTypeDiskCache, WKWebsiteDataTypeMemoryCache]
++        configuration.websiteDataStore.removeData(ofTypes: cacheTypes, modifiedSince: .distantPast) {
++            DispatchQueue.main.async { webView.load(request) }
++        }
+@@ -315,0 +321,5 @@ struct AlongWebView: UIViewRepresentable {
++        }),
++        reminder: (action, value = null) => new Promise((resolve, reject) => {
++          const id = crypto.randomUUID();
++          agentPending.set(id, {resolve, reject});
++          window.webkit.messageHandlers.alongAgent.postMessage({id, operation: 'reminder', action, value});
+@@ -375,0 +386,9 @@ struct AlongWebView: UIViewRepresentable {
++                if body["operation"] as? String == "reminder" {
++                    Task {
++                        let result: [String: Any]
++                        do { result = ["ok": true, "value": try await Self.reminderOperation(body)] }
++                        catch { result = ["ok": false, "error": error.localizedDescription] }
++                        await MainActor.run { Self.deliverAlongResult(id: id, result: result, webView: webView) }
++                    }
++                    return
++                }
+@@ -408,0 +428,38 @@ struct AlongWebView: UIViewRepresentable {
++        static func reminderOperation(_ input: [String: Any]) async throws -> [String: Any] {
++            guard let action = input["action"] as? String else { throw AgentBridgeError.invalidConfiguration }
++            let center = UNUserNotificationCenter.current()
++            switch action {
++            case "schedule":
++                guard let value = input["value"] as? [String: Any],
++                      let identifier = value["id"] as? String, !identifier.isEmpty,
++                      let hour = value["hour"] as? Int, (0...23).contains(hour),
++                      let minute = value["minute"] as? Int, (0...59).contains(minute),
++                      let title = value["title"] as? String, !title.isEmpty,
++                      let body = value["body"] as? String, !body.isEmpty
++                else { throw AgentBridgeError.invalidConfiguration }
++                let granted = try await center.requestAuthorization(options: [.alert, .sound])
++                guard granted else { throw AgentBridgeError.server("需要允许通知，Along 才能在 14:15 提醒你") }
++                let content = UNMutableNotificationContent()
++                content.title = title
++                content.body = body
++                content.sound = .default
++                var components = DateComponents()
++                components.hour = hour
++                components.minute = minute
++                let request = UNNotificationRequest(identifier: identifier, content: content,
++                                                    trigger: UNCalendarNotificationTrigger(dateMatching: components, repeats: true))
++                center.removePendingNotificationRequests(withIdentifiers: [identifier])
++                try await center.add(request)
++                return ["status": "scheduled", "identifier": identifier, "hour": hour, "minute": minute]
++            case "status":
++                let requests = await center.pendingNotificationRequests()
++                let scheduled = requests.contains { $0.identifier == "along-reminder-fixture" }
++                return ["status": scheduled ? "scheduled" : "inactive"]
++            case "cancel":
++                center.removePendingNotificationRequests(withIdentifiers: ["along-reminder-fixture"])
++                return ["status": "inactive"]
++            default:
++                throw AgentBridgeError.invalidConfiguration
++            }
++        }
++
+@@ -568,2 +625,14 @@ final class BundledWebSchemeHandler: NSObject, WKURLSchemeHandler {
+-        let response = URLResponse(url: requestURL, mimeType: mimeType,
+-                                   expectedContentLength: data.count, textEncodingName: encoding)
++        let contentType = encoding.map { "\(mimeType); charset=\($0)" } ?? mimeType
++        let response = HTTPURLResponse(
++            url: requestURL,
++            statusCode: 200,
++            httpVersion: "HTTP/1.1",
++            headerFields: [
++                "Content-Type": contentType,
++                "Content-Length": String(data.count),
++                "Cache-Control": "no-store, no-cache, must-revalidate",
++                "Pragma": "no-cache",
++                "Expires": "0",
++            ]
++        ) ?? URLResponse(url: requestURL, mimeType: mimeType,
++                         expectedContentLength: data.count, textEncodingName: encoding)
+diff --git a/package.json b/package.json
+index e30bb40..cbcdb59 100644
+--- a/package.json
++++ b/package.json
+@@ -13 +13 @@
+-    "check": "node --check app.mjs && node --check health.mjs && node --check workspace.mjs && node --check loop.mjs && node --check agent-client.mjs && node --check goal-agent-core.mjs && node --check adaptive-ui.mjs && node --check super-agent.mjs && node --check codex-agent.mjs && node --check agent-host.mjs && node --check server.mjs && node --check sync-server.mjs && node --test health.test.mjs && node --test workspace.test.mjs && node --test loop.test.mjs && node --test sync-server.test.mjs && node --test engine.test.mjs && node --test goal-agent-core.test.mjs && node --test adaptive-ui.test.mjs && node --test super-agent.test.mjs && node --test codex-agent.test.mjs"
++    "check": "node --check app.mjs && node --check health.mjs && node --check health-companion.mjs && node --check workspace.mjs && node --check loop.mjs && node --check agent-client.mjs && node --check goal-agent-core.mjs && node --check adaptive-ui.mjs && node --check super-agent.mjs && node --check codex-agent.mjs && node --check agent-host.mjs && node --check server.mjs && node --check sync-server.mjs && node --test health.test.mjs && node --test health-companion.test.mjs && node --test workspace.test.mjs && node --test loop.test.mjs && node --test sync-server.test.mjs && node --test engine.test.mjs && node --test goal-agent-core.test.mjs && node --test adaptive-ui.test.mjs && node --test super-agent.test.mjs && node --test codex-agent.test.mjs"
+diff --git a/style.css b/style.css
+index 7e527b0..a475053 100644
+--- a/style.css
++++ b/style.css
+@@ -101,0 +102,42 @@ p { line-height: 1.5; }
++.dataset-disclosure { padding: 14px 16px; border: 1px solid #e3e3e1; border-radius: 14px; background: #ececea; }
++.dataset-disclosure strong { display: block; font-size: 11px; }
++.dataset-disclosure p { margin-top: 5px; color: #737373; font-size: 10px; line-height: 1.65; }
++.companion-task-list { display: grid; gap: 10px; margin-top: 10px; }
++.companion-task { padding: 20px; overflow: hidden; border: 1px solid #e5e5e3; border-radius: 19px; background: #fff; }
++.companion-task-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
++.task-kind { color: #555; font-size: 10px; font-weight: 650; letter-spacing: .025em; }
++.task-run-state { padding: 4px 8px; border-radius: 999px; background: #efefed; color: #777; font-size: 9px; white-space: nowrap; }
++.task-run-state.working, .task-run-state.agent-ready { background: #fff2d7; color: #896421; }
++.task-run-state.done, .task-run-state.scheduled, .task-run-state.ready { background: #e7f3eb; color: #397252; }
++.task-run-state.blocked, .task-run-state.needs-consent, .task-run-state.waiting-data { background: #f5e9e7; color: #915148; }
++.task-when { margin-top: 14px; color: #999; font-size: 10px; }
++.companion-task h3 { margin-top: 6px; font-size: 18px; font-weight: 630; line-height: 1.4; letter-spacing: -.2px; }
++.task-detail { margin-top: 8px; color: #6f6f6f; font-size: 11px; line-height: 1.7; }
++.task-result { margin-top: 16px; padding: 13px 14px; border-radius: 12px; background: #f5f5f3; }
++.task-result span { display: block; color: #999; font-size: 9px; font-weight: 650; letter-spacing: .04em; }
++.task-result p { margin-top: 6px; color: #3f3f3f; font-size: 11px; line-height: 1.65; }
++.companion-task-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 15px; }
++.task-detail-action { padding: 7px 0; border: 0; background: transparent; color: #555; font-size: 10px; }
++.task-detail-action b { margin-left: 4px; color: #222; font-size: 13px; font-weight: 400; }
++.reminder-action { min-width: 0; padding: 8px 11px; font-size: 10px; }
++.task-evidence-section { margin-top: 33px; }
++.task-contract { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
++.task-contract > div { padding: 14px; border: 1px solid #e5e5e3; border-radius: 14px; background: #fff; }
++.task-contract > div:last-child { grid-column: 1 / -1; }
++.task-contract span { display: block; margin-bottom: 7px; color: #999; font-size: 9px; }
++.task-contract strong { color: #444; font-size: 10px; font-weight: 560; line-height: 1.65; }
++.evidence-list { margin-top: 10px; padding: 0 17px; border: 1px solid #e5e5e3; border-radius: 16px; background: #fff; }
++.evidence-list > div { padding: 15px 0; }
++.evidence-list > div + div { border-top: 1px solid #ededeb; }
++.evidence-kind { display: inline-block; margin-bottom: 7px; padding: 3px 6px; border-radius: 6px; background: #efefed; color: #707070; font-size: 8px; }
++.evidence-kind.connected { background: #e7f3eb; color: #397252; }
++.evidence-kind.demo { background: #fff2d7; color: #896421; }
++.evidence-list strong { display: block; font-size: 11px; }
++.evidence-list p { margin-top: 5px; color: #777; font-size: 10px; line-height: 1.65; }
++.suggested-sources .section-heading span { max-width: 290px; }
++.source-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
++.source-card { padding: 15px; border: 1px solid #e5e5e3; border-radius: 15px; background: #fff; }
++.source-status { display: inline-block; margin-bottom: 10px; padding: 3px 6px; border-radius: 6px; background: #f0f0ee; color: #777; font-size: 8px; }
++.source-status.online-evidence { background: #e7f3eb; color: #397252; }
++.source-card strong { display: block; font-size: 11px; }
++.source-card p { margin-top: 5px; color: #888; font-size: 10px; line-height: 1.6; }
+@@ -117 +159 @@ p { line-height: 1.5; }
+-.orchestration-section, .workers-section, .activity-section { margin-top: 33px; }
++.orchestration-section, .workers-section, .activity-section, .delivery-section { margin-top: 33px; }
+@@ -143,0 +186 @@ p { line-height: 1.5; }
++.delivery-card { padding: 19px; border: 1px solid #dededc; border-radius: 17px; background: #fff; color: #444; font-size: 11px; line-height: 1.75; white-space: pre-wrap; }
+@@ -170,4 +213,5 @@ p { line-height: 1.5; }
+-.connection-metrics { display: flex; gap: 7px; flex-wrap: wrap; margin-top: 8px; }
+-.connection-metrics > div { display: flex; flex-direction: column; gap: 3px; padding: 9px 11px; border: 1px solid #e8e8e7; border-radius: 10px; background: #fff; }
+-.connection-metrics span { color: #999; font-size: 10px; }
+-.connection-metrics strong { color: #333; font-size: 11px; font-weight: 600; }
++.connection-metrics { display: flex; gap: 7px; margin-top: 8px; overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
++.connection-metrics::-webkit-scrollbar { display: none; }
++.connection-metrics > div { display: flex; flex: 0 0 auto; flex-direction: column; gap: 3px; padding: 9px 11px; border: 1px solid #e8e8e7; border-radius: 10px; background: #fff; }
++.connection-metrics span { color: #999; font-size: 10px; white-space: nowrap; }
++.connection-metrics strong { color: #333; font-size: 11px; font-weight: 600; white-space: nowrap; }
+@@ -305,0 +350 @@ footer { padding: 0 0 26px; color: #aaa; text-align: center; font-size: 10px; }
++  .source-grid { grid-template-columns: 1fr; }
+diff --git a/super-agent.mjs b/super-agent.mjs
+index 7664e84..0140c06 100644
+--- a/super-agent.mjs
++++ b/super-agent.mjs
+@@ -28,2 +28,6 @@ export function createSuperAgentRequest({task,domain='health',goal=null,context=
+-  const requestId=`along-${domain}-${stableId(`${safeTask.id}:${safeTask.title}:${safeTask.detail}`)}`;
+-  return {requestId,task:safeTask,goal:goal?{domain,title:cleanText(goal.title,'当前目标',120),target:Number.isFinite(goal.target)?goal.target:null}:null,context};
++  const requestedId=typeof task?.requestId==='string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$/.test(task.requestId) ? task.requestId : null;
++  const requestId=requestedId||`along-${domain}-${stableId(`${safeTask.id}:${safeTask.title}:${safeTask.detail}`)}`;
++  const taskOrchestration=task?.orchestration && typeof task.orchestration==='object' && !Array.isArray(task.orchestration)
++    ? task.orchestration : null;
++  return {requestId,task:safeTask,goal:goal?{domain,title:cleanText(goal.title,'当前目标',120),target:Number.isFinite(goal.target)?goal.target:null}:null,
++    context:{...(context&&typeof context==='object'?context:{}),...(taskOrchestration?{taskOrchestration}:{})}};
+diff --git a/super-agent.test.mjs b/super-agent.test.mjs
+index 62a1f4b..d1bc56e 100644
+--- a/super-agent.test.mjs
++++ b/super-agent.test.mjs
+@@ -14,0 +15,7 @@ test('creates a stable request for the real Along Source',()=>{
++test('uses a curated request id and sends task orchestration as trusted context',()=>{
++  const request=createSuperAgentRequest({task:{...task,requestId:'fixture-health-review',orchestration:{runPolicy:'automatic'}},domain:'health'});
++  assert.equal(request.requestId,'fixture-health-review');
++  assert.equal(request.context.taskOrchestration.runPolicy,'automatic');
++  assert.equal(request.task.requestId,undefined);
++});
++
+diff --git a/sw.js b/sw.js
+index 0e5aa96..eba608c 100644
+--- a/sw.js
++++ b/sw.js
+@@ -1,2 +1,2 @@
+-const CACHE='along-shell-v11';
+-const FILES=['./','./index.html','./style.css','./app.mjs','./health.mjs','./workspace.mjs','./loop.mjs','./goal-agent-core.mjs','./adaptive-ui.mjs','./super-agent.mjs','./agent-client.mjs','./agent-replay.json','./app-icon.png','./icon.svg','./icon-192.png','./icon-512.png','./manifest.webmanifest'];
++const CACHE='along-shell-v13';
++const FILES=['./','./index.html','./style.css','./app.mjs','./health.mjs','./health-companion.mjs','./workspace.mjs','./loop.mjs','./goal-agent-core.mjs','./adaptive-ui.mjs','./super-agent.mjs','./agent-client.mjs','./agent-replay.json','./app-icon.png','./icon.svg','./icon-192.png','./icon-512.png','./manifest.webmanifest'];
+diff --git a/workspace.mjs b/workspace.mjs
+index 08d4bc9..4057b6b 100644
+--- a/workspace.mjs
++++ b/workspace.mjs
+@@ -10 +10 @@ export function ensureHealthGoal(state) {
+-    goals: [...state.goals, {id: HEALTH_GOAL_ID, type: 'workout', target: 120}],
++    goals: [...state.goals, {id: HEALTH_GOAL_ID, type: 'workout', target: 100}],
+@@ -32,0 +33,8 @@ export function addFinanceDemoRecord(finance, target = FINANCE_TARGET) {
++function formatSleepDuration(minutes) {
++  if (minutes == null) return '无记录';
++  const hours=Math.floor(minutes/60), remainder=minutes%60;
++  if (!hours) return `${remainder} 分钟`;
++  if (!remainder) return `${hours} 小时`;
++  return `${hours} 小时 ${remainder} 分钟`;
++}
++
+@@ -35 +43 @@ export function healthView(state, customization = null) {
+-  const target = goal?.target ?? 120;
++  const target = goal?.target ?? 100;
+@@ -44,0 +53,2 @@ export function healthView(state, customization = null) {
++    selected?.includes('sleep') ? {label:'睡眠时长',value:formatSleepDuration(state.snapshot.sleepMinutes)} : null,
++    selected?.includes('steps') ? {label:'今日步数',value:state.snapshot.steps == null ? '无记录' : `${state.snapshot.steps.toLocaleString('zh-CN')} 步`} : null,
+diff --git a/workspace.test.mjs b/workspace.test.mjs
+index 86bef1b..5c73f1f 100644
+--- a/workspace.test.mjs
++++ b/workspace.test.mjs
+@@ -12,2 +12,2 @@ test('existing HealthKit summary survives the new goal view', () => {
+-  assert.equal(view.percent, 63);
+-  assert.match(view.primary.detail, /还差 45 分钟/);
++  assert.equal(view.percent, 75);
++  assert.match(view.primary.detail, /还差 25 分钟/);
+@@ -39,0 +40,8 @@ test('connected health sources show only selected additional aggregates',()=>{
++test('connected health sources expose selected sleep duration and steps',()=>{
++  const state=ensureHealthGoal(setSnapshot(initialState(),{
++    selectedTypes:['sleep','steps'],sleepMinutes:360,steps:1000,
++  },'healthkit'));
++  const metrics=healthView(state).connection.metrics;
++  assert.deepEqual(metrics.map(item=>item.label),['睡眠时长','今日步数']);
++  assert.deepEqual(metrics.map(item=>item.value),['6 小时','1,000 步']);
++});
