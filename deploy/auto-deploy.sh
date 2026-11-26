@@ -650,7 +650,7 @@ cmd_run() {
   fi
 
   local release compose_file
-  release="$(materialize_release "$along_sha" "$sa_sha")"
+  release="$(materialize_release "$along_sha" "$sa_sha")" || die "展开发布目录失败"
   compose_file="$release/along/$COMPOSE_REL"
   [ -f "$compose_file" ] || die "发布目录里没有编排文件：$compose_file"
 
