@@ -395,6 +395,34 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
     restoreSelection(next);save(next);onChange();
     return next.activeGoalId;
   }
+  // 已入队但尚未送达的完成反馈：同一个任务不重复提交（服务端按事件号幂等，重复提交也不会累加执行次数）。
+  function pendingTaskCompletions() {
+    const ids=new Set();
+    for (const {envelope} of pendingEvents(config)) {
+      if (envelope?.kind==='task.completed'&&typeof envelope.task_id==='string') ids.add(envelope.task_id);
+    }
+    return ids;
+  }
+  /**
+   * 提交一次完成事实：组装既有 `task.completed` 信封并入队（发送由随后的 sync 完成）。
+   * 状态只来自服务端快照——这里不改任何任务状态，任务是否完成由服务端回执后的同步结果决定。
+   */
+  async function completeTask(taskId) {
+    const goalId=state.activeGoalId, goal=goalId?state.goals[goalId]:undefined;
+    const task=goal?.tasks.find(item=>item.id===taskId);
+    if (!goal||!task||task.status!=='open') throw Error('该任务当前不可完成');
+    if (pendingTaskCompletions().has(taskId)) throw Error('完成反馈已提交');
+    const completedAt=new Date().toISOString();
+    const assembled=assembleEnvelope({event_type:'along.message',kind:'task.completed',occurred_at:completedAt,
+      timezone:Intl.DateTimeFormat().resolvedOptions().timeZone||'Asia/Shanghai',
+      goal_id:goal.id,task_id:task.id,
+      payload:{event_type:'along.message',kind:'task.completed',task_id:task.id,completed_at:completedAt}});
+    if (!assembled.ok) throw Error(assembled.reason);
+    const receipt=await queueEvent(config,assembled.envelope,{send:false});
+    if (!receipt.ok) throw Error(receipt.reason);
+    onChange();
+    return receipt.event_id;
+  }
   function prepareRecommendationFeedback(eventId) {
     const message=state.messages[eventId];
     if (!message?.recommendation||message.goalId!==state.activeGoalId||!isActiveGoal(state,state.activeGoalId)) return false;
@@ -540,5 +568,5 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
       .finally(()=>{flight=null;if(!disposed&&lastError!==beforeError) onChange();});
     return flight;
   }
-  return {view,draft,setDraft,select,leaveConversation,prepareRecommendationFeedback,submit,sync,dispose:()=>{disposed=true;retireEventAuthority(config);}};
+  return {view,draft,setDraft,select,leaveConversation,prepareRecommendationFeedback,completeTask,pendingTaskCompletions,submit,sync,dispose:()=>{disposed=true;retireEventAuthority(config);}};
 }

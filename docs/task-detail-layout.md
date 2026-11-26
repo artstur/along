@@ -72,3 +72,20 @@
 验收先以基线失败测试复现，再运行真实 createEventWorkspace.sync→onNotifications 完整投影：legacy/user/显式提前提醒原样保留，Agent quiet 无预提醒，activeTasks 与结果不丢、重同步/冷缓存不重发、显式关闭只移除自身。DOM 回归核对任务详情执行安排、原 user 提醒文案和真实 finance 摘要。运行 npm run check / build 并检查 web/dist/iOS 资源一致；用单独回退修复的变异检查证明测试能抓住原错误。系统实际送达与真机前台验收留统一发版，合成投影通过不等于设备已通知。
 
 本子任务实测：基线 npm run check 482/482；修复后485/485（含原Native/Host覆盖与去重回归）。新增完整sync投影、真实finance清洗和详情DOM三项测试通过；分别回退event-workspace与app源码后对应业务断言重新失败，前者出现多出的agent_quiet系统提醒和演示摘要，后者出现“你指定的提醒”。build21文件，web/dist/iOS逐字节一致；Swift、CSS、Build67/Web76版本入口均未修改。结果是代码/合成同步与DOM验证，未部署或验收实际通知送达。
+
+## 任务完成确认与历史任务入口
+
+主分类 ui，依赖服务端既有 `task.completed` 协议与 `task_updated` 同步项；服务端基线为 Along Agent `src/along/inbox.ts` 的完成事实分支。本轮只补「完成」确认键与「历史任务」入口，不新增事件类型、不改事件 schema 与双端向量、不新增产品主模块、采集与凭证。
+
+问题：任务卡没有确认完成的入口，已完成的任务和未完成的任务混在同一张列表里，用户看不到「这件事已经做完了」。根因在服务端：完成事实只写了任务状态，没有发出 `task_updated` 同步项，客户端拿不到新快照，状态无从更新。
+
+范围：
+
+- 客户端 `web/event-workspace.mjs` 增加 `completeTask(taskId)` 与 `pendingTaskCompletions()`：复用既有 `along.message` / `task.completed` 信封（载荷只带 `kind`、`task_id`、`completed_at`，`envelope.kind` 必须等于 `payload.kind`），入队后由既有的 `sync()` 投递并拉取同步项。状态只来自服务端快照，客户端不乐观改状态。
+- 客户端 `web/app.mjs`：任务卡右侧栏增加「完成」键（仅 open 任务，与「查看详情」同为12px浅灰透明文字、无下划线，状态与入口仍右对齐）；点开是确认层，取消不发任何请求、状态与列表完全不变，确认才发出完成事实；任务区标题行增加同级「历史任务」入口，复用同一份目标快照里的任务、只列 `status==='done'`；「动态任务」只列 open。
+- 服务端 `along-superagent/src/along/inbox.ts`：完成事实落库后补发带 `goal_id` 的 `task_updated` 同步项（`status='done'`、`revision` 与任务当前版本一致）。`goal_id` 必带——客户端只对带 `goalId` 的同步项应用目标快照，缺它就拿不到新状态。
+- 周期任务语义不变：带每日安排的 open 任务走服务端既有的「完成本次并续排」分支，任务仍 open、不进历史任务；该分支本就发出 `status='open'` 的同步项，客户端不自行判断或改状态。
+
+验收：open 任务卡出现「完成」键、done 任务卡不出现；取消不发任何请求且列表不变；确认只发一条 `task.completed`（`task_id`、`goal_id` 正确，`completed_at` 为确认时刻），服务端接受后卡片状态变为「已完成」；该任务从「动态任务」移出、在「历史任务」可见，刷新或重启后仍是「已完成」；改前就是 done 的历史任务也能在「历史任务」看到；周期任务点完成不误关任务（仍 open、执行次数 +1）；服务端完成事实产生 `task_updated` 同步行且 `/sync` 快照里该任务为 done。重复提交不累加执行次数，待发队列里已有该任务的 `task.completed` 时不再显示「完成」键。
+
+本子任务实测：服务端 `pnpm exec vitest run tests/along-inbox.spec.ts` 24 项通过（新增完成事实同步行一项，回退修复后该项重新失败）；`pnpm check` 1928 项通过、1 跳过（typecheck 与 build 同跑通过）。客户端 `npm run check` 863 项：860 通过、0 失败、3 跳过（含新增 8 项：完成事实只入队一次、重复提交被拒、服务端快照驱动状态、卡片与历史任务入口、确认层取消不发请求、确认只发一条）。`npm run build` 22 文件，web/dist/iOS 逐字节一致。Web 版本 `?v=95`、ServiceWorker `along-shell-v95`、原生 `build=95`，`Info.plist` 的 `CFBundleVersion` 未提高。未部署正式 Host、未安装手机；周期任务的续排与执行次数沿用服务端既有语义，本轮未改。
