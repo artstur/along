@@ -473,16 +473,19 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
     const history=historyOf(state.history);
     const current=history&&history.goalId===goalId?history:{goalId,tasks:[],cursor:undefined,exhausted:false};
     if (current.exhausted) return {added:0,exhausted:true};
-    const page=await agentCall(config,'/sync',{after_seq:state.cursor,limit:50,conversation_version:1,
+    const page=await agentCall(config,'/sync',{after_seq:state.cursor,limit:1,conversation_version:1,
       tasks_page:{goal_id:goalId,status:'done',limit:50,...(current.cursor?{cursor:current.cursor}:{})}});
     const tasksPage=record(page)?page.tasks_page:undefined;
     if (!record(tasksPage)||!Array.isArray(tasksPage.items)) throw Error('历史任务同步格式不正确');
     // 与目标快照同一套任务校验（同一目标、同一字段口径），标题与指标不重复信任远端。
     const pageTasks=safeTaskPage(tasksPage.items,goal);
     const cursor=typeof tasksPage.nextCursor==='string'&&tasksPage.nextCursor.length>0?tasksPage.nextCursor:undefined;
+    // 已经看得见的（快照里的已完成任务 + 已翻过的页）不算新增：翻页要一直翻到出现新的历史任务为止。
+    const visible=new Set([...goal.tasks.filter(task=>task.status==='done').map(task=>task.id),
+      ...current.tasks.map(task=>task.id)]);
+    const fresh=pageTasks.filter(task=>!visible.has(task.id));
     const known=new Set(current.tasks.map(task=>task.id));
-    const fresh=pageTasks.filter(task=>!known.has(task.id));
-    const tasks=[...current.tasks,...fresh];
+    const tasks=[...current.tasks,...pageTasks.filter(task=>!known.has(task.id))];
     const next={...state,history:{goalId,tasks,cursor,exhausted:cursor===undefined}};
     try { save(next); } catch { state=next; }
     onChange();
