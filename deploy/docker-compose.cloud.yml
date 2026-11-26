@@ -63,6 +63,12 @@ services:
       # 容器默认 UTC；记忆维护批次按本地小时调度（默认 03:00），不设 TZ 会落到
       # 03:00 UTC = 北京 11:00，与 Mac 上「夜里跑」的语义不一致。
       TZ: Asia/Shanghai
+      # 启动脚本（deploy/superagent-start.sh）的四个入口参数：profile 名、业务库目录、
+      # 编排库目录，以及**仓库里的规范 patch**（Hy-Memory 接线与模型路由都在那份里）。
+      ALONG_SUPERAGENT_PROFILE: superagent
+      ALONG_SUPERAGENT_STATE_DIR: /var/lib/dsh/state
+      ALONG_SUPERAGENT_ALONG_STATE_DIR: /var/lib/along/data
+      ALONG_SUPERAGENT_PATCH_FILE: /opt/profile.patch.yml
     volumes:
       - "../../data/superagent/dsh:/var/lib/dsh"
       - "../../data/superagent/along:/var/lib/along"
@@ -74,12 +80,12 @@ services:
       # profile 的 patch 层：仓库里的规范副本，启动时复制进 profile 目录，
       # 所以「改配置 → 重启 → 生效」不依赖手工编辑状态目录。
       - "./superagent-profile.patch.yml:/opt/profile.patch.yml:ro"
-    # 复制规范 patch 后 exec 常驻 dsh（与 deploy/superagent-profile.patch.yml 配套）。
-    # $$ 是 compose 的转义：$DSH_HOME 要留给容器里的 shell 展开，不能被 compose 提前插值。
-    # bundle 的软链也在这里建立：bundle 装在 dsh CLI 的 node_modules 树里
-    # （deploy/Dockerfile.superagent），profile 必须链到**同一个真实路径**，
-    # 否则插件加载报 ERR_MODULE_NOT_FOUND（V-1 实测的坑）。
-    command: ["sh", "-c", "mkdir -p \"$$DSH_HOME/profiles/superagent/node_modules\" && cp /opt/profile.patch.yml \"$$DSH_HOME/profiles/superagent/cordis.patch.yml\" && ln -sfn /app/deploy/agent-dsh/node_modules/dsh-superagent \"$$DSH_HOME/profiles/superagent/node_modules/dsh-superagent\" && exec dsh --profile superagent --no-open"]
+    # 走仓库的启动脚本（deploy/superagent-start.sh）：铺 profile、链 bundle、播种设置、
+    # **推导并应用读取面收紧**，再用 dsh --dump-config 校验最终生效配置——收紧没生效
+    # 就拒绝启动。收紧是白名单口径：长驻 DSH 与业务库同容器同进程，DSH 的文件工具能读
+    # 任意绝对路径，而业务库里两位用户的数据在同一张表按 user_id 分行，API 的身份检查
+    # 管不住这条读取路径。不用这个脚本就等于把业务库敞开。
+    command: ["sh", "-c", "exec /usr/local/bin/along-superagent-start"]
     secrets: [memory-env]
     healthcheck:
       # 两个探针：① 管理面自身可达；② 跳板 127.0.0.1:3083 可达。
