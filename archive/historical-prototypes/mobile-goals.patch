@@ -1,0 +1,93 @@
+diff --git a/app.mjs b/app.mjs
+index 9f596ab..127f72b 100644
+--- a/app.mjs
++++ b/app.mjs
+@@ -107 +107 @@ function customView(goalKey=activeGoal) {
+-const taskStateLabel={temporary:'临时',planned:'已规划',deferred:'到时生成'};
++const taskStateLabel={temporary:'进行中',planned:'已规划',deferred:'到时生成'};
+diff --git a/index.html b/index.html
+index dbd56fb..6057142 100644
+--- a/index.html
++++ b/index.html
+@@ -11,2 +11,2 @@
+-  <link rel="icon" type="image/png" href="./app-icon.png?v=20">
+-  <link rel="apple-touch-icon" href="./app-icon.png?v=20">
++  <link rel="icon" type="image/png" href="./app-icon.png?v=21">
++  <link rel="apple-touch-icon" href="./app-icon.png?v=21">
+@@ -14 +14 @@
+-  <link rel="stylesheet" href="./style.css?v=20">
++  <link rel="stylesheet" href="./style.css?v=21">
+@@ -20 +20 @@
+-  <script type="module" src="./app.mjs?v=20"></script>
++  <script type="module" src="./app.mjs?v=21"></script>
+diff --git a/ios/AlongHealth/Sources/AlongShellView.swift b/ios/AlongHealth/Sources/AlongShellView.swift
+index 3c9001b..a30b9a4 100644
+--- a/ios/AlongHealth/Sources/AlongShellView.swift
++++ b/ios/AlongHealth/Sources/AlongShellView.swift
+@@ -273 +273,5 @@ struct AlongWebView: UIViewRepresentable {
+-        webView.load(URLRequest(url: site, cachePolicy: .reloadIgnoringLocalCacheData))
++        let request = URLRequest(url: site, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: 30)
++        let cacheTypes: Set<String> = [WKWebsiteDataTypeDiskCache, WKWebsiteDataTypeMemoryCache]
++        configuration.websiteDataStore.removeData(ofTypes: cacheTypes, modifiedSince: .distantPast) {
++            DispatchQueue.main.async { webView.load(request) }
++        }
+@@ -588,2 +592,14 @@ final class BundledWebSchemeHandler: NSObject, WKURLSchemeHandler {
+-        let response = URLResponse(url: requestURL, mimeType: mimeType,
+-                                   expectedContentLength: data.count, textEncodingName: encoding)
++        let contentType = encoding.map { "\(mimeType); charset=\($0)" } ?? mimeType
++        let response = HTTPURLResponse(
++            url: requestURL,
++            statusCode: 200,
++            httpVersion: "HTTP/1.1",
++            headerFields: [
++                "Content-Type": contentType,
++                "Content-Length": String(data.count),
++                "Cache-Control": "no-store, no-cache, must-revalidate",
++                "Pragma": "no-cache",
++                "Expires": "0",
++            ]
++        ) ?? URLResponse(url: requestURL, mimeType: mimeType,
++                         expectedContentLength: data.count, textEncodingName: encoding)
+diff --git a/style.css b/style.css
+index 45a7cf6..2c0578c 100644
+--- a/style.css
++++ b/style.css
+@@ -172,4 +172,5 @@ p { line-height: 1.5; }
+-.connection-metrics { display: flex; gap: 7px; flex-wrap: wrap; margin-top: 8px; }
+-.connection-metrics > div { display: flex; flex-direction: column; gap: 3px; padding: 9px 11px; border: 1px solid #e8e8e7; border-radius: 10px; background: #fff; }
+-.connection-metrics span { color: #999; font-size: 10px; }
+-.connection-metrics strong { color: #333; font-size: 11px; font-weight: 600; }
++.connection-metrics { display: flex; gap: 7px; margin-top: 8px; overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
++.connection-metrics::-webkit-scrollbar { display: none; }
++.connection-metrics > div { display: flex; flex: 0 0 auto; flex-direction: column; gap: 3px; padding: 9px 11px; border: 1px solid #e8e8e7; border-radius: 10px; background: #fff; }
++.connection-metrics span { color: #999; font-size: 10px; white-space: nowrap; }
++.connection-metrics strong { color: #333; font-size: 11px; font-weight: 600; white-space: nowrap; }
+diff --git a/workspace.mjs b/workspace.mjs
+index 08d4bc9..a6f5435 100644
+--- a/workspace.mjs
++++ b/workspace.mjs
+@@ -32,0 +33,8 @@ export function addFinanceDemoRecord(finance, target = FINANCE_TARGET) {
++function formatSleepDuration(minutes) {
++  if (minutes == null) return '无记录';
++  const hours=Math.floor(minutes/60), remainder=minutes%60;
++  if (!hours) return `${remainder} 分钟`;
++  if (!remainder) return `${hours} 小时`;
++  return `${hours} 小时 ${remainder} 分钟`;
++}
++
+@@ -44,0 +53,2 @@ export function healthView(state, customization = null) {
++    selected?.includes('sleep') ? {label:'睡眠时长',value:formatSleepDuration(state.snapshot.sleepMinutes)} : null,
++    selected?.includes('steps') ? {label:'今日步数',value:state.snapshot.steps == null ? '无记录' : `${state.snapshot.steps.toLocaleString('zh-CN')} 步`} : null,
+diff --git a/workspace.test.mjs b/workspace.test.mjs
+index 86bef1b..eb1c16c 100644
+--- a/workspace.test.mjs
++++ b/workspace.test.mjs
+@@ -39,0 +40,8 @@ test('connected health sources show only selected additional aggregates',()=>{
++test('connected health sources expose selected sleep duration and steps',()=>{
++  const state=ensureHealthGoal(setSnapshot(initialState(),{
++    selectedTypes:['sleep','steps'],sleepMinutes:360,steps:1000,
++  },'healthkit'));
++  const metrics=healthView(state).connection.metrics;
++  assert.deepEqual(metrics.map(item=>item.label),['睡眠时长','今日步数']);
++  assert.deepEqual(metrics.map(item=>item.value),['6 小时','1,000 步']);
++});
