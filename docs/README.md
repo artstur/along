@@ -22,6 +22,7 @@
 
 ## 设计与验收依据
 
+- [字号层级](typography-scale.md)：App 与网页共用的排版层级，对话正文 17 px / 行高 1.6，其余按文字用途分档。
 - [阶段 A 设计](stage-a-tech-design.md)：骨架、存储及协议设计，保留设计时基线与行号。
 - [业务测试用例](business-test-cases.md)：业务验收标准；未登记执行结果的项目不能视为已通过。
 - [Along Agent 决策](https://github.com/artstur/along-superagent/blob/main/docs/along/000-decisions.md)、[目标架构](https://github.com/artstur/along-superagent/blob/main/docs/along/001-architecture.md)及[实施范围](https://github.com/artstur/along-superagent/blob/main/docs/along/003-implementation.md)：已定边界、设计目标与已实现范围分开查阅。
