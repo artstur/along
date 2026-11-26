@@ -18,15 +18,15 @@ App 配对后自动协商事件接入，聊天变更经过服务端校验后同�
 
 ### 一键安装到真机
 
-在本机设置一次设备和签名。用 `xcrun devicectl list devices` 查看 iPhone 的 UDID，用 Xcode 的签名设置核对 Team ID 和 Bundle ID。覆盖安装时填写手机上现有 App 对应的签名值。这三项由同一仓库的工作树共用。
+在本机设置一次设备和签名。用 `xcrun devicectl list devices` 查看 iPhone 的 UDID，用 Xcode 的签名设置核对 Team ID。工程默认 Bundle ID 为 `com.artstur.along`，真机签名使用该 ID 对应的描述文件。这三项由同一仓库的工作树共用。
 
 ```sh
 git config --local along.iosDevice '<iPhone UDID>'
 git config --local along.iosTeam '<Xcode Team ID>'
-git config --local along.iosBundleId '<已安装 App 的 Bundle ID>'
+git config --local along.iosBundleId com.artstur.along
 ```
 
-连接 iPhone 后，从要安装的检出目录运行 `./tools/install-ios.sh`。脚本生成内置网页资源，签名构建 Release 版，覆盖安装到指定真机，再回读并核对 Build 号。Xcode 产物保存在该检出目录的 `ios/build/install/`。
+连接 iPhone 后，从要安装的检出目录运行 `./tools/install-ios.sh`。脚本生成内置网页资源，签名构建 Release 版，安装到指定真机，再回读并核对 Build 号。相同 Bundle ID 和签名身份的后续安装会覆盖对应 App。不同 Bundle ID 作为独立 App 安装，其本机数据和授权各自独立。Xcode 产物保存在该检出目录的 `ios/build/install/`。启用 APNs 时，Host topic 也使用 `com.artstur.along`。
 
 ### 页面滚动
 

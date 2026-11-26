@@ -3,7 +3,7 @@ import {createHash, createPrivateKey, sign} from 'node:crypto';
 import {readFileSync, statSync} from 'node:fs';
 
 const encode=value=>Buffer.from(JSON.stringify(value)).toString('base64url');
-const topic='com.artstur.AlongHealth';
+const topic='com.artstur.along';
 
 export function createApnsProvider(env=process.env,openSession=connect) {
   const {ALONG_APNS_KEY_FILE:file,ALONG_APNS_TEAM_ID:team,ALONG_APNS_KEY_ID:kid}=env;
