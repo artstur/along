@@ -141,7 +141,10 @@ test('Apple request uses ES256, the signed environment and a generic alert with 
   for (let i=0;i<2;i++) assert.equal(await provider(f.input,route,Date.now()+60000),'accepted');
   const {headers,body,authority}=requests[0];
   assert.equal(authority,'https://api.sandbox.push.apple.com');
-  assert.equal(headers['apns-topic'],'com.artstur.AlongHealth');
+  assert.equal(headers['apns-topic'],'com.artstur.along');
+  const project=readFileSync(new URL('../ios/AlongHealth.xcodeproj/project.pbxproj',import.meta.url),'utf8');
+  const bundleIds=[...project.matchAll(/PRODUCT_BUNDLE_IDENTIFIER = ([^;]+);/g)].map(match=>match[1]);
+  assert.deepEqual(bundleIds,[headers['apns-topic'],headers['apns-topic']]);
   assert.equal(headers['apns-push-type'],'alert');
   assert.equal(headers['apns-collapse-id'],requests[1].headers['apns-collapse-id']);
   assert.deepEqual(body,{aps:{alert:{title:'Along 任务有了结果',body:'打开查看详情'},sound:'default'},along:route});

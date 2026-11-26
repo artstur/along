@@ -16,6 +16,18 @@ App 配对后自动协商事件接入，聊天变更经过服务端校验后同�
 
 网页界面改动后，从仓库根目录运行 `npm run build`（会同时写入 `dist/` 与 `ios/AlongHealth/Web/`），随后重新构建 App。移动端通过 `along://app/` 自定义协议加载这些内置资源，避免公司网络或 CDN 状态导致启动白屏。
 
+### 一键安装到真机
+
+在本机设置一次设备和签名。用 `xcrun devicectl list devices` 查看 iPhone 的 UDID，用 Xcode 的签名设置核对 Team ID。工程默认 Bundle ID 为 `com.artstur.along`，真机签名使用该 ID 对应的描述文件。这三项由同一仓库的工作树共用。
+
+```sh
+git config --local along.iosDevice '<iPhone UDID>'
+git config --local along.iosTeam '<Xcode Team ID>'
+git config --local along.iosBundleId com.artstur.along
+```
+
+连接 iPhone 后，从要安装的检出目录运行 `./tools/install-ios.sh`。脚本生成内置网页资源，签名构建 Release 版，安装到指定真机，再回读并核对 Build 号。相同 Bundle ID 和签名身份的后续安装会覆盖对应 App。不同 Bundle ID 作为独立 App 安装，其本机数据和授权各自独立。Xcode 产物保存在该检出目录的 `ios/build/install/`。启用 APNs 时，Host topic 也使用 `com.artstur.along`。
+
 ### 页面滚动
 
 iPhone App 的顶部栏和页面外框固定在屏幕上。目标页与任务详情的长内容在工作区内滚动，聊天继续在消息区滚动，输入框跟随键盘。内置页面使用独立的工作区滚动容器，原生 WebView 关闭外层回弹。任务详情同步刷新时，从该滚动容器恢复同一份结果的阅读位置。普通网页沿用文档滚动。

@@ -290,7 +290,7 @@ Apple 的推送能力（`aps-environment` entitlement）只在**付费的 Apple 
 
 三样东西都在 Apple Developer 后台，不在 Along 里：`.p8` 私钥（**只能下载一次**）、Key ID、Team ID。
 而且 `.p8` 必须和**签 AlongHealth 那个 App 的团队是同一个**——`host/apns.mjs:6` 的 topic 硬编码
-`com.artstur.AlongHealth`，bundle id 必须匹配；别的团队的 key 推不动这个 App。
+`com.artstur.along`，需要与签名包的 Bundle ID 匹配。
 
 **第三方推送服务（个推 / 极光 / OneSignal / 阿里云移动推送）也绕不开**：它们在 iOS 上同样是转手
 APNs，只是替你做签名、token 管理、失效重注册与送达回执——那 $99 省的只是开发量，不是费用。
