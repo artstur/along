@@ -564,3 +564,102 @@ test('only this projection version can resume its interrupted execution replay c
   const w=createEventWorkspace({config});await w.sync();assert.equal(after[0],marker===2?40:0);const cache=JSON.parse(localStorage.getItem(key));assert.equal(cache.executionVersion,2);assert.equal(cache.executionReplayVersion,undefined);
  }
 });
+
+test('the chat waiting state follows the newest input and only its own visible reply ends it',async()=>{
+  const goal={id:'g_wait',domain:'custom',status:'active',revision:1,title:'等待目标',metric:null,context:[],tasks:[]};
+  const other={id:'g_other',domain:'custom',status:'active',revision:1,title:'另一个目标',metric:null,context:[],tasks:[]};
+  const wire={goal:{id:goal.id,domain:'custom',status:'active',currentRevision:1},
+    revision:{goalId:goal.id,revision:1,title:goal.title,status:'active'},tasks:[]};
+  const key='along.event-workspace.v1:'+config.userId;
+  const seed={version:1,recommendationsVersion:1,conversationVersion:1,dataSourcesVersion:1,executionVersion:2,
+    taskCapabilityVersion:1,resultPresentationVersion:1,userId:config.userId,cursor:0,activeGoalId:goal.id,
+    conversationId:null,returnGoalId:goal.id,goals:{[goal.id]:goal,[other.id]:other},messages:{},drafts:{}};
+  installDomStub({storage:{[key]:JSON.stringify(seed)}});
+  let items=[];
+  window.AlongAgentBridge={request:async input=>{
+    if (input.path==='/events') return {status:'accepted',event_id:input.body.event_id};
+    if (input.path==='/sync') return {items:items.filter(item=>item.seq>input.body.after_seq)};
+    if (input.path==='/sync/ack') return {acked:input.body.seqs.length};
+    throw Error(input.path);
+  }};
+  const workspace=createEventWorkspace({config});
+  const sent=await workspace.submit('今晚想早点睡');
+  assert.equal(workspace.view().awaiting?.eventId,sent,'刚提交的原话立即进入等待');
+  await workspace.sync();
+  assert.equal(workspace.view().awaiting?.eventId,sent,'送达后仍在等待回复');
+  items=[
+    {seq:1,userId:config.userId,kind:'message',goalId:goal.id,payload:{snapshot:wire,presentation:'execution',
+      message:{id:'msg_exec',eventId:'out:wait:worker',role:'assistant',direction:'outbound',text:'后台执行完成',seq:1}}},
+    {seq:2,userId:config.userId,kind:'message',goalId:goal.id,payload:{snapshot:wire,conversation_id:'another_chat',
+      message:{id:'msg_other',eventId:'reply_other',role:'assistant',direction:'outbound',text:'其他会话的回复',seq:2}}},
+  ];
+  await workspace.sync();
+  assert.equal(workspace.view().awaiting?.eventId,sent,'后台结果和其他会话的回复都不会提前结束等待');
+  workspace.select(other.id);
+  assert.equal(workspace.view().awaiting,null,'切到其他目标时不显示原请求的等待');
+  workspace.select(goal.id);
+  assert.equal(workspace.view().awaiting?.eventId,sent,'回到原目标时等待仍在');
+  items.push({seq:3,userId:config.userId,kind:'message',goalId:goal.id,payload:{snapshot:wire,
+    message:{id:'msg_user',eventId:sent,role:'user',direction:'inbound',text:'今晚想早点睡',seq:3}}});
+  await workspace.sync();
+  assert.equal(workspace.view().awaiting?.eventId,sent,'服务端回显原话后仍在等待答复');
+  items.push({seq:4,userId:config.userId,kind:'message',goalId:goal.id,payload:{snapshot:wire,conversation_id:sent,
+    message:{id:'msg_reply',eventId:'reply_wait',role:'assistant',direction:'outbound',text:'那就十一点前放下手机',seq:4,causationId:sent}}});
+  await workspace.sync();
+  assert.equal(workspace.view().awaiting,null,'同一会话的可见回复结束等待');
+});
+
+test('a newer input supersedes the earlier request so no stale waiting outlives its answer',async()=>{
+  installDomStub();
+  window.AlongAgentBridge={request:async input=>{
+    if (input.path==='/events') return {status:'accepted',event_id:input.body.event_id};
+    if (input.path==='/sync') return {items:[]};
+    if (input.path==='/sync/ack') return {acked:0};
+    throw Error(input.path);
+  }};
+  const workspace=createEventWorkspace({config});
+  const first=await workspace.submit('第一句');
+  const second=await workspace.submit('第二句');
+  assert.equal(workspace.view().awaiting?.eventId,second,'等待跟随最新原话');
+  const root=workspace.view().conversationId;
+  window.AlongAgentBridge.request=async input=>{
+    if (input.path==='/sync') return {items:[
+      {seq:1,userId:config.userId,kind:'message',payload:{message:{id:'msg_first',eventId:first,role:'user',direction:'inbound',text:'第一句',seq:1}}},
+      {seq:2,userId:config.userId,kind:'message',payload:{message:{id:'msg_second',eventId:second,role:'user',direction:'inbound',text:'第二句',seq:2,causationId:root}}},
+      {seq:3,userId:config.userId,kind:'message',payload:{conversation_id:root,
+        message:{id:'msg_second_reply',eventId:'reply_second',role:'assistant',direction:'outbound',text:'收到第二句',seq:3,causationId:root}}},
+    ].filter(item=>item.seq>input.body.after_seq)};
+    if (input.path==='/sync/ack') return {acked:input.body.seqs.length};
+    throw Error(input.path);
+  };
+  await workspace.sync();
+  assert.equal(workspace.view().awaiting,null,'最新原话得到回复后不再等待，也不会为被取代的旧请求保留等待');
+});
+
+test('an offline queued input shows the pending-sync state instead of a false waiting row',async()=>{
+  installDomStub();
+  window.AlongAgentBridge={request:async()=>{throw Error('offline');}};
+  const workspace=createEventWorkspace({config});
+  const sent=await workspace.submit('离线的一句话');
+  await workspace.sync();
+  assert.notEqual(workspace.view().error,'');
+  assert.ok(pendingEvents(config).some(item=>item.event_id===sent));
+  assert.equal(workspace.view().awaiting,null,'明确的离线待同步不再声称 Agent 正在回复');
+  assert.equal(workspace.view().messages.find(message=>message.eventId===sent).status,'pending');
+});
+
+test('a rejected input ends the waiting state instead of leaving it spinning',async()=>{
+  installDomStub();
+  window.AlongAgentBridge={request:async input=>{
+    if (input.path==='/events') return {status:'rejected',event_id:input.body.event_id,reason:'invalid_envelope'};
+    if (input.path==='/sync') return {items:[]};
+    if (input.path==='/sync/ack') return {acked:0};
+    throw Error(input.path);
+  }};
+  const workspace=createEventWorkspace({config});
+  const sent=await workspace.submit('会被拒绝的一句话');
+  assert.equal(workspace.view().awaiting?.eventId,sent);
+  await workspace.sync();
+  assert.equal(workspace.view().awaiting,null);
+  assert.equal(workspace.view().messages.find(message=>message.eventId===sent).status,'rejected');
+});

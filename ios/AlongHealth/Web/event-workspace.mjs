@@ -227,6 +227,30 @@ function localResult(item,remote) {
   return {eventId:n.event_id,kind:n.kind,goalId:item.goalId,taskId:item.taskId??undefined,revision:n.revision,createdAt:item.createdAt,...(resultEvidence(item.payload)?{evidence:resultEvidence(item.payload)}:{})};
 }
 
+// 等待态从持久缓存派生，不放在页面的瞬时变量里：同步和重渲染后仍然成立，重启后也能接着显示。
+// 只有可见范围内最新的一条原话还等着答复——更新的原话会取代它（服务端把旧工作判为 conflicted_input），
+// 而答复总是落在同一会话里、排在原话之后。本机刚提交、还没有服务端 seq 的原话视为最新。
+function awaitingReply(messages,pending,error,inScope) {
+  const visible=message=>message.audience!=='background'&&message.presentation!=='execution';
+  let request;
+  for (const message of messages) {
+    if (message.role!=='user'||!visible(message)||!inScope(message)) continue;
+    if (!request) {request=message;continue;}
+    const prior=version(request.seq)?request.seq:null,seq=version(message.seq)?message.seq:null;
+    // 本机待回显的原话比任何已存记录都新；两条都还没 seq 时按缓存插入顺序取后一条。
+    if (prior===null) {if (seq===null) request=message;continue;}
+    if (seq===null||seq>=prior) request=message;
+  }
+  if (!request||request.status==='failed'||request.status==='rejected') return null;
+  // 队列里还在、同步也已报错，是明确的离线待同步，不再声称 Agent 正在回复。
+  if (pending.has(request.eventId)&&error) return null;
+  // 没有 seq 说明刚在本机提交，任何已存答复都早于它。
+  if (!version(request.seq)) return request;
+  const answered=messages.some(message=>message.role==='assistant'&&visible(message)&&
+    message.conversationId===request.conversationId&&version(message.seq)&&message.seq>request.seq);
+  return answered?null:request;
+}
+
 export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
   if (!id(config?.userId)) throw Error('缺少服务端绑定用户');
   bindEventAuthority(config);
@@ -326,8 +350,12 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
   }
   function view() {
     const next=recoverPending(),failures=readEventFailures(config),pending=new Set(pendingEvents(config).map(item=>item.event_id));
-    return {...next,draftScope:draftScope(next),error:lastError,messages:Object.values(next.messages).map(message=>({...message,
-      status:failures.some(item=>item.event_id===message.eventId)?'rejected':pending.has(message.eventId)?'pending':message.status}))};
+    const messages=Object.values(next.messages).map(message=>({...message,
+      status:failures.some(item=>item.event_id===message.eventId)?'rejected':pending.has(message.eventId)?'pending':message.status}));
+    // 与页面可见历史同一范围：已选目标按目标，未绑定目标时按当前会话。
+    const inScope=message=>next.activeGoalId==null?message.conversationId===next.conversationId:message.goalId===next.activeGoalId;
+    return {...next,draftScope:draftScope(next),error:lastError,messages,
+      awaiting:awaitingReply(messages,pending,lastError,inScope)};
   }
   function draftScope(value=state) {
     const conversationScope = `conversation:${value.conversationId??'new'}`;

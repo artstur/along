@@ -705,3 +705,57 @@ test('a quiet Agent time task shows execution arrangement rather than claiming a
   await dom.click({action:'event-task-back'});await dom.click({action:'event-task-detail',taskId:'t_execute_waiting'});
   assert.match(dom.app.innerHTML,/执行时间待补/);assert.doesNotMatch(dom.app.innerHTML,/提醒时间待补/);
 });
+
+const waitingGoal={id:'g_wait_ui',domain:'custom',status:'active',revision:1,title:'等待目标',metric:null,context:[],tasks:[]};
+const waitingSnapshot={goal:{id:waitingGoal.id,domain:'custom',status:'active',currentRevision:1},
+  revision:{goalId:waitingGoal.id,revision:1,title:waitingGoal.title,status:'active'},tasks:[]};
+function waitingApp(storage={}) {
+  const saved={version:1,userId:'u_app_b',cursor:0,activeGoalId:waitingGoal.id,conversationId:null,returnGoalId:waitingGoal.id,
+    goals:{[waitingGoal.id]:waitingGoal},messages:{},drafts:{}};
+  const dom=installDomStub({storage:{'along.agent.v1':JSON.stringify(config),
+    [`along.event-workspace.v1:u_app_b`]:JSON.stringify(saved),...storage}});
+  document.visibilityState='visible';
+  const bridge={syncItems:[]};
+  const requests=installEventBridge(bridge);
+  return {dom,bridge,requests};
+}
+const submitChat=(dom,message)=>dom.app.dispatch('submit',{target:{id:'agent-form',fields:{message},
+  querySelector:()=>null,reset(){},setAttribute(){}},preventDefault(){}});
+
+test('a submitted chat keeps an accessible waiting row until its own visible reply arrives',async()=>{
+  const {dom,bridge,requests}=waitingApp();
+  await import(`../web/app.mjs?chat-waiting=${Date.now()}`);await settle();
+  await dom.click({action:'event-chat'});
+  await submitChat(dom,'帮我安排今晚的睡前提醒');await settle();
+  const sent=requests.find(item=>item.path==='/events').body.event_id;
+  assert.match(dom.app.innerHTML,/Agent 正在回复…/,'提交后立即显示等待');
+  assert.match(dom.app.innerHTML,/agent-thinking[\s\S]*role="status"|role="status"[\s\S]*agent-thinking/,'等待提示可被辅助技术读出');
+  bridge.syncItems=[
+    {seq:1,userId:'u_app_b',kind:'message',goalId:waitingGoal.id,payload:{snapshot:waitingSnapshot,presentation:'execution',
+      message:{id:'msg_exec_ui',eventId:'out:wait:worker',role:'assistant',direction:'outbound',text:'后台执行完成',seq:1}}},
+    {seq:2,userId:'u_app_b',kind:'message',goalId:waitingGoal.id,payload:{snapshot:waitingSnapshot,conversation_id:'another_chat',
+      message:{id:'msg_other_ui',eventId:'reply_other_ui',role:'assistant',direction:'outbound',text:'其他会话的回复',seq:2}}},
+  ];
+  await dom.tick(3000);await settle();
+  assert.match(dom.app.innerHTML,/Agent 正在回复…/,'同步和重渲染后仍在，后台与其他会话的消息不会提前清除');
+  bridge.syncItems.push({seq:3,userId:'u_app_b',kind:'message',goalId:waitingGoal.id,payload:{snapshot:waitingSnapshot,
+    message:{id:'msg_user_ui',eventId:sent,role:'user',direction:'inbound',text:'帮我安排今晚的睡前提醒',seq:3}}});
+  bridge.syncItems.push({seq:4,userId:'u_app_b',kind:'message',goalId:waitingGoal.id,payload:{snapshot:waitingSnapshot,conversation_id:sent,
+    message:{id:'msg_reply_ui',eventId:'reply_wait_ui',role:'assistant',direction:'outbound',text:'十一点前放下手机',seq:4,causationId:sent}}});
+  await dom.tick(3000);await settle();
+  assert.doesNotMatch(dom.app.innerHTML,/Agent 正在回复…/,'当前请求的可见回复结束等待');
+  assert.match(dom.app.innerHTML,/十一点前放下手机/);
+});
+
+test('a failed chat ends the waiting row and keeps the failure feedback',async()=>{
+  const {dom,bridge,requests}=waitingApp();
+  await import(`../web/app.mjs?chat-waiting-failed=${Date.now()}`);await settle();
+  await dom.click({action:'event-chat'});
+  await submitChat(dom,'这条发送会失败');await settle();
+  const sent=requests.find(item=>item.path==='/events').body.event_id;
+  assert.match(dom.app.innerHTML,/Agent 正在回复…/);
+  bridge.syncItems=[{seq:1,userId:'u_app_b',kind:'delivery_failed',payload:{event_id:sent}}];
+  await dom.tick(3000);await settle();
+  assert.doesNotMatch(dom.app.innerHTML,/Agent 正在回复…/,'失败后结束等待');
+  assert.match(dom.app.innerHTML,/发送未完成/,'保留原有的失败反馈');
+});
