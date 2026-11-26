@@ -13,7 +13,7 @@
 
 ## 2. 一份源码，两份产物
 
-没有打包器。`web/` 是前端唯一源码，`host/` 是 Mac 上运行的服务，`test/` 是测试，`tools/` 是构建与图标脚本。`npm run build` 按 `tools/build.mjs` 的 `files` 白名单，把 `web/` 里的文件复制到 `dist/`（GitHub Pages）和 `ios/AlongHealth/Web/`（App 内置页面）。
+没有打包器。`web/` 是前端唯一源码，`host/` 是 Mac 和云端共用的服务，`test/` 是测试，`tools/` 是构建与图标脚本。`npm run build` 按 `tools/build.mjs` 的 `files` 白名单，把 `web/` 里的文件复制到 `dist/`（GitHub Pages）和 `ios/AlongHealth/Web/`（App 内置页面）。
 
 - 不要手改这两个产物目录，改了会被下次 build 覆盖。
 - 新增前端文件放进 `web/`，并同时登记到 `tools/build.mjs` 的 `files` 和 `web/sw.js` 的 `FILES`。漏登记会导致产物缺文件，或者离线时打不开。`web/` 内保持平铺：产物目录也是平铺的，App 和 Service Worker 都按平铺路径取文件。
@@ -32,10 +32,11 @@
 
 - Agent 工程统一称为 **Along Agent**；本地目录沿用 `../along-superagent/`，包名与插件 ID 沿用 `dsh-superagent`。
 
-- Agent 有两种运行时，在 `web/super-agent.mjs` 里定义：`dsh-superagent` 和 `kimi-code-swarm`。用户没选过时，前端默认用 Kimi。Host 的路由在 `host/agent-host.mjs`。
+- `ALONG_EVENT_INGEST=on` 的事件工作区使用 Along Agent，App 配对后自动协商。仅旧 Host 兼容路径有 `dsh-superagent` / `kimi-code-swarm` 双运行时，前端未选过时默认 Kimi；定义在 `web/super-agent.mjs`，Host 路由在 `host/agent-host.mjs`。
 - 状态目录由 `ALONG_AGENT_STATE_DIR` 决定，默认 `~/.along/agent-host/`（直接 `npm run agent-host`）；`npm run activate` 用 `~/.along/phone-test/`；云端部署用挂载卷（`/opt/along/data/host`）。环境变量见 `README.md` 与 `deploy/env.example`。
-- 云端部署形态（一台云主机 + Docker Compose、2 个静态用户、每用户一次性配对码）的设计、决策与上线 Runbook 见 `docs/cloud-deploy-multi-user.md`。Mac 本地模式完全保留且行为不变，作为回退路径；云端与本地共用同一套源码，不新增模式开关。
-- 目标方向是全链路自动化：Agent 结果校验后自动生效，目标只能通过聊天改变。现有代码里的「采用」流程、待采用提案和目标编辑入口是待迁移的旧行为；方案见 `../along-superagent/docs/along/`。改到相关代码时按第 5 节迁移，不要再新增采用、确认或审批环节。
+- 云端部署形态（一台云主机 + Docker Compose、2 个静态用户、每用户一次性配对码）的设计、决策与上线 Runbook 见 `docs/cloud-deploy-multi-user.md`；先从 `deploy/README.md` 选编排。云端与本地共用同一套源码，不新增模式开关。Mac 本地模式完全保留且行为不变，作为回退路径仅适用于普通 Tier 1 换端，不适用于已退役原写端的个人冷交接。
+- 普通配对或同一台 Mac 换址不是跨 Host 迁移。保留个人工作区须走 `docs/personal-workspace-handoff.md`，只允许一个业务写端；旧源退役后不得恢复写入。
+- 事件工作区已按校验后自动生效实现，目标只能通过聊天改变。「采用」、待采用提案和目标编辑入口仅用于旧 Host 兼容；不要在新链路增加采用、确认或审批环节。
 
 ## 5. 红线
 

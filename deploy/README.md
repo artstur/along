@@ -1,8 +1,12 @@
 # deploy/ — Along 云端部署产物
 
-对应设计 `docs/cloud-deploy-multi-user.md`（拓扑 §3.1、本模块 §4-M5、验收 #5/#10、Runbook §6.4）。**上线步骤以 Runbook §6.4 为准**，本文只写产物自身的口径与自检。
+先按目标选择编排，不把不同形态的证书、路径或版本来源混用：
 
-固定公网 IPv4 入口按本文的[独立运维步骤](#固定公网-ipv4-直连)执行。
+- **Tier 1 兼容路径**：`docker-compose.yml`，事件接入关闭，按[多用户 Runbook §6.4](../docs/cloud-deploy-multi-user.md#64-上线-runbook由用户手动执行)。
+- **Tier 2 事件工作区**：基础 Compose 加 `docker-compose.tier2.yml`，按[开启与回退 §6.5](../docs/cloud-deploy-multi-user.md#tier2-runbook)。固定公网 IPv4 按下文[独立运维步骤](#固定公网-ipv4-直连)。
+- **Linux 实测栈**：`docker-compose.cloud.yml` 是独立三容器编排，不是叠加文件；其端口、宿主 nginx、证书与卷按 [Host 云端部署经验](../docs/host-cloud-deploy.md) 核对。该文件的 `ALONG_SUPERAGENT_SOURCE` 默认取相邻 checkout；复现时显式指定经验证的提交，不把本地 HEAD 当固定版本。
+
+已有个人事件工作区要保全历史和待发时，按[冷交接契约](../docs/personal-workspace-handoff.md)处理；不要把初次发码和普通重新配对当成迁移步骤。
 
 ## 文件清单
 
@@ -63,7 +67,7 @@ Host 通过私有回环探测 `/along-source/api/goals/along-status-probe`，带
 
 ### 上游来源是钉死的提交
 
-两个镜像的构建输入都取
+基础 Compose 中两个镜像的构建输入都取
 `${ALONG_SUPERAGENT_SOURCE:-https://github.com/artstur/along-superagent.git#<40 位提交>}`，
 **不指向相邻 checkout 的工作区**：那个 HEAD 是可变的，运维切个分支镜像就跟着变，
 而旧版探针恒答 200，Host 侦测不到装错版本——镜像里若是没有就绪修复的 bundle，

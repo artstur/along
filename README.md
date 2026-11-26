@@ -45,9 +45,9 @@ Along 把一个目标拆成三样东西，并让它们保持联动：
 
 ## 新架构与实现状态
 
-阶段 C 已接入健康事件自动跟进：在新协议目标页复用 Apple Health 连接卡，导入并允许 Agent 使用所选摘要后，手机在前台及系统允许的后台机会自动补传；Mac 按目标筛选变化并自动建评估工单，经校验调整任务。无须再发聊天，也无采用步骤。原始样本仍留在手机。设计、验证与真机边界见 [阶段 C](docs/stage-c-tech-design.md)。
+阶段 C 已接入健康事件自动跟进：在目标页授权所选 Apple Health 摘要后，iPhone 在前台及系统允许的后台机会自动补传；服务端按目标筛选变化并建立评估工单，经校验调整任务。无须再发聊天，也无采用步骤。原始样本仍留在手机。设计与验收见 [阶段 C](docs/stage-c-tech-design.md)。
 
-新方案以 [Along 本地 Agent 系统架构](https://github.com/artstur/along-superagent/blob/main/docs/along/001-architecture.md) 为准：首期自用，Mac 上运行 Along Host、Along Agent（基于 DSH Super Agent）与可选的 Hy-Memory，iPhone 提供聊天和授权健康摘要。Mac 保存业务状态，手机保留离线缓存与待同步事件。记忆提取已接入定时维护；完整复盘与 Skill 自动整理仍待实现。
+Along Host 负责配对与协议代理，Along Agent（基于 DSH Super Agent）保存业务状态并执行编排；iPhone 提供聊天、授权摘要、离线缓存和待同步队列。新事件链路可在 Mac 本机或启用事件接入的云端栈运行。两种形态及验收入口见[架构与开发入口](docs/agent-architecture.md)。
 
 已确定的交互边界：
 
@@ -60,13 +60,11 @@ Along 把一个目标拆成三样东西，并让它们保持联动：
 - **首期按本人自用简化**。不做额外的健康授权撤回及关联历史数据清理流程，系统数据不可用时仍正常处理。
 - **不设应用侧模型用量上限**。不设每日预算或累计调用额度；批量作业、超时和失败重试仍按技术方案运行。
 
-Along Agent 的本地工程目录为 `../along-superagent/`，包名与插件 ID 保留 `dsh-superagent`。当前源码、方案与验证记录已进入该仓库的 `main`；历史记录中的分支名和测试条数只对应当时快照。
-
-**阶段 A 基座与阶段 B 最小聊天闭环已有实现，尚未完成真机验收。** Host 开启新事件链路后，App 自动协商使用 DSH：原话可靠入队，目标和任务在校验后自动生效，页面同步展示，你通过聊天纠正。这条链路没有采用、直接编辑或删除入口。健康新协议、长期记忆 Runtime 接线与定时记忆维护已在后续实现；完整复盘、Skill 自动发布与回退、记忆长期质量及迁移恢复仍待完成或验收。旧 Host 兼容路径继续使用下文描述的双运行时和采用流程；旧手机数据保留，本轮不自动导入新库。范围、配置和验收见 [阶段 B 设计](docs/stage-b-tech-design.md) 与 [实施与验收](https://github.com/artstur/along-superagent/blob/main/docs/along/003-implementation.md)。
+启用事件接入后，App 自动协商使用 Along Agent。旧 Host 保留双运行时和采用相关流程；云端 Tier 1 的 DSH Runner 也能自动应用经校验的目标对话结果，但不提供事件工作区。Linux 云端已记录一轮真实模型建目标与容器重建持久化验证，这不等于个人工作区交接、自然健康补传或通知送达均已验收。
 
 ## 能体验什么
 
-以下双运行时与演示入口属于旧 Host 兼容路径；`npm run activate` 启用的新事件链路由 Along Agent 自动维护目标，不显示采用或直接编辑入口。
+以下演示入口属于旧 Host 兼容路径；新事件链路由 Along Agent 自动维护目标，不显示采用或直接编辑入口。
 
 顶部下拉即可在目标之间切换。一屏只做一件事：看清进度，知道下一步。
 
@@ -122,6 +120,7 @@ flowchart LR
 真机连接新架构，在仓库根目录执行：
 
 ```sh
+npm install
 npm run activate
 ```
 
@@ -169,7 +168,7 @@ Along 本地部署启用 Along Source 并关闭 GitHub Source，不需要 GitHub
 
 ### 和 iPhone 配对
 
-`npm run agent-host` 启动后，终端会打印三样东西：
+本机使用 `npm run activate`（事件工作区）或 `npm run agent-host`（默认兼容模式）时，使用终端给出的三项信息：
 
 ```text
 局域网 HTTPS 地址     https://192.168.x.x:4176
@@ -177,7 +176,7 @@ Along 本地部署启用 Along Source 并关闭 GitHub Source，不需要 GitHub
 一次性配对码          15 分钟内有效
 ```
 
-在 iPhone App 的目标编辑页填入这三项即可开始问答，只需首次填写；之后正常重启、升级或重新安装 App 都会自动恢复。iPhone 需要和 Mac 在同一 Wi-Fi。
+在 iPhone App 的配对入口填写这三项，并确保手机可访问 Mac（例如同一 Wi-Fi）。云端新配对使用部署提供的 HTTPS 地址、一次性配对码和对应的系统信任策略；系统信任入口不填叶指纹。已有个人事件工作区要保留历史、待发与提醒时，不要直接换址或重新配对，走[受保护的冷交接](docs/personal-workspace-handoff.md)。
 
 iPhone App 的签名、安装与 HealthKit 读取口径见 [ios/README.md](ios/README.md)。
 
@@ -213,10 +212,10 @@ Along 处理的是健康这类敏感数据，所以边界写得很死：
 | 原则 | 具体做法 |
 | --- | --- |
 | 授权的数据范围 | 旧授权限于已选的周运动总时长。确认导入情境评估后，Agent 可收到所选健康类型的汇总、当前计划、观察变化和近期反馈 |
-| 健康数据范围 | 新事件链路在 Mac 保存授权摘要，手机保存本地摘要及待同步事件；原始 HealthKit 样本仍留在手机 |
+| 健康数据范围 | 新事件链路在已配对的服务端保存授权摘要，手机保存本地摘要及待同步事件；原始 HealthKit 样本仍留在手机 |
 | 凭证只留服务端 | Kimi、模型、桥接、APNs 凭证只保存在服务端安全存储（Mac 或云主机的卷/secrets/env），绝不发给 iPhone 或网页，也不写进运行结果和日志；配对 token 只在配对响应出现一次，服务端只存哈希 |
-| 部署面收敛 | Mac 本地模式默认只绑定 Mac 的 Wi-Fi 地址，没有公网通道，退出终端即停止；云端部署只开放 443 一个端口（[云端部署与多用户](docs/cloud-deploy-multi-user.md)），配对码另有按来源（连接 IP）失败限速 |
-| TLS 信任 | Mac 私网：服务端启动时现场自签，iPhone 原生网络层校验叶指纹后才传输。云端：服务端读预签发的 CA 叶证书（带 DNS SAN），iPhone 按系统信任评估校验链/主机名/有效期——根证书经描述文件安装并开启完全信任，叶证书可轮换而不必重新配对（[CA 方案](docs/iphone-ca-profile-design.md)）。两种形态连接后都使用随机令牌 |
+| 部署面收敛 | Mac 本地模式默认不发布公网入口。基础云端 Compose 对外只开放 443 一个端口提供 Along 服务；公共 IP 叠加另开放 80 用于 HTTP-01。其他实测入口见[部署说明](deploy/README.md)。云端配对码另有按来源（连接 IP）失败限速 |
+| TLS 信任 | Mac 私网：服务端启动时现场自签，iPhone 原生网络层校验叶指纹后才传输。云端：服务端读预签发的 CA 叶证书；若由 nginx 终止公网 TLS，手机校验 nginx 的证书。iPhone 按系统信任评估校验链/主机名/有效期，公网 IPv4 核对 IP SAN。仅私有 CA 需要安装根描述文件并开启完全信任（[CA 方案](docs/iphone-ca-profile-design.md)） |
 | 通过聊天纠正 | 新事件链路与云端目标聊天的变更经校验后自动生效。Mac 旧兼容链路保留原有采用流程 |
 | 忘记与历史分开 | 新架构中「忘记这件事」撤回对应记忆，不删除历史聊天；旧聊天不能重新激活已撤回的记忆 |
 
@@ -233,14 +232,15 @@ Along 处理的是健康这类敏感数据，所以边界写得很死：
 │   ├── workspace.mjs  adaptive-ui.mjs     # 目标空间与自适应布局校验
 │   ├── goal-agent-core.mjs                # Agent 回复解析、路由与校验
 │   └── super-agent.mjs  agent-client.mjs  # 运行时定义与前端 Agent 客户端
-├── host/                                  # 在 Mac 上运行的服务
+├── host/                                  # Mac 和云端共用的服务源码
 │   ├── agent-host.mjs                     # HTTPS Agent Host
 │   ├── kimi-code-agent.mjs  codex-agent.mjs # 各 Agent 运行时适配
 │   ├── server.mjs                         # npm run dev 本地服务
 │   └── schemas/                           # Agent 输出的 JSON Schema
 ├── test/                                  # *.test.mjs，npm run check 自动运行
 ├── tools/                                 # build.mjs 构建脚本
-└── ios/                                   # iPhone App（HealthKit + WKWebView）
+├── ios/                                   # iPhone App（HealthKit + WKWebView）
+└── deploy/                                # 云端部署入口
 ```
 
 `host/` 会从 `../web/` 引用共享校验逻辑，所以这些共享文件必须同时能在浏览器和 Node 里运行。
@@ -273,15 +273,13 @@ iPhone 在已同步的任务到点时提醒。Mac 上的 Agent 得出需要告�
 
 Host 逐事件保存待发记录。APNs 拒收或短时失败后，已授权 iPhone 下次拉取同步页也能接手近期推荐，即使业务游标已经前进；原生处理后返回回执。到期提醒的远程补送及结果交接只在十分钟有效期内重试。提供方接受请求和设备确实展示分别验收。
 
-本次配套的 Along Agent 发布源码固定为 `b79fccc93f63dd9cdcd219401a4a1b654d6a5152`（[Agent PR #3](https://github.com/artstur/along-superagent/pull/3)，依赖 [#2](https://github.com/artstur/along-superagent/pull/2)）。从该提交单独构建并安装到 along-phone profile。业务库由 Schema 4 原位升级至 5，切换前停写备份。旧版无法打开新版库，已有新写入时应先保全数据再评估回退。
-
 ## 当前边界
 
 坦白说，这还是一个 Demo，下面这些是有意为之或尚未完成的：
 
-- **健康更新按授权触发**。新事件链路由原生层统一补传所选类型的摘要，在前台读取或 iOS 提供后台执行机会时上传；Mac 按已有目标独立筛选与跟进。锁屏读取、系统唤醒与网络可达仍受环境限制，真机边界见[阶段 C](docs/stage-c-tech-design.md)。旧 Host 的逐目标后台评估是兼容流程。
+- **健康更新按授权触发**。锁屏读取、系统唤醒与网络可达仍受环境限制，真机边界见[阶段 C](docs/stage-c-tech-design.md)。旧 Host 的逐目标后台评估是兼容流程。
 - **通知由 iOS 处理**。新事件链路维护已同步任务的本地预约，明确的推荐与任务结果可走配对通知通道；普通进度和 keep 保持安静。APNs 需要对应签名与 Host 配置，预约成功、提供方接单、设备展示与点开应分别验收，详见[新协议通知](#新协议任务通知与到期复查)。旧 Host 仍保留采用后的提醒兼容流程。
-- **Agent 依赖 Mac**。Mac 关闭或网络断开时，首页确定性进度照常更新，Agent 问答和任务提案显示不可用；GitHub Pages 是静态站，无法常驻生成进程。
+- **新一轮 Agent 处理依赖配对 Host 和运行时可达**。本机模式依赖 Mac，云端模式不要求 Mac 在线。断网仍可读已保存内容；事件工作区的待发数据待连接恢复后同步。GitHub Pages 是静态站，不运行 Agent。
 - **OKX 支持 iPhone 只读历史复盘**。其他理财示例仍为演示。原生采集近三个月有界成交与账单，保留完整/截断/不可用覆盖状态；Agent 可读取分币种费用和实际普通交易分量，策略归属与完整收益仍依赖真实成本、规则和数据覆盖。见[历史契约](docs/okx-trade-history.md)。不转账、不交易。
 - **个人团队签名**。Xcode 个人团队的配置文件通常 7 天后到期，需要重新构建安装。
 
