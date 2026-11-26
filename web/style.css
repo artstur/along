@@ -13,6 +13,9 @@ h1, h2, h3, p { margin: 0; }
 p { line-height: 1.5; }
 
 .app-shell { min-height: 100vh; }
+.along-native #app { position: fixed; inset: 0; overflow: hidden; overflow-y: auto; overscroll-behavior: none; scroll-padding-top: 64px; }
+.along-native .app-shell:not(.agent-shell) { min-height: 100%; }
+.along-native .topbar { position: sticky; top: 0; z-index: 1; }
 .topbar { height: 64px; border-bottom: 1px solid #eaeae9; background: #fff; }
 .topbar-inner { max-width: 620px; height: 100%; padding: 0 24px; margin: auto; display: flex; align-items: center; justify-content: space-between; }
 .brand { display: flex; align-items: center; gap: 8px; font-size: 20px; font-weight: 650; letter-spacing: -.65px; }
@@ -248,6 +251,7 @@ footer { padding: 0 0 26px; color: #aaa; text-align: center; font-size: 10px; }
 .task-proposal p { color: #666; font-size: 12px; margin: 8px 0 14px; }
 .task-proposal .button { margin-right: 6px; }
 .agent-shell { display: flex; height: var(--agent-viewport-height,100dvh); overflow: hidden; flex-direction: column; }
+.along-native .agent-shell { min-height: 0; }
 .agent-shell .topbar { flex: 0 0 64px; }
 .agent-page { display: flex; width: 100%; min-height: 0; margin: 0 auto; padding-top: 0; padding-bottom: 0; overflow: hidden; flex: 1; flex-direction: column; }
 .agent-scroll { min-height: 0; padding-top: 23px; padding-bottom: 10px; overflow-x: hidden; overflow-y: auto; flex: 1; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
@@ -312,6 +316,7 @@ footer { padding: 0 0 26px; color: #aaa; text-align: center; font-size: 10px; }
 .agent-disclaimer { margin: 7px 8px 0; color: #999; text-align: center; font-size: 9px; }
 
 @media (max-width: 600px) {
+  .along-native #app { scroll-padding-top: 58px; }
   .topbar { height: 58px; }
   .topbar-inner { padding: 0 20px; }
   .content { padding: 22px 18px 48px; }

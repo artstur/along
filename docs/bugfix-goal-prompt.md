@@ -193,6 +193,8 @@ Along 是手机优先的目标工作台：把一个目标拆成「目标 / 来�
 
 ## 7. 这个仓库已经踩过的坑（别再踩一遍）
 
+- **外层和内容区要分别验证滚动**。沿用文档滚动会把 App 顶部栏带走，WKWebView 外层回弹也会拖动短页面。改用内层滚动后，任务结果同步要读回同一个滚动容器。软键盘缩小时检查聊天的实际高度，`min-height: 100vh` 会覆盖按可视视口计算的高度。
+
 - **交接必须保留手机实际使用的通知namespace**：它可能来自更早的传输身份，不能从当前URL／凭据重新推导。prepared／committed journal须捕获合法的当前偏好；已有committed修复绑定原签名、manifest和当前Keychain目标，按已提交授权恢复而不是重做初次签名时效检查。系统提醒清理按namespace＋user＋goal/task的精确requestID归属，不把全部`along.event.task.*`视作当前用户排程。
 
 - **模型的执行时限和手机的网络时限要分开**：Cloud Runner 接单后先返回可查询的 `working` 回执，再在后台完成模型调用。用真实 Host 与 Runner 验证首个回执和终态，App 关闭或首包丢失后按原号恢复。只在 DOM 桩里返回 `working` 会漏掉 Runner 仍在同步等待的问题。

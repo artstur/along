@@ -589,7 +589,7 @@ enum AlongConnectionStore {
 
 struct AlongWebView: UIViewRepresentable {
     @ObservedObject var bridge: AlongBridgeModel
-    private let site = URL(string: "along://app/index.html?build=91")!
+    private let site = URL(string: "along://app/index.html?build=92")!
 
     func makeCoordinator() -> Coordinator { Coordinator(bridge: bridge) }
 
@@ -607,6 +607,7 @@ struct AlongWebView: UIViewRepresentable {
         configuration.userContentController = controller
         configuration.setURLSchemeHandler(BundledWebSchemeHandler(), forURLScheme: "along")
         let webView = WKWebView(frame: .zero, configuration: configuration)
+        webView.scrollView.bounces = false
         context.coordinator.attach(webView)
         EventTaskNotifications.shared.attach(context.coordinator)
         webView.navigationDelegate = context.coordinator
