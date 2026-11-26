@@ -60,6 +60,9 @@ services:
         condition: service_started
     environment:
       DSH_HOME: /var/lib/dsh
+      # 容器默认 UTC；记忆维护批次按本地小时调度（默认 03:00），不设 TZ 会落到
+      # 03:00 UTC = 北京 11:00，与 Mac 上「夜里跑」的语义不一致。
+      TZ: Asia/Shanghai
     volumes:
       - "../../data/superagent/dsh:/var/lib/dsh"
       - "../../data/superagent/along:/var/lib/along"
