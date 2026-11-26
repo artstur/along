@@ -105,11 +105,32 @@ mkdir -p "$PROFILE_DIR/node_modules"
 ln -sfn "$BUNDLE_DIR" "$PROFILE_DIR/node_modules/dsh-superagent"
 
 # ---- 3. profile 的 patch 层 ----------------------------------------------
+# 两种 patch 来源，**仓库里的规范副本优先**：
+#   ALONG_SUPERAGENT_PATCH_FILE 指向的文件（deploy/superagent-profile.patch.yml）
+#   是仓库里的唯一真相，带 Hy-Memory 接线、模型路由与研究来源开关；文件不存在时
+#   退回下面这份精简 patch（Tier 2 自带形态，不带上面那些接线）。
+# 两种来源都只是**起点**：3b 的收紧行照旧追加在这里，所以底是哪份都不影响收紧。
+#
+# 播种写进 patch 自己声明的 stateDir（编排库 orchestrator.sqlite 所在目录）：
+# 规范 patch 写的是 /var/lib/dsh/state，精简 patch 写的是 $STATE_DIR/engine。
+# 两份 patch 的 stateDir 不同，播种跟着 patch 走才不会写错库。
+#
 # webserver 绑 127.0.0.1：管理面（/orchestrator、面板）只在本机可达（src/app/http.ts
 # 与 src/along/api.ts 都硬性要求 webserver.host === '127.0.0.1'）。
 # alongStateDir 与 alongBridgeTokenFile 是 Along 业务面的两个绝对路径配置键，缺任一
 # 都会让 Runtime 启动即抛错（src/app/runtime.ts assembleAlong）。
-cat > "$PROFILE_DIR/cordis.patch.yml" <<YAML
+PATCH_FILE="${ALONG_SUPERAGENT_PATCH_FILE:-}"
+PATCH_STATE_DIR=""
+if [ -n "$PATCH_FILE" ] && [ -f "$PATCH_FILE" ]; then
+  cp "$PATCH_FILE" "$PROFILE_DIR/cordis.patch.yml"
+  PATCH_STATE_DIR="$(sed -n 's/^    stateDir: *//p' "$PATCH_FILE" | head -n 1)"
+  if [ -z "$PATCH_STATE_DIR" ]; then
+    echo "规范 patch 里没有 stateDir，拒绝启动：$PATCH_FILE" >&2
+    exit 1
+  fi
+else
+  PATCH_STATE_DIR="$STATE_DIR/engine"
+  cat > "$PROFILE_DIR/cordis.patch.yml" <<YAML
 - id: webserver
   config:
     host: 127.0.0.1
@@ -124,6 +145,7 @@ cat > "$PROFILE_DIR/cordis.patch.yml" <<YAML
 - id: dsh-superagent-along
   disabled: false
 YAML
+fi
 
 # ---- 3b. 收紧读取面（审查 P1-1）--------------------------------------------
 #
@@ -196,7 +218,7 @@ fi
 # 为什么不用管理面 API：source:github 这一块在 GitHub Source 未安装时会被
 #「Source not found」挡掉（src/app/http.ts 的 known 判定）；直接落库绕开了这个限制，
 # 也绕开了「保存设置会触发重启」的时序。
-node /usr/local/bin/along-superagent-seed.mjs "$STATE_DIR/engine" || exit 1
+node /usr/local/bin/along-superagent-seed.mjs "$PATCH_STATE_DIR" || exit 1
 
 # ---- 5. 常驻 --------------------------------------------------------------
 exec "$CLI_DIR/node_modules/.bin/dsh" --profile "$PROFILE" --no-open
