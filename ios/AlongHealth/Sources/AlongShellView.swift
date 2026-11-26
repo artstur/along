@@ -607,6 +607,7 @@ struct AlongWebView: UIViewRepresentable {
         configuration.userContentController = controller
         configuration.setURLSchemeHandler(BundledWebSchemeHandler(), forURLScheme: "along")
         let webView = WKWebView(frame: .zero, configuration: configuration)
+        webView.scrollView.bounces = false
         context.coordinator.attach(webView)
         EventTaskNotifications.shared.attach(context.coordinator)
         webView.navigationDelegate = context.coordinator
