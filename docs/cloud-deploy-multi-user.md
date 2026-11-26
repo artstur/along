@@ -1,6 +1,6 @@
 # Along 云端部署与多用户方案（2 人）
 
-> **2026-11-21 TLS 决策修订，尚未实施**：用户已选择 [iPhone 安装 CA 描述文件并启用系统完全信任](iphone-ca-profile-design.md)。云端目标改为 Along 专用根签发短期 SAN 叶、URLSession 系统信任评估，取代十年自签叶指纹钉扎和此前 App 内专用锚建议。本文的现状代码、历史测试与 Compose 快照不表示新路线已实现；首次信任、旧连接迁移、安装/移除、换证及失窃恢复以该专项方案为准。生产域名、根保管和双手机切换条件仍待确定，本轮只更新设计，不生成密钥或部署。
+> **使用前先选拓扑**：本文保留 2026-11-20 的多用户设计与分层 Runbook。现行编排从[部署入口](../deploy/README.md)选择；私有 CA 的系统信任与旧指纹迁移见 [CA 专项](iphone-ca-profile-design.md)，公共 CA 的固定公网 IP 入口不要求安装私有根。源码支持不等于当前环境已部署或真机已验收。
 
 > 2026-11-20。把 host 与 agent 链路从「Mac 本机单用户」迁到「云服务器 + Docker Compose」，并支持 2 个用户。部署形态已拍板：一台云主机（如阿里云 ECS）+ Docker Compose，本文档产出全部代码与配置的设计，实际登录用户云服务器执行部署不在本轮范围（由 Runbook §6.4 交给用户手动执行）。本文不放宽任何红线（AGENTS.md §5）；对规格未拍板的点以 `SD-n` 编号给出决策与理由（§7），实施中方案有变化须回写本文（AGENTS.md §3）。
 >
@@ -52,8 +52,8 @@ Tier 2 追加 Compose 叠加文件，由 Along 独立 nginx 终止 TLS。公网 
 - **不做** 无关 UI 视觉改动。CA 迁移仅调整云端连接表单的叶指纹要求及信任失败恢复指引，沿用现有连接入口；具体见 [CA 方案 §2/§7](iphone-ca-profile-design.md)。涉及 Web 代码仍须按 AGENTS.md §2 联动版本，不能把当前历史版本号直接覆盖到并行工作树。
 - **不做** Kimi 运行时上云：Kimi Code Web Server（`kimi web`，`host/kimi-code-agent.mjs:9-10` 默认 `127.0.0.1:58627`、token 在 `~/.kimi-code/server.token`）是 Mac 本机登录态服务，无云端等价物。云端它按现状自然降级为不可用（选择 Kimi 运行时时报「未找到 Kimi Code Web Server token」，与 Mac 上没启动 `kimi web` 的表现一致，`host/kimi-code-agent.mjs:143-147`），UI 的运行时切换按钮不动。预留 `ALONG_KIMI_CODE_URL` 指向可达服务即可启用，不改代码。
 - **不做** Codex 路径上云：`/goal/event` 依赖本机 Codex 二进制（`host/codex-agent.mjs:9-14`），云端镜像不安装 codex，该端点按既有语义优雅失败（「Along 暂时不可用」）；`web/` 无任何调用 `/goal/event` 的代码（本轮全库 grep 无命中），属休眠路径，上线验收时不得误判为故障（验收 #10）。
-- **不做** Hy-Memory 记忆服务上云：云端 profile 不配置 `alongMemory`，agent 仓库文档明确「Omit `alongMemory` to retain local governance and explicit SQLite fallback; this does not silently disable conversations」（`along-superagent/docs/006-deployment.md:35`），符合 D6 的降级语义（`along-superagent/docs/along/000-decisions.md:40-44`）。
-- **不迁移**新链路业务历史库（along.sqlite）到云端：云端 v1 没有 along 数据面，目标空间在手机本地（旧链路语义，见 §6.2）。
+- **基础 Tier 1 不启用 Hy-Memory**；独立 Linux 实测栈可通过 `alongMemory` 接入，见 [Host 部署经验 §6](host-cloud-deploy.md#6-hy-memory-接通真实模型下跑通)。
+- **普通配对不迁移**事件工作区的业务历史库；保全单个既有工作区走[专用冷交接](personal-workspace-handoff.md)，不复用下文 Tier 1 的换端步骤。
 
 ## 2. 现状结论（本轮已在代码中逐条核实）
 
@@ -218,7 +218,7 @@ secrets:
 
 - **Web 连接**：沿用现有连接/重新配对入口；DNS 系统策略不再要求叶指纹，Mac 私网路径保留。跨 Host 切换与 token 持久化仍遵循 Keychain 成功后启用、迟到回执隔离和云端 DSH 提示持久化。CA 同端升级与换端分开处理，不把叶换证误当换用户。
 - **iOS 改动目标**：域名 HTTPS 使用 URLSession 系统信任和 ATS，移除云端 PinnedAgentDelegate 放行逻辑；规范化地址、无凭证/path/query/fragment、路径白名单、禁重定向和 DIRECT 策略保留。连接 v2、Mac 私网 pin 兼容、Web/原生桥、健康/设备来源/通知的 fingerprint 消费点须一起迁移，详见 [CA 方案 §2](iphone-ca-profile-design.md)。安装系统根不会让旧 App 自动完成这些修改。
-- **版本联动**：当前候选 Web 版本为 82，App `CFBundleVersion` 为 73；`index.html`、Service Worker 缓存名和内置页 URL 同步更新。iPhone 需要安装新版本。
+- **版本联动**：`index.html`、Service Worker 缓存名和内置页 URL 按项目约定联动；待安装版本以该发行提交的 `ios/AlongHealth/Info.plist` 为准，不沿用本文历史候选号。
 - **健康事件 outbox 迁移口径**：outbox 绑定哈希含 baseURL（`ios/AlongHealth/Sources/HealthKitReader.swift:786-790`），换地址会归档旧 outbox 并按新绑定重建（`:819-827`）；OKX 绑定不含 baseURL（`ios/AlongHealth/Sources/PhoneSourceCoordinator.swift:513-516`，注释明写「Mac 地址变更是传输层不是新配对」）。云端 v1 不开新链路，outbox 场景仅在回退 Mac 模式时出现；Runbook 顺序把「切换前先在旧端同步清空 outbox」列为步骤（§6.4 第 8 步）。
 
 ### 3.5 agent 链路上云（Linux 运行时事实与两级形态）
@@ -348,15 +348,19 @@ secrets:
 
 ### 6.2 Mac 本地数据怎么迁
 
+> 下列步骤只用于 Tier 1 的普通重配，不保全事件工作区的授权、待发与提醒身份。个人事件工作区走[专用冷交接](personal-workspace-handoff.md)。
+
 云端 v1 **不迁移业务历史库**（along.sqlite 属 Tier 2 数据面；云端 v1 目标空间在手机本地延续）。当前 `persistAgentConfig` 仍按 token/指纹变化清背景模板并撤销每日委托；CA 同端升级须按专项方案先验证同一绑定并映射稳定 scope，不能因叶指纹消失误撤授权。真正跨 Host 的迁移/重建如下：
 
 1. **用户身份**：从实际在用的 Mac 状态目录读取 `pairings.json` 中现役绑定的 `user_id`，仅把该值写入云端 `users.json`。直接 `npm run agent-host` 默认用 `~/.along/agent-host/`，`npm run activate` 默认用 `~/.along/phone-test/host/`。旧版还未迁移时可读 `pairing.json` 的 `user_id`。旧文件只有哈希时，先用当前 Host 启动完成迁移再读。用户 B 使用新 `u_` 号。
-2. **可选历史快照**：如需在云端可见旧聊天记录，仅迁移手机本地数据（换地址自动保留）；服务器侧 `device-sources/`、`okx-connections/`、`source-events/`、`kimi-runs.json` **不拷贝上云**（原 Mac 数据保留用于回退，回退零成本）——`okx-connections/` 是可解密的 OKX 凭证库，云端多用户形态启动守卫发现它即拒绝启动（`docs/cloud-security-hardening.md` §3.1-(2)）。
+2. **旧页面历史**：旧页面的本机聊天仍在手机上，不等于已导入云端。服务器侧 `device-sources/`、`okx-connections/`、`source-events/`、`kimi-runs.json` **不拷贝上云**，原 Mac 数据保留用于回退（仅 Tier 1）。`okx-connections/` 是可解密的 OKX 凭证库，云端多用户形态启动守卫发现它即拒绝启动（`docs/cloud-security-hardening.md` §3.1-(2)）。
 3. **通知登记**：新端重新登记（App 首次连接后自动上报 APNs token，`/notifications/device`，云端 v1 也可先不配 APNs key）。
 4. **健康事件 outbox**：切换前在旧端把待同步队列清空（打开 App 等同步完成），换址后 outbox 按新绑定重建（§3.4）；云端 v1 该链路 503，原始摘要仍只在手机与 Mac。
 5. **每日委托授权随换端失效（要提前告知用户）**：重新配对（token/指纹变化）触发 `persistAgentConfig` 的 `revokeDaily()`（`web/app.mjs:111-115`），健康目标的每日委托授权被撤销；换到云端后如需情境评估的每日委托，须在新端重新确认授权——这是既有安全语义（授权跟绑定走），不是缺陷，Runbook 第 9 步后向两位用户说明。
 
 ### 6.3 迁移期间如何回退
+
+下列重配仅适用于 Tier 1，不是个人事件工作区交接的回滚办法；专用交接退役原写端后不能重启旧源写入。
 
 - **回退到 Mac**：原 Mac 数据仍在原地。用 `npm run activate` 启动原服务，在 iPhone 当前连接区选择重新配对，填写 Mac 的局域网 HTTPS 地址、证书指纹和新码。
 - 云端侧回退更简单：`docker compose down` 即停止服务，卷数据保留。
@@ -364,11 +368,13 @@ secrets:
 
 ### 6.4 上线 Runbook（由用户手动执行）
 
+本节对应基础 Tier 1；启用事件接入见 §6.5，独立 Linux 实测栈从 [deploy 入口](../deploy/README.md)进入。普通配对不执行个人工作区迁移。
+
 > **2026-11-20 定稿**：命令以本节与 deploy/README.md 为准。真实模型冒烟经过配置好的 runner，覆盖模型凭证、规划配置和隔离工作目录。
 
 > **2026-11-21 修订门槛**：先完成 CA 专项方案的代码、测试材料及真机验收准备；当前运行配置仍是旧自签实现，不能仅照此文档启动就宣称 CA 已上线。实际执行还需生产输入和部署授权，本轮均未操作。
 
-前置：一台 ECS（建议 2C4G 起，Ubuntu 22.04/24.04）、一个域名、两台已装当前候选 App 的 iPhone（`CFBundleVersion=74`）。
+前置：一台 ECS（原方案建议 2C4G 起）、一个域名、两台已装与目标信任策略匹配的 App 的 iPhone。用安装包的 `CFBundleVersion` 记录实际验收版本。
 
 1. **主机初始化**：安装 Docker（≥24）与 compose v2；安全组只开 22/443；建议启用 ECS 云盘加密；`mkdir -p /opt/along/{data/host,secrets}`（`deploy/` 由第 2 步 clone 自带；这两个目录在 git 仓库**外层**，compose 经 `../../` 相对路径引用，基准=compose 文件所在目录 deploy/，§3.1）并收紧权限：`chmod 700 /opt/along/data/host /opt/along/secrets`（默认 umask 建出的是 0755，与 §3.1 的 0700 声明不符；第 3 步的密钥文件另须 0600）。
 2. **取代码**：`git clone` 本仓库与 `along-superagent` 保持相邻布局（`/opt/along/along` + `/opt/along/along-superagent`）；`cd /opt/along/along`。

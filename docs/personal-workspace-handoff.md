@@ -12,7 +12,7 @@
 
 ## 固定接口和单写次序
 
-依赖 Along Agent [PR35](https://github.com/artstur/along-superagent/pull/35) 的交接契约和 [PR36](https://github.com/artstur/along-superagent/pull/36) 的冷停排空守卫兼容修复。2026-11-25 核实 PR36 已合入，真实main为`ccc57ba64494ce528e7c27eff5539455bb09e3e9`，deploy两种镜像的默认Agent pin均为该完整SHA。验收为两处默认构建来源一致且包含该修复，通过`npm run check`、`npm run build`及22项Web/dist/iOS资源比对；实际云部署和原工作区交接另行验收。
+Agent 侧以[冷导入和单写围栏契约](https://github.com/artstur/along-superagent/blob/main/docs/along/019-personal-cloud-handoff.md)为准。部署前核对实际构建来源包含 [PR36](https://github.com/artstur/along-superagent/pull/36) 的冷停排空守卫；基础 Compose 两处默认 `ALONG_SUPERAGENT_SOURCE` pin 均含该修复，独立 `docker-compose.cloud.yml` 默认取相邻 checkout，须另验实际输入。构建来源、实际云部署和原工作区交接分别验收。
 
 PR36 按实际Runtime的退役语义判定`health_dispatch.result=NULL`：有效关联的due/repair/source review中任一已退役时，该dispatch不再算pending，原NULL结果与全部review历史保留。真实pending（仅有active review或没有关联）、无效退役标记、无效事件ID、目标归属不符及缺失/跨作用域source引用仍阻塞交接；不能靠SQL补值或删除历史绕过守卫。schema 18、manifest、摘要、冷锁、单写围栏、Source witness和companion绑定不变。
 

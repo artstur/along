@@ -1,6 +1,6 @@
 # Along for iPhone
 
-这是一层原生 HealthKit 连接页，承载现有 Along 网页。只有人在 iPhone 上选择数据类型、看过摘要并确认后，才会把所选摘要导入这台手机上的 Along 页面。
+Along for iPhone 在内置工作区提供目标聊天、离线缓存和任务提醒，通过原生层配对 Host、管理凭据并读取用户明确授权的 Apple Health 摘要。
 
 ## 在 iPhone 上运行
 
@@ -8,13 +8,11 @@
 
 新架构真机验证可先在 Along 根目录运行 `npm run activate`，自动准备专用 DSH profile 并启动 DSH 与 Host。缺少模型或 Key 时终端会询问，Key 隐藏输入且保存在 Mac；后续启动免输。随后在 Xcode 安装 App，按终端显示的地址、指纹和连接码配对。初始化与边界见[一条命令激活](../docs/stage-b-tech-design.md#一条命令激活本机服务2026-11-16)。
 
-新聊天链路：先启动已构建的 Along DSH profile（`alongStateDir`、`alongBridgeTokenFile` 为绝对路径，Along 启用且 GitHub 关闭），再以 `ALONG_EVENT_INGEST=on`、`ALONG_BRIDGE_TOKEN_FILE` 指向同一凭证文件启动 Host。App 配对后自动识别新协议，聊天变更校验后自动展示，无需采用。构建和真机验收按 [阶段 B 设计](../docs/stage-b-tech-design.md) 执行；旧手机数据保留，本轮不自动导入新库。阶段 C 进一步接入自动健康跟进：重新构建、安装 App 后，在新协议目标页的 Apple Health 卡片连接或管理所选类型，点「导入并允许 Agent 评估」。前后台共用原生持久事件队列，Mac 自动跟进已有目标并更新任务。iOS 是否唤醒及锁屏时是否能读取仍由系统决定，解锁或回前台会重试；不承诺即时送达。资源版本 59、Bundle 52。验收见 [阶段 C](../docs/stage-c-tech-design.md)。以下双运行时和采用步骤属于旧 Host 兼容路径。
+App 配对后自动协商事件接入，聊天变更经过服务端校验后同步，无需采用。云端 HTTPS 与本机配对分开；已有个人事件工作区要保留原消息、待发队列与通知，应走[受保护的冷交接](../docs/personal-workspace-handoff.md)，而不是直接重新配对。
 
-1. 安装支持手机系统版本的完整 Xcode，打开 [AlongHealth.xcodeproj](AlongHealth.xcodeproj)。例如，iOS 27 需要 Xcode 27。在 Xcode → Settings → Apple Accounts 登录自己的 Apple 账号；然后在 target 的 **Signing & Capabilities** 里选自己的 Team，确认 **HealthKit** capability 已开启。若 bundle ID 与你的签名冲突，改成自己的唯一 ID。
-2. 在 iOS 27 + Xcode 27 上，可以打开 Xcode 的 Device Hub，点侧栏的 `+` → **Pair Nearby Device…**，首次通过同一局域网无线配对；也可以用数据线连接。按提示在 iPhone 上完成配对、信任设备并开启开发者模式。选择这台 iPhone 作为运行设备，点 Run。HealthKit 的真实读取需要真机。
-3. 在目标首页的 Apple Health 连接卡点「连接」或「管理」，选择所需类型，点「读取并预览」，然后点「导入并允许 Agent 评估」。iPhone 在本机读取摘要和更新进度。自动编排还需要手机能够访问已配对的 Mac。具名目标通过自己的连接卡关联摘要，提案和采用后的任务保存在该目标中。
-
-已有健康目标会在收到首份已授权摘要后复核。之后，读数变化或到了 Agent 指定的复查时间会再次触发评估；相同内容的重复读取保持安静。调整建议显示在动态任务上方，可以查看具体变化并采用。局域网地址变化时，可在「编辑目标」里更新 Mac 地址并验证原配对。
+1. 从仓库根目录运行 `npm run build`，然后用支持手机系统版本的 Xcode 打开 `ios/AlongHealth.xcodeproj`。在 **Signing & Capabilities** 选自己的 Team，确认 **HealthKit** 已开启；如签名冲突，为新的测试安装使用自己的 Bundle ID。覆盖已有正式安装时不要更换 Bundle ID 或签名身份。
+2. 连接并信任 iPhone，按系统提示启用开发者模式，在 Xcode 选择这台手机后点 Run。HealthKit 真实读取需用真机。
+3. 配对后从目标的 Apple Health 卡片连接或管理数据，选择类型、预览，并点「导入并允许 Agent 评估」。事件工作区由前后台共用的原生持久队列补传，Host 可达后由 Agent 跟进已有目标。唤醒与锁屏读取受系统限制；解锁或回前台会重试。见[阶段 C](../docs/stage-c-tech-design.md)。
 
 网页界面改动后，从仓库根目录运行 `npm run build`（会同时写入 `dist/` 与 `ios/AlongHealth/Web/`），随后重新构建 App。移动端通过 `along://app/` 自定义协议加载这些内置资源，避免公司网络或 CDN 状态导致启动白屏。
 
@@ -38,28 +36,26 @@ Apple 健康 App 的手腕温度通常展示相对个人基线的偏差；Health
 
 同一次只允许一个健康导入在进行中：在原生弹层还没选完时再点一次「连接 Apple Health」，这次会明确收到「已有健康数据导入正在进行」，不会被静默丢掉（网页那边的等待会一直悬着，界面看上去像点了没反应）。
 
-## Agent 结果通知
+## 旧 Host 兼容行为
+
+以下采用、逐目标复评和本机结果通知仅适用于旧 Host；事件工作区使用下文的新协议通知。
 
 在 iPhone 上第一次把目标或动态任务交给 Agent 时，Along 会请求系统通知权限。只有真实 Agent 运行完成、输出通过校验且包含明确下一步时，网页才把结构化通知交给原生 `UNUserNotificationCenter`；相同 Request ID 会在本机去重。点通知会回到对应目标提案或动态任务，通知本身不会替用户采用提案或执行外部操作。
 
 在健康计划的「动态任务 → 补充信息」中，可以把下一步要求交给 Agent。它会结合获准使用的摘要和已有安排，给出具体时刻或询问缺少的信息。睡眠和运动的每日委托会在原任务卡上显示当天的 DSH 建议；只有在系统队列核到同目标、同日及对应时刻，才标记「iPhone 已安排」。睡前准备提醒与建议就寝可在不同时刻；周目标与每日运动分钟分别显示。新决策在 App 前台或下次打开读到工单后可发本机通知。你采用定时任务后，由 iOS 在指定时间提醒，后续采用的改期或取消会同步到系统队列。App 挂起时不会持续轮询 Mac，当前未接 APNs。
 
-## 当前边界
+## 健康与签名边界
 
-- 首次手动授权并确认后，App 在前台为已选类型安装 HealthKit 观察器；页面启动、回到前台也会主动读取，页面可见时每 60 秒兜底检查。明确允许后台评估后，HealthKit 可以在系统安排的时机唤起 Along。当前目标使用 DSH、有可读的新摘要且已配对 Mac 可达时，iPhone 可以在后台提交复评，回到前台接回工单。锁屏期间 HealthKit 可能暂时不可读；回到前台会再查。页面界面随 App 打包在 `AlongHealth/Web`，不依赖 GitHub Pages 的实时网络；网页更新后需重新运行 `npm run build` 并重新安装 App。
-- 普通任务调整仍需点采用。明确的每日委托只授权该目标发睡前或运动提醒，不改原计划；同一天改期会更新该主题的通知。开启该目标的后台评估后，可在系统给予 HealthKit 或后台刷新的执行机会时联系原配对 Mac。App 无法要求 iOS 每次有样本或每天零点必定唤醒；无人唤醒、手机暂时读不到健康摘要或 Mac 不可达时，不能保证及时生成新一天的安排。
-- 在已连接并授权的前提下，新的健康观察、用户反馈和 Agent 指定的复查时间会触发情境评估。Agent 可以保留安排、提出调整或请求信息。保留安排时静默，调整由你采用。“目标变化实验”仍是隔离的模拟实验。
 - HealthKit 对没有匹配记录的统计查询可能返回 `errorNoData`；此时界面显示“无可读取记录”，不会把它当作整个连接失败。
 - 当前使用 Xcode 个人团队签名。个人团队的配置文件通常 7 天后到期，届时需重新构建并安装。GitHub 提交和 Pages 更新不会自动更新已安装的 iPhone App；移动端需重新同步内置资源并安装。
-- 新目标输入和动态任务详情都已接入 Mac 上独立运行的 DSH Super Agent。目标页展示真实的 Source、Main Session、Ticket、Worker、子 Agent 分工、进展、输出与最终综合结果；任务页展示 Source、Eval、Ticket、Assignment 和 Report。Mac 服务或 GitHub Agent 账号未就绪时，页面明确显示阻塞原因，不会本地模拟完成。
 
 ## 新协议任务通知
 
 对已配对用户，App 按同步完成后的活动目标和未完成任务，将未来的 scheduledAt 排入 iOS。任务改期使用同一系统标识替换，完成、取消、归档和权限变化会清理本协议的预约。已有旧协议委托和用户资料保留。同步回执不等于通知送达，验收分别核对 iOS pending、delivered 以及点击后的目标和任务。
 
-经过 Agent 校验且明确标记的推荐或执行结果使用独立事件身份。已配置远程推送时由 Host 发 APNs，凭据在 Host 管理，设备注册使用已配对的原生固定证书连接。无远程通道时，仅在前台同步到新结果且已获授权时发本机通知。手机将确认过的系统队列摘要回传 Host，供后续委托在手机挂起期间选择推送。APNs 拒收后，Host 可将近期结果交回前台补投，App 先保存事件，再按相同身份投递和回执。iOS 系统按已预约的时刻触发本地提醒。尚未同步到手机的改期需等连接恢复。
+经过 Agent 校验且明确标记的推荐或执行结果使用独立事件身份。已配置远程推送时由 Host 发 APNs，凭据由 Host 保管；设备注册沿用配对连接的原生 HTTPS 信任策略。无远程通道时，已授权的手机在前台同步到仍有效的新结果后可发本机通知。手机把确认过的系统队列摘要回传 Host，用于按实际覆盖去重。iOS 按已经同步并预约的时刻触发本地提醒；离线期间尚未同步的改期需等连接恢复。
 
-本机验收时通过真实目标对话创建短时间后的一次性测试任务。在它出现后回主屏，等待通知，点击核对任务，再通过对话取消测试任务。不得删除其他目标、通知或配对。Build 53 / Web v61。
+使用隔离身份和测试目标验证一次性提醒：创建任务、退出到主屏、等待通知、点开核对目标与任务，再从测试对话取消。正式工作区只做只读验收，不代发聊天、增测试通知或重配对。
 
 已在 Apple 开发者账户启用 Push Notifications 且签名描述文件允许时，签名构建设置 CODE_SIGN_ENTITLEMENTS=AlongHealth/AlongPush.entitlements 与 ALONG_APNS_ENVIRONMENT=development 或 production，与实际签名环境对应。默认描述文件继续支持本地提醒。原生每次启动重新向 Apple 注册，并只向证书固定的配对 Host 传递设备令牌。
 

@@ -1,10 +1,8 @@
-# Along Superagent 云端部署经验（Linux）
+# Along Agent 云端部署经验（Linux）
 
 > 2026-11-23 在阿里云 ECS 上实测。**本文只记录实测事实与踩过的坑，不重复部署编排** ——
-> 编排由 `origin/feature/tier2-cloud-orchestration` 分支承担
-> （`deploy/Dockerfile.superagent`、`deploy/superagent-start.sh`、`deploy/superagent-seed.mjs`、
-> `deploy/docker-compose.tier2.yml`）。完整实测记录在 Along Agent 仓库
-> [`docs/along/023-linux-cloud-deployment.md`](../along-superagent/docs/along/023-linux-cloud-deployment.md)。
+> 现行编排及运维入口见 [deploy](../deploy/README.md)，不需要切历史开发分支。
+> 完整上游实测记录见 [Along Agent 的 Linux 云端部署记录](https://github.com/artstur/along-superagent/blob/main/docs/along/023-linux-cloud-deployment.md)。
 
 ## 1. V-1 已通过：Linux 可以长驻承载 Along 数据面
 
@@ -36,17 +34,7 @@ GET /along-source/api/goals/along-status-probe   （桥接凭证 + 合规身份�
 
 第二条正是 `docs/cloud-deploy-multi-user.md` 定义的 Tier 2 就绪契约。
 
-### 1.1 待修订的旧结论
-
-`origin/feature/tier2-cloud-orchestration` 已实现 Tier 2 编排并把 V-1 写成「已通过」，但**旧结论原文仍在**。
-合入 main 时需一并修订，否则两份结论并存：
-
-| 位置 | 现文 | 处置 |
-| --- | --- | --- |
-| §2.1 | 「已核实的官方 Linux 发行物 `@deepseek-ai/dsh` 是 headless 一次性形态……承载不了长驻数据面」 | 改为：发行物同时提供 `dsh web`（长驻）与 `dsh headless`（一次性），headless 不是唯一形态 |
-| §2.2 冲突表 C9 | 「DSH 核心运行时无 Linux 长驻形态」 | 该条已不成立，标注为 V-1 已推翻 |
-| §1 | 「不做新链路数据面上云（Tier 2）」 | 该取舍的唯一理由是长驻运行时不可得；V-1 通过后重新评估 |
-| §3.5 | 「Tier 2（验证项 V-1，不在本轮验收范围）」 | 改为已通过并给出就绪契约 |
+基础 Tier 1 仍关闭事件接入，这是编排选择，不是 Linux 运行时限制。V-1 证明长驻与就绪探针可用；真实模型回合和容器重建验证见 [Host 云端部署经验](host-cloud-deploy.md)。
 
 ## 2. settings seed：缺了就永远停在「等待设置」
 
