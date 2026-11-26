@@ -663,3 +663,38 @@ test('a rejected input ends the waiting state instead of leaving it spinning',as
   assert.equal(workspace.view().awaiting,null);
   assert.equal(workspace.view().messages.find(message=>message.eventId===sent).status,'rejected');
 });
+
+// 会话被绑定到目标那一刻，等待态不能消失：本机刚提交、服务端还没回填 goalId 的原话，
+// 仍然属于这个会话。范围判定只认原话自己的 conversationId，目标只决定它算不算当前可见的目标。
+test('binding the conversation to a goal keeps the waiting row and the original message',async()=>{
+  const goal={id:'g_bound',domain:'custom',status:'active',revision:1,title:'绑定目标',metric:null,context:[],tasks:[]};
+  const wire={goal:{id:goal.id,domain:'custom',status:'active',currentRevision:1},
+    revision:{goalId:goal.id,revision:1,title:goal.title,status:'active'},tasks:[]};
+  const key='along.event-workspace.v1:'+config.userId;
+  const seed={version:1,recommendationsVersion:1,conversationVersion:1,dataSourcesVersion:1,executionVersion:2,
+    taskCapabilityVersion:1,resultPresentationVersion:1,userId:config.userId,cursor:0,activeGoalId:null,
+    conversationId:null,returnGoalId:null,goals:{},messages:{},drafts:{}};
+  installDomStub({storage:{[key]:JSON.stringify(seed)}});
+  let items=[];
+  window.AlongAgentBridge={request:async input=>{
+    if (input.path==='/events') return {status:'accepted',event_id:input.body.event_id};
+    if (input.path==='/sync') return {items:items.filter(item=>item.seq>input.body.after_seq)};
+    if (input.path==='/sync/ack') return {acked:input.body.seqs.length};
+    throw Error(input.path);
+  }};
+  const workspace=createEventWorkspace({config});
+  const sent=await workspace.submit('我在新对话里说的第一句');
+  assert.equal(workspace.view().awaiting?.eventId,sent,'刚提交的原话进入等待');
+  const root=workspace.view().conversationId;
+  items=[
+    {seq:1,userId:config.userId,kind:'message',payload:{message:{id:'msg_bound_user',eventId:sent,role:'user',direction:'inbound',text:'我在新对话里说的第一句',seq:1}}},
+    // 一条带 goalId、但不是用户原话回链的消息行：会话因此被绑定到目标，原话自己的 goalId 仍是空的。
+    {seq:2,userId:config.userId,kind:'message',goalId:goal.id,payload:{snapshot:wire,presentation:'execution',conversation_id:root,
+      message:{id:'msg_bound_worker',eventId:'out:bound:worker',role:'assistant',direction:'outbound',text:'后台执行完成',seq:2}}},
+  ];
+  await workspace.sync();
+  const view=workspace.view();
+  assert.equal(view.activeGoalId,goal.id,'会话被绑定到目标');
+  assert.equal(view.awaiting?.eventId,sent,'绑定目标不结束等待：还没有任何可见回复');
+  assert.equal(view.scopedMessages?.filter(message=>message.eventId===sent).length,1,'原话仍在可见范围里');
+});

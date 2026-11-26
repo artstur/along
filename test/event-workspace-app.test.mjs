@@ -759,3 +759,21 @@ test('a failed chat ends the waiting row and keeps the failure feedback',async()
   assert.doesNotMatch(dom.app.innerHTML,/Agent 正在回复…/,'失败后结束等待');
   assert.match(dom.app.innerHTML,/发送未完成/,'保留原有的失败反馈');
 });
+
+// 页面这一侧用同一套范围规则：会话被绑定到目标后，原话仍在会话里、「Agent 正在回复…」仍在。
+test('binding the conversation to a goal keeps the waiting row on screen',async()=>{
+  const {dom,bridge,requests}=waitingApp();
+  await import(`../web/app.mjs?chat-waiting-bound=${Date.now()}`);await settle();
+  await dom.click({action:'new-goal'});
+  await submitChat(dom,'我在新对话里说的第一句');await settle();
+  const sent=requests.find(item=>item.path==='/events').body.event_id;
+  assert.match(dom.app.innerHTML,/Agent 正在回复…/,'提交后立即显示等待');
+  bridge.syncItems=[
+    {seq:1,userId:'u_app_b',kind:'message',payload:{message:{id:'msg_user_bound',eventId:sent,role:'user',direction:'inbound',text:'我在新对话里说的第一句',seq:1}}},
+    {seq:2,userId:'u_app_b',kind:'message',goalId:waitingGoal.id,payload:{snapshot:waitingSnapshot,presentation:'execution',conversation_id:sent,
+      message:{id:'msg_worker_bound',eventId:'out:bound:worker',role:'assistant',direction:'outbound',text:'后台执行完成',seq:2}}},
+  ];
+  await dom.tick(3000);await settle();
+  assert.match(dom.app.innerHTML,/Agent 正在回复…/,'会话被绑定到目标不结束等待');
+  assert.match(dom.app.innerHTML,/我在新对话里说的第一句/,'原话仍在会话里');
+});

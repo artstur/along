@@ -258,14 +258,36 @@ function localResult(item,remote) {
   return {eventId:n.event_id,kind:n.kind,goalId:item.goalId,taskId:item.taskId??undefined,revision:n.revision,createdAt:item.createdAt,...(resultEvidence(item.payload)?{evidence:resultEvidence(item.payload)}:{})};
 }
 
-// 等待态从持久缓存派生，不放在页面的瞬时变量里：同步和重渲染后仍然成立，重启后也能接着显示。
-// 只有可见范围内最新的一条原话还等着答复——更新的原话会取代它（服务端把旧工作判为 conflicted_input），
-// 而答复总是落在同一会话里、排在原话之后。本机刚提交、还没有服务端 seq 的原话视为最新。
-function awaitingReply(messages,pending,error,inScope) {
+// 一套范围规则，页面渲染与等待判定共用（docs/bugfix-goal-prompt.md §7：同一件事的两条读取路径要给同样的结论）。
+// 会话归属只认消息自己的 conversationId；目标只决定「这条消息算不算当前可见的目标」——
+// 消息所属会话绑定了目标就按那个目标算，没有才回退消息自己的 goalId。
+// 不用 message.goalId===activeGoalId 直接筛：本机刚提交、服务端还没回填 goalId 的原话会被误判成不在范围内，
+// 于是会话刚被绑定到目标，等待行就提前消失。
+function visibleScope(state) {
+  const goalsByConversation=new Map();
+  for (const message of Object.values(state.messages)) {
+    if (message.goalId&&message.conversationId&&!goalsByConversation.has(message.conversationId)) {
+      goalsByConversation.set(message.conversationId,message.goalId);
+    }
+  }
+  const activeGoalId=state.activeGoalId??null;
+  const conversationId=state.conversationId??null;
+  const goalOf=message=>goalsByConversation.get(message.conversationId)??message.goalId??null;
+  const inScope=message=>activeGoalId===null
+    ?message.conversationId===conversationId
+    :goalOf(message)===activeGoalId;
   const visible=message=>message.audience!=='background'&&message.presentation!=='execution';
+  return {activeGoalId,conversationId,goalOf,inScope,visible};
+}
+
+// 等待态从持久缓存派生，不放在页面的瞬时变量里：同步和重渲染后仍然成立，重启后也能接着显示。
+// 入参已经是范围内且可见的消息（见 visibleScope）。只有最新的一条原话还等着答复——
+// 更新的原话会取代它（服务端把旧工作判为 conflicted_input），而答复总是落在同一会话里、排在原话之后。
+// 本机刚提交、还没有服务端 seq 的原话视为最新。
+function awaitingReply(messages,pending,error) {
   let request;
   for (const message of messages) {
-    if (message.role!=='user'||!visible(message)||!inScope(message)) continue;
+    if (message.role!=='user') continue;
     if (!request) {request=message;continue;}
     const prior=version(request.seq)?request.seq:null,seq=version(message.seq)?message.seq:null;
     // 本机待回显的原话比任何已存记录都新；两条都还没 seq 时按缓存插入顺序取后一条。
@@ -277,7 +299,7 @@ function awaitingReply(messages,pending,error,inScope) {
   if (pending.has(request.eventId)&&error) return null;
   // 没有 seq 说明刚在本机提交，任何已存答复都早于它。
   if (!version(request.seq)) return request;
-  const answered=messages.some(message=>message.role==='assistant'&&visible(message)&&
+  const answered=messages.some(message=>message.role==='assistant'&&
     message.conversationId===request.conversationId&&version(message.seq)&&message.seq>request.seq);
   return answered?null:request;
 }
@@ -389,10 +411,12 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
     const next=recoverPending(),failures=readEventFailures(config),pending=new Set(pendingEvents(config).map(item=>item.event_id));
     const messages=Object.values(next.messages).map(message=>({...message,
       status:failures.some(item=>item.event_id===message.eventId)?'rejected':pending.has(message.eventId)?'pending':message.status}));
-    // 与页面可见历史同一范围：已选目标按目标，未绑定目标时按当前会话。
-    const inScope=message=>next.activeGoalId==null?message.conversationId===next.conversationId:message.goalId===next.activeGoalId;
-    return {...next,draftScope:draftScope(next),error:lastError,messages,
-      awaiting:awaitingReply(messages,pending,lastError,inScope)};
+    // 范围只有一份，页面渲染与等待判定共用（visibleScope）。
+    const scope=visibleScope(next);
+    const scopedMessages=messages.filter(scope.inScope);
+    const visibleMessages=scopedMessages.filter(scope.visible);
+    return {...next,draftScope:draftScope(next),error:lastError,messages,scopedMessages,visibleMessages,
+      awaiting:awaitingReply(visibleMessages,pending,lastError)};
   }
   function draftScope(value=state) {
     const conversationScope = `conversation:${value.conversationId??'new'}`;

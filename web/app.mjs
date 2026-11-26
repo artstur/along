@@ -1691,9 +1691,8 @@ function eventWorkspacePage() {
   const selectedLocal=localChoices.find(item=>item.key===localSelection?.key);
   if (!selectedLocal) localSelection=null;
   const options=goals.map(item=>`<option value="${esc(item.id)}" ${!localSelection&&item.id===view.activeGoalId?'selected':''}>${esc(item.title)}</option>`).join('');
-  const scopedMessages=view.messages.filter(message=>(view.activeGoalId
-    ?message.goalId===view.activeGoalId:message.conversationId===view.conversationId));
-  const messages=scopedMessages.filter(message=>message.audience!=='background'&&message.presentation!=='execution');
+  const scopedMessages=view.scopedMessages;
+  const messages=view.visibleMessages;
   const connection=connectionSetup(view.error||agentConnection.error);
   const pendingCompletions=eventWorkspace.pendingTaskCompletions();
   const goalPicker=`<div class="goal-switch"><label for="event-goal-select">当前目标</label><div class="goal-switch-actions"><div class="select-wrap"><select id="event-goal-select" aria-label="切换目标"><option value="" ${!localSelection&&!view.activeGoalId?'selected':''}>新目标</option>${options}${localChoices.length?`<optgroup label="本机已存目标">${localChoices.map(l=>`<option value="local:${esc(l.key)}" ${localSelection?.key===l.key?'selected':''}>${esc(l.title)}</option>`).join('')}</optgroup>`:''}</select></div><button class="goal-add-button" data-action="new-goal">新建</button></div></div>`;
@@ -2165,12 +2164,13 @@ app.addEventListener('submit', async event => {
   } catch(error) {
     if (agentConfig===config) notice(error.message || 'Along 请求失败');
   } finally {
-    if (agentConfig===config) {
-      agentBusy=false;
-      if (agentPendingRequest?.id===pendingId) agentPendingRequest=null;
-      if (screen==='agent' && activeGoal===goalKey) renderAgentUpdate({follow:true});
-      else render();
-    }
+    // 清理只认「我这条还是当前的那一条」，不挂在配置守卫下：请求在途时重新配对会换掉 agentConfig，
+    // 挂在守卫下会留下一条永久的假等待，用户只剩一个永远转圈的界面
+    // （docs/bugfix-goal-prompt.md §7：不要造一条假的「正在连接」）。
+    if (agentPendingRequest?.id===pendingId) agentPendingRequest=null;
+    agentBusy=false;
+    if (screen==='agent' && activeGoal===goalKey) renderAgentUpdate({follow:true});
+    else render();
   }
 });
 function legacyGoalIntent(key) {

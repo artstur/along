@@ -117,7 +117,7 @@ npm run agent-host
 验证包含：原始复现先失败后通过、来源跨目标隔离、离线重启/旧缓存重放、未知提供者/伪造连接状态/任意 URL 的拒绝、HTML 转义、官方入口链接以及原健康连接回归；全量 check、双端 build、浏览器和原配对 iPhone 分别取证。
 
 
-### 2026-11-26 聊天等待态
+## 2026-11-26 聊天等待态
 
 目标：提交原话后立即看到「Agent 正在回复…」，在等待首条可见回复期间跨同步与重渲染保留；收到可见回复、发送失败或进入明确的离线待同步时结束等待，并保留原有反馈。复用现有三点样式、消息状态和聊天页，不新增入口或模式开关。
 
@@ -131,3 +131,33 @@ npm run agent-host
 - 资源版本号联动：`web/index.html`、`web/sw.js`、`ios/AlongHealth/Sources/AlongShellView.swift` 的 `build=` 提升到 93。
 
 验收：提交后立即出现「Agent 正在回复…」且可被辅助技术读出；空轮询、同步和重渲染后仍在；同会话可见回复、失败/被拒、离线待同步后消失并保留对应反馈；切到其他目标或新对话时不出现，回到原请求确认仍在等待时恢复；其他会话与后台结果不提前清除；`npm run check` 全绿，build 后源码与两份产物一致。
+## 2026-11-26 聊天等待态（第 2 轮：修 PR #71 review 出的缺陷）
+
+根因：等待态的范围判定用 `message.goalId===activeGoalId` 直接筛原话，而本机刚提交、还没被服务端回填 `goalId` 的原话 `goalId` 是 `undefined`（`web/event-workspace.mjs` 的 `submit()`）。会话被绑定到目标那一刻 `activeGoalId` 由 null 变成目标，判定口径随之从「当前会话」切成「这个目标」，原话掉出范围 → `awaiting` 变 `null` → 「Agent 正在回复…」提前消失：既没有可见回复，也没有失败或离线反馈。服务端今天只在 `goal.create` 分支保证回填（along-superagent `src/along/changeset.ts`），所以线上多数时候碰巧是对的；客户端把「还在等」绑在这个服务端并不保证回填的字段上，属于隐藏耦合。
+
+改法：范围规则收成一份（`web/event-workspace.mjs` 的 `conversationScope()`），页面渲染与等待判定共用同一份结论：
+
+- 会话归属只认消息自己的 `conversationId`；目标只决定「这条消息算不算当前可见的目标」。
+- 消息所属会话绑定了目标就按那个目标算，没有才回退消息自己的 `goalId`；不再用 `message.goalId===activeGoalId` 直接筛原话。
+- 可见性（`audience: background` / `presentation: execution` 不算可见回复）也在同一份规则里：页面历史与等待判定给出同样的结论（§7：同一件事的两条读取路径要给出同样的结论——原来的分叉正是本缺陷的成因）。
+
+等待态的终止条件（与 `awaitingReply` 一致）：同一会话出现 seq 更大的可见 assistant 消息；该原话失败或被拒；该原话仍在待同步队列且同步已报错（明确的离线待同步）；被更新的原话取代。
+
+旧 Host 兼容路径：`agentPendingRequest` 的清理只认「我这条还是当前的那一条」（id 守卫），不再挂在 `agentConfig===config` 守卫下——请求在途时重新配对会换掉 `agentConfig`，挂在守卫下会留下一条永久的假等待，用户只剩一个永远转圈的界面（§7 已记过这条坑）。`agentBusy` 同理，不再挂在配置守卫下。
+
+实施与验证记录（第 2 轮）：
+
+- 修前失败证据：新增三条回归用例，在未修复的代码上 **3 failed / 71 passed**（`node --test test/app-agent-pending-rerender.test.mjs test/event-workspace.test.mjs test/event-workspace-app.test.mjs`）。两条红在「绑定目标不结束等待：还没有任何可见回复」（工作区级与页面级各一条），一条红在「重新配对后不留永久的假等待」。
+- 修复后：同三条 **74 passed / 0 failed**。
+- 回退复测：只回退 `web/event-workspace.mjs` 与 `web/app.mjs` 的修复、保留新增用例，三条重新变红（**3 failed / 71 passed**，红在同样三条断言）；恢复修复后重新全绿（**74 passed / 0 failed**）。
+- 全量 `npm run check`：**856 tests / 853 pass / 0 fail / 3 skipped**。3 个 skip 是本机缺 docker compose 的环境用例（public IPv4 Compose 入口、来源限流、Tier 2 Linux Compose），与本次改动无关。
+- build：`npm run build`（Built 22 files）后 `web/` 与 `ios/AlongHealth/Web/`、`dist/` 的对应文件逐字节一致（`cmp` 校验）；重跑 build 后 `git status` 干净，产物不是手改的。
+- 资源版本：`web/index.html` 的 `?v=`、`web/sw.js` 的 `CACHE`、`ios/AlongHealth/Sources/AlongShellView.swift` 的 `build=` 一起提升到 **94**；`ios/AlongHealth/Info.plist` 的 `CFBundleVersion` 保持 **85**（与 v93 轮一致，本轮不产新安装包）——**本轮修复要随下次 App 安装才到达设备**，已装机的 App 仍是 v93 的页面。
+- 仓库没有 PR CI（`.github/workflows/` 只有手动触发的 `pages.yml`），全量检查以本地 `npm run check` 为准。
+
+本轮不做（记录理由）：
+
+- 等待态没有时间上限：Agent 这一轮没在该会话落可见回复时会一直转。加超时属于产品决策（慢回复不该被误杀，§7「别给等用户操作的调用加超时」），且当前没有宿主「本轮结束但无可见回复」的显式信号可用，留待产品决定。
+- `role="status"` 可能被整页重建反复朗读：`app.innerHTML` 整体替换 DOM 是既有架构，改它是渲染层重构，不在 bugfix 轮做。记为遗留风险，需真机/VoiceOver 验证。
+- 旧 Host 兼容路径的文案与结束点：保留「正在连接 <runtime>…」语义（该路径确实在连接旧运行时），结束条件是拿到 HTTP 回执；与事件工作区路径的差异在此写明。该路径运行期间仍有「Super Agent 编排中…」与禁用的输入框，用户不会没有反馈。
+- 旧 Host 兼容路径「在途重新配对」时的失败提示：失败原因仍被 `agentConfig===config` 守卫挡住（避免把旧绑定的错误误报到新绑定上），用户看不到失败提示。本轮只清理等待态，失败提示的去向另议。
