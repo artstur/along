@@ -367,3 +367,60 @@ db.prepare("UPDATE maintenance_schedule SET next_due_at=? WHERE user_id=?")
 docker compose -f deploy/docker-compose.cloud.yml ps
 docker logs -f along-host
 ```
+
+## 10. 每小时检查主干并自动部署（2026-11-27 实测）
+
+在这台机（`ecs-user@8.155.140.214`）上跑一个 systemd 定时器，每小时检查
+`artstur/along` 与 `artstur/along-superagent` 的 `main`；有更新就拉取、构建、切换，
+没更新就什么都不做。产物在 `deploy/auto-deploy.sh` 与同目录的单元文件，
+装法与运维命令见 [deploy/README.md 的定时自动部署一节](../deploy/README.md#定时自动部署每小时检查主干并部署)。
+
+### 现场的既有形态（先只读核对过）
+
+| 项 | 实测值 |
+| --- | --- |
+| 工作区 | `/home/ecs-user/workspace/{along,along-superagent,data,secrets}` |
+| Compose 项目名 | `deploy`（project directory 是 `deploy/`，项目名取目录名） |
+| 容器 | `along-host`（`along-host:cloud`）、`along-superagent`（`along-superagent:local`）、`along-netns`（锚点） |
+| 凭证 | `secrets/{runner-token,memory-env}` 与 `data/superagent/along/data/bridge-token`，file secret，root 属主 0600 |
+| 仓库访问 | `ecs-user` 的 `~/.ssh/id_ed25519` 能读两个仓库（`git ls-remote` 实测通过） |
+| 调度 | 装之前机器上只有 `dnf-makecache` / `logrotate` 等系统定时器，没有别的 Along 调度 |
+
+### 装好之后的位置
+
+| 位置 | 内容 |
+| --- | --- |
+| `/usr/local/libexec/along/auto-deploy.sh` | 部署器本体（root 属主，0755） |
+| `/etc/systemd/system/along-auto-deploy.{service,timer}` | 单元（`User=ecs-user`） |
+| `/etc/along-auto-deploy.env` | 配置（只有路径与版本来源，没有凭证） |
+| `/home/ecs-user/workspace/.auto-deploy/` | 成功版本记录、版本台账、部署锁 |
+| `/home/ecs-user/workspace/release/<两个 SHA 前 12 位>/` | 每个版本的干净源码树 |
+
+### 实测口径
+
+| 项 | 值 |
+| --- | --- |
+| 定时器 | `OnCalendar=hourly` + 随机延迟 5 分钟；实测下一次触发 `06:02:12 CST` |
+| 一轮完整部署（缓存命中时） | 约 70 秒：构建 ~60 秒，切换 ~30 秒，探活 ~30 秒 |
+| 无更新的一轮 | 只做 fetch 与 `ls-remote`（约 15 秒），不构建不重启 |
+| 磁盘 | 每个 Super Agent 镜像约 2.41 GB；发布目录与镜像按版本台账保留两份 |
+
+### 三个必须知道的点
+
+**一、锚点每轮都会被重建，这不是副作用。** 编排里的相对路径（`./netns-proxy.mjs`、
+`./superagent-profile.patch.yml`）落在发布目录上，与现场 checkout 的路径不同，
+compose 的配置指纹因此变了，锚点本来就会被重建。而命名空间跟着持有它的容器走
+（§2.3），所以锚点与两个使用方必须在同一次操作里一起重建——
+`up -d --no-build --force-recreate anchor superagent host` 就是 §2.3 那条命令。
+实测顺序：锚点 → Super Agent → Host，三个都起来后探活通过。
+
+**二、镜像必须带标签，否则回退就断了。** 第一版用 `docker image prune --filter
+until=2h` 清悬空镜像，结果把**上一成功版本**的镜像一起删了——它们没有标签就是悬空的。
+现在改成：每个版本在台账里记镜像 ID 与版本化标签，清理时**只按台账删自己的镜像**，
+不跑全局 prune（同机还有 Multica 的镜像，不能连坐）。这条是踩出来的。
+
+**三、卷与凭证一个字节都没动，靠的是发布目录里的符号链接。** `release/<id>/data` 与
+`release/<id>/secrets` 是指向工作区真实目录的符号链接，所以 compose 的 `../../data`、
+`../../secrets` 落在同一份持久卷与凭证上；清理发布目录时 `rm -rf` 不会跟着符号链接
+删到真实数据（实测确认过）。切换前还会把 `docker compose config` 解析出来的卷、凭证、
+构建输入路径逐条核对一遍——相对路径配错是静默降级，不能靠肉眼。

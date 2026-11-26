@@ -1,0 +1,24 @@
+[Unit]
+Description=Check Along and Along Super Agent main branches and deploy updates
+Documentation=file:///home/ecs-user/workspace/along/docs/host-cloud-deploy.md
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# 用现场账号跑：它已经在 docker 组里，git 的读权限也在这把 SSH 密钥上。
+User=ecs-user
+Group=ecs-user
+WorkingDirectory=-/home/ecs-user/workspace
+EnvironmentFile=-/etc/along-auto-deploy.env
+ExecStart=/usr/local/libexec/along/auto-deploy.sh run
+# 构建 Super Agent 镜像要拉依赖，慢网下可能跑很久；超时按一小时算。
+TimeoutStartSec=7200
+NoNewPrivileges=true
+PrivateTmp=true
+# 一轮失败不重试：下一轮定时任务会重来，失败轮次没有推进成功记录。
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

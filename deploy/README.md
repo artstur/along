@@ -30,6 +30,10 @@
 | `../.dockerignore` | 两个主构建上下文都用仓库根目录的白名单，只放行 npm 清单、Host 模块及任务协议、web 模块和 runner 入口。 |
 | `agent-runner.mjs` | 内网 HTTP runner，使用 Along 专用 DSH profile；模块自检 `node --check deploy/agent-runner.mjs` |
 | `agent-dsh/` | dsh 安装清单：`package.json` + `package-lock.json` 锁定 `@deepseek-ai/dsh@0.2.2-rc.5`，镜像内 `npm ci --ignore-scripts` 安装。升级 dsh 版本时在本目录 `npm install --package-lock-only --ignore-scripts` 重新生成 lock 并入库，同时同步 `Dockerfile.agent` 的 pin 与 compose 的 `ALONG_DSH_VERSION` |
+| `auto-deploy.sh` | 定时部署器：每小时检查 Along 与 Super Agent 的 `main`，有更新就构建并切换，切换后探活失败回退到上一成功版本。见下文[定时自动部署](#定时自动部署每小时检查主干并部署) |
+| `auto-deploy-install.sh` | 把部署器装到目标机（脚本进 `/usr/local/libexec/along/`，单元进 `/etc/systemd/system/`，配置进 `/etc/along-auto-deploy.env`） |
+| `along-auto-deploy.service` / `along-auto-deploy.timer` | systemd 单元：oneshot 服务 + 每小时定时器 |
+| `auto-deploy.env.example` | 部署器配置模板（路径与版本来源，不含凭证） |
 
 ## Tier 2：长驻 Super Agent（§3.5，验证项 V-1）
 
@@ -297,3 +301,113 @@ WantedBy=timers.target
 续期、证书校验、nginx 配置检查、重载或入口探针失败时，任务失败并记录告警，继续使用上一份仍在有效期内的证书。已经尝试重载的故障会恢复原配置、重新加载并核验旧叶。证书剩余不足 36 小时也触发告警。检查 HTTP-01 公网可达性、Certbot 日志和 nginx 日志，在旧叶过期前修复后重新启动续期服务。公网 IP 和公开信任链必须在修复后仍可通过验证。
 
 部署验收时从两个独立公网来源确认 Host 配对审计分开记录各自的 IPv4，再记录一次实际续期，核对外部地址的叶指纹变化，并让原配对的 iPhone 分别验证前台连接和后台同步。隔离验收可运行 `ALONG_PUBLIC_IP_INTEGRATION=1 node --test test/public-ip-compose.test.mjs`，使用真实 nginx 和 Host、合成 CA 与 ACME 替身。
+
+## 定时自动部署（每小时检查主干并部署）
+
+`auto-deploy.sh` 在**目标机本地**跑：systemd 定时器每小时触发一轮，检查
+`artstur/along` 与 `artstur/along-superagent` 的 `main`；有更新就拉取、构建、切换，
+没更新就什么都不做（不构建、不重启）。
+
+### 为什么放在目标机而不是 CI
+
+调度在目标机，重启后自恢复，运行结果直接落在本机 journal 里。代价是目标机要有
+两个仓库的读权限（这台机用 `ecs-user` 的 SSH 密钥拉 `git@github.com:artstur/…`）。
+CI 方案要把部署身份交给 GitHub，信任面更大。
+
+### 一轮里做什么
+
+| 阶段 | 做什么 | 为什么这么定 |
+| --- | --- | --- |
+| 锁 | `flock` 非阻塞；抢不到就跳过本轮 | 重复触发不能并发切换 |
+| 取提交 | fetch 两个仓库，`ls-remote` 取 `main` 的 SHA，**当轮固定这一对** | 上游中途再推不影响本轮；两个 SHA 都进构建 |
+| 展开 | `git archive` 把两个提交展开成干净源码树，放在 `release/<两个 SHA 前 12 位>/` | 现场 checkout 可能有本地改动，构建不该被它们影响 |
+| 核对 | `docker compose config` 解析出的卷、凭证、构建输入逐条比对预期路径 | 相对路径配错是静默降级（卷挂空目录、数据看着"配好了"其实没生效） |
+| 构建 | `docker compose build`，产物打版本化标签（标签里带两个 SHA） | 运行中的镜像 ID 可反查到当轮固定的提交 |
+| 切换 | `up -d --no-build --force-recreate anchor superagent host` | 锚点与两个使用方一起重建：命名空间跟着持有它的容器走，只重建一边会把另一边落在旧 netns 里（外部入口静默断掉，见 [Host 云端部署经验 §2.3](../docs/host-cloud-deploy.md#23-命名空间必须由第三方容器持有这条最隐蔽)） |
+| 探活 | 两个容器 `healthy` + Host 的 HTTPS `/health` 200 + 锚点跳板可达 | 跳板在锚点的命名空间里，够不着就说明被落下 |
+| 记录 | **两个服务都健康之后**才把这一对 SHA 写成成功版本 | 失败轮次不推进记录，下一轮可以重试 |
+
+失败处理：切换前记下当前运行的镜像 ID 与编排文件；切换后探活失败就把镜像标签打回
+旧 ID、按旧编排重建三个容器并重新探活。**失败轮次不写成功记录**，上一成功版本保持
+健康或经恢复后重新健康。
+
+### 发布目录的形状是刻意的
+
+```
+release/<along 前 12 位>-<superagent 前 12 位>/
+├── along/            # 从固定 SHA 展开的 Along 源码（构建上下文）
+├── along-superagent/ # 从固定 SHA 展开的 Super Agent 源码（bundle 来源）
+├── data    -> ../../data        # 符号链接
+└── secrets -> ../../secrets     # 符号链接
+```
+
+compose 的 project directory 是 `release/<id>/along/deploy`，所以 `../../data`、
+`../../secrets`、`../../along-superagent` 分别落到上面三个位置：前两个是指向工作区
+**真实目录**的符号链接（持久卷与凭证仍是同一份，宿主 nginx 与 App 看到的还是老数据），
+第三个就是当轮钉住提交的 Super Agent 源码。
+
+### 安装
+
+```sh
+sudo deploy/auto-deploy-install.sh              # 安装并启用定时器
+sudo deploy/auto-deploy-install.sh --no-enable  # 只装不启用
+```
+
+装完先手动跑一轮看结果：
+
+```sh
+sudo systemctl start along-auto-deploy.service
+journalctl -u along-auto-deploy.service -n 100 --no-pager
+```
+
+首次安装时把当前正在跑的版本登记成基线（否则第一轮会无条件重装一遍）：
+
+```sh
+sudo /usr/local/libexec/along/auto-deploy.sh bootstrap
+```
+
+`bootstrap` 默认取现场 checkout 的 HEAD——只在"现场 HEAD 就是当前运行的版本"时成立；
+否则显式给两个提交号：`bootstrap <along SHA> <superagent SHA>`。
+
+### 日常操作
+
+```sh
+# 状态：成功版本、上一成功版本、运行中的镜像与探活
+/usr/local/libexec/along/auto-deploy.sh status
+
+# 只探活
+/usr/local/libexec/along/auto-deploy.sh verify
+
+# 手工回退到上一成功版本
+/usr/local/libexec/along/auto-deploy.sh rollback
+
+# 停用 / 卸载
+sudo systemctl disable --now along-auto-deploy.timer
+sudo rm -f /usr/local/libexec/along/auto-deploy.sh \
+  /etc/systemd/system/along-auto-deploy.service /etc/systemd/system/along-auto-deploy.timer
+sudo systemctl daemon-reload
+```
+
+### 配置与排障
+
+配置在 `/etc/along-auto-deploy.env`（模板 `auto-deploy.env.example`），只有路径与版本
+来源，**没有凭证**：模型与桥接凭证仍走目标机现有的 file secret。
+
+| 变量 | 作用 |
+| --- | --- |
+| `ALONG_DEPLOY_WORKSPACE` | 工作区根目录（`data/`、`secrets/` 在它下面） |
+| `ALONG_DEPLOY_ALONG_URL` / `ALONG_DEPLOY_SUPERAGENT_URL` | 两个仓库的地址 |
+| `ALONG_DEPLOY_ALONG_CHECKOUT` / `ALONG_DEPLOY_SUPERAGENT_CHECKOUT` | 现场 checkout：只用来 fetch 与取对象，不作构建上下文 |
+| `ALONG_DEPLOY_COMPOSE_REL` | 编排文件（相对发布目录里的 along/ 根） |
+| `ALONG_DEPLOY_HEALTH_URL` | Host 的探活入口 |
+| `ALONG_DEPLOY_HEALTH_TIMEOUT` / `ALONG_DEPLOY_BUILD_TIMEOUT` | 探活与构建的超时（秒） |
+| `ALONG_DEPLOY_KEEP_RELEASES` | 保留几个版本（当前与上一成功版本必须留着，前者用于运行、后者用于回退） |
+| `ALONG_DEPLOY_ALONG_SHA` / `ALONG_DEPLOY_SUPERAGENT_SHA` | **钉住**当轮使用的提交，跳过 `ls-remote`。验收时用它模拟"只更新一个仓" |
+| `ALONG_DEPLOY_DRY_RUN=1` | 只做计划：取提交、展开、核对路径，不构建不切换 |
+| `ALONG_DEPLOY_BUILD_ONLY=1` | 只构建不切换，成功记录不变 |
+| `ALONG_DEPLOY_TEST_FAULT` | **测试用**故障注入：`fetch` / `build` / `switch` / `health`。用来验证失败轮次不推进记录、回退可用 |
+
+排障看 journal：`journalctl -u along-auto-deploy.service -n 200 --no-pager`。
+每一行都带阶段前缀（`LOCK` / `FETCH` / `SHA` / `CHANGE` / `RELEASE` / `PATH-CHECK` /
+`BUILD` / `SWITCH` / `HEALTH` / `RECORD` / `CLEANUP` / `ROLLBACK`），日志只记版本、阶段
+和结果，不记凭证与请求内容。
