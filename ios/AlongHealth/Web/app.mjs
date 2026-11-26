@@ -22,6 +22,9 @@ const HEALTH_SHARING_KEY='along.health-sharing.v1';
 const app = document.querySelector('#app');
 const sheet = document.querySelector('#sheet');
 const toast = document.querySelector('#toast');
+const nativePage = location.protocol === 'along:';
+const pageScroller = nativePage ? app : window;
+if (nativePage) document.documentElement.classList.add('along-native');
 // 离线缓存：只有浏览器支持时才注册（App 内的 along:// 不是安全上下文，会自动跳过）。
 if ('serviceWorker' in navigator) {
   try { void navigator.serviceWorker.register('./sw.js').catch(()=>{}); }
@@ -1619,9 +1622,9 @@ function renderEventUpdate() {
   const scroller=app.querySelector('.agent-scroll');
   const scrollTop=scroller?.scrollTop??0;
   const follow=scroller&&(scroller.scrollHeight-scroller.scrollTop-scroller.clientHeight<80);
-  const reading=captureResultReading(app,{activeElement:document.activeElement,scrollY:window.scrollY});
+  const reading=captureResultReading(app,{activeElement:document.activeElement,scrollY:nativePage?app.scrollTop:window.scrollY});
   render();
-  restoreResultReading(app,reading,{scrollTo:options=>window.scrollTo(options)});
+  restoreResultReading(app,reading,{scrollTo:options=>pageScroller.scrollTo(options)});
   const next=app.querySelector('#agent-form textarea');
   if (sameScope&&next&&typeof draft==='string') {next.value=draft;if (focused) {next.focus();next.setSelectionRange?.(selection,selection);}}
   const nextScroller=app.querySelector('.agent-scroll');
@@ -2904,9 +2907,11 @@ const recoveredInitialCustomGoal=eventConnection()?false:adoptPendingInitialCust
 if (eventConnection()) connectEventWorkspace(eventConnection().userId);
 if ('scrollRestoration' in history) history.scrollRestoration='manual';
 render();
-requestAnimationFrame(()=>window.scrollTo({top:0,left:0,behavior:'instant'}));
-setTimeout(()=>window.scrollTo({top:0,left:0,behavior:'instant'}),120);
-setTimeout(()=>window.scrollTo({top:0,left:0,behavior:'instant'}),420);
+if (!nativePage) {
+  requestAnimationFrame(()=>window.scrollTo({top:0,left:0,behavior:'instant'}));
+  setTimeout(()=>window.scrollTo({top:0,left:0,behavior:'instant'}),120);
+  setTimeout(()=>window.scrollTo({top:0,left:0,behavior:'instant'}),420);
+}
 if (recoveredInitialCustomGoal) notice('已恢复新目标和动态任务');
 async function restoreAlongConnection() {
   try {
