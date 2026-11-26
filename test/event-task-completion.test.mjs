@@ -82,12 +82,40 @@ test('the server sync row is what turns the task into done',async()=>{
   assert.ok(calls.some(call=>call.path==='/events'));
 });
 
+test('a completion already submitted is not submitted again until the server snapshot confirms it',async()=>{
+  let failing=false;
+  const {workspace,calls}=setup(input=>{
+    if(input.path==='/events')return {status:'accepted',event_id:input.body.event_id};
+    if(input.path==='/sync'){
+      if (failing) throw Error('同步暂不可用');
+      const after=input.body.after_seq??0;
+      return {items:after===0?[taskItem('open',1)]:[taskItem('done',2)]};
+    }
+    return {acked:0};
+  });
+  await workspace.sync();
+  await workspace.completeTask('t_open');
+  // 事实已受理，但随后的同步失败：快照没更新，客户端不能再次提交同一条任务的完成事实。
+  failing=true;
+  await workspace.sync();
+  assert.deepEqual([...workspace.pendingTaskCompletions()],['t_open']);
+  await assert.rejects(()=>workspace.completeTask('t_open'),/已提交/);
+  assert.equal(calls.filter(call=>call.path==='/events').length,1);
+  // 同步恢复后补拉：快照确认完成，台账收敛，完成键重新按状态判断。
+  failing=false;
+  await workspace.sync();
+  assert.equal(workspace.view().goals[GOAL].tasks[0].status,'done');
+  assert.deepEqual([...workspace.pendingTaskCompletions()],[]);
+});
+
 // ---- 页面层：卡片、确认层与历史任务入口 ----
 
 let instance=0;
 async function pageFixture({pending=false,offline=false}={}) {
   const goal={id:GOAL,domain:'custom',status:'active',revision:1,title:'睡眠目标',metric:null,context:[],dataSources:[],
     tasks:[{id:'t_open',goalId:GOAL,status:'open',content:'睡前放下手机',revision:1},
+      {id:'t_repeat',goalId:GOAL,status:'open',content:'每天快走',revision:1,scheduledAt:'2099-01-02T11:00:00Z',
+        reminderPlan:{state:'scheduled',source:'agent',repeat:'daily',timezone:'Asia/Shanghai',explanation:'每天提醒我快走',wallTime:'2099-01-02T11:00:00Z'}},
       {id:'t_done',goalId:GOAL,status:'done',content:'早起的散步',revision:2}]};
   const saved={version:1,recommendationsVersion:1,conversationVersion:1,executionVersion:2,userId:config.userId,cursor:3,
     activeGoalId:GOAL,conversationId:null,goals:{[GOAL]:goal},messages:{},drafts:{}};
@@ -102,7 +130,7 @@ async function pageFixture({pending=false,offline=false}={}) {
   window.AlongAgentBridge={request:async r=>{calls.push(r);
     if(r.path==='/connection/status')return {along:true,ready:true,eventProtocol:1,userId:config.userId};
     if(r.path==='/events'){if(offline)throw Error('离线');return {status:'accepted',event_id:r.body.event_id};}
-    if(r.path==='/sync')return {items:[]};
+    if(r.path==='/sync')return {items:[],...(r.body?.tasks_page?{tasks_page:{items:[{id:'t_older',goalId:GOAL,content:'更早的历史任务',status:'done',currentRevision:1}]}}:{})};
     if(r.path==='/sync/ack')return {acked:0};
     throw Error(r.path);},notification:async()=>({})};
   await import('../web/app.mjs?task-completion='+ ++instance);
@@ -162,4 +190,29 @@ test('confirming sends exactly one task.completed fact',async()=>{
   assert.ok(Number.isFinite(Date.parse(events[0].body.payload.completed_at)));
   // 确认后按既有发送路径同型触发一次同步，状态以服务端快照为准。
   assert.ok(calls.some(call=>call.path==='/sync'));
+  // 事实已提交但快照尚未确认：同一任务不再提供完成键。
+  const open=dom.app.innerHTML.split('id="event-task-t_open"')[1]?.split('</article>')[0]??'';
+  assert.doesNotMatch(open,/event-task-complete/);
+});
+
+test('the confirmation copy matches the recurring behaviour instead of promising a move to history',async()=>{
+  const {dom}=await pageFixture();
+  await dom.click({action:'event-task-complete',taskId:'t_repeat'});
+  const copy=document.querySelector('#sheet').innerHTML;
+  assert.match(copy,/继续按原计划续排/);
+  assert.doesNotMatch(copy,/移入历史任务/);
+});
+
+test('the history entry pages past the bounded snapshot and reaches the oldest completed task',async()=>{
+  const {dom,calls}=await pageFixture();
+  await dom.click({action:'event-task-history'});
+  await new Promise(r=>setTimeout(r,60));
+  const pageCall=calls.find(call=>call.path==='/sync'&&call.body?.tasks_page);
+  assert.ok(pageCall,'历史入口按需翻页取回更早的任务');
+  assert.equal(pageCall.body.tasks_page.goal_id,GOAL);
+  assert.equal(pageCall.body.tasks_page.status,'done');
+  assert.match(dom.app.innerHTML,/更早的历史任务/);
+  assert.match(dom.app.innerHTML,/早起的散步/);
+  // 翻到尽头后不再提供翻页入口。
+  assert.doesNotMatch(dom.app.innerHTML,/event-task-history-more/);
 });

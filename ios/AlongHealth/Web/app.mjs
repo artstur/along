@@ -2,7 +2,7 @@ import {KEY, loadState, setSnapshot} from './health.mjs';
 import {ACTIVE_GOAL_KEY, FINANCE_KEY, ensureHealthGoal, withoutDefaultHealthGoal, loadFinance, connectFinanceDemo, addFinanceDemoRecord, healthView, financeView} from './workspace.mjs';
 import {EXPERIMENT, startExperiment, routeHealthEvent, acceptAgentSuggestion, agentRequestPayload} from './loop.mjs';
 import {goalChangeText} from './goal-agent-core.mjs';
-import {createEventWorkspace} from './event-workspace.mjs';
+import {createEventWorkspace, recurringPlan} from './event-workspace.mjs';
 import {recommendationCard} from './recommendations.mjs';
 import {dataSourceProvider} from './data-sources.mjs';
 import {taskResultBodyRelevant} from './task-results.mjs';
@@ -1574,18 +1574,36 @@ function eventTaskCard(task,pending=new Set()) {
     ?`<button class="task-detail-link" data-action="event-task-complete" data-task-id="${esc(task.id)}">完成</button>`:'';
   return `<article class="task-row event-task-card" tabindex="-1" id="event-task-${esc(task.id)}"><div><strong>${esc(task.content)}</strong><p>执行时间 · ${esc(eventTaskTime(task))}</p><div class="event-task-footer">${isEventTimedTask(task)?'<span class="task-schedule-tag">定时任务</span>':''}</div></div><div class="event-task-meta"><span class="task-row-status">${task.status==='done'?'已完成':'待完成'}</span><div class="event-task-links">${complete}<button class="task-detail-link" data-action="event-task-detail" data-task-id="${esc(task.id)}">查看详情<span class="task-detail-chevron" aria-hidden="true">›</span></button></div></div></article>`;
 }
-// 历史任务入口复用同一份目标快照里的任务，只列 status==='done'（不新增服务端列表接口）。
+// 历史任务入口复用同一份目标快照里的任务，只列 status==='done'；快照之外更早的任务按需翻页取回。
 function eventTaskHistory(goal,pending) {
-  const done=goal.tasks.filter(task=>task.status==='done');
-  return `${backButton('event-task-history-back','返回动态任务')}<section class="task-section"><div class="section-heading"><h2>历史任务</h2></div><div class="task-list">${done.map(task=>eventTaskCard(task,pending)).join('')||'<p class="agent-empty">还没有已完成的任务。</p>'}</div></section>`;
+  const done=eventWorkspace?eventWorkspace.historyTasks():goal.tasks.filter(task=>task.status==='done');
+  const more=eventWorkspace?!eventWorkspace.historyExhausted():false;
+  return `${backButton('event-task-history-back','返回动态任务')}<section class="task-section"><div class="section-heading"><h2>历史任务</h2></div><div class="task-list">${done.map(task=>eventTaskCard(task,pending)).join('')||'<p class="agent-empty">还没有已完成的任务。</p>'}</div>${more?'<div class="history-more"><button class="minor-action" data-action="event-task-history-more">加载更早的任务</button></div>':''}</section>`;
+}
+// 历史任务翻页：目标快照只带最近 200 条任务，一直翻到找到快照之外的任务或翻到尽头。
+async function loadMoreHistory() {
+  if (!eventWorkspace) return;
+  const workspace=eventWorkspace;
+  try {
+    for (let page=0;page<10;page++) {
+      const result=await workspace.loadHistoryPage();
+      if (result.added>0||result.exhausted) break;
+    }
+  } catch(error) {
+    if (eventWorkspace===workspace) notice(error?.message||'历史任务加载失败');
+  }
 }
 // 完成确认层：取消不发任何请求，卡片状态原样保留（服务端只认确认后发出的 task.completed）。
+// 周期任务完成的是「本次」：服务端续排并保持 open，文案必须与实际行为一致。
 function openEventTaskCompleteConfirm(taskId) {
   if (!eventWorkspace||!taskId) return;
   const view=eventWorkspace.view();
   const task=view.goals[view.activeGoalId]?.tasks.find(item=>item.id===taskId&&item.status==='open');
   if (!task) return;
-  show(`<div class="sheet-head"><h2>确认完成</h2><button class="icon-button" data-action="close" aria-label="关闭">×</button></div><p class="sheet-copy">确认「${esc(task.content)}」已完成？确认后任务会移入历史任务。</p><div class="sheet-actions"><button class="button sheet-main-button" data-action="event-task-complete-confirm" data-task-id="${esc(task.id)}">确认完成</button><button class="button secondary" data-action="event-task-complete-cancel">取消</button></div>`);
+  const copy=recurringPlan(task)
+    ?'确认后完成本次安排，任务会继续按原计划续排，仍在动态任务里。'
+    :'确认后任务会移入历史任务。';
+  show(`<div class="sheet-head"><h2>确认完成</h2><button class="icon-button" data-action="close" aria-label="关闭">×</button></div><p class="sheet-copy">确认「${esc(task.content)}」已完成？${copy}</p><div class="sheet-actions"><button class="button sheet-main-button" data-action="event-task-complete-confirm" data-task-id="${esc(task.id)}">确认完成</button><button class="button secondary" data-action="event-task-complete-cancel">取消</button></div>`);
 }
 async function completeEventTask(taskId) {
   if (!eventWorkspace||!taskId) return;
@@ -1869,7 +1887,8 @@ app.addEventListener('click', event => {
     } else if (action==='event-task-detail') {
       const task=eventWorkspace.view().goals[eventWorkspace.view().activeGoalId]?.tasks.find(t=>t.id===actionTarget.dataset.taskId&&t.status!=='cancelled');
       if (task) {selectedEventTaskId=task.id;focusedEventRecommendation=null;screen='task';render();}
-    } else if (action==='event-task-history') {screen='history';render();}
+    } else if (action==='event-task-history') {screen='history';render();void loadMoreHistory();}
+    else if (action==='event-task-history-more') {void loadMoreHistory();}
     else if (action==='event-task-history-back') {screen='home';render();}
     else if (action==='event-task-complete') {openEventTaskCompleteConfirm(actionTarget.dataset.taskId);}
     else if (action==='event-task-back') {selectedEventTaskId=null;focusedEventRecommendation=null;screen='home';render();}

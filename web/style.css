@@ -422,6 +422,9 @@ footer { padding: 0 0 26px; color: #aaa; text-align: center; font-size: 10px; }
 .sheet-actions { display:flex; flex-direction:column; gap:8px; margin-top:16px; }
 .sheet-actions .button { width:100%; }
 
+/* 历史任务按需翻页的入口：次要动作，弱化处理。 */
+.history-more { display:flex; justify-content:center; padding-top:6px; }
+
 /* Results share the compact detail typography; long content stays in the page scroll. */
 .event-task-detail, .event-task-detail .task-section, .event-task-detail .goal-card { min-width:0; overflow-wrap:anywhere; }
 .task-result-card { background:#fff; border:1px solid #e7e7e6; border-radius:16px; padding:18px 16px; min-width:0; overflow-wrap:anywhere; }

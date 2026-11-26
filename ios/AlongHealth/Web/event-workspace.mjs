@@ -71,7 +71,7 @@ function cleanTaskReminder(task) {
   return {};
 }
 
-const recurringPlan = task => task.reminderPlan?.state==='scheduled'&&task.reminderPlan.timezone&&['daily','weekly'].includes(task.reminderPlan.repeat);
+export const recurringPlan = task => task.reminderPlan?.state==='scheduled'&&task.reminderPlan.timezone&&['daily','weekly'].includes(task.reminderPlan.repeat);
 
 function isActiveGoal(value, goalId) {
   return goalId != null && value.goals[goalId]?.status === 'active';
@@ -118,6 +118,42 @@ function cleanTaskTrigger(t) {
   return {trigger:{version:1,kind:t.kind,actor:t.actor,capability:t.capability,state:t.state,label:t.label,conditions,notifyBefore:t.notifyBefore}};
 }
 
+// 完成事实台账（本地）：已提交但服务端快照尚未确认的任务。损坏的条目直接丢弃，不让整份缓存作废。
+function completionsOf(value) {
+  if (!record(value)) return {};
+  const out={};
+  for (const [taskId,entry] of Object.entries(value)) {
+    if (!id(taskId)||!record(entry)||!eventId(entry.eventId)||!id(entry.goalId)||!version(entry.revision)) continue;
+    out[taskId]={eventId:entry.eventId,goalId:entry.goalId,revision:entry.revision};
+  }
+  return out;
+}
+// 历史任务分页缓存：目标快照之外、按需取回的那一页。损坏的条目直接丢弃。
+function historyOf(value) {
+  if (!record(value)||!id(value.goalId)||!Array.isArray(value.tasks)) return undefined;
+  const tasks=[];
+  for (const task of value.tasks) {
+    if (!record(task)||!id(task.id)||!text(task.content,120)||!version(task.revision)) continue;
+    tasks.push(task);
+  }
+  return {goalId:value.goalId,tasks,cursor:typeof value.cursor==='string'&&value.cursor.length>0?value.cursor:undefined,exhausted:value.exhausted===true};
+}
+
+// One task of a goal, cleaned by the same rules the goal snapshot uses.
+function cleanGoalTask(task,goalId,seen) {
+  if (!record(task)||!id(task.id)||(seen!==undefined&&seen.has(task.id))||task.goalId!==goalId||!text(task.content,120)||!version(task.currentRevision)||
+      !['open','done','cancelled'].includes(task.status)) throw Error('任务同步格式不正确');
+  seen?.add(task.id);
+  return {id:task.id,goalId:goalId,content:task.content,status:task.status,revision:task.currentRevision,
+    ...cleanTaskReminder(task),...cleanTaskExecution(task.execution),...cleanTaskTrigger(task.trigger)};
+}
+// One page of a goal's tasks (history): same task rules, same goal identity as the snapshot.
+function safeTaskPage(items,goal) {
+  if (!Array.isArray(items)||items.length>200) throw Error('历史任务同步格式不正确');
+  const seen=new Set();
+  return items.map(item=>cleanGoalTask(item,goal.id,seen));
+}
+
 // Wire snapshots are validated before entering the cache; layouts are deterministic projections, not model HTML.
 export function safeWorkspaceGoal(snapshot) {
   if (!record(snapshot)||!record(snapshot.goal)||!record(snapshot.revision)||!Array.isArray(snapshot.tasks)) throw Error('目标同步格式不正确');
@@ -130,12 +166,7 @@ export function safeWorkspaceGoal(snapshot) {
   if (revision.context!=null && (!Array.isArray(revision.context)||revision.context.length>20||revision.context.some(item=>
     typeof item==='string'?!text(item,300):!record(item)||!text(item.text,300)||(item.until!==undefined&&!time(item.until))))) throw Error('目标情境格式不正确');
   const seen=new Set();
-  const cleanTasks=tasks.map(task=>{
-    if (!record(task)||!id(task.id)||seen.has(task.id)||task.goalId!==goal.id||!text(task.content,120)||!version(task.currentRevision)||
-        !['open','done','cancelled'].includes(task.status)) throw Error('任务同步格式不正确');
-    seen.add(task.id);
-    return {id:task.id,goalId:goal.id,content:task.content,status:task.status,revision:task.currentRevision,...cleanTaskReminder(task),...cleanTaskExecution(task.execution),...cleanTaskTrigger(task.trigger)};
-  });
+  const cleanTasks=tasks.map(task=>cleanGoalTask(task,goal.id,seen));
   validateGoalReply({reply:'目标已同步',proposal:{title:revision.title,target:metric?.target??null,
     task:cleanTasks[0]?.content||'通过聊天安排下一步',reason:'已校验的目标状态'}},goal.domain,'');
   const layout=safeAdaptiveLayout({version:1,title:revision.title,summary:'按你的目标持续调整',
@@ -298,6 +329,9 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
       saved.notificationReceipts=Array.isArray(saved.notificationReceipts)?saved.notificationReceipts.filter(eventId):[];
       saved.drafts=saved.drafts??{};
       saved.returnGoalId=saved.returnGoalId??null;
+      // 完成事实台账与历史任务分页缓存：坏条目丢弃，不让整份缓存作废。
+      saved.completions=completionsOf(saved.completions);
+      saved.history=historyOf(saved.history);
       if (saved.recommendationsVersion!==1&&(!version(saved.recommendationReplayAfter)||saved.recommendationReplayAfter>saved.cursor)) saved.recommendationReplayAfter=0;
       if (saved.conversationVersion!==1&&(!version(saved.conversationReplayAfter)||saved.conversationReplayAfter>saved.cursor)) saved.conversationReplayAfter=0;
       if (saved.taskCapabilityVersion!==1&&(!version(saved.taskCapabilityReplayAfter)||saved.taskCapabilityReplayAfter>saved.cursor)) saved.taskCapabilityReplayAfter=0;
@@ -401,6 +435,7 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
     for (const {envelope} of pendingEvents(config)) {
       if (envelope?.kind==='task.completed'&&typeof envelope.task_id==='string') ids.add(envelope.task_id);
     }
+    for (const taskId of Object.keys(state.completions??{})) ids.add(taskId);
     return ids;
   }
   /**
@@ -420,8 +455,74 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
     if (!assembled.ok) throw Error(assembled.reason);
     const receipt=await queueEvent(config,assembled.envelope,{send:false});
     if (!receipt.ok) throw Error(receipt.reason);
+    // 普通任务：提交后等服务端快照确认（完成或版本前进）。同步故障期间不重复提交，
+    // 同一任务只产生一次 done 版本与一条同步项。周期任务由服务端按周期去重，下一次仍可完成。
+    const completions={...completionsOf(state.completions)};
+    if (!recurringPlan(task)) completions[taskId]={eventId:receipt.event_id,goalId,revision:task.revision};
+    try { save({...state,completions}); } catch { state={...state,completions}; }
     onChange();
     return receipt.event_id;
+  }
+  /**
+   * 历史任务按需翻页：目标快照只带最近 200 条任务，更早的按页取回，不放大每次同步的快照。
+   * 返回本次新增的任务数与是否已到尽头。
+   */
+  async function loadHistoryPage() {
+    const goalId=state.activeGoalId, goal=goalId?state.goals[goalId]:undefined;
+    if (!goalId||!goal) throw Error('没有选中目标');
+    const history=historyOf(state.history);
+    const current=history&&history.goalId===goalId?history:{goalId,tasks:[],cursor:undefined,exhausted:false};
+    if (current.exhausted) return {added:0,exhausted:true};
+    const page=await agentCall(config,'/sync',{after_seq:state.cursor,limit:50,conversation_version:1,
+      tasks_page:{goal_id:goalId,status:'done',limit:50,...(current.cursor?{cursor:current.cursor}:{})}});
+    const tasksPage=record(page)?page.tasks_page:undefined;
+    if (!record(tasksPage)||!Array.isArray(tasksPage.items)) throw Error('历史任务同步格式不正确');
+    // 与目标快照同一套任务校验（同一目标、同一字段口径），标题与指标不重复信任远端。
+    const pageTasks=safeTaskPage(tasksPage.items,goal);
+    const cursor=typeof tasksPage.nextCursor==='string'&&tasksPage.nextCursor.length>0?tasksPage.nextCursor:undefined;
+    const known=new Set(current.tasks.map(task=>task.id));
+    const fresh=pageTasks.filter(task=>!known.has(task.id));
+    const tasks=[...current.tasks,...fresh];
+    const next={...state,history:{goalId,tasks,cursor,exhausted:cursor===undefined}};
+    try { save(next); } catch { state=next; }
+    onChange();
+    return {added:fresh.length,exhausted:cursor===undefined};
+  }
+  /** 历史任务列表：目标快照里的已完成任务，加上按需翻页取回的那部分（按 id 去重）。 */
+  function historyTasks() {
+    const goal=state.activeGoalId?state.goals[state.activeGoalId]:undefined;
+    if (!goal) return [];
+    const base=goal.tasks.filter(task=>task.status==='done');
+    const history=historyOf(state.history);
+    if (!history||history.goalId!==goal.id) return base;
+    const seen=new Set(base.map(task=>task.id));
+    return [...base,...history.tasks.filter(task=>!seen.has(task.id))];
+  }
+  /** 历史任务是否已翻到尽头（没翻过时保守当作还有更早的，翻页确认后才收口）。 */
+  function historyExhausted() {
+    const goal=state.activeGoalId?state.goals[state.activeGoalId]:undefined;
+    if (!goal) return true;
+    const history=historyOf(state.history);
+    if (!history||history.goalId!==goal.id) return false;
+    return history.exhausted;
+  }
+  /**
+   * 台账收敛：服务端快照确认完成（或版本前进）后移除记录；终态回执（被拒／冲突）同样移除，
+   * 让用户可以重新提交。周期任务不记台账——服务端按周期去重，下一次仍可完成。
+   */
+  function pruneCompletions(next) {
+    const completions=completionsOf(next.completions);
+    const failed=new Set(readEventFailures(config).map(item=>item.event_id));
+    const kept={};
+    for (const [taskId,entry] of Object.entries(completions)) {
+      if (failed.has(entry.eventId)) continue;
+      const goal=next.goals[entry.goalId];
+      const task=goal?.tasks.find(item=>item.id===taskId);
+      if (task&&(task.status==='done'||task.revision>entry.revision)) continue;
+      kept[taskId]=entry;
+    }
+    next.completions=kept;
+    return next;
   }
   function prepareRecommendationFeedback(eventId) {
     const message=state.messages[eventId];
@@ -527,6 +628,8 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
       }
       if (page.nextCursor!==undefined&&String(page.nextCursor)!==String(previous)) throw Error('同步分页游标不正确');
       restoreSelection(next);
+      // 快照确认后收敛完成事实台账：同一任务不再重复提交完成事实。
+      pruneCompletions(next);
       next.cursor=Math.max(next.cursor,previous);next.pendingAck=seqs;
       if (replay) {
         if (page.nextCursor===undefined) {next.recommendationsVersion=1;next.conversationVersion=1;next.dataSourcesVersion=1;next.executionVersion=2;next.taskCapabilityVersion=1;next.resultPresentationVersion=1;delete next.resultPresentationReplayAfter;delete next.taskCapabilityReplayAfter;delete next.recommendationReplayAfter;delete next.conversationReplayAfter;delete next.dataSourcesReplayAfter;delete next.executionReplayAfter;delete next.executionReplayVersion;}
@@ -568,5 +671,5 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
       .finally(()=>{flight=null;if(!disposed&&lastError!==beforeError) onChange();});
     return flight;
   }
-  return {view,draft,setDraft,select,leaveConversation,prepareRecommendationFeedback,completeTask,pendingTaskCompletions,submit,sync,dispose:()=>{disposed=true;retireEventAuthority(config);}};
+  return {view,draft,setDraft,select,leaveConversation,prepareRecommendationFeedback,completeTask,pendingTaskCompletions,loadHistoryPage,historyTasks,historyExhausted,submit,sync,dispose:()=>{disposed=true;retireEventAuthority(config);}};
 }
