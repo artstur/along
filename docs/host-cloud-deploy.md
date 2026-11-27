@@ -367,3 +367,106 @@ db.prepare("UPDATE maintenance_schedule SET next_due_at=? WHERE user_id=?")
 docker compose -f deploy/docker-compose.cloud.yml ps
 docker logs -f along-host
 ```
+
+## 10. 每小时检查主干并自动部署（2026-11-27 实测）
+
+**调度在 Multica，不在这台机上。** Multica 的每小时 wakeup 调起这台机上的**一次性
+部署入口**（`sudo systemctl start along-auto-deploy.service`）：那一轮检查
+`artstur/along` 与 `artstur/along-superagent` 的 `main`，有更新就拉取、构建、切换，
+没更新就什么都不做；跑完把摘要回报到工单，**工单上的评论就是运行记录**。
+
+这台机上**不装 systemd timer**：两套调度同时跑会互相切换（各自切一次，线上版本与
+台账可能对不上）。产物在 `deploy/auto-deploy.sh` 与同目录的单元文件，
+装法与运维命令见 [deploy/README.md 的自动部署一节](../deploy/README.md#自动部署每小时检查主干并部署)。
+
+### 现场的既有形态（先只读核对过）
+
+| 项 | 实测值 |
+| --- | --- |
+| 工作区 | `/home/ecs-user/workspace/{along,along-superagent,data,secrets}` |
+| Compose 项目名 | `deploy`（project directory 是 `deploy/`，项目名取目录名） |
+| 容器 | `along-host`（`along-host:cloud`）、`along-superagent`（`along-superagent:local`）、`along-netns`（锚点） |
+| 凭证 | `secrets/{runner-token,memory-env}` 与 `data/superagent/along/data/bridge-token`，file secret，root 属主 0600 |
+| 仓库访问 | `ecs-user` 的 `~/.ssh/id_ed25519` 能读两个仓库（`git ls-remote` 实测通过） |
+| 调度 | 装之前机器上只有 `dnf-makecache` / `logrotate` 等系统定时器，没有别的 Along 调度。改造前装过一个 `along-auto-deploy.timer`（hourly），改造时停用并移除 |
+
+### 装好之后的位置
+
+| 位置 | 内容 |
+| --- | --- |
+| `/usr/local/libexec/along/auto-deploy.sh` | 部署器本体（root 属主，0755） |
+| `/etc/systemd/system/along-auto-deploy.service` | 一次性部署入口的单元（`User=ecs-user`）。**没有 timer** |
+| `/etc/along-auto-deploy.env` | 配置（只有路径与版本来源，没有凭证） |
+| `/home/ecs-user/workspace/.auto-deploy/` | 成功版本记录、版本台账、部署锁 |
+| `/home/ecs-user/workspace/release/<两个 SHA 前 12 位>/` | 每个版本的干净源码树 |
+
+### 实测口径
+
+| 项 | 值 |
+| --- | --- |
+| 调度 | Multica 工单上的 cron wakeup（`0 * * * *` UTC）；触发那一轮调起上面那个入口 |
+| 一轮完整部署（缓存命中时） | 约 70 秒：构建 ~60 秒，切换 ~30 秒，探活 ~30 秒 |
+| 无更新的一轮 | 只做 fetch 与取提交（部署专用引用 `refs/along-auto-deploy/main`），不构建不重启 |
+| 磁盘 | 每个 Super Agent 镜像约 2.41 GB；发布目录与镜像按版本台账保留两份 |
+
+### 六个必须知道的点
+
+**一、锚点每轮都会被重建，这不是副作用。** 编排里的相对路径（`./netns-proxy.mjs`、
+`./superagent-profile.patch.yml`）落在发布目录上，与现场 checkout 的路径不同，
+compose 的配置指纹因此变了，锚点本来就会被重建。而命名空间跟着持有它的容器走
+（§2.3），所以锚点与两个使用方必须在同一次操作里一起重建——
+`up -d --no-build --force-recreate anchor superagent host` 就是 §2.3 那条命令。
+实测顺序：锚点 → Super Agent → Host，三个都起来后探活通过。
+
+**二、镜像必须带标签，否则回退就断了。** 第一版用 `docker image prune --filter
+until=2h` 清悬空镜像，结果把**上一成功版本**的镜像一起删了——它们没有标签就是悬空的。
+现在改成：每个版本在台账里记镜像 ID 与版本化标签，清理时**只按台账删自己的镜像**，
+不跑全局 prune（同机还有 Multica 的镜像，不能连坐）。这条是踩出来的。
+
+**三、卷与凭证一个字节都没动，靠的是发布目录里的符号链接。** `release/<id>/data` 与
+`release/<id>/secrets` 是指向工作区真实目录的符号链接，所以 compose 的 `../../data`、
+`../../secrets` 落在同一份持久卷与凭证上；清理发布目录时 `rm -rf` 不会跟着符号链接
+删到真实数据（实测确认过）。切换前还会把 `docker compose config` 解析出来的卷、凭证、
+构建输入路径逐条核对一遍——相对路径配错是静默降级，不能靠肉眼。
+
+**四、同秒提交会让构建缓存把旧内容烤进镜像。** `git archive` 把所有文件的 mtime 设成
+提交时间。同秒提交、同样字节长度的改动，路径+大小+mtime 三项都不变，构建的本地源
+同步会认为"什么都没变"，直接复用上一次的**内容**——镜像里留着旧代码，而台账记的是
+新提交，下一轮还会跳过。`--no-cache` 救不了：旧的是源同步那一层，不是构建缓存层。
+解法：展开后把每个文件的 mtime 设成**该文件内容派生**的时间戳，内容变了 mtime 就变。
+再加一道防线：切换前逐文件比对镜像产物与源码，对不上就不切换、不写成功记录。
+这两条都在隔离环境里复现过（见 `deploy/README.md` 的隔离复测一节）。
+
+**五、compose up 可能部分成功，那比完全失败更糟。** `up -d --force-recreate anchor
+superagent host` 可能把锚点与 Super Agent 重建完、Host 容器却创建不来（新增了一个
+指向不存在路径的 bind 之类），命令返回非零——此时线上入口是断的。所以"命令失败"与
+"探活失败"必须走同一条回退路径：把镜像标签打回旧 ID、按旧编排重建三个容器并重新
+探活。回退是**回退到切换前记录下来的镜像 ID 与编排文件**，不依赖台账里的版本指针。
+
+**六、状态目录必须归服务账号所有。** root 建出来的目录服务账号写不进去，下一轮取锁
+直接 `Permission denied`，定时任务从此每轮都失败，而且失败得很安静。安装脚本按
+`ALONG_DEPLOY_STATE_USER` 建目录；`bootstrap` 若以 root 运行，会在**登记之后**把整个
+状态目录（含 `versions/` 版本台账与台账文件）chown 给服务账号——登记前 chown 不够：
+`record_success` 随后以 root 建出来的 `versions/` 仍然是 root 的，服务账号下一轮写
+台账就 Permission denied，而那时容器已经切过去了、台账还指着旧版本。
+安装顺序：先装 → 以服务账号 `bootstrap` → 手动跑一轮 → 再启用 Multica 调度。
+
+**七、台账写不进去要在切换前就发现。** 上一条的失败形态是"容器切过去了、台账写不进去"：
+线上跑的是新版本，台账说旧版本，下一轮的"变没变"判断全错。所以切换前先真写一个探针
+文件，确认状态目录与版本台账目录在**当前账号**下写得进去；写不进去就在切换前失败。
+（`-w` 判不可靠：目录看着可写却建不了文件，或父目录权限不对。）
+
+**八、同一 checkout 上的并发 fetch 会污染本轮提交。** `FETCH_HEAD` 是 checkout 里的
+全局可变文件——别人在这个 checkout 上 fetch 另一个分支，它就被覆盖了，本轮会拿到那个
+分支的提交并部署出去（台账也记成它）。所以本轮的提交固定在**部署专用引用**
+`refs/along-auto-deploy/<分支>` 上：只有部署器写它，别人的 fetch 碰不到。
+
+**九、以 root 跑时 git 会拒绝操作服务账号的 checkout。** checkout 归服务账号所有，
+root 跑 git 会报 "dubious ownership" 而失败。部署器对 checkout 的每次 git 调用都带
+`-c safe.directory=<那个 checkout>`——只声明已知的那个路径，不是放开全部。
+
+**十、配置文件必须在参数解析之前读。** 顺序反了，配置文件里的值**全部**不生效：
+参数先按默认值算好，配置文件后 source，派生变量（工作区、状态目录、服务账号）拿到的
+还是默认值。表现是"按手册装完，root 登记基线没 chown（服务账号没读到），
+服务账号的首次更新写台账 Permission denied"。现在部署器先 source
+`/etc/along-auto-deploy.env`，再解析参数。

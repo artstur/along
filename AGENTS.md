@@ -36,7 +36,7 @@
 - 状态目录由 `ALONG_AGENT_STATE_DIR` 决定，默认 `~/.along/agent-host/`（直接 `npm run agent-host`）；`npm run activate` 用 `~/.along/phone-test/`；云端部署用挂载卷（`/opt/along/data/host`）。环境变量见 `README.md` 与 `deploy/env.example`。
 - 云端部署形态（一台云主机 + Docker Compose、2 个静态用户、每用户一次性配对码）的设计、决策与上线 Runbook 见 `docs/cloud-deploy-multi-user.md`；先从 `deploy/README.md` 选编排。云端与本地共用同一套源码，不新增模式开关。Mac 本地模式完全保留且行为不变，作为回退路径仅适用于普通 Tier 1 换端，不适用于已退役原写端的个人冷交接。
 - 线上是**一套**栈（compose 项目 `deploy`：`anchor` + `superagent` + `host`），443 与 10531 两个入口都指向它；不要另起一套"个人栈"——同一份业务库只能有一个写端。
-- **镜像的构建输入默认取相邻 checkout 的工作区**（`deploy/docker-compose.cloud.yml` 的 `additional_contexts`），不是钉死的提交：工作区有未提交改动或前移到别的提交，重建出的镜像就与仓库不一致，而镜像标签不带 revision，**漂移没有任何提示**。`deploy/README.md` 的基础编排默认是钉死的提交，云端编排没有沿用这条。重建线上那一份前，先把两个工作区清干净停在目标提交，或用 `ALONG_SUPERAGENT_SOURCE=<40 位 SHA>` 钉住。线上当前对应：Along 仓库 `d2d3880`、Along Agent 仓库 `65a0bfd`（2026-11-26 合并后的单栈）。
+- **镜像的构建输入默认取相邻 checkout 的工作区**（`deploy/docker-compose.cloud.yml` 的 `additional_contexts`），不是钉死的提交：工作区有未提交改动或前移到别的提交，重建出的镜像就与仓库不一致，而镜像标签不带 revision，**漂移没有任何提示**。`deploy/README.md` 的基础编排默认是钉死的提交，云端编排没有沿用这条。**线上那一份现在由 `deploy/auto-deploy.sh` 定时构建**：它把当轮固定的两个提交展开成干净源码树再构建，构建输入不再取工作区；镜像标签带两个 SHA，漂移能被查出来。手工重建线上那一份仍按老规矩：先把两个工作区清干净停在目标提交，或用 `ALONG_SUPERAGENT_SOURCE=<40 位 SHA>` 钉住。线上当前对应：Along 仓库 `944da99`、Along Agent 仓库 `d16a98b`（2026-11-27 由 hourly 自动部署切上去）。
 - 普通配对或同一台 Mac 换址不是跨 Host 迁移。保留个人工作区须走 `docs/personal-workspace-handoff.md`，只允许一个业务写端；旧源退役后不得恢复写入。
 - 事件工作区已按校验后自动生效实现，目标只能通过聊天改变。「采用」、待采用提案和目标编辑入口仅用于旧 Host 兼容；不要在新链路增加采用、确认或审批环节。
 
