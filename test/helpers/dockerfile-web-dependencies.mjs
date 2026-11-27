@@ -13,7 +13,8 @@ export function copyWebFiles(dockerfile) {
     .map(token => token.slice('web/'.length));
 }
 
-const IMPORT_RE = /(?:from|import\()\s*'([^']+\.(?:mjs|json))'/g;
+// 模块说明符可能带资源版本参数（`./x.mjs?v=98`），版本参数不属于文件名的一部分。
+const IMPORT_RE = /(?:from|import\()\s*'([^']+?\.(?:mjs|json))(?:\?[^']*)?'/g;
 
 // 从 Host 的顶层模块跟随相对 import，收集 Dockerfile.host 需要复制的 Web 文件。
 export function hostWebDependencies(root) {
