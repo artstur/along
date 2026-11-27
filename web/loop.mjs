@@ -1,5 +1,5 @@
-import {initialState, setSnapshot} from './health.mjs?v=100';
-import {validateTaskReply, SIGNIFICANT_MINUTES} from './goal-agent-core.mjs?v=100';
+import {initialState, setSnapshot} from './health.mjs?v=101';
+import {validateTaskReply, SIGNIFICANT_MINUTES} from './goal-agent-core.mjs?v=101';
 
 export const EXPERIMENT = 'weekly-workout-120-v1';
 export const ORIGINAL_TASK = '本周安排一次 45 分钟健身';

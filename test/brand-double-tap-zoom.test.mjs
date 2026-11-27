@@ -54,11 +54,14 @@ test('the rule targets the brand markup the user actually taps', async () => {
   assert.match(dom.app.innerHTML, /class="brand-symbol"/, '品牌区里必须有那个图标');
 });
 
-test('the page keeps pinch zoom available instead of locking zoom globally', () => {
+test('the web version keeps pinch zoom while the App locks it at runtime', () => {
+  // 契约变更（Bug#5，2026-11-28）：App 内置页面现在整体禁掉双指缩放，网页版本不跟着锁。
+  // 所以静态 viewport 仍然不能全局禁掉缩放——网页版本要保留双指缩放。
+  // App 侧的锁由 index.html 里那段 along: 判断负责，见 test/ios-page-zoom-lock.test.mjs。
   const viewport = read('../web/index.html').match(/<meta name="viewport" content="([^"]*)"/)?.[1] ?? '';
   assert.ok(viewport, 'index.html 必须声明 viewport');
-  assert.doesNotMatch(viewport, /user-scalable\s*=\s*no/i, '不能全局禁掉缩放，那会影响页面其它区域的手势');
-  assert.doesNotMatch(viewport, /maximum-scale\s*=\s*1(\b|$)/, '不能用 maximum-scale=1 变相关掉双指缩放');
+  assert.doesNotMatch(viewport, /user-scalable\s*=\s*no/i, '网页版本不跟着锁缩放：静态 viewport 不能全局禁掉双指缩放');
+  assert.doesNotMatch(viewport, /maximum-scale\s*=\s*1(\b|$)/, '网页版本不跟着锁缩放：静态 viewport 不能全局禁掉双指缩放');
 });
 
 test('the App bundled assets ship the same rule', () => {
