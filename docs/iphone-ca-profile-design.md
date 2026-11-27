@@ -4,6 +4,12 @@
 
 **状态：设计已落文档；代码实现已落地并通过自动化回归，但尚未上线。**
 
+> **适用范围**：本文是 2026-11-21 那轮**私有 CA + DNS 域名**迁移的方案与实现契约。
+> 文中「本轮」「公网数字 IP 不接受」等口径都以那次私有 CA DNS 迁移为范围，不是现行全局策略：
+> 固定公网 IPv4 直连是**另一条已实现的入口**，走公共 CA 证书（IP SAN）+ 系统信任评估，
+> 不装本文的描述文件，见
+> [deploy/README.md 的固定公网 IPv4 直连](../deploy/README.md#固定公网-ipv4-直连)。
+
 2026-11-21 实施轮次已完成的部分（详见 §7 与本轮交付说明）：服务端云端 TLS 材料加载与启动前校验、iOS
 侧系统信任评估委托与连接 v2（`trustPolicy` + `bindingScopeId`）、Web 桥与后台/设备来源/通知的归属迁移、
 只含公开根的描述文件制作与核验工具（`tools/ca-profile.mjs`），以及覆盖这些行为的自动化测试。
@@ -24,7 +30,7 @@
 | Host 缺证书时现场自签，仅传 CN/天数；云端 Compose 配置 3650 天 | `host/agent-host.mjs` 的 key/cert 生成段；`deploy/docker-compose.yml` 的 ALONG_TLS_* | 云端改用预签发证书，缺失或不合法就拒启；本地模式保留既有证书机制 |
 | 原生只比较叶 DER SHA-256，然后 useCredential | `ios/AlongHealth/Sources/AlongShellView.swift` 的 PinnedAgentDelegate | 云端移除该放行分支，不能只安装根而保留叶钉扎 |
 | 连接存储、Web 桥、设备采集、通知和健康队列均依赖 fingerprint | AlongConnectionStore.clean、`web/agent-client.mjs`、PhoneSourceCoordinator、EventTaskNotifications、HealthKitReader | 一起迁移；不能只修改一个网络委托 |
-| 地址接受合法 DNS 域名及 RFC1918 IPv4，不接受公网数字 IP | AlongConnectionStore.hostAccepted | 本方案用生产域名；公网 IP 直连不在本轮目标 |
+| 地址接受合法 DNS 域名及 RFC1918 IPv4，不接受公网数字 IP | AlongConnectionStore.hostAccepted | 本方案用生产域名；公网 IP 直连不在本轮目标——那是本文之后另做的一条入口（公共 CA 的 IP SAN + 系统信任），不按本文的私有 CA 描述文件走 |
 
 现状事实与实施状态以工作树为准。描述文件不会替代新 App 发版，也不会改变旧 App 的叶钉扎。CA 不认证访问者：公网 `/health`、配对入口及连接资源防护仍需独立处理。本轮不引入 mTLS、MDM、反代、公共 CA 自动兜底或原始健康数据上云。
 
@@ -219,7 +225,7 @@ T19 的 Mac 私网真机回归、T20 的容器内权限与中断发布、T21 的
 | T01 | profile 未安装；或已安装但完全信任未开启 | 新 App 的前台/后台 TLS 均失败，无 HTTP 秘密发送；不能被旧叶 pin 接管 |
 | T02 | 正确根、正确 DNS SAN、有效叶及完整链 | Release iPhone 上 `/pair`/verify、前台及后台请求成功，未额外安装 App 内锚 |
 | T03 | 同名 CN 的错误根；无其他可用信任路径 | 正确摘要核验能识别错根；只装错根不能连接真正 Along 链 |
-| T04 | 错误 SAN、只有 CN 无 SAN、把公网 IP 当 DNS SAN | 对生产域名验证失败；公网 IP URL 仍被地址约束拒绝 |
+| T04 | 错误 SAN、只有 CN 无 SAN、把公网 IP 当 DNS SAN | 对生产域名验证失败；公网 IP URL 仍被地址约束拒绝。本行限本文的私有 CA DNS 迁移范围；固定公网 IPv4 直连走公共 CA 的 IP SAN，另有验收 |
 | T05 | 叶过期、尚未生效、签名错误、缺中间链、错误 EKU/不合格叶扩展 | Host preflight 拒启；测试端强行出示时客户端拒绝不合法身份。手机时钟错误可诊断，不放宽规则 |
 | T06 | TLS 版本/算法不满足 ATS | 失败，不为通过而加 NSAllowsArbitraryLoads 或手动 useCredential |
 | T07 | 同域/跨域 HTTP 重定向，包括另一个受信任站点 | 不跟随，不把 Bearer/配对码带到新地址 |

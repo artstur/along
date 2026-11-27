@@ -2,10 +2,15 @@
 
 > 2026-11-23 实测。环境：阿里云 ECS（2 核 / 3.5 GB / 40 GB 磁盘），Alibaba Cloud Linux 4，Docker 29.10.0 / Compose v5.8.0。
 > **本文只记录实测事实与踩过的坑，不重复部署编排** —— 编排在本轮新增的
-> `deploy/docker-compose.cloud.yml`（锚点 + superagent + host + embeddings 垫片）、
+> `deploy/docker-compose.cloud.yml`（锚点 + superagent + host；首版还有一个 embeddings 垫片服务，
+> 见 §6.2，本轮已删，现在这份编排里没有它）、
 > `deploy/Dockerfile.host.cloud`、`deploy/Dockerfile.superagent`、`deploy/netns-proxy.mjs`、
 > `deploy/superagent-profile.patch.yml`；
 > Super Agent 侧的前置实测见[Superagent 云端部署经验](superagent-cloud-deploy.md)。
+>
+> **本文是 2026-11-23 那次的现场快照**，含当时的手工部署命令、10531 入口与 APNs 观察。
+> 日常部署、运行状态与版本查询看 [deploy/README.md 的自动部署一节](../deploy/README.md#自动部署每小时检查主干并部署)，
+> 本文的手工命令与观察值按当时保留，不当作现行口径。
 >
 > 与[云端部署与多用户方案](cloud-deploy-multi-user.md)的关系：那份是设计（§3.5 的 Tier 1/Tier 2 划分
 > 保留为历史设计），本文是 Linux 上真正跑起来的那一版。
@@ -268,6 +273,11 @@ worker 派工一启动就失败：`Error: spawn git ENOENT`。node 基础镜像�
 
 ## 7. 远程推送：本部署不启用，走本地提醒 + 前台补收
 
+> 下面是 2026-11-23 那次的观察与结论。这台机当时用的是免费 personal team 签名，
+> 描述文件里没有 `aps-environment`，所以推不通。**这是当时的现场状态，不是通用结论**：
+> 开了付费开发者团队之后，§7.3 的步骤可以接上，App 侧的信任策略按
+> [iPhone CA 方案 §2.2](iphone-ca-profile-design.md#22-旧连接迁移与-mac-兼容) 走。
+
 **结论：不启用 APNs，这是账号能力问题，不是缺个文件。**
 
 Apple 的推送能力（`aps-environment` entitlement）只在**付费的 Apple Developer Program** 团队里
@@ -340,6 +350,11 @@ APNs，只是替你做签名、token 管理、失效重注册与送达回执—�
 - **worker 的 bash 沙箱在 Linux 上只验过启动**：git 缺失已修，但真实的文件/命令执行行为没有系统验收。
 
 ## 9. 运维命令
+
+以下是 2026-11-23 实测现场的手工命令。**日常部署与运行状态不在这里**：线上那一份由
+`deploy/auto-deploy.sh` 按双 SHA 构建并切换，查版本用 `auto-deploy.sh status`、探活用
+`verify`、回退用 `rollback`，装法与调度见
+[deploy/README.md 的自动部署一节](../deploy/README.md#自动部署每小时检查主干并部署)。
 
 ```sh
 cd /home/ecs-user/workspace/along      # 这台机的布局；仓库的规范布局是 /opt/along/along

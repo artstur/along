@@ -50,7 +50,10 @@ services:
       dockerfile: deploy/Dockerfile.superagent
       # bundle 的构建输入。默认取**相邻仓库的工作区**（这台机的布局是
       # /home/ecs-user/workspace/{along,along-superagent}）；要用远端固定提交就设
-      # ALONG_SUPERAGENT_SOURCE=...#<40 位 SHA>（main 的 compose 默认走远端 pin）。
+      # ALONG_SUPERAGENT_SOURCE=https://github.com/artstur/along-superagent.git#<40 位 SHA>
+      # （main 的 compose 默认走远端 pin）。**不能只写裸 SHA**：裸 SHA 会被当成相对
+      # project directory（deploy/）的本地路径，解析成 deploy/<SHA> 这种不存在的目录。
+      # 这个变量只固定 Agent 的构建上下文，Along 源码由 context: .. 决定。
       additional_contexts: {along: "${ALONG_SUPERAGENT_SOURCE:-../../along-superagent}"}
     image: along-superagent:local
     container_name: along-superagent
