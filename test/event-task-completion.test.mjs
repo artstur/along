@@ -216,3 +216,25 @@ test('the history entry pages past the bounded snapshot and reaches the oldest c
   // 翻到尽头后不再提供翻页入口。
   assert.doesNotMatch(dom.app.innerHTML,/event-task-history-more/);
 });
+
+test('a paged history card opens its own detail and returns to the same history list',async()=>{
+  const {dom}=await pageFixture();
+  await dom.click({action:'event-task-history'});
+  await new Promise(r=>setTimeout(r,60));
+  // 分页加载出来的历史卡片不在目标快照里：点「查看详情」要打开它自己的详情。
+  await dom.click({action:'event-task-detail',taskId:'t_older'});
+  assert.match(dom.app.innerHTML,/class="content event-task-detail"/);
+  assert.match(dom.app.innerHTML,/更早的历史任务/);
+  assert.match(dom.app.innerHTML,/返回历史任务/);
+  // 返回时回到同一目标的历史列表，分页结果仍在。
+  await dom.click({action:'event-task-back'});
+  assert.match(dom.app.innerHTML,/历史任务/);
+  assert.match(dom.app.innerHTML,/更早的历史任务/);
+  assert.doesNotMatch(dom.app.innerHTML,/class="content event-task-detail"/);
+  // 快照内的历史卡片同样能打开详情，并回到动态任务列表。
+  await dom.click({action:'event-task-detail',taskId:'t_done'});
+  assert.match(dom.app.innerHTML,/class="content event-task-detail"/);
+  assert.match(dom.app.innerHTML,/早起的散步/);
+  await dom.click({action:'event-task-back'});
+  assert.match(dom.app.innerHTML,/历史任务/);
+});

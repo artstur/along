@@ -61,6 +61,8 @@ const okxStates=new Map();
 const okxPending=new Map();
 let focusedEventRecommendation=null;
 let selectedEventTaskId=null;
+// 任务详情是从哪里进来的：动态任务列表还是历史任务列表——返回时回到同一处。
+let eventTaskDetailOrigin='home';
 let pendingRecommendationOpen=null;
 let localSelection=null,waitingForSavedGoal=false;
 let lastNotificationProjection='',lastNotificationCheck=0;
@@ -193,7 +195,7 @@ function disconnectEventWorkspace() {
   eventWorkspace=null;
   eventWorkspaceBinding=null;
   okxStates.clear();okxPending.clear();
-  focusedEventRecommendation=null;selectedEventTaskId=null;pendingRecommendationOpen=null;
+  focusedEventRecommendation=null;selectedEventTaskId=null;pendingRecommendationOpen=null;eventTaskDetailOrigin='home';
   waitingForSavedGoal=false;
   lastNotificationProjection='';lastNotificationCheck=0;
 }
@@ -1475,7 +1477,8 @@ async function openEventNotification(route,synced=false) {
     void eventWorkspace.sync();return;
   }
   const linkedTaskId=route.taskId??recommendationMessage?.taskId;
-  const task=goal.tasks.find(t=>t.id===linkedTaskId&&t.status!=='cancelled');
+  // 通知指向的任务可能在按需翻页取回的那部分里：快照与分页缓存都算数。
+  const task=eventWorkspace.taskById(goal.id,linkedTaskId);
   const recommendation=Boolean(recommendationMessage?.recommendation);
   // A result can never cross a task boundary merely because the goal matches.
   const matchesResult=!recommendation||recommendationMessage.taskId===task?.id;
@@ -1485,6 +1488,7 @@ async function openEventNotification(route,synced=false) {
   eventWorkspace.select(goal.id);
   focusedEventRecommendation=recommendation&&matchesResult?recommendationMessage.eventId:null;
   selectedEventTaskId=task?.id??null;
+  eventTaskDetailOrigin='home';
   screen=task&&goal.status==='active'?'task':'home';render();
   if (task) {
     const target=document.getElementById(recommendation&&matchesResult?'event-message-'+route.eventId:'event-task-'+task.id);
@@ -1618,13 +1622,14 @@ async function completeEventTask(taskId) {
   }
 }
 function eventTaskDetail(goal,messages) {
-  const task=goal.tasks.find(t=>t.id===selectedEventTaskId&&t.status!=='cancelled');
-  if (!task) return `${backButton('event-task-back','返回动态任务')}<section class="goal-card"><h1>任务已更新</h1><p>请返回查看最新安排。</p></section>`;
+  // 分页加载出来的历史任务不在目标快照里：先看快照，再看按需翻页取回的那部分。
+  const task=eventWorkspace?eventWorkspace.taskById(goal.id,selectedEventTaskId):goal.tasks.find(t=>t.id===selectedEventTaskId&&t.status!=='cancelled');
+  if (!task) return `${backButton('event-task-back',eventTaskDetailOrigin==='history'?'返回历史任务':'返回动态任务')}<section class="goal-card"><h1>任务已更新</h1><p>请返回查看最新安排。</p></section>`;
   const candidates=messages.filter(m=>m.goalId===goal.id&&m.taskId===task.id&&(m.recommendation||taskResultBodyRelevant(m,goal,task)));
   const result=candidates.find(m=>m.eventId===focusedEventRecommendation)??candidates.at(-1);
   const execution=task.execution;
   const history=execution?.records??[];
-  return `${backButton('event-task-back','返回动态任务')}<section class="goal-card" tabindex="-1" id="event-task-${esc(task.id)}"><p class="goal-note">${esc(goal.title)}</p><h1>${esc(task.content)}</h1><p>执行时间 · ${esc(eventTaskTime(task))}</p>${isEventTimedTask(task)?'<span class="task-schedule-tag">定时任务</span>':''}${taskReminderLine(task)}</section>${result?`<section class="task-section" id="event-message-${esc(result.notificationEventId??result.eventId)}">${result.recommendation?recommendationCard(result.recommendation,{eventId:result.eventId}):taskResultCard(result)}</section>`:''}<section class="task-section"><div class="section-heading"><h2>已记录 ${execution?.count??0} 次执行</h2></div>${history.length?`<ol class="task-execution-list">${history.map(record=>`<li><strong>${esc(record.summary??(record.kind==='research'?'已整理推荐方案':record.kind==='calculation'?'已完成计算':'已确认完成'))}</strong><p>${esc(eventTaskStamp(record.executedAt,task.reminderPlan?.timezone))}</p></li>`).join('')}</ol>`:'<p class="goal-note">暂无可核实的执行记录</p>'}</section>`;
+  return `${backButton('event-task-back',eventTaskDetailOrigin==='history'?'返回历史任务':'返回动态任务')}<section class="goal-card" tabindex="-1" id="event-task-${esc(task.id)}"><p class="goal-note">${esc(goal.title)}</p><h1>${esc(task.content)}</h1><p>执行时间 · ${esc(eventTaskTime(task))}</p>${isEventTimedTask(task)?'<span class="task-schedule-tag">定时任务</span>':''}${taskReminderLine(task)}</section>${result?`<section class="task-section" id="event-message-${esc(result.notificationEventId??result.eventId)}">${result.recommendation?recommendationCard(result.recommendation,{eventId:result.eventId}):taskResultCard(result)}</section>`:''}<section class="task-section"><div class="section-heading"><h2>已记录 ${execution?.count??0} 次执行</h2></div>${history.length?`<ol class="task-execution-list">${history.map(record=>`<li><strong>${esc(record.summary??(record.kind==='research'?'已整理推荐方案':record.kind==='calculation'?'已完成计算':'已确认完成'))}</strong><p>${esc(eventTaskStamp(record.executedAt,task.reminderPlan?.timezone))}</p></li>`).join('')}</ol>`:'<p class="goal-note">暂无可核实的执行记录</p>'}</section>`;
 }
 function recommendationValidity(view) {
   const now=Date.now();
@@ -1852,7 +1857,7 @@ app.addEventListener('change', event => {
       const key=value.slice(6);
       if (localGoalEntries().some(l=>l.key===key)) {localSelection={key};screen='home';render();}
     } else {
-      localSelection=null;selectedEventTaskId=null;focusedEventRecommendation=null;eventWorkspace.select(value||null);screen=value?'home':'agent';render();
+      localSelection=null;selectedEventTaskId=null;focusedEventRecommendation=null;eventTaskDetailOrigin='home';eventWorkspace.select(value||null);screen=value?'home':'agent';render();
     }
     return;
   }
@@ -1885,21 +1890,30 @@ app.addEventListener('click', event => {
     else if (action==='local-task'&&localSelection&&localTasks(localSelection.key).some(t=>t.id===actionTarget.dataset.taskId)) {
       localSelection={key:localSelection.key,taskId:actionTarget.dataset.taskId};render();
     } else if (action==='event-task-detail') {
-      const task=eventWorkspace.view().goals[eventWorkspace.view().activeGoalId]?.tasks.find(t=>t.id===actionTarget.dataset.taskId&&t.status!=='cancelled');
-      if (task) {selectedEventTaskId=task.id;focusedEventRecommendation=null;screen='task';render();}
+      // 分页加载出来的历史卡片同样能打开详情：任务在快照里或按需翻页取回的都算数。
+      const view=eventWorkspace.view();
+      const task=eventWorkspace.taskById(view.activeGoalId,actionTarget.dataset.taskId);
+      if (task&&task.status!=='cancelled') {
+        selectedEventTaskId=task.id;focusedEventRecommendation=null;
+        eventTaskDetailOrigin=screen==='history'?'history':'home';
+        screen='task';render();
+      }
     } else if (action==='event-task-history') {screen='history';render();void loadMoreHistory();}
     else if (action==='event-task-history-more') {void loadMoreHistory();}
-    else if (action==='event-task-history-back') {screen='home';render();}
+    else if (action==='event-task-history-back') {screen='home';eventTaskDetailOrigin='home';render();}
     else if (action==='event-task-complete') {openEventTaskCompleteConfirm(actionTarget.dataset.taskId);}
-    else if (action==='event-task-back') {selectedEventTaskId=null;focusedEventRecommendation=null;screen='home';render();}
-    else if (action==='event-chat') {selectedEventTaskId=null;focusedEventRecommendation=null;screen='agent';render();}
+    else if (action==='event-task-back') {
+      selectedEventTaskId=null;focusedEventRecommendation=null;
+      screen=eventTaskDetailOrigin==='history'?'history':'home';eventTaskDetailOrigin='home';render();
+    }
+    else if (action==='event-chat') {selectedEventTaskId=null;focusedEventRecommendation=null;eventTaskDetailOrigin='home';screen='agent';render();}
     else if (action==='event-recommendation-feedback') {
       if (eventWorkspace.prepareRecommendationFeedback(actionTarget.dataset.eventId)) {focusedEventRecommendation=null;screen='agent';render();}
     }
     else if (action==='event-health-connect') {void connectHealth();}
     else if (action==='event-okx-connect') {void connectOkx();}
     else if (action==='agent-back') {
-      selectedEventTaskId=null;focusedEventRecommendation=null;
+      selectedEventTaskId=null;focusedEventRecommendation=null;eventTaskDetailOrigin='home';
       if (!eventWorkspace.view().activeGoalId) eventWorkspace.leaveConversation();
       screen='home';render();
     }
