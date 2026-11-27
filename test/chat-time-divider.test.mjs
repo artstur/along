@@ -9,7 +9,9 @@ import {chatTimeline} from '../web/event-workspace.mjs';
 
 const config={baseURL:'https://localhost:4176',fingerprint:'A'.repeat(64),token:'b'.repeat(64)};
 const settle=()=>new Promise(resolve=>setTimeout(resolve,30));
-const at=offset=>new Date(Date.now()+offset).toISOString();
+// 相对时刻锚在本地同一个钟点（今天 10:00）：直接用 Date.now() 时，「N 分钟前」在
+// 00:50–01:00 之间会跨过午夜，而跨日本身就是一条分割线，期望值会随运行时刻漂移。
+const at=offset=>{const base=new Date();base.setHours(10,0,0,0);return new Date(base.getTime()+offset).toISOString();};
 
 // 期望文案走 Intl，与实现里的 Date 取值是两条独立路径。
 function expectedLabel(value,reference=Date.now()) {
