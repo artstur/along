@@ -33,8 +33,11 @@ if ('serviceWorker' in navigator) {
     void navigator.serviceWorker.register('./sw.js').catch(()=>{});
     // 脚本地址不变时，浏览器 24 小时内只检查一次更新；这里强制检查一次，
     // 否则发布新版本后客户端可能一直跑旧脚本（见 web/sw.js 的缓存版本）。
-    const pending=navigator.serviceWorker.getRegistration?.();
-    if(pending)void pending.then(registration=>registration?.update()).catch(()=>{});
+    // 离线时不去试：离线取不到脚本，只会多一次失败请求。
+    if (navigator.onLine) {
+      const pending=navigator.serviceWorker.getRegistration?.();
+      if(pending)void pending.then(registration=>registration?.update()).catch(()=>{});
+    }
     // 新 Service Worker 接管后重载一次，让本次启动也用上新资源。
     // 每个会话最多重载一次，避免反复重载。
     navigator.serviceWorker.addEventListener?.('controllerchange',()=>{
