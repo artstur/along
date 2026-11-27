@@ -244,7 +244,7 @@ test('a completion already submitted is not submitted again until the server sna
 // ---- 页面层：卡片、确认层与历史任务入口 ----
 
 let instance=0;
-async function pageFixture({pending=false,offline=false}={}) {
+async function pageFixture({pending=false,offline=false,refused=false}={}) {
   const goal={id:GOAL,domain:'custom',status:'active',revision:1,title:'睡眠目标',metric:null,context:[],dataSources:[],
     tasks:[{id:'t_open',goalId:GOAL,status:'open',content:'睡前放下手机',revision:1},
       {id:'t_repeat',goalId:GOAL,status:'open',content:'每天快走',revision:1,scheduledAt:'2099-01-02T11:00:00Z',
@@ -262,7 +262,11 @@ async function pageFixture({pending=false,offline=false}={}) {
   const calls=[];
   window.AlongAgentBridge={request:async r=>{calls.push(r);
     if(r.path==='/connection/status')return {along:true,ready:true,eventProtocol:1,userId:config.userId};
-    if(r.path==='/events'){if(offline)throw Error('离线');return {status:'accepted',event_id:r.body.event_id};}
+    if(r.path==='/events'){
+      if(offline)throw Error('离线');
+      // 终态回执（被拒）与真机一致：桥接把非 2xx 的回执体挂在 Error.receipt 上。
+      if(refused){const error=Error('完成事实被拒');error.receipt={status:'rejected',event_id:r.body.event_id,reason:'invalid_envelope'};throw error;}
+      return {status:'accepted',event_id:r.body.event_id};}
     if(r.path==='/sync')return {items:[],...(r.body?.tasks_page?{tasks_page:{items:[{id:'t_older',goalId:GOAL,content:'更早的历史任务',status:'done',currentRevision:1}]}}:{})};
     if(r.path==='/sync/ack')return {acked:0};
     throw Error(r.path);},notification:async()=>({})};
@@ -326,6 +330,57 @@ test('confirming sends exactly one task.completed fact',async()=>{
   // 事实已提交但快照尚未确认：同一任务不再提供完成键。
   const open=dom.app.innerHTML.split('id="event-task-t_open"')[1]?.split('</article>')[0]??'';
   assert.doesNotMatch(open,/event-task-complete/);
+});
+
+test('a task the server accepted leaves the current list before the goal snapshot arrives',async()=>{
+  const {dom}=await pageFixture();
+  await dom.click({action:'event-task-complete',taskId:'t_open'});
+  await sheetClick({action:'event-task-complete-confirm',taskId:'t_open'});
+  await new Promise(r=>setTimeout(r,50));
+  // 服务端已受理这条完成事实。这一版服务端不会为完成事实补发带目标快照的同步项，
+  // 客户端不能因此把这一项永远留在「动态任务」里：受理成功就离开当前列表。
+  assert.doesNotMatch(dom.app.innerHTML,/睡前放下手机/);
+  // 其他项保持原样。
+  assert.match(dom.app.innerHTML,/动态任务/);
+  assert.match(dom.app.innerHTML,/每天快走/);
+});
+
+test('a completion the server refused keeps the task in the current list and lets it be submitted again',async()=>{
+  const {dom}=await pageFixture({refused:true});
+  await dom.click({action:'event-task-complete',taskId:'t_open'});
+  await sheetClick({action:'event-task-complete-confirm',taskId:'t_open'});
+  await new Promise(r=>setTimeout(r,50));
+  // 终态失败：任务仍在当前列表，完成键回来，用户可以重试。
+  const open=dom.app.innerHTML.split('id="event-task-t_open"')[1]?.split('</article>')[0]??'';
+  assert.match(open,/待完成/);
+  assert.match(open,/data-action="event-task-complete"/);
+});
+
+test('a recurring task stays in the current list because only this occurrence is completed',async()=>{
+  const {dom}=await pageFixture();
+  await dom.click({action:'event-task-complete',taskId:'t_repeat'});
+  await sheetClick({action:'event-task-complete-confirm',taskId:'t_repeat'});
+  await new Promise(r=>setTimeout(r,50));
+  // 周期任务完成的是「本次」：服务端续排、任务仍是 open，它必须留在当前列表里。
+  assert.match(dom.app.innerHTML,/每天快走/);
+});
+
+test('an accepted completion stays out of the current list after the page is reloaded',async()=>{
+  const dom=installDomStub();
+  window.AlongAgentBridge={request:async input=>{
+    if(input.path==='/events')return {status:'accepted',event_id:input.body.event_id};
+    if(input.path==='/sync')return {items:[taskItem('open')]};
+    return {acked:0};}};
+  const workspace=createEventWorkspace({config});
+  await workspace.sync();
+  await workspace.completeTask('t_open');
+  await workspace.sync();
+  // 服务端受理了完成事实，但这一版服务端不为完成事实补发目标快照：快照里任务仍是 open。
+  assert.equal(workspace.view().goals[GOAL].tasks[0].status,'open');
+  assert.ok(workspace.acceptedTaskCompletions().has('t_open'));
+  // 重新载入（同一份本地缓存）：完成事实仍在台账里，这项任务不回到当前列表。
+  const reopened=createEventWorkspace({config});
+  assert.ok(reopened.acceptedTaskCompletions().has('t_open'));
 });
 
 test('the confirmation copy matches the recurring behaviour instead of promising a move to history',async()=>{

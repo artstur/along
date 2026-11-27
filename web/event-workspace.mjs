@@ -562,6 +562,23 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
     return ids;
   }
   /**
+   * 服务端已受理的完成事实：台账里有、待发队列里没有（已送达）、也没有终态失败。
+   *
+   * 服务端受理了完成事实，这条任务就不再是「待完成」——即便这一版服务端不为完成事实
+   * 补发带目标快照的同步项（那样客户端永远等不到新快照，任务会一直挂在当前列表里）。
+   * 服务端补发了快照时，这条任务在快照里已经是 done，两者口径一致。
+   */
+  function acceptedTaskCompletions() {
+    const queued=new Set(pendingEvents(config).map(item=>item.event_id));
+    const failed=new Set(readEventFailures(config).map(item=>item.event_id));
+    const ids=new Set();
+    for (const [taskId,entry] of Object.entries(completionsOf(state.completions))) {
+      if (queued.has(entry.eventId)||failed.has(entry.eventId)) continue;
+      ids.add(taskId);
+    }
+    return ids;
+  }
+  /**
    * 提交一次完成事实：组装既有 `task.completed` 信封并入队（发送由随后的 sync 完成）。
    * 状态只来自服务端快照——这里不改任何任务状态，任务是否完成由服务端回执后的同步结果决定。
    */
@@ -749,6 +766,11 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
         if (page.nextCursor!==undefined) throw Error('同步分页游标不正确');
         if (replay) {next.recommendationsVersion=1;next.conversationVersion=1;next.dataSourcesVersion=1;next.executionVersion=2;next.taskCapabilityVersion=1;next.resultPresentationVersion=1;delete next.resultPresentationReplayAfter;delete next.taskCapabilityReplayAfter;delete next.recommendationReplayAfter;delete next.conversationReplayAfter;delete next.dataSourcesReplayAfter;delete next.executionReplayAfter;delete next.executionReplayVersion;}
         if (replay||fallbacks.length||receipts.length) save(next);
+        // 终态回执（被拒／冲突）立刻收敛完成事实台账：任务回到可完成状态，不必等下一张有内容的同步页。
+        const beforeCompletions=JSON.stringify(completionsOf(next.completions));
+        pruneCompletions(next);
+        const completionsChanged=JSON.stringify(next.completions)!==beforeCompletions;
+        if (completionsChanged) {save(next);onChange();}
         break;
       }
       let previous=after;
@@ -826,5 +848,5 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
       .finally(()=>{flight=null;if(!disposed&&lastError!==beforeError) onChange();});
     return flight;
   }
-  return {view,draft,setDraft,select,leaveConversation,prepareRecommendationFeedback,completeTask,pendingTaskCompletions,loadHistoryPage,historyTasks,historyExhausted,taskById,submit,sync,dispose:()=>{disposed=true;retireEventAuthority(config);}};
+  return {view,draft,setDraft,select,leaveConversation,prepareRecommendationFeedback,completeTask,pendingTaskCompletions,acceptedTaskCompletions,loadHistoryPage,historyTasks,historyExhausted,taskById,submit,sync,dispose:()=>{disposed=true;retireEventAuthority(config);}};
 }
