@@ -138,5 +138,6 @@ python3 docs/verification/pr-61/replay.py
 除上述 4 条样式规则外，Along 仓的生产代码（`web/`、`host/`、`tools/`、`deploy/`、`examples/`、`ios/AlongHealth/Sources/`）在本轮口径下**没有**可达性缺失的模块、没有未使用导入、没有未使用参数或局部量、没有只声明不使用的符号、没有其余未被引用的 CSS 类。沿用多轮记录的结论：死代码在本仓主要集中在导入层与样式层，且此前已被逐步清掉。
 
 - `npm run check`：**887** 项，**883 passed / 0 failed / 4 skipped**，与清理前基线逐项一致；差异只删除未使用绑定，未增删用例（`git diff -U0 -- test` 无用例声明行变化）。
-- 样式改动按 `AGENTS.md` 第 2 节同步资源版本：`node tools/bump-shell-version.mjs 99` 把 `web/index.html` 的 `?v=`、`web/sw.js` 的 `CACHE`、`ios/AlongHealth/Sources/AlongShellView.swift` 的 `build=` 与全部 `web/*.mjs` 的模块说明符一起推进到 **v99**，并重新生成 `dist/` 与 `ios/AlongHealth/Web/`（22 份产物与 `web/` 逐字节一致）。
+- 样式改动按 `AGENTS.md` 第 2 节同步资源版本：`node tools/bump-shell-version.mjs 100` 把 `web/index.html` 的 `?v=`、`web/sw.js` 的 `CACHE`、`ios/AlongHealth/Sources/AlongShellView.swift` 的 `build=` 与全部 `web/*.mjs` 的模块说明符一起推进到 **v100**，并重新生成 `dist/` 与 `ios/AlongHealth/Web/`（22 份产物与 `web/` 逐字节一致）。
+- **版本号说明**：本轮最初把版本推进到 v99，但主干随后合入 PR #80（聊天流时间分割线）并已占用 v99。合入主干时 `web/app.mjs:5` 与 `ios/AlongHealth/Web/app.mjs:5` 的同一行 import 冲突（#80 新增 `chatTimeline`、`captureChatAnchor`、`anchoredScrollTop`），按主干版本解决并保留这三个符号；资源版本随之推进到 **v100**——停在 v99 会让已缓存 v99 的客户端继续用 #80 的样式，本轮删除不生效。
 - 未验证事项：未安装真机、未部署公开环境、未替换线上 Host/Agent；这些流程本轮未执行，不得记为已验收。删除的样式没有任何标记使用，因此不改变渲染结果；但「渲染结果逐像素不变」未在真机或真实浏览器上复核。
