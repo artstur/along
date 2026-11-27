@@ -1,20 +1,20 @@
-import {KEY, loadState, setSnapshot} from './health.mjs?v=98';
-import {ACTIVE_GOAL_KEY, FINANCE_KEY, ensureHealthGoal, withoutDefaultHealthGoal, loadFinance, connectFinanceDemo, addFinanceDemoRecord, healthView, financeView} from './workspace.mjs?v=98';
-import {EXPERIMENT, startExperiment, routeHealthEvent, acceptAgentSuggestion, agentRequestPayload} from './loop.mjs?v=98';
-import {goalChangeText} from './goal-agent-core.mjs?v=98';
-import {createEventWorkspace, recurringPlan, chatTimeline} from './event-workspace.mjs?v=98';
-import {recommendationCard} from './recommendations.mjs?v=98';
-import {dataSourceProvider} from './data-sources.mjs?v=98';
-import {taskResultBodyRelevant} from './task-results.mjs?v=98';
-import {taskResultCard,captureResultReading,restoreResultReading} from './task-result-view.mjs?v=98';
-import {AGENT_KEY, GOALS_KEY, CONVERSATIONS_KEY, readStored, agentCall, loadNativeConnection, saveNativeConnection} from './agent-client.mjs?v=98';
-import {ADAPTIVE_LAYOUTS_KEY, customGoalEntries, findInitialCustomGoalCandidate, goalDomain, isCustomGoalKey, safeAdaptiveLayout, validateAdaptiveLayout} from './adaptive-ui.mjs?v=98';
+import {KEY, loadState, setSnapshot} from './health.mjs?v=99';
+import {ACTIVE_GOAL_KEY, FINANCE_KEY, ensureHealthGoal, withoutDefaultHealthGoal, loadFinance, connectFinanceDemo, addFinanceDemoRecord, healthView, financeView} from './workspace.mjs?v=99';
+import {EXPERIMENT, startExperiment, routeHealthEvent, acceptAgentSuggestion, agentRequestPayload} from './loop.mjs?v=99';
+import {goalChangeText} from './goal-agent-core.mjs?v=99';
+import {createEventWorkspace, recurringPlan, chatTimeline, captureChatAnchor, anchoredScrollTop} from './event-workspace.mjs?v=99';
+import {recommendationCard} from './recommendations.mjs?v=99';
+import {dataSourceProvider} from './data-sources.mjs?v=99';
+import {taskResultBodyRelevant} from './task-results.mjs?v=99';
+import {taskResultCard,captureResultReading,restoreResultReading} from './task-result-view.mjs?v=99';
+import {AGENT_KEY, GOALS_KEY, CONVERSATIONS_KEY, readStored, agentCall, loadNativeConnection, saveNativeConnection} from './agent-client.mjs?v=99';
+import {ADAPTIVE_LAYOUTS_KEY, customGoalEntries, findInitialCustomGoalCandidate, goalDomain, isCustomGoalKey, safeAdaptiveLayout, validateAdaptiveLayout} from './adaptive-ui.mjs?v=99';
 import {GOAL_SUPER_AGENT_RUNS_KEY, SUPER_AGENT_RUNS_KEY, createFailedGoalSuperAgentRun, createFailedSuperAgentRun,
   createGoalSuperAgentRequest, createPendingGoalSuperAgentRun, createPendingSuperAgentRun, createSuperAgentRequest,
-  safeGoalSuperAgentRun, safeSuperAgentRun, withRunError, AGENT_RUN_TIMEOUT_MS, AGENT_RUNTIME_KEY, CLOUD_RUN_NOT_FOUND, DSH_RUNTIME, KIMI_RUNTIME, agentRuntimeLabel, safeAgentRuntime, newId} from './super-agent.mjs?v=98';
+  safeGoalSuperAgentRun, safeSuperAgentRun, withRunError, AGENT_RUN_TIMEOUT_MS, AGENT_RUNTIME_KEY, CLOUD_RUN_NOT_FOUND, DSH_RUNTIME, KIMI_RUNTIME, agentRuntimeLabel, safeAgentRuntime, newId} from './super-agent.mjs?v=99';
 import {AGENT_NOTIFICATION_LEDGER_KEY, goalRunNotification, taskRunNotification, healthProposalNotification,
-  notificationWasDelivered, recordNotificationDelivered} from './agent-notifications.mjs?v=98';
-import {PLANNING_STATE_KEY,cleanDailyDelegation,validateDailyActions,agentHealthSnapshot,cleanPlanningContext,healthContextChanges,createPlanningContext,validateReassessment,buildBackgroundReviewRequest} from './contextual-planning.mjs?v=98';
+  notificationWasDelivered, recordNotificationDelivered} from './agent-notifications.mjs?v=99';
+import {PLANNING_STATE_KEY,cleanDailyDelegation,validateDailyActions,agentHealthSnapshot,cleanPlanningContext,healthContextChanges,createPlanningContext,validateReassessment,buildBackgroundReviewRequest} from './contextual-planning.mjs?v=99';
 const TICKET_KEY = 'along.goal-ticket.v1';
 const REMINDER_SYNC_KEY='along.health-reminder-sync.v1';
 const HEALTH_SHARING_KEY='along.health-sharing.v1';
@@ -1705,7 +1705,7 @@ function eventWorkspacePage() {
   if (selectedLocal) return localRecordPage(localSelection,selectedLocal.title,goalPicker,connection);
   // 时间分割线按整条可见消息列表算：首条有时间的消息前一条，之后看间隔和跨日。
   const timeline=chatTimeline(messages);
-  const history=messages.map((message,index)=>`${timeline[index]?`<time class="agent-time-divider" datetime="${esc(new Date(timeline[index].at).toISOString())}">${esc(timeline[index].label)}</time>`:''}<div ${message.notificationEventId?`id="event-message-${esc(message.notificationEventId)}"`: ''} class="agent-message ${message.role==='user'?'user':'assistant'}"><p>${esc(message.text)}</p>${message.status==='pending'?'<p class="agent-disclaimer">待同步</p>':message.status==='rejected'||message.status==='failed'?'<p class="agent-disclaimer">发送未完成，请通过聊天重新说明。</p>':''}</div>`).join('');
+  const history=messages.map((message,index)=>`${timeline[index]?`<time class="agent-time-divider" datetime="${esc(new Date(timeline[index].at).toISOString())}">${esc(timeline[index].label)}</time>`:''}<div ${message.notificationEventId?`id="event-message-${esc(message.notificationEventId)}"`: ''} class="agent-message ${message.role==='user'?'user':'assistant'}" data-event-id="${esc(message.eventId)}"><p>${esc(message.text)}</p>${message.status==='pending'?'<p class="agent-disclaimer">待同步</p>':message.status==='rejected'||message.status==='failed'?'<p class="agent-disclaimer">发送未完成，请通过聊天重新说明。</p>':''}</div>`).join('');
   // 等待态由缓存派生（见 event-workspace.mjs 的 awaitingReply），同步与重渲染不会把它冲掉。
   const waiting=view.awaiting?`<div class="agent-message assistant pending" role="status"><div class="agent-thinking"><span aria-hidden="true"><i></i><i></i><i></i></span><p>Agent 正在回复…</p></div></div>`:'';
   const content=chat?`${backButton('agent-back','返回目标')}<div class="agent-title"><h1>${esc(goal?.title||'说说你想做什么')}</h1></div>${connection}<div class="agent-messages" role="log" aria-live="polite">${history}${waiting||(history?'':'<p class="agent-empty">说说你的想法，Along 会和你一起理清下一步。</p>')}</div>`
@@ -1729,13 +1729,19 @@ function renderEventUpdate() {
   const scroller=app.querySelector('.agent-scroll');
   const scrollTop=scroller?.scrollTop??0;
   const follow=scroller&&(scroller.scrollHeight-scroller.scrollTop-scroller.clientHeight<80);
+  // 读者在看历史时，重渲染可能在他上方插入内容（历史回放补时间就会加分割线）。
+  // 先记下他正在看的那条气泡，重渲染后按它复位，而不是按同一个 scrollTop。
+  const anchor=follow?null:captureChatAnchor(scroller);
   const reading=captureResultReading(app,{activeElement:document.activeElement,scrollY:nativePage?app.scrollTop:window.scrollY});
   render();
   restoreResultReading(app,reading,{scrollTo:options=>pageScroller.scrollTo(options)});
   const next=app.querySelector('#agent-form textarea');
   if (sameScope&&next&&typeof draft==='string') {next.value=draft;if (focused) {next.focus();next.setSelectionRange?.(selection,selection);}}
   const nextScroller=app.querySelector('.agent-scroll');
-  nextScroller?.scrollTo({top:follow?lastMessageScrollTop(nextScroller):scrollTop,behavior:'instant'});
+  if (nextScroller) {
+    const top=follow?lastMessageScrollTop(nextScroller):(anchoredScrollTop(nextScroller,anchor)??scrollTop);
+    nextScroller.scrollTo({top,behavior:'instant'});
+  }
   const pending=pendingRecommendationOpen;
   if (pending?.binding===eventWorkspaceBinding&&eventWorkspace.view().messages.some(m=>m.goalId===pending.route.goalId&&m.notificationEventId===pending.route.eventId)) {
     pendingRecommendationOpen=null;void openEventNotification(pending.route,true);

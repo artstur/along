@@ -1,11 +1,11 @@
-import {agentCall, queueEvent, flushEventQueue, pendingEvents, readEventFailures,bindEventAuthority,retireEventAuthority} from './agent-client.mjs?v=98';
-import {assembleEnvelope} from './event-envelope.mjs?v=98';
-import {validateGoalReply} from './goal-agent-core.mjs?v=98';
-import {safeAdaptiveLayout} from './adaptive-ui.mjs?v=98';
-import {safeRecommendation} from './recommendations.mjs?v=98';
-import {safeDataSources} from './data-sources.mjs?v=98';
-import {taskResultRelevant,resultEvidence,validResultEvidence} from './task-results.mjs?v=98';
-import {safeResultPresentation,RESULT_TEXT_LIMIT,wellFormedResultText} from './task-result-view.mjs?v=98';
+import {agentCall, queueEvent, flushEventQueue, pendingEvents, readEventFailures,bindEventAuthority,retireEventAuthority} from './agent-client.mjs?v=99';
+import {assembleEnvelope} from './event-envelope.mjs?v=99';
+import {validateGoalReply} from './goal-agent-core.mjs?v=99';
+import {safeAdaptiveLayout} from './adaptive-ui.mjs?v=99';
+import {safeRecommendation} from './recommendations.mjs?v=99';
+import {safeDataSources} from './data-sources.mjs?v=99';
+import {taskResultRelevant,resultEvidence,validResultEvidence} from './task-results.mjs?v=99';
+import {safeResultPresentation,RESULT_TEXT_LIMIT,wellFormedResultText} from './task-result-view.mjs?v=99';
 
 const id = value => typeof value==='string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$/.test(value);
 const record = value => value!==null && typeof value==='object' && !Array.isArray(value);
@@ -51,6 +51,40 @@ export function chatTimeline(messages, now = Date.now()) {
     previous=at;
   });
   return dividers;
+}
+
+/**
+ * 阅读锚点：记下读者正在看的那条气泡在视口里的位置。
+ * 只按 scrollTop 复位不够——历史回放补时间会在阅读位置上方插入分割线，
+ * 同样的 scrollTop 会让整段内容下移，读者正在读的那条气泡被推走。
+ * 锚点取「第一条完整露出来的气泡」：只露出一条边的上一条已经在被读过去了。
+ * 锚点用消息自己的 eventId 认人，不用下标：消息列表可能增删，下标会指错人。
+ */
+export function captureChatAnchor(scroller) {
+  if (!scroller||typeof scroller.getBoundingClientRect!=='function') return null;
+  const box=scroller.getBoundingClientRect();
+  if (!box) return null;
+  for (const bubble of scroller.querySelectorAll?.('.agent-message')||[]) {
+    const id=bubble.dataset?.eventId;
+    if (!id) continue;
+    const rect=bubble.getBoundingClientRect?.();
+    if (!rect||rect.top<box.top) continue;
+    return {id,offset:rect.top-box.top};
+  }
+  return null;
+}
+
+/** 按锚点复位：让同一条气泡回到同一个视口位置，锚点找不到就交回调用方按原逻辑处理。 */
+export function anchoredScrollTop(scroller,anchor) {
+  if (!scroller||!anchor?.id) return null;
+  const bubble=[...(scroller.querySelectorAll?.('.agent-message')||[])].find(item=>item.dataset?.eventId===anchor.id);
+  if (!bubble) return null;
+  const rect=bubble.getBoundingClientRect?.(),box=scroller.getBoundingClientRect?.();
+  if (!rect||!box) return null;
+  // 气泡在新内容里的位置，减去锚点原本的视口位置，得到需要补偿的滚动量。
+  const top=(rect.top-box.top+(scroller.scrollTop||0))-anchor.offset;
+  const max=Math.max(0,(scroller.scrollHeight||0)-(scroller.clientHeight||0));
+  return Math.min(Math.max(0,top),max);
 }
 const empty = userId => ({version:1,recommendationsVersion:1,conversationVersion:1,dataSourcesVersion:1,executionVersion:2,taskCapabilityVersion:1,resultPresentationVersion:1,userId,cursor:0,goals:{},messages:{},drafts:{},activeGoalId:null,conversationId:null,returnGoalId:null});
 
