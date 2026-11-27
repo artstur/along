@@ -4,7 +4,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {installDomStub} from './dom-stub.mjs';
 import {createEventWorkspace} from '../web/event-workspace.mjs';
-import {pendingEvents} from '../web/agent-client.mjs';
+import {pendingEvents,queueEvent,readEventFailures} from '../web/agent-client.mjs';
 
 const config={userId:'u_complete',baseURL:'https://localhost:4176',fingerprint:'a'.repeat(64),token:'b'.repeat(64)};
 const GOAL='g_complete';
@@ -244,6 +244,8 @@ test('a completion already submitted is not submitted again until the server sna
 // ---- 页面层：卡片、确认层与历史任务入口 ----
 
 let instance=0;
+// 还要拒收几次（跨页面实例共享：重载后的实例接着用同一份额度）。
+let refuseBudget=0;
 async function pageFixture({pending=false,offline=false,refused=false,syncFails=false,storage=null}={}) {
   const goal={id:GOAL,domain:'custom',status:'active',revision:1,title:'睡眠目标',metric:null,context:[],dataSources:[],
     tasks:[{id:'t_open',goalId:GOAL,status:'open',content:'睡前放下手机',revision:1},
@@ -265,7 +267,9 @@ async function pageFixture({pending=false,offline=false,refused=false,syncFails=
     if(r.path==='/events'){
       if(offline)throw Error('离线');
       // 终态回执（被拒）与真机一致：桥接把非 2xx 的回执体挂在 Error.receipt 上。
-      if(refused){const error=Error('完成事实被拒');error.receipt={status:'rejected',event_id:r.body.event_id,reason:'invalid_envelope'};throw error;}
+      if(refused||refuseBudget>0){
+        if(refuseBudget>0) refuseBudget-=1;
+        const error=Error('完成事实被拒');error.receipt={status:'rejected',event_id:r.body.event_id,reason:'invalid_envelope'};throw error;}
       return {status:'accepted',event_id:r.body.event_id};}
     if(r.path==='/sync'){
       if(syncFails)throw Error('同步暂不可用');
@@ -384,6 +388,44 @@ test('a refused completion lets the task be submitted again even while the sync 
   const retried=reloaded.calls.filter(call=>call.path==='/events');
   assert.equal(retried.length,1);
   assert.notEqual(retried[0].body.event_id,firstEventId);
+});
+
+test('a rejected completion stays visible and retryable after the failure record is evicted',async()=>{
+  // 1 次完成被拒 + 50 条别的终态拒收：最早的失败记录被挤出本地 50 条上限。
+  refuseBudget=51;
+  const {dom,calls}=await pageFixture({syncFails:true});
+  await dom.click({action:'event-task-complete',taskId:'t_open'});
+  await sheetClick({action:'event-task-complete-confirm',taskId:'t_open'});
+  await new Promise(r=>setTimeout(r,50));
+  const original=calls.find(call=>call.path==='/events').body.event_id;
+  assert.equal(readEventFailures(config).some(row=>row.event_id===original),true);
+  const visible=()=>dom.app.innerHTML.includes('id="event-task-t_open"');
+  const clickable=()=>dom.app.innerHTML.includes('data-action="event-task-complete" data-task-id="t_open"');
+  assert.equal(visible()&&clickable(),true,'被拒的完成：任务可见、可重试');
+  // 别的任务再失败 50 次：这条完成事实的失败记录被挤出本地上限。
+  for(let n=0;n<50;n++) {
+    await queueEvent(config,{event_type:'along.user_message',occurred_at:new Date().toISOString(),timezone:'Asia/Shanghai',
+      payload:{event_type:'along.user_message',text:'合成失败事件'}},{send:false});
+  }
+  await dom.tick(3000);
+  await new Promise(r=>setTimeout(r,50));
+  assert.equal(readEventFailures(config).length,50);
+  assert.equal(readEventFailures(config).some(row=>row.event_id===original),false,'最早的失败记录已被淘汰');
+  // 失败记录没了，这条被拒的完成事实仍然是「被拒」：任务可见、可重试。
+  assert.equal(visible()&&clickable(),true,'失败记录被淘汰后任务仍可见可重试');
+  // 刷新后同样可见可重试。
+  const reloaded=await pageFixture({syncFails:true,storage:reloadedStorage(dom)});
+  const visibleAfter=()=>reloaded.dom.app.innerHTML.includes('id="event-task-t_open"');
+  const clickableAfter=()=>reloaded.dom.app.innerHTML.includes('data-action="event-task-complete" data-task-id="t_open"');
+  assert.equal(visibleAfter()&&clickableAfter(),true,'刷新后任务仍可见可重试');
+  // 重试获明确受理之后，这一项才从当前列表里移除。
+  await reloaded.dom.click({action:'event-task-complete',taskId:'t_open'});
+  await sheetClick({action:'event-task-complete-confirm',taskId:'t_open'});
+  await new Promise(r=>setTimeout(r,50));
+  const retried=reloaded.calls.filter(call=>call.path==='/events');
+  assert.equal(retried.length,1);
+  assert.notEqual(retried[0].body.event_id,original,'重试是新的完成事实');
+  assert.equal(visibleAfter(),false,'受理之后这一项离开当前列表');
 });
 
 test('a lost receipt is retried with the same event id so the completion is not counted twice',async()=>{

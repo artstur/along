@@ -204,12 +204,16 @@ function cleanTaskTrigger(t) {
 }
 
 // 完成事实台账（本地）：已提交但服务端快照尚未确认的任务。损坏的条目直接丢弃，不让整份缓存作废。
+// outcome 是这条完成事实自己的终态回执：queued=已入队还没有终态回执，accepted=服务端已受理，
+// failed=服务端终态拒收。台账按任务记账，不受别的任务的失败记录影响。
 function completionsOf(value) {
   if (!record(value)) return {};
   const out={};
   for (const [taskId,entry] of Object.entries(value)) {
     if (!id(taskId)||!record(entry)||!eventId(entry.eventId)||!id(entry.goalId)||!version(entry.revision)) continue;
-    out[taskId]={eventId:entry.eventId,goalId:entry.goalId,revision:entry.revision};
+    if (entry.outcome!==undefined&&!['queued','accepted','failed'].includes(entry.outcome)) continue;
+    out[taskId]={eventId:entry.eventId,goalId:entry.goalId,revision:entry.revision,
+      ...(entry.outcome===undefined?{}:{outcome:entry.outcome})};
   }
   return out;
 }
@@ -556,33 +560,38 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
    * 尚未了结的完成反馈：同一个任务不重复提交（服务端按事件号幂等，重复提交也不会累加执行次数）。
    *
    * 终态回执（被拒／冲突）已经了结——那条事实不会再送达，任务回到可完成状态，用户可以重试。
-   * 判定只读本地两份记录（待发队列与终态失败台账），不依赖同步是否成功：回执到了就是终态，
-   * 同步挂着也不该把完成键一直扣住。
+   * 依据是**这条完成事实自己的回执**（台账里的 outcome），不是本地失败台账：失败台账有 50 条上限，
+   * 别的任务失败得多了会把这条挤掉，那时「没在失败台账里」不再等于「被受理过」。
    */
   function pendingTaskCompletions() {
     const ids=new Set();
-    const failed=new Set(readEventFailures(config).map(item=>item.event_id));
     for (const {envelope} of pendingEvents(config)) {
       if (envelope?.kind==='task.completed'&&typeof envelope.task_id==='string') ids.add(envelope.task_id);
     }
     for (const [taskId,entry] of Object.entries(completionsOf(state.completions))) {
-      if (failed.has(entry.eventId)) continue;
+      if (entry.outcome==='failed') continue;
       ids.add(taskId);
     }
     return ids;
   }
   /**
-   * 服务端已受理的完成事实：台账里有、待发队列里没有（已送达）、也没有终态失败。
+   * 服务端已受理的完成事实：台账里这条完成事实的终态回执是 accepted。
    *
    * 服务端受理了完成事实，这条任务就不再是「待完成」——即便这一版服务端不为完成事实
    * 补发带目标快照的同步项（那样客户端永远等不到新快照，任务会一直挂在当前列表里）。
    * 服务端补发了快照时，这条任务在快照里已经是 done，两者口径一致。
+   *
+   * 判据是**受理这件事本身**（回执），不是「没被拒收」：被拒收的事实只要回执还在，就永远不会被
+   * 当成已受理。没有 outcome 的旧台账条目（更早的客户端写的）沿用旧口径推断。
    */
   function acceptedTaskCompletions() {
     const queued=new Set(pendingEvents(config).map(item=>item.event_id));
     const failed=new Set(readEventFailures(config).map(item=>item.event_id));
     const ids=new Set();
     for (const [taskId,entry] of Object.entries(completionsOf(state.completions))) {
+      if (entry.outcome==='accepted') {ids.add(taskId);continue;}
+      // 旧台账没有回执：沿用旧口径（不在队列里、也没有失败记录）推断已受理。
+      if (entry.outcome!==undefined) continue;
       if (queued.has(entry.eventId)||failed.has(entry.eventId)) continue;
       ids.add(taskId);
     }
@@ -608,10 +617,33 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
     // 普通任务：提交后等服务端快照确认（完成或版本前进）。同步故障期间不重复提交，
     // 同一任务只产生一次 done 版本与一条同步项。周期任务由服务端按周期去重，下一次仍可完成。
     const completions={...completionsOf(state.completions)};
-    if (!recurringPlan(task)) completions[taskId]={eventId:receipt.event_id,goalId,revision:task.revision};
+    if (!recurringPlan(task)) completions[taskId]={eventId:receipt.event_id,goalId,revision:task.revision,outcome:'queued'};
     try { save({...state,completions}); } catch { state={...state,completions}; }
     onChange();
     return receipt.event_id;
+  }
+  /**
+   * 把投递的终态回执记到各自的完成事实上：accepted/duplicate=服务端已受理，rejected/conflict=终态拒收。
+   * 依据是这条事实自己的回执，与同步成败无关，也与别的任务的失败记录无关。
+   */
+  function recordDeliveryOutcomes(outcomes) {
+    if (!Array.isArray(outcomes)||outcomes.length===0) return;
+    const completions={...completionsOf(state.completions)};
+    let changed=false;
+    for (const outcome of outcomes) {
+      const status=outcome?.status;
+      if (status!=='accepted'&&status!=='duplicate'&&status!=='rejected'&&status!=='conflict') continue;
+      const resolved=status==='accepted'||status==='duplicate'?'accepted':'failed';
+      for (const [taskId,entry] of Object.entries(completions)) {
+        if (entry.eventId!==outcome.event_id||entry.outcome===resolved) continue;
+        completions[taskId]={...entry,outcome:resolved};
+        changed=true;
+      }
+    }
+    if (!changed) return;
+    const next={...state,completions};
+    try { save(next); } catch { state=next; }
+    onChange();
   }
   /**
    * 历史任务按需翻页：目标快照只带最近 200 条任务，更早的按页取回，不放大每次同步的快照。
@@ -684,15 +716,15 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
     return history.tasks.find(task=>task.id===taskId);
   }
   /**
-   * 台账收敛：服务端快照确认完成（或版本前进）后移除记录；终态回执（被拒／冲突）同样移除，
-   * 让用户可以重新提交。周期任务不记台账——服务端按周期去重，下一次仍可完成。
+   * 台账收敛：服务端快照确认完成（或版本前进）后移除记录；终态拒收的记录同样移除——那条事实
+   * 不会再送达，留着也只是历史，用户重新提交时会写新的记录。周期任务不记台账——服务端按周期
+   * 去重，下一次仍可完成。
    */
   function pruneCompletions(next) {
     const completions=completionsOf(next.completions);
-    const failed=new Set(readEventFailures(config).map(item=>item.event_id));
     const kept={};
     for (const [taskId,entry] of Object.entries(completions)) {
-      if (failed.has(entry.eventId)) continue;
+      if (entry.outcome==='failed') continue;
       const goal=next.goals[entry.goalId];
       const task=goal?.tasks.find(item=>item.id===taskId);
       if (task&&(task.status==='done'||task.revision>entry.revision)) continue;
@@ -742,8 +774,11 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
       save({...state,pendingAck:[]});
     }
     const pendingBefore=JSON.stringify([pendingEvents(config),readEventFailures(config)]);
-    await flushEventQueue(config);
+    const flushed=await flushEventQueue(config);
     if(disposed) return;
+    // 投递的终态回执先记到各自的完成事实上：受理了就不再是「待完成」，终态拒收就回到可重试。
+    // 这一步与同步成败无关，也不依赖本地失败台账（那份台账有上限，会被别的任务挤掉）。
+    recordDeliveryOutcomes(flushed?.outcomes);
     if (JSON.stringify([pendingEvents(config),readEventFailures(config)])!==pendingBefore) onChange();
     for (;;) {
       const receipts=onNotifications?(state.notificationReceipts??[]).slice(0,50):[];

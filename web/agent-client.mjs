@@ -115,19 +115,25 @@ export async function queueEvent(config, envelope, {send=true}={}) {
 /**
  * 按入队顺序重投待同步项（同一份序列化信封、同一 event_id）。终态回执（accepted/duplicate/rejected/
  * conflict）继续处理后续项；遇到需要保留重试的暂时性失败即停止，保持顺序与至少一次语义。
+ *
+ * `outcomes` 逐项带上终态回执（accepted/duplicate/rejected/conflict）：调用方据此知道每一条事实的
+ * 下落。本地失败台账是**有上限的诊断记录**（最旧的可能被挤掉），不能拿它当「这条事实有没有被受理」
+ * 的依据——依据必须来自这条事实自己的回执。
  */
 export async function flushEventQueue(config) {
   let removed = 0, retried = 0;
+  const outcomes = [];
   for (const item of pendingEvents(config)) {
     const outcome = await sendQueuedEvent(config, item);
     retried += 1;
+    outcomes.push(outcome);
     if (outcome.status === 'retry') break;
     removed += 1;
   }
-  return {pending:pendingEvents(config).length, retried, removed};
+  return {pending:pendingEvents(config).length, retried, removed, outcomes};
 }
 
-/** 本地失败状态（被拒/冲突回执），供排查「为什么没有生效」；只记录、不提供任何重试入口。 */
+/** 本地失败状态（被拒/冲突回执），供排查「为什么没有生效」；只记录、不提供任何重试入口。上限 50 条，最旧的会被挤掉。 */
 export function readEventFailures(config) {
   return readStored(eventKey(EVENT_FAILED_KEY,config), []);
 }
