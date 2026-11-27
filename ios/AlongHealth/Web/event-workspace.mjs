@@ -1,11 +1,11 @@
-import {agentCall, queueEvent, flushEventQueue, pendingEvents, readEventFailures,bindEventAuthority,retireEventAuthority} from './agent-client.mjs?v=97';
-import {assembleEnvelope} from './event-envelope.mjs?v=97';
-import {validateGoalReply} from './goal-agent-core.mjs?v=97';
-import {safeAdaptiveLayout} from './adaptive-ui.mjs?v=97';
-import {safeRecommendation} from './recommendations.mjs?v=97';
-import {safeDataSources} from './data-sources.mjs?v=97';
-import {taskResultRelevant,resultEvidence,validResultEvidence} from './task-results.mjs?v=97';
-import {safeResultPresentation,RESULT_TEXT_LIMIT,wellFormedResultText} from './task-result-view.mjs?v=97';
+import {agentCall, queueEvent, flushEventQueue, pendingEvents, readEventFailures,bindEventAuthority,retireEventAuthority} from './agent-client.mjs?v=98';
+import {assembleEnvelope} from './event-envelope.mjs?v=98';
+import {validateGoalReply} from './goal-agent-core.mjs?v=98';
+import {safeAdaptiveLayout} from './adaptive-ui.mjs?v=98';
+import {safeRecommendation} from './recommendations.mjs?v=98';
+import {safeDataSources} from './data-sources.mjs?v=98';
+import {taskResultRelevant,resultEvidence,validResultEvidence} from './task-results.mjs?v=98';
+import {safeResultPresentation,RESULT_TEXT_LIMIT,wellFormedResultText} from './task-result-view.mjs?v=98';
 
 const id = value => typeof value==='string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$/.test(value);
 const record = value => value!==null && typeof value==='object' && !Array.isArray(value);
@@ -260,7 +260,8 @@ function localResult(item,remote) {
 
 // 一套范围规则，页面渲染与等待判定共用（docs/bugfix-goal-prompt.md §7：同一件事的两条读取路径要给同样的结论）。
 // 会话归属只认消息自己的 conversationId；目标只决定「这条消息算不算当前可见的目标」——
-// 消息所属会话绑定了目标就按那个目标算，没有才回退消息自己的 goalId。
+// 消息自己的 goalId 最直接：服务端在 goal.create 回链时会把会话里的消息改挂到新目标，
+// 沿用旧的目标关联会把刚回链的原话判到旧目标上。消息没有 goalId 时才回退到它所属会话的目标关联。
 // 不用 message.goalId===activeGoalId 直接筛：本机刚提交、服务端还没回填 goalId 的原话会被误判成不在范围内，
 // 于是会话刚被绑定到目标，等待行就提前消失。
 function visibleScope(state) {
@@ -272,7 +273,7 @@ function visibleScope(state) {
   }
   const activeGoalId=state.activeGoalId??null;
   const conversationId=state.conversationId??null;
-  const goalOf=message=>goalsByConversation.get(message.conversationId)??message.goalId??null;
+  const goalOf=message=>message.goalId??goalsByConversation.get(message.conversationId)??null;
   const inScope=message=>activeGoalId===null
     ?message.conversationId===conversationId
     :goalOf(message)===activeGoalId;
@@ -601,7 +602,11 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
     if (!assembled.ok) throw Error(assembled.reason);
     const receipt=await queueEvent(config,assembled.envelope,{send:false});
     if (!receipt.ok) throw Error(receipt.reason);
-    const root=next.conversationId??receipt.event_id;
+    // 会话根跟着目标走，和服务端一致：客户端只给未绑定目标的会话带 causation_id，
+    // 服务端因此把每条目标内消息各自起一段会话（服务端 inbox 的 conversationRoot 就是这么定的）。
+    // 复用上一个目标的会话根会让这条原话挂到旧目标上——切换目标后当前目标看不到自己的原话和
+    // 等待行，旧目标反而显示别人的原话（独立复核第 1 条回归）。
+    const root=next.activeGoalId===null?(next.conversationId??receipt.event_id):receipt.event_id;
     next.conversationId=root;
     next.drafts={...next.drafts};delete next.drafts[composingScope];delete next.feedbackContext;
     next.messages[receipt.event_id]={eventId:receipt.event_id,role:'user',text:message,goalId:next.activeGoalId??undefined,conversationId:root,status:'pending'};
