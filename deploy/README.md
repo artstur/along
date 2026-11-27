@@ -4,9 +4,16 @@
 
 - **Tier 1 兼容路径**：`docker-compose.yml`，事件接入关闭，按[多用户 Runbook §6.4](../docs/cloud-deploy-multi-user.md#64-上线-runbook由用户手动执行)。
 - **Tier 2 事件工作区**：基础 Compose 加 `docker-compose.tier2.yml`，按[开启与回退 §6.5](../docs/cloud-deploy-multi-user.md#tier2-runbook)。固定公网 IPv4 按下文[独立运维步骤](#固定公网-ipv4-直连)。
-- **Linux 实测栈**：`docker-compose.cloud.yml` 是独立三容器编排，不是叠加文件；其端口、宿主 nginx、证书与卷按 [Host 云端部署经验](../docs/host-cloud-deploy.md) 核对。该文件的 `ALONG_SUPERAGENT_SOURCE` 默认取相邻 checkout；复现时显式指定经验证的提交，不把本地 HEAD 当固定版本。
+- **Linux 实测栈**：`docker-compose.cloud.yml` 是独立三容器编排，不是叠加文件；其端口、宿主 nginx、证书与卷按 [Host 云端部署经验](../docs/host-cloud-deploy.md) 核对。该文件的 `ALONG_SUPERAGENT_SOURCE` 默认取相邻 checkout；复现时显式指定经验证的提交，不把本地 HEAD 当固定版本。**这台形态的日常部署走[自动部署](#自动部署每小时检查主干并部署)**：调度在 Multica，机器上只有一次性入口 `sudo systemctl start along-auto-deploy.service`；查当前跑的是哪一版用 `/usr/local/libexec/along/auto-deploy.sh status`，探活用 `verify`，回退用 `rollback`。
 
 已有个人事件工作区要保全历史和待发时，按[冷交接契约](../docs/personal-workspace-handoff.md)处理；不要把初次发码和普通重新配对当成迁移步骤。
+
+## 两个 HTTPS 入口别混用
+
+| 入口 | TLS 终结处 | 到 Host 的路径 | 构建输入 |
+| --- | --- | --- | --- |
+| 固定公网 IPv4 直连（Tier 2 + `docker-compose.public-ip.yml`） | nginx edge 终结（Let's Encrypt IP 证书，HTTP-01 签发，`deploy/nginx/https.conf`） | 专用 Unix socket `/run/along-proxy/host.sock`；Host 不发布端口 | 基础编排：远端 pin 的提交 |
+| Linux 实测栈（`docker-compose.cloud.yml` + 宿主 nginx） | 宿主 nginx 终结（Let's Encrypt IP 证书，`deploy/nginx/along-10531.conf` 监听 10531） | `127.0.0.1:4176` → Host 的私 CA 自签叶证书（对内） | 编排文件默认取相邻 checkout；线上那一份由自动部署按双 SHA 干净构建 |
 
 ## 文件清单
 
@@ -326,8 +333,6 @@ Multica 那一轮把摘要回报到工单——**工单上的评论就是运行�
 凭证的地方。调度交给 Multica：触发与运行记录都在平台侧可查，不需要在目标机上留
 一个常驻定时器，也不用把部署身份交给 CI。代价是目标机要有两个仓库的读权限
 （这台机用 `ecs-user` 的 SSH 密钥拉 `git@github.com:artstur/…`）。
-
-### 一轮里做什么
 
 ### 一轮里做什么
 
