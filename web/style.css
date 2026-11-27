@@ -281,6 +281,9 @@ footer { padding: 0 0 26px; color: #aaa; text-align: center; font-size: 12px; }
 .agent-setup form { display: grid; gap: 9px; margin-top: 16px; }
 .agent-setup input { width: 100%; padding: 12px; border: 1px solid #dededd; border-radius: 10px; background: #fff; color: #222; font: inherit; font-size: 16px; }
 .agent-messages { display: flex; flex-direction: column; gap: 12px; margin: 20px 0 12px; }
+/* 会话时间分割线：居中，两侧细线。只是显示，不参与消息布局。 */
+.agent-time-divider { align-self: center; display: flex; align-items: center; gap: 10px; width: 100%; margin: 4px 0; color: #8a8a8a; font-size: var(--text-caption); font-variant-numeric: tabular-nums; }
+.agent-time-divider::before, .agent-time-divider::after { content: ""; flex: 1 1 auto; height: 1px; background: #e7e7e6; }
 .agent-empty { color: #999; font-size: var(--text-body); padding: 20px 0; }
 .agent-message { align-self: flex-start; max-width: min(88%, calc(100% - 46px)); padding: 16px; border: 1px solid #e7e7e6; border-radius: 17px; background: #fff; }
 .agent-message.user { align-self: flex-end; margin-left: 42px; border-color: #eeeeed; border-bottom-right-radius: 6px; background: #eeeeed; }
