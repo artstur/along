@@ -12,9 +12,50 @@ const record = value => value!==null && typeof value==='object' && !Array.isArra
 const text = (value,max) => typeof value==='string' && value.trim().length>0 && value.length<=max;
 const version = value => Number.isSafeInteger(value) && value>=0;
 const time = value => typeof value==='string' && Number.isFinite(Date.parse(value));
+
+// 相邻两条消息间隔达到 30 分钟，或落到设备本地时区的另一个日历日，就断一段。
+export const CHAT_TIME_GAP = 30*60*1000;
+
+// 时间只用于显示：缺失、空串、非字符串或非法日期（如 2 月 30 日）都按「这条没有时间」处理。
+function chatTimeValue(value) {
+  if (!absoluteTime(value)) return null;
+  const at=Date.parse(value);
+  return Number.isFinite(at)?at:null;
+}
+// 设备本地时区的日历日。跨日判断和「当天」的文案都用它，不用 UTC。
+function chatDayKey(value) {
+  const date=new Date(value);
+  return `${date.getFullYear()}-${date.getMonth()+1}-${date.getDate()}`;
+}
+function chatTimeLabel(value, now) {
+  const date=new Date(value);
+  const clock=`${String(date.getHours()).padStart(2,'0')}:${String(date.getMinutes()).padStart(2,'0')}`;
+  if (chatDayKey(value)===chatDayKey(now)) return clock;
+  return `${date.getFullYear()}年${String(date.getMonth()+1).padStart(2,'0')}月${String(date.getDate()).padStart(2,'0')}日 ${clock}`;
+}
+
+/**
+ * 按可见消息的顺序，算出每条消息前要不要显示时间分割线。
+ * 只跟上一条「有时间的消息」比较：缺时间或时间无效的消息保留气泡，但不参与门槛，
+ * 下一条有时间的消息仍跟更早那条有效消息比。两个条件同时成立也只显示一次。
+ */
+export function chatTimeline(messages, now = Date.now()) {
+  const dividers=new Array(messages.length).fill(null);
+  let previous=null;
+  messages.forEach((message,index)=>{
+    const at=chatTimeValue(message?.sentAt);
+    if (at===null) return;
+    if (previous===null||at-previous>=CHAT_TIME_GAP||chatDayKey(at)!==chatDayKey(previous)) {
+      dividers[index]={at,label:chatTimeLabel(at,now)};
+    }
+    previous=at;
+  });
+  return dividers;
+}
 const empty = userId => ({version:1,recommendationsVersion:1,conversationVersion:1,dataSourcesVersion:1,executionVersion:2,taskCapabilityVersion:1,resultPresentationVersion:1,userId,cursor:0,goals:{},messages:{},drafts:{},activeGoalId:null,conversationId:null,returnGoalId:null});
 
-function absoluteReminderTime(value) {
+// 带时区的绝对时间。日历上不存在的日期（2 月 30 日）会被 Date.parse 进位成下个月，这里挡掉。
+function absoluteTime(value) {
   if (!time(value)||!/^\d{4}-\d\d-\d\dT(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)$/.test(value)) return false;
   const day=value.slice(0,10),utc=Date.parse(day+'T00:00:00Z');
   return Number.isFinite(utc)&&new Date(utc).toISOString().slice(0,10)===day;
@@ -43,7 +84,7 @@ function cleanTaskReminder(task) {
     return {scheduledAt};
   }
   if (!record(plan)) return {};
-  if (plan.state==='scheduled'&&absoluteReminderTime(scheduledAt)&&['user','agent'].includes(plan.source)&&
+  if (plan.state==='scheduled'&&absoluteTime(scheduledAt)&&['user','agent'].includes(plan.source)&&
       ['once','daily','weekly'].includes(plan.repeat)) {
     const explanation=typeof plan.explanation==='string'?plan.explanation.trim():'';
     const weekly=plan.repeat==='weekly';
@@ -56,7 +97,7 @@ function cleanTaskReminder(task) {
         if (weekly&&['Mon','Tue','Wed','Thu','Fri','Sat','Sun'].indexOf(day)+1!==plan.weekday) return {};
       } catch { return {}; }
     }
-    if (plan.wallTime!==undefined&&(!absoluteReminderTime(plan.wallTime)||!plan.timezone||
+    if (plan.wallTime!==undefined&&(!absoluteTime(plan.wallTime)||!plan.timezone||
         !matchesReminderClock(scheduledAt,plan.wallTime,plan.timezone))) return {};
     return {scheduledAt,reminderPlan:{state:'scheduled',source:plan.source,explanation,repeat:plan.repeat,
       ...(weekly?{weekday:plan.weekday}:{}),...(plan.timezone===undefined?{}:{timezone:plan.timezone}),
@@ -196,6 +237,10 @@ function safeMessage(message,item) {
     ...(version(item.payload.notification?.revision)?{notificationRevision:item.payload.notification.revision}:{}),
     ...(version(item.payload.task_execution_revision)&&item.payload.task_execution_revision>0?{taskExecutionRevision:item.payload.task_execution_revision}:{}),
     ...(resultEvidence(item.payload)?{resultEvidence:resultEvidence(item.payload)}:{}),status:'received'};
+  // 发送时间只是显示用的可选字段：用户消息用入队信封的 occurred_at，Agent 回复用落库时间。
+  // 缺失或非法就当这条没有时间，不影响气泡本身。
+  const sentAt=message.role==='user'?message.occurredAt:message.createdAt;
+  if (absoluteTime(sentAt)) clean.sentAt=sentAt;
   const goal=item.goalId?safeWorkspaceGoal(item.payload.snapshot):undefined,task=goal?.tasks.find(task=>task.id===clean.taskId);
   const scopedResult=storedResultBody(clean,goal,task);
   if(!text(message.text,scopedResult?RESULT_TEXT_LIMIT:2000))throw Error('对话同步格式不正确');
@@ -403,8 +448,12 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
     const next=structuredClone(state);
     for (const {envelope} of pendingEvents(config)) {
       if (envelope.event_type!=='along.user_message') continue;
-      if (!next.messages[envelope.event_id]) next.messages[envelope.event_id]={eventId:envelope.event_id,role:'user',text:envelope.payload.text,
-        goalId:envelope.goal_id,conversationId:envelope.causation_id??envelope.event_id,status:'pending'};
+      // 待发的原话按入队时间参与时间分割线；队列里还在，就可以按同一 eventId 补回这个时间。
+      const sentAt=absoluteTime(envelope.occurred_at)?envelope.occurred_at:undefined;
+      const cached=next.messages[envelope.event_id];
+      if (!cached) next.messages[envelope.event_id]={eventId:envelope.event_id,role:'user',text:envelope.payload.text,
+        goalId:envelope.goal_id,conversationId:envelope.causation_id??envelope.event_id,status:'pending',...(sentAt?{sentAt}:{})};
+      else if (sentAt&&!cached.sentAt) next.messages[envelope.event_id]={...cached,sentAt};
     }
     return next;
   }
@@ -609,7 +658,8 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
     const root=next.activeGoalId===null?(next.conversationId??receipt.event_id):receipt.event_id;
     next.conversationId=root;
     next.drafts={...next.drafts};delete next.drafts[composingScope];delete next.feedbackContext;
-    next.messages[receipt.event_id]={eventId:receipt.event_id,role:'user',text:message,goalId:next.activeGoalId??undefined,conversationId:root,status:'pending'};
+    next.messages[receipt.event_id]={eventId:receipt.event_id,role:'user',text:message,goalId:next.activeGoalId??undefined,conversationId:root,status:'pending',
+      ...(absoluteTime(assembled.envelope.occurred_at)?{sentAt:assembled.envelope.occurred_at}:{})};
     // The queue is already durable even if this display cache cannot be written.
     try { save(next); } catch { state=next; }
     onChange();

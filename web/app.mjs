@@ -2,7 +2,7 @@ import {KEY, loadState, setSnapshot} from './health.mjs?v=98';
 import {ACTIVE_GOAL_KEY, FINANCE_KEY, ensureHealthGoal, withoutDefaultHealthGoal, loadFinance, connectFinanceDemo, addFinanceDemoRecord, healthView, financeView} from './workspace.mjs?v=98';
 import {EXPERIMENT, startExperiment, routeHealthEvent, acceptAgentSuggestion, agentRequestPayload} from './loop.mjs?v=98';
 import {goalChangeText} from './goal-agent-core.mjs?v=98';
-import {createEventWorkspace, recurringPlan} from './event-workspace.mjs?v=98';
+import {createEventWorkspace, recurringPlan, chatTimeline} from './event-workspace.mjs?v=98';
 import {recommendationCard} from './recommendations.mjs?v=98';
 import {dataSourceProvider} from './data-sources.mjs?v=98';
 import {taskResultBodyRelevant} from './task-results.mjs?v=98';
@@ -1703,7 +1703,9 @@ function eventWorkspacePage() {
   const pendingCompletions=eventWorkspace.pendingTaskCompletions();
   const goalPicker=`<div class="goal-switch"><label for="event-goal-select">当前目标</label><div class="goal-switch-actions"><div class="select-wrap"><select id="event-goal-select" aria-label="切换目标"><option value="" ${!localSelection&&!view.activeGoalId?'selected':''}>新目标</option>${options}${localChoices.length?`<optgroup label="本机已存目标">${localChoices.map(l=>`<option value="local:${esc(l.key)}" ${localSelection?.key===l.key?'selected':''}>${esc(l.title)}</option>`).join('')}</optgroup>`:''}</select></div><button class="goal-add-button" data-action="new-goal">新建</button></div></div>`;
   if (selectedLocal) return localRecordPage(localSelection,selectedLocal.title,goalPicker,connection);
-  const history=messages.map(message=>`<div ${message.notificationEventId?`id="event-message-${esc(message.notificationEventId)}"`: ''} class="agent-message ${message.role==='user'?'user':'assistant'}"><p>${esc(message.text)}</p>${message.status==='pending'?'<p class="agent-disclaimer">待同步</p>':message.status==='rejected'||message.status==='failed'?'<p class="agent-disclaimer">发送未完成，请通过聊天重新说明。</p>':''}</div>`).join('');
+  // 时间分割线按整条可见消息列表算：首条有时间的消息前一条，之后看间隔和跨日。
+  const timeline=chatTimeline(messages);
+  const history=messages.map((message,index)=>`${timeline[index]?`<time class="agent-time-divider" datetime="${esc(new Date(timeline[index].at).toISOString())}">${esc(timeline[index].label)}</time>`:''}<div ${message.notificationEventId?`id="event-message-${esc(message.notificationEventId)}"`: ''} class="agent-message ${message.role==='user'?'user':'assistant'}"><p>${esc(message.text)}</p>${message.status==='pending'?'<p class="agent-disclaimer">待同步</p>':message.status==='rejected'||message.status==='failed'?'<p class="agent-disclaimer">发送未完成，请通过聊天重新说明。</p>':''}</div>`).join('');
   // 等待态由缓存派生（见 event-workspace.mjs 的 awaitingReply），同步与重渲染不会把它冲掉。
   const waiting=view.awaiting?`<div class="agent-message assistant pending" role="status"><div class="agent-thinking"><span aria-hidden="true"><i></i><i></i><i></i></span><p>Agent 正在回复…</p></div></div>`:'';
   const content=chat?`${backButton('agent-back','返回目标')}<div class="agent-title"><h1>${esc(goal?.title||'说说你想做什么')}</h1></div>${connection}<div class="agent-messages" role="log" aria-live="polite">${history}${waiting||(history?'':'<p class="agent-empty">说说你的想法，Along 会和你一起理清下一步。</p>')}</div>`
