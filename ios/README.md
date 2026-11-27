@@ -77,7 +77,7 @@ Apple 健康 App 的手腕温度通常展示相对个人基线的偏差；Health
 
 使用隔离身份和测试目标验证一次性提醒：创建任务、退出到主屏、等待通知、点开核对目标与任务，再从测试对话取消。正式工作区只做只读验收，不代发聊天、增测试通知或重配对。
 
-已在 Apple 开发者账户启用 Push Notifications 且签名描述文件允许时，签名构建设置 CODE_SIGN_ENTITLEMENTS=AlongHealth/AlongPush.entitlements 与 ALONG_APNS_ENVIRONMENT=development 或 production，与实际签名环境对应。默认描述文件继续支持本地提醒。原生每次启动重新向 Apple 注册，并只向配对的那个 Host 传递设备令牌——传什么、走什么信任策略由**配对连接自己的原生信任策略**决定，不是一律按证书钉死：私网 IPv4 沿用叶指纹钉扎（`legacy-local-pin-v1`），云端 DNS 或公网 IPv4 交给系统信任评估（`system-pki-v1`），策略由主机形态推导，不接受网页自报（见 [CA 方案 §2.2](../docs/iphone-ca-profile-design.md#22-旧连接迁移与-mac-兼容)）。
+已在 Apple 开发者账户启用 Push Notifications 且签名描述文件允许时，签名构建设置 CODE_SIGN_ENTITLEMENTS=AlongHealth/AlongPush.entitlements 与 ALONG_APNS_ENVIRONMENT=development 或 production，与实际签名环境对应。默认描述文件继续支持本地提醒。原生向 Apple 注册的时机由条件决定，不是每次启动都注册：绑定到用户、通知授权已授予、且构建配置了 APNs 环境（`AlongAPNsEnvironment`）三者都成立时才走注册流程；其中**当前缺设备令牌才向 Apple 重新注册**，已有令牌就把它提交给当前配对的那个 Host——并只向该 Host 传递设备令牌。传什么、走什么信任策略由**配对连接自己的原生信任策略**决定，不是一律按证书钉死：私网 IPv4 沿用叶指纹钉扎（`legacy-local-pin-v1`），云端 DNS 或公网 IPv4 交给系统信任评估（`system-pki-v1`），策略由主机形态推导，不接受网页自报（见 [CA 方案 §2.2](../docs/iphone-ca-profile-design.md#22-旧连接迁移与-mac-兼容)）。
 
 Debug 真机验收可用环境变量 ALONG_NOTIFICATION_PROBE_TASK 指定真实测试任务的 ID。将 App 送回主屏，等待到时并点击通知，再用 devicectl 读取 App 数据容器 Library/Caches/AlongNotificationProbe.json。该文件只记录指定任务的匿名哈希、系统回读时间、已送达、点击与定位时间。回到前台读取通知中心也可独立验证送达。验收后通过目标聊天撤销测试任务。
 

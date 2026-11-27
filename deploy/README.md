@@ -4,7 +4,7 @@
 
 - **Tier 1 兼容路径**：`docker-compose.yml`，事件接入关闭，按[多用户 Runbook §6.4](../docs/cloud-deploy-multi-user.md#64-上线-runbook由用户手动执行)。
 - **Tier 2 事件工作区**：基础 Compose 加 `docker-compose.tier2.yml`，按[开启与回退 §6.5](../docs/cloud-deploy-multi-user.md#tier2-runbook)。固定公网 IPv4 按下文[独立运维步骤](#固定公网-ipv4-直连)。
-- **Linux 实测栈**：`docker-compose.cloud.yml` 是独立三容器编排，不是叠加文件；其端口、宿主 nginx、证书与卷按 [Host 云端部署经验](../docs/host-cloud-deploy.md) 核对。该文件的 `ALONG_SUPERAGENT_SOURCE` 默认取相邻 checkout；复现时显式指定经验证的提交，不把本地 HEAD 当固定版本。**这台形态的日常部署走[自动部署](#自动部署每小时检查主干并部署)**：调度在 Multica，机器上只有一次性入口 `sudo systemctl start along-auto-deploy.service`；查当前跑的是哪一版用 `/usr/local/libexec/along/auto-deploy.sh status`，探活用 `verify`，回退用 `rollback`。
+- **Linux 实测栈**：`docker-compose.cloud.yml` 是独立三容器编排，不是叠加文件；其端口、宿主 nginx、证书与卷按 [Host 云端部署经验](../docs/host-cloud-deploy.md) 核对。该文件的 `ALONG_SUPERAGENT_SOURCE` 默认取相邻 checkout；复现时显式指定经验证的提交，不把本地 HEAD 当固定版本——钉远端提交要写完整 Git URL（`https://github.com/artstur/along-superagent.git#<40 位 SHA>`），只写裸 SHA 会被 compose 当成相对 `deploy/` 的本地路径（`deploy/<SHA>`，目录不存在），构建直接失败；该变量只固定 Agent 的构建上下文，Along 源码仍取所用的 Along checkout。**这台形态的日常部署走[自动部署](#自动部署每小时检查主干并部署)**：调度在 Multica，机器上只有一次性入口 `sudo systemctl start along-auto-deploy.service`；查当前跑的是哪一版用 `/usr/local/libexec/along/auto-deploy.sh status`，探活用 `verify`，回退用 `rollback`。
 
 已有个人事件工作区要保全历史和待发时，按[冷交接契约](../docs/personal-workspace-handoff.md)处理；不要把初次发码和普通重新配对当成迁移步骤。
 
