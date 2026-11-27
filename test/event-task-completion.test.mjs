@@ -45,6 +45,86 @@ test('completing a task queues one task.completed fact and leaves the local stat
   assert.equal(calls.some(call=>call.path==='/events'),false);
 });
 
+test('a late history page never overwrites the cache of the goal now shown',async()=>{
+  const secondGoal='g_second';
+  const snapshotOf=(id,title)=>({goal:{id,domain:'custom',status:'active',currentRevision:1},
+    revision:{goalId:id,revision:1,title,status:'active'},
+    tasks:[{id:'t_'+id,goalId:id,content:id+' 的任务',status:'open',currentRevision:1}]});
+  let releaseA;
+  const gate=new Promise(resolve=>{releaseA=resolve});
+  const {workspace}=setup(async input=>{
+    if(input.path==='/sync'&&input.body?.tasks_page) {
+      const goalId=input.body.tasks_page.goal_id;
+      if(goalId===GOAL) {
+        await gate;
+        return {items:[],tasks_page:{items:[{id:'t_a_paged',goalId:GOAL,content:'A 的更早任务',status:'done',currentRevision:1}]}};
+      }
+      return {items:[],tasks_page:{items:[{id:'t_b_paged',goalId:secondGoal,content:'B 的更早任务',status:'done',currentRevision:1}]}};
+    }
+    if(input.path==='/sync')return {items:[
+      {seq:1,userId:config.userId,kind:'goal_updated',goalId:GOAL,payload:{snapshot:snapshotOf(GOAL,'目标 A')}},
+      {seq:2,userId:config.userId,kind:'goal_updated',goalId:secondGoal,payload:{snapshot:snapshotOf(secondGoal,'目标 B')}}]};
+    return {acked:0};
+  });
+  await workspace.sync();
+  workspace.select(GOAL);
+  const late=workspace.loadHistoryPage();
+  await new Promise(r=>setTimeout(r,10));
+  workspace.select(secondGoal);
+  await workspace.loadHistoryPage();
+  assert.deepEqual(workspace.historyTasks().map(task=>task.id),['t_b_paged']);
+  assert.equal(workspace.historyExhausted(),true);
+  // A 的迟到响应放行：不得改写 B 的卡片、游标与收口状态。
+  releaseA();
+  await late;
+  assert.deepEqual(workspace.historyTasks().map(task=>task.id),['t_b_paged']);
+  assert.equal(workspace.historyExhausted(),true);
+});
+
+test('a late page from an earlier batch does not land in the reloaded cache of the same goal',async()=>{
+  const secondGoal='g_second';
+  const snapshotOf=(id,title)=>({goal:{id,domain:'custom',status:'active',currentRevision:1},
+    revision:{goalId:id,revision:1,title,status:'active'},
+    tasks:[{id:'t_'+id,goalId:id,content:id+' 的任务',status:'open',currentRevision:1}]});
+  let releaseA;
+  const gate=new Promise(resolve=>{releaseA=resolve});
+  let aRequests=0;
+  const {workspace}=setup(async input=>{
+    if(input.path==='/sync'&&input.body?.tasks_page) {
+      const goalId=input.body.tasks_page.goal_id;
+      if(goalId===GOAL) {
+        aRequests+=1;
+        if(aRequests===1) {
+          await gate;
+          return {items:[],tasks_page:{items:[{id:'t_a_stale',goalId:GOAL,content:'A 的旧批次任务',status:'done',currentRevision:1}]}};
+        }
+        return {items:[],tasks_page:{items:[{id:'t_a_fresh',goalId:GOAL,content:'A 的新批次任务',status:'done',currentRevision:1}]}};
+      }
+      return {items:[],tasks_page:{items:[{id:'t_b_paged',goalId:secondGoal,content:'B 的更早任务',status:'done',currentRevision:1}]}};
+    }
+    if(input.path==='/sync')return {items:[
+      {seq:1,userId:config.userId,kind:'goal_updated',goalId:GOAL,payload:{snapshot:snapshotOf(GOAL,'目标 A')}},
+      {seq:2,userId:config.userId,kind:'goal_updated',goalId:secondGoal,payload:{snapshot:snapshotOf(secondGoal,'目标 B')}}]};
+    return {acked:0};
+  });
+  await workspace.sync();
+  workspace.select(GOAL);
+  const late=workspace.loadHistoryPage();
+  await new Promise(r=>setTimeout(r,10));
+  workspace.select(secondGoal);
+  await workspace.loadHistoryPage();
+  // A → B → A：A 的历史重新从头翻，旧批次的迟到响应不得落进 A 的新缓存。
+  workspace.select(GOAL);
+  const reloaded=workspace.loadHistoryPage();
+  await reloaded;
+  assert.deepEqual(workspace.historyTasks().map(task=>task.id),['t_a_fresh']);
+  assert.equal(workspace.historyExhausted(),true);
+  releaseA();
+  await late;
+  assert.deepEqual(workspace.historyTasks().map(task=>task.id),['t_a_fresh']);
+  assert.equal(workspace.historyExhausted(),true);
+});
+
 test('the same task is not submitted twice while its completion is still queued',async()=>{
   const {workspace}=setup(input=>input.path==='/sync'?{items:[taskItem('open')]}:{acked:0});
   await workspace.sync();
