@@ -30,9 +30,9 @@
 | `../.dockerignore` | 两个主构建上下文都用仓库根目录的白名单，只放行 npm 清单、Host 模块及任务协议、web 模块和 runner 入口。 |
 | `agent-runner.mjs` | 内网 HTTP runner，使用 Along 专用 DSH profile；模块自检 `node --check deploy/agent-runner.mjs` |
 | `agent-dsh/` | dsh 安装清单：`package.json` + `package-lock.json` 锁定 `@deepseek-ai/dsh@0.2.2-rc.5`，镜像内 `npm ci --ignore-scripts` 安装。升级 dsh 版本时在本目录 `npm install --package-lock-only --ignore-scripts` 重新生成 lock 并入库，同时同步 `Dockerfile.agent` 的 pin 与 compose 的 `ALONG_DSH_VERSION` |
-| `auto-deploy.sh` | 定时部署器：每小时检查 Along 与 Super Agent 的 `main`，有更新就构建并切换，切换后探活失败回退到上一成功版本。见下文[定时自动部署](#定时自动部署每小时检查主干并部署) |
-| `auto-deploy-install.sh` | 把部署器装到目标机（脚本进 `/usr/local/libexec/along/`，单元进 `/etc/systemd/system/`，配置进 `/etc/along-auto-deploy.env`） |
-| `along-auto-deploy.service` / `along-auto-deploy.timer` | systemd 单元：oneshot 服务 + 每小时定时器 |
+| `auto-deploy.sh` | 部署器：检查 Along 与 Super Agent 的 `main`，有更新就构建并切换，切换后探活失败回退到上一成功版本。调度由 Multica 的每小时 wakeup 驱动，它调起目标机上的一次性入口。见下文[自动部署](#自动部署每小时检查主干并部署) |
+| `auto-deploy-install.sh` | 把部署器装到目标机（脚本进 `/usr/local/libexec/along/`，unit 进 `/etc/systemd/system/`，配置进 `/etc/along-auto-deploy.env`）。**不装定时器**——调度归 Multica |
+| `along-auto-deploy.service` | systemd 单元：一次性部署入口（`sudo systemctl start along-auto-deploy.service`）。**没有 timer**——调度归 Multica |
 | `auto-deploy.env.example` | 部署器配置模板（路径与版本来源，不含凭证） |
 | `../test/auto-deploy-integration.test.mjs` | 部署器的隔离集成验证（`ALONG_AUTO_DEPLOY_INTEGRATION=1` 开启）：部分切换回退、同秒等长改动、解包失败重试 |
 
@@ -303,17 +303,30 @@ WantedBy=timers.target
 
 部署验收时从两个独立公网来源确认 Host 配对审计分开记录各自的 IPv4，再记录一次实际续期，核对外部地址的叶指纹变化，并让原配对的 iPhone 分别验证前台连接和后台同步。隔离验收可运行 `ALONG_PUBLIC_IP_INTEGRATION=1 node --test test/public-ip-compose.test.mjs`，使用真实 nginx 和 Host、合成 CA 与 ACME 替身。
 
-## 定时自动部署（每小时检查主干并部署）
+## 自动部署（每小时检查主干并部署）
 
-`auto-deploy.sh` 在**目标机本地**跑：systemd 定时器每小时触发一轮，检查
-`artstur/along` 与 `artstur/along-superagent` 的 `main`；有更新就拉取、构建、切换，
-没更新就什么都不做（不构建、不重启）。
+**调度在 Multica，不在目标机上。** Multica 的每小时 wakeup 调起目标机上的**一次性
+部署入口**：
 
-### 为什么放在目标机而不是 CI
+```sh
+sudo systemctl start along-auto-deploy.service
+```
 
-调度在目标机，重启后自恢复，运行结果直接落在本机 journal 里。代价是目标机要有
-两个仓库的读权限（这台机用 `ecs-user` 的 SSH 密钥拉 `git@github.com:artstur/…`）。
-CI 方案要把部署身份交给 GitHub，信任面更大。
+那一轮在目标机上检查 `artstur/along` 与 `artstur/along-superagent` 的 `main`；有更新
+就拉取、构建、切换，没更新就什么都不做（不构建、不重启）。结果落在目标机 journal 里，
+Multica 那一轮把摘要回报到工单——**工单上的评论就是运行记录**。
+
+目标机上**不装 systemd timer**：两套调度同时跑会互相切换（各自切一次，线上版本与
+台账可能对不上）。
+
+### 为什么这么分工
+
+构建、部署、健康检查与失败回退都要在目标机上做——那是唯一有 Docker、有卷、有
+凭证的地方。调度交给 Multica：触发与运行记录都在平台侧可查，不需要在目标机上留
+一个常驻定时器，也不用把部署身份交给 CI。代价是目标机要有两个仓库的读权限
+（这台机用 `ecs-user` 的 SSH 密钥拉 `git@github.com:artstur/…`）。
+
+### 一轮里做什么
 
 ### 一轮里做什么
 
@@ -358,9 +371,13 @@ compose 的 project directory 是 `release/<id>/along/deploy`，所以 `../../da
 ### 安装
 
 ```sh
-sudo deploy/auto-deploy-install.sh              # 安装并启用定时器
-sudo deploy/auto-deploy-install.sh --no-enable  # 只装不启用
+sudo deploy/auto-deploy-install.sh            # 安装（不装定时器：调度归 Multica）
+sudo deploy/auto-deploy-install.sh --trigger-now   # 装完立刻跑一轮
 ```
+
+安装器做三件事：把脚本装到 `/usr/local/libexec/along/`、装 unit、按实际探测到的账号
+生成 `/etc/along-auto-deploy.env`（含 `ALONG_DEPLOY_STATE_USER`）并把状态目录归它所有。
+机器上**已有的旧定时器会被停用并移除**——两套调度同时跑会互相切换。
 
 装完先手动跑一轮看结果：
 
@@ -376,19 +393,37 @@ sudo -u ecs-user /usr/local/libexec/along/auto-deploy.sh bootstrap
 ```
 
 **必须以服务账号运行**（单元里的 `User=`）。状态目录与版本台账都归服务账号所有：root
-建出来的目录服务账号写不进去，下一轮取锁直接 `Permission denied`，定时任务从此每轮
-都失败。以 root 跑也行——部署器在登记**之后**把整个状态目录（含 `versions/` 台账与
-台账文件）`chown` 给 `ALONG_DEPLOY_STATE_USER` 指定的账号，并在登记完当场自检。
+建出来的目录服务账号写不进去，下一轮取锁直接 `Permission denied`，每一轮都失败。
+以 root 跑也行——部署器读 `/etc/along-auto-deploy.env` 拿到服务账号，登记**之后**把整个
+状态目录（含 `versions/` 台账与台账文件）`chown` 给它，并在登记完当场自检。
 
 `bootstrap` 默认取现场 checkout 的 HEAD——只在"现场 HEAD 就是当前运行的版本"时成立；
 否则显式给两个提交号：`bootstrap <along SHA> <superagent SHA>`。
 
-**安装顺序**：先 `--no-enable` 装 → 以服务账号 `bootstrap` → 手动跑一轮看结果 →
-再 `systemctl enable --now along-auto-deploy.timer`。
+**安装顺序**：装 → 以服务账号 `bootstrap` → 手动跑一轮看结果 → 再启用 Multica 调度。
+
+### Multica 调度配置
+
+调度是工单上的一个每小时 cron wakeup，它叫醒的目标会去调目标机上的一次性部署入口：
+
+```sh
+multica issue wakeup create <工单 ID> \
+  --kind cron --cron "0 * * * *" --mode continuous \
+  --instruction-file ./wakeup-instruction.md
+```
+
+`--instruction` 里写清"调起哪个入口、跑完回报什么"。Multica 那一轮跑完会把结果作为
+评论发回工单——**工单上的评论就是运行记录**。
+
+已建的调度：`multica issue wakeup list <工单 ID>`；手动触发一次：
+`multica issue wakeup trigger <工单 ID> <wakeup ID>`；停用：`multica issue wakeup disable`。
 
 ### 日常操作
 
 ```sh
+# 跑一轮（Multica 调的就是这个）
+sudo systemctl start along-auto-deploy.service
+
 # 状态：成功版本、上一成功版本、运行中的镜像与探活
 /usr/local/libexec/along/auto-deploy.sh status
 
@@ -398,10 +433,9 @@ sudo -u ecs-user /usr/local/libexec/along/auto-deploy.sh bootstrap
 # 手工回退到上一成功版本
 /usr/local/libexec/along/auto-deploy.sh rollback
 
-# 停用 / 卸载
-sudo systemctl disable --now along-auto-deploy.timer
+# 卸载（调度在 Multica 侧另行停用）
 sudo rm -f /usr/local/libexec/along/auto-deploy.sh \
-  /etc/systemd/system/along-auto-deploy.service /etc/systemd/system/along-auto-deploy.timer
+  /etc/systemd/system/along-auto-deploy.service
 sudo systemctl daemon-reload
 ```
 
@@ -440,8 +474,8 @@ sudo systemctl daemon-reload
 ### 隔离复测
 
 部署器契约里有几件事单元测试锁不住：compose up 会不会**部分成功**、构建缓存会不会把
-旧内容烤进镜像、解包失败会不会污染同 SHA 的下一轮。这些要在隔离 Docker 环境里跑真实
-容器才验得了。
+旧内容烤进镜像、解包失败会不会污染同 SHA 的下一轮、台账写不进去时会不会先切了再说。
+这些要在隔离 Docker 环境里跑真实容器才验得了。
 
 ```sh
 ALONG_AUTO_DEPLOY_INTEGRATION=1 node --test test/auto-deploy-integration.test.mjs
@@ -450,5 +484,13 @@ ALONG_AUTO_DEPLOY_INTEGRATION=1 node --test test/auto-deploy-integration.test.mj
 默认不跑（要构建镜像、起容器，耗时）；`npm run check` 不带这个变量，普通开发与 CI
 不受影响。用例用两个本地 git origin 当上游、一套与生产同形状的三容器编排（锚点持
 netns，host 与 superagent 加入它），逐条验：无更新跳过、同秒等长改动必须进到镜像里
-且台账与镜像内容一致、解包失败不污染同 SHA 的下一轮、compose up 部分失败时回退到
+且台账与镜像内容一致、解包失败不污染同 SHA 的下一轮、台账目录不可写时在切换前就失败、
+同一 checkout 上并发 fetch 别的分支时本轮仍部署 main、compose up 部分失败时回退到
 上一成功版本。
+
+**按实际入口的端到端**（安装 → root 登记基线 → 服务账号首次更新）另在隔离 Linux 主机上
+用真安装器跑：安装器生成 `/etc/along-auto-deploy.env`（含服务账号），以 root 跑
+`bootstrap`（**不预先导出** `ALONG_DEPLOY_STATE_USER`），再以 unit 的服务账号
+`systemctl start along-auto-deploy.service` 完成首次真实更新，核对双服务健康、运行镜像
+ID 与成功台账一致。这条路径是"按手册装"的真实形状，配置文件的读取顺序必须对——
+配置文件在参数解析**之后**才被 source 的话，配置文件里的服务账号、工作区全都不生效。

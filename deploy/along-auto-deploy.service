@@ -1,5 +1,5 @@
 [Unit]
-Description=Check Along and Along Super Agent main branches and deploy updates
+Description=Run one Along auto-deploy round (check upstream main, deploy if changed)
 Documentation=file:///home/ecs-user/workspace/along/docs/host-cloud-deploy.md
 After=docker.service network-online.target
 Requires=docker.service
@@ -13,11 +13,12 @@ Group=ecs-user
 WorkingDirectory=-/home/ecs-user/workspace
 EnvironmentFile=-/etc/along-auto-deploy.env
 ExecStart=/usr/local/libexec/along/auto-deploy.sh run
-# 构建 Super Agent 镜像要拉依赖，慢网下可能跑很久；超时按一小时算。
+# 构建 Super Agent 镜像要拉依赖，慢网下可能跑很久；超时按两小时算。
 TimeoutStartSec=7200
 NoNewPrivileges=true
 PrivateTmp=true
-# 一轮失败不重试：下一轮定时任务会重来，失败轮次没有推进成功记录。
+# 一轮失败不重试：下一次调用（Multica 的每小时 wakeup）会重来，
+# 失败轮次没有推进成功记录。
 Restart=no
 
 [Install]

@@ -36,8 +36,20 @@ CONFIG_FILE="${ALONG_DEPLOY_CONFIG:-/etc/along-auto-deploy.env}"
 log()     { printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; }
 die()     { log "ERROR $*"; exit 1; }
 
-# ---------- 配置（默认值先落，配置文件后覆盖） ----------
+# ---------- 配置 ----------
 
+# **先读配置文件，再解析参数**。
+#
+# 顺序反了会出事：配置文件里的值（如安装器写进去的 ALONG_DEPLOY_STATE_USER）在
+# 参数解析**之后**才被 source 进来，派生变量（如 STATE_USER）拿到的还是默认值——
+# root 登记基线时就不会 chown，服务账号的首次更新写台账 Permission denied，
+# 而那时容器已经切过去了、台账还指着旧版本。
+if [ -f "$CONFIG_FILE" ]; then
+  # shellcheck disable=SC1090
+  . "$CONFIG_FILE"
+fi
+
+# 之后的默认值只在**没设**时生效：配置文件与环境变量都已经写进变量了。
 WORKSPACE="${ALONG_DEPLOY_WORKSPACE:-/home/ecs-user/workspace}"
 ALONG_URL="${ALONG_DEPLOY_ALONG_URL:-git@github.com:artstur/along.git}"
 SUPERAGENT_URL="${ALONG_DEPLOY_SUPERAGENT_URL:-git@github.com:artstur/along-superagent.git}"
@@ -56,11 +68,11 @@ DRY_RUN="${ALONG_DEPLOY_DRY_RUN:-0}"
 BUILD_ONLY="${ALONG_DEPLOY_BUILD_ONLY:-0}"
 TEST_FAULT="${ALONG_DEPLOY_TEST_FAULT:-}"
 ALONG_SHA_PIN="${ALONG_DEPLOY_ALONG_SHA:-}"
+SUPERAGENT_SHA_PIN="${ALONG_DEPLOY_SUPERAGENT_SHA:-}"
 # 定时任务以这个账号运行；状态目录与版本记录都必须归它所有。
 STATE_USER="${ALONG_DEPLOY_STATE_USER:-}"
 # 部署专用引用：本轮 fetch 的落点。只有部署器写它。
 DEPLOY_REF="${ALONG_DEPLOY_REF:-refs/along-auto-deploy/$BRANCH}"
-SUPERAGENT_SHA_PIN="${ALONG_DEPLOY_SUPERAGENT_SHA:-}"
 
 STATE_FILE="$STATE_DIR/last-success.env"
 PREV_STATE_FILE="$STATE_DIR/prev-success.env"
@@ -85,7 +97,6 @@ EXPECT_CONTEXTS="${ALONG_DEPLOY_EXPECT_CONTEXTS-host=along}"
 EXPECT_ADDCTX="${ALONG_DEPLOY_EXPECT_ADDCTX-superagent:along=along-superagent}"
 # 切换前核对镜像产物与源码是否一致（默认开；关掉就只剩 mtime 隔离这一道防线）。
 VERIFY_IMAGE="${ALONG_DEPLOY_VERIFY_IMAGE:-1}"
-# 镜像产物核对：镜像 | 源码在发布目录下的相对目录 | 镜像内目录:源码内目录
 # 镜像产物核对：镜像 | 源码在发布目录下的相对目录 | 镜像内路径:源码内路径
 #
 # 只比**逐字拷贝**进镜像的那些目录：Host 镜像的 host/ 与 web/，Super Agent 镜像的
@@ -93,11 +104,6 @@ VERIFY_IMAGE="${ALONG_DEPLOY_VERIFY_IMAGE:-1}"
 # 不比 lib/——那是镜像里编译出来的产物，源码树里根本没有（.gitignore）。
 VERIFY_HOST_IMAGE="${ALONG_DEPLOY_VERIFY_HOST_IMAGE-$HOST_IMAGE|along|/app/host:host,/app/web:web}"
 VERIFY_SUPERAGENT_IMAGE="${ALONG_DEPLOY_VERIFY_SUPERAGENT_IMAGE-$SUPERAGENT_IMAGE|along-superagent|/app/deploy/agent-dsh/node_modules/dsh-superagent/prompts:prompts,/app/deploy/agent-dsh/node_modules/dsh-superagent/skills:skills,/app/deploy/agent-dsh/node_modules/dsh-superagent/locale:locale,/app/deploy/agent-dsh/node_modules/dsh-superagent/scripts:scripts,/app/deploy/agent-dsh/node_modules/dsh-superagent/package.json:package.json,/app/deploy/agent-dsh/node_modules/dsh-superagent/cordis.patch.yml:cordis.patch.yml}"
-
-if [ -f "$CONFIG_FILE" ]; then
-  # shellcheck disable=SC1090
-  . "$CONFIG_FILE"
-fi
 
 # ---------- 小工具 ----------
 

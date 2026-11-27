@@ -370,10 +370,14 @@ docker logs -f along-host
 
 ## 10. 每小时检查主干并自动部署（2026-11-27 实测）
 
-在这台机（`ecs-user@8.155.140.214`）上跑一个 systemd 定时器，每小时检查
-`artstur/along` 与 `artstur/along-superagent` 的 `main`；有更新就拉取、构建、切换，
-没更新就什么都不做。产物在 `deploy/auto-deploy.sh` 与同目录的单元文件，
-装法与运维命令见 [deploy/README.md 的定时自动部署一节](../deploy/README.md#定时自动部署每小时检查主干并部署)。
+**调度在 Multica，不在这台机上。** Multica 的每小时 wakeup 调起这台机上的**一次性
+部署入口**（`sudo systemctl start along-auto-deploy.service`）：那一轮检查
+`artstur/along` 与 `artstur/along-superagent` 的 `main`，有更新就拉取、构建、切换，
+没更新就什么都不做；跑完把摘要回报到工单，**工单上的评论就是运行记录**。
+
+这台机上**不装 systemd timer**：两套调度同时跑会互相切换（各自切一次，线上版本与
+台账可能对不上）。产物在 `deploy/auto-deploy.sh` 与同目录的单元文件，
+装法与运维命令见 [deploy/README.md 的自动部署一节](../deploy/README.md#自动部署每小时检查主干并部署)。
 
 ### 现场的既有形态（先只读核对过）
 
@@ -384,14 +388,14 @@ docker logs -f along-host
 | 容器 | `along-host`（`along-host:cloud`）、`along-superagent`（`along-superagent:local`）、`along-netns`（锚点） |
 | 凭证 | `secrets/{runner-token,memory-env}` 与 `data/superagent/along/data/bridge-token`，file secret，root 属主 0600 |
 | 仓库访问 | `ecs-user` 的 `~/.ssh/id_ed25519` 能读两个仓库（`git ls-remote` 实测通过） |
-| 调度 | 装之前机器上只有 `dnf-makecache` / `logrotate` 等系统定时器，没有别的 Along 调度 |
+| 调度 | 装之前机器上只有 `dnf-makecache` / `logrotate` 等系统定时器，没有别的 Along 调度。改造前装过一个 `along-auto-deploy.timer`（hourly），改造时停用并移除 |
 
 ### 装好之后的位置
 
 | 位置 | 内容 |
 | --- | --- |
 | `/usr/local/libexec/along/auto-deploy.sh` | 部署器本体（root 属主，0755） |
-| `/etc/systemd/system/along-auto-deploy.{service,timer}` | 单元（`User=ecs-user`） |
+| `/etc/systemd/system/along-auto-deploy.service` | 一次性部署入口的单元（`User=ecs-user`）。**没有 timer** |
 | `/etc/along-auto-deploy.env` | 配置（只有路径与版本来源，没有凭证） |
 | `/home/ecs-user/workspace/.auto-deploy/` | 成功版本记录、版本台账、部署锁 |
 | `/home/ecs-user/workspace/release/<两个 SHA 前 12 位>/` | 每个版本的干净源码树 |
@@ -400,12 +404,12 @@ docker logs -f along-host
 
 | 项 | 值 |
 | --- | --- |
-| 定时器 | `OnCalendar=hourly` + 随机延迟 5 分钟；实测下一次触发 `06:02:12 CST` |
+| 调度 | Multica 工单上的 cron wakeup（`0 * * * *` UTC）；触发那一轮调起上面那个入口 |
 | 一轮完整部署（缓存命中时） | 约 70 秒：构建 ~60 秒，切换 ~30 秒，探活 ~30 秒 |
-| 无更新的一轮 | 只做 fetch 与取提交（FETCH_HEAD），不构建不重启 |
+| 无更新的一轮 | 只做 fetch 与取提交（部署专用引用 `refs/along-auto-deploy/main`），不构建不重启 |
 | 磁盘 | 每个 Super Agent 镜像约 2.41 GB；发布目录与镜像按版本台账保留两份 |
 
-### 三个必须知道的点
+### 六个必须知道的点
 
 **一、锚点每轮都会被重建，这不是副作用。** 编排里的相对路径（`./netns-proxy.mjs`、
 `./superagent-profile.patch.yml`）落在发布目录上，与现场 checkout 的路径不同，
@@ -445,7 +449,7 @@ superagent host` 可能把锚点与 Super Agent 重建完、Host 容器却创建
 状态目录（含 `versions/` 版本台账与台账文件）chown 给服务账号——登记前 chown 不够：
 `record_success` 随后以 root 建出来的 `versions/` 仍然是 root 的，服务账号下一轮写
 台账就 Permission denied，而那时容器已经切过去了、台账还指着旧版本。
-安装顺序：先 `--no-enable` 装 → 以服务账号 `bootstrap` → 手动跑一轮 → 再启用定时器。
+安装顺序：先装 → 以服务账号 `bootstrap` → 手动跑一轮 → 再启用 Multica 调度。
 
 **七、台账写不进去要在切换前就发现。** 上一条的失败形态是"容器切过去了、台账写不进去"：
 线上跑的是新版本，台账说旧版本，下一轮的"变没变"判断全错。所以切换前先真写一个探针
@@ -460,3 +464,9 @@ superagent host` 可能把锚点与 Super Agent 重建完、Host 容器却创建
 **九、以 root 跑时 git 会拒绝操作服务账号的 checkout。** checkout 归服务账号所有，
 root 跑 git 会报 "dubious ownership" 而失败。部署器对 checkout 的每次 git 调用都带
 `-c safe.directory=<那个 checkout>`——只声明已知的那个路径，不是放开全部。
+
+**十、配置文件必须在参数解析之前读。** 顺序反了，配置文件里的值**全部**不生效：
+参数先按默认值算好，配置文件后 source，派生变量（工作区、状态目录、服务账号）拿到的
+还是默认值。表现是"按手册装完，root 登记基线没 chown（服务账号没读到），
+服务账号的首次更新写台账 Permission denied"。现在部署器先 source
+`/etc/along-auto-deploy.env`，再解析参数。
