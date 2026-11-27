@@ -42,11 +42,17 @@ fi
 user="$(id -un "$(stat -c %u "$here" 2>/dev/null || echo 1000)" 2>/dev/null || echo ecs-user)"
 [ -n "$user" ] || user=ecs-user
 case "$user" in root) user=ecs-user ;; esac
+group="$(id -gn "$user" 2>/dev/null || echo "$user")"
+[ -n "$group" ] || group="$user"
 
 printf '安装自动部署器：工作区 %s，账号 %s\n' "$workspace" "$user"
 
 install -d -m 0755 /usr/local/libexec/along
 install -m 0755 "$here/auto-deploy.sh" /usr/local/libexec/along/auto-deploy.sh
+
+# 状态目录归**服务账号**所有：定时任务以服务账号运行，它要在这里放锁与版本记录。
+# root 建出来的目录服务账号写不进去——取锁直接 Permission denied，每轮都失败。
+install -d -m 0750 -o "$user" -g "$group" "$workspace/.auto-deploy"
 
 # 单元里的账号与工作区按实际探测值替换，提交进仓库的单元写的是这台机的约定值。
 sed -e "s#^User=.*#User=$user#" \
@@ -63,6 +69,14 @@ if [ ! -f /etc/along-auto-deploy.env ]; then
   printf '已生成 /etc/along-auto-deploy.env\n'
 else
   printf '保留已有的 /etc/along-auto-deploy.env\n'
+fi
+
+# 服务账号记进配置：以 root 跑 bootstrap 时据此把状态目录改成服务账号所有，
+# 免得服务账号下一轮取锁 Permission denied。
+if grep -q '^ALONG_DEPLOY_STATE_USER=' /etc/along-auto-deploy.env; then
+  sed -i "s#^ALONG_DEPLOY_STATE_USER=.*#ALONG_DEPLOY_STATE_USER=$user#" /etc/along-auto-deploy.env
+else
+  printf 'ALONG_DEPLOY_STATE_USER=%s\n' "$user" >> /etc/along-auto-deploy.env
 fi
 
 systemctl daemon-reload

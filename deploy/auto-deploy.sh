@@ -56,6 +56,8 @@ DRY_RUN="${ALONG_DEPLOY_DRY_RUN:-0}"
 BUILD_ONLY="${ALONG_DEPLOY_BUILD_ONLY:-0}"
 TEST_FAULT="${ALONG_DEPLOY_TEST_FAULT:-}"
 ALONG_SHA_PIN="${ALONG_DEPLOY_ALONG_SHA:-}"
+# 定时任务以这个账号运行；状态目录与版本记录都必须归它所有。
+STATE_USER="${ALONG_DEPLOY_STATE_USER:-}"
 SUPERAGENT_SHA_PIN="${ALONG_DEPLOY_SUPERAGENT_SHA:-}"
 
 STATE_FILE="$STATE_DIR/last-success.env"
@@ -63,8 +65,32 @@ PREV_STATE_FILE="$STATE_DIR/prev-success.env"
 VERSIONS_DIR="$STATE_DIR/versions"
 LOCK_FILE="$STATE_DIR/deploy.lock"
 
-HOST_IMAGE="along-host:cloud"
-SUPERAGENT_IMAGE="along-superagent:local"
+HOST_IMAGE="${ALONG_DEPLOY_HOST_IMAGE:-along-host:cloud}"
+SUPERAGENT_IMAGE="${ALONG_DEPLOY_SUPERAGENT_IMAGE:-along-superagent:local}"
+# 容器名与跳板探针地址：线上那两个容器名是 along-host / along-superagent，
+# 跳板在锚点的 3083。隔离环境用别的名字与端口，所以做成配置。
+HOST_CONTAINER="${ALONG_DEPLOY_HOST_CONTAINER:-along-host}"
+SUPERAGENT_CONTAINER="${ALONG_DEPLOY_SUPERAGENT_CONTAINER:-along-superagent}"
+PROBE_URL="${ALONG_DEPLOY_PROBE_URL:-http://127.0.0.1:3083/}"
+
+# 核对用的期望值。默认是线上那套云端栈；隔离环境换一份配置即可复用同一个脚本。
+#
+# 注意用的是 ${VAR-default} 而不是 ${VAR:-default}：**显式设成空串**表示"不核对这一类"
+#（隔离栈没有生产那样的卷与凭证），只有**没有设**才取默认值。
+EXPECT_BINDS="${ALONG_DEPLOY_EXPECT_BINDS-host:/data=data/host superagent:/var/lib/dsh=data/superagent/dsh superagent:/var/lib/along=data/superagent/along superagent:/var/lib/memory=data/superagent/memory}"
+EXPECT_SECRETS="${ALONG_DEPLOY_EXPECT_SECRETS-runner-token=secrets/runner-token memory-env=secrets/memory-env bridge-token=data/superagent/along/data/bridge-token}"
+EXPECT_CONTEXTS="${ALONG_DEPLOY_EXPECT_CONTEXTS-host=along}"
+EXPECT_ADDCTX="${ALONG_DEPLOY_EXPECT_ADDCTX-superagent:along=along-superagent}"
+# 切换前核对镜像产物与源码是否一致（默认开；关掉就只剩 mtime 隔离这一道防线）。
+VERIFY_IMAGE="${ALONG_DEPLOY_VERIFY_IMAGE:-1}"
+# 镜像产物核对：镜像 | 源码在发布目录下的相对目录 | 镜像内目录:源码内目录
+# 镜像产物核对：镜像 | 源码在发布目录下的相对目录 | 镜像内路径:源码内路径
+#
+# 只比**逐字拷贝**进镜像的那些目录：Host 镜像的 host/ 与 web/，Super Agent 镜像的
+# prompts/ skills/ locale/ scripts/ 与 package.json、cordis.patch.yml。
+# 不比 lib/——那是镜像里编译出来的产物，源码树里根本没有（.gitignore）。
+VERIFY_HOST_IMAGE="${ALONG_DEPLOY_VERIFY_HOST_IMAGE-$HOST_IMAGE|along|/app/host:host,/app/web:web}"
+VERIFY_SUPERAGENT_IMAGE="${ALONG_DEPLOY_VERIFY_SUPERAGENT_IMAGE-$SUPERAGENT_IMAGE|along-superagent|/app/deploy/agent-dsh/node_modules/dsh-superagent/prompts:prompts,/app/deploy/agent-dsh/node_modules/dsh-superagent/skills:skills,/app/deploy/agent-dsh/node_modules/dsh-superagent/locale:locale,/app/deploy/agent-dsh/node_modules/dsh-superagent/scripts:scripts,/app/deploy/agent-dsh/node_modules/dsh-superagent/package.json:package.json,/app/deploy/agent-dsh/node_modules/dsh-superagent/cordis.patch.yml:cordis.patch.yml}"
 
 if [ -f "$CONFIG_FILE" ]; then
   # shellcheck disable=SC1090
@@ -120,7 +146,13 @@ free_kb() {
 # ---------- 锁 ----------
 
 acquire_lock() {
-  mkdir -p "$STATE_DIR"
+  mkdir -p "$STATE_DIR" 2>/dev/null || true
+  if [ ! -w "$STATE_DIR" ]; then
+    die "状态目录 $STATE_DIR 对当前账号（$(id -un)）不可写：定时任务以服务账号运行，请用服务账号执行 bootstrap，或由 root 执行 chown $(id -u):$(id -g) $STATE_DIR"
+  fi
+  # flock 不可用必须**报错**，不能当成"锁被占"——那会让每一轮都静默跳过，
+  # 定时任务看着在跑，实际上一件事都没做。
+  command -v flock >/dev/null 2>&1 || die "缺少 flock（util-linux），无法保证不并发切换"
   exec 9>"$LOCK_FILE"
   if ! flock -n 9; then
     log "SKIP 已有部署在执行（锁 $LOCK_FILE 被占），本轮不切换"
@@ -132,6 +164,10 @@ acquire_lock() {
 # ---------- 取提交 ----------
 
 # fetch 两个仓库，让目标 SHA 落进本地对象库。fetch 只写对象库，不动现场工作区。
+#
+# 顺带把本轮要用的 SHA 固定下来：fetch 写进 FETCH_HEAD 的就是远端分支当轮的尖端，
+# 不再单独 ls-remote 一次——多一次远端读取就多一个窗口，远端在 fetch 与读取之间
+# 推进时，本轮会拿到一个还没被取下来的提交（fetch/ls-remote 之间的竞争）。
 fetch_repos() {
   local repo
   for repo in "$ALONG_CHECKOUT" "$SUPERAGENT_CHECKOUT"; do
@@ -142,14 +178,9 @@ fetch_repos() {
   git -C "$SUPERAGENT_CHECKOUT" fetch --quiet "$SUPERAGENT_URL" "$BRANCH" || die "拉取 $SUPERAGENT_URL 失败"
 }
 
-# 远端 main 的 SHA；被 ALONG_DEPLOY_*_SHA 钉住时用钉住的值。
-remote_sha() {
-  local url="$1" out
-  out="$(git ls-remote "$url" "refs/heads/$BRANCH" 2>&1)" || {
-    log "ERROR 读取 $url 的 $BRANCH 失败：$out"
-    return 1
-  }
-  printf '%s' "$out" | awk 'NR==1 {print $1}'
+# 本轮 fetch 取下来的提交（FETCH_HEAD 就是远端分支尖端）。
+fetched_sha() {
+  git -C "$1" rev-parse --verify --quiet FETCH_HEAD
 }
 
 resolve_sha() {
@@ -158,8 +189,8 @@ resolve_sha() {
     sha="$pin"
     log "SHA 使用钉住的提交 $sha（$url）"
   else
-    sha="$(remote_sha "$url")" || return 1
-    [ -n "$sha" ] || { log "ERROR $url 没有 $BRANCH 分支"; return 1; }
+    sha="$(fetched_sha "$checkout")"
+    [ -n "$sha" ] || { log "ERROR $url 的 $BRANCH 没有取到提交"; return 1; }
     log "SHA $url 的 $BRANCH 是 $sha"
   fi
   git -C "$checkout" cat-file -e "${sha}^{commit}" 2>/dev/null || {
@@ -171,13 +202,53 @@ resolve_sha() {
 
 # ---------- 展开干净的发布工作区 ----------
 
+# 把展开后的每个文件的 mtime 设成**该文件内容派生**的时间戳。
+#
+# 为什么不能留 git archive 给的 mtime：那是提交时间。同秒提交、同样字节长度的
+# 改动，路径+大小+mtime 三项都不变——buildkit 的本地源同步按这三项判断文件是否
+# 变了，没变就直接复用上一次的**内容**，于是镜像里留下旧代码，而台账记的是
+# 新提交。--no-cache 也救不了：旧的是源同步这一层，不是构建缓存层。
+# 按内容派生 mtime 之后，内容变了 mtime 就变，源同步会重新读文件。
+#
+# 逐文件而不是整棵树：整棵树一个摘要会让任何一个文件的改动都作废全部文件的
+# mtime，把 pnpm install 之类的层也拖下水。逐文件只作废真正变了的文件。
+#
+# 秒 + 纳秒两段都取自摘要：同一路径内容不同 → mtime 必不同（碰撞概率可忽略），
+# 同一内容 → mtime 相同 → 构建缓存照旧命中（这是想要的：没变的东西别重建）。
+# 基准取 2020-01-01 并限制在当天之内，文件时间不会跑到未来。
+stamp_tree_mtime() {
+  local dest="$1" file digest secs nanos
+  while IFS= read -r -d '' file; do
+    digest="$(sha256sum "$file" | cut -d' ' -f1)"
+    [ -n "$digest" ] || continue
+    secs=$(( 1577836800 + (0x${digest:0:8} % 86400) ))
+    nanos=$(( (0x${digest:8:8} % 1000000) * 1000 + (0x${digest:16:8} % 1000) ))
+    touch -h -d "@$secs.$nanos" "$file" 2>/dev/null || true
+  done < <(find "$dest" -type f -print0 2>/dev/null)
+}
+
 # 用 git archive 从固定 SHA 展开一棵干净源码树到 $dest。
 # 不用 worktree/checkout：现场 checkout 可能有未提交改动，展开出来的树只含该提交的内容。
+#
+# 解包失败必须显式失败：管道 `git archive | tar -x` 的失败码会被调用方的 `|| die`
+# 吞掉——命令替换里的 errexit 在 `||` 上下文下不生效，解包失败会被当成成功，
+# 接着写清单、下一轮复用这个不完整的目录。先落到临时 tar 文件，两步各自查返回码。
 expand_tree() {
-  local checkout="$1" sha="$2" dest="$3"
-  rm -rf "$dest"
+  local checkout="$1" sha="$2" dest="$3" tarball
+  tarball="$(mktemp)"
+  if ! git -C "$checkout" archive --format=tar "$sha" > "$tarball"; then
+    rm -f "$tarball"
+    log "ERROR 从 $checkout 导出 $sha 失败"
+    return 1
+  fi
   mkdir -p "$dest"
-  git -C "$checkout" archive --format=tar "$sha" | tar -x -C "$dest"
+  if ! tar -xf "$tarball" -C "$dest"; then
+    rm -f "$tarball"
+    log "ERROR 解包 $sha 失败"
+    return 1
+  fi
+  rm -f "$tarball"
+  stamp_tree_mtime "$dest"
 }
 
 # 展开一个发布目录：<release>/{along,along-superagent} + data/secrets 符号链接。
@@ -189,14 +260,26 @@ expand_tree() {
 # 提交的 Super Agent 源码。
 materialize_release() {
   local along_sha="$1" sa_sha="$2"
-  local id release
+  local id release staging
   id="$(printf '%s' "$along_sha" | cut -c1-12)-$(printf '%s' "$sa_sha" | cut -c1-12)"
   release="$RELEASE_ROOT/$id"
 
   if [ ! -f "$release/manifest.env" ] || [ ! -d "$release/along" ] || [ ! -d "$release/along-superagent" ]; then
     log "RELEASE 展开发布目录 $release"
-    expand_tree "$ALONG_CHECKOUT" "$along_sha" "$release/along"
-    expand_tree "$SUPERAGENT_CHECKOUT" "$sa_sha" "$release/along-superagent"
+    # 先展开到暂存目录，**完整展开成功后**才发布：半成品目录不能被下一轮复用。
+    staging="$RELEASE_ROOT/.staging.$$"
+    rm -rf "$staging"
+    mkdir -p "$staging"
+    if ! expand_tree "$ALONG_CHECKOUT" "$along_sha" "$staging/along" \
+      || ! expand_tree "$SUPERAGENT_CHECKOUT" "$sa_sha" "$staging/along-superagent"; then
+      rm -rf "$staging"
+      return 1
+    fi
+    rm -rf "$release"
+    mkdir -p "$release"
+    mv "$staging/along" "$release/along"
+    mv "$staging/along-superagent" "$release/along-superagent"
+    rm -rf "$staging"
   else
     log "RELEASE 复用发布目录 $release"
   fi
@@ -219,6 +302,12 @@ materialize_release() {
 
 # compose 相对路径配错是静默降级（卷挂到空目录、数据看着"配好了"其实没生效），
 # 所以切换前把 compose 实际解析出来的路径逐条核对。
+#
+# 期望值用配置描述，默认是线上那套；隔离环境换一份配置即可复用同一个脚本。
+#   ALONG_DEPLOY_EXPECT_BINDS    service:target=工作区相对路径（多项空格分隔）
+#   ALONG_DEPLOY_EXPECT_SECRETS  名字=工作区相对路径
+#   ALONG_DEPLOY_EXPECT_CONTEXTS service=发布目录相对路径（构建上下文）
+#   ALONG_DEPLOY_EXPECT_ADDCTX   service:上下文名=发布目录相对路径
 verify_paths() {
   local compose_file="$1" release="$2"
   command -v python3 >/dev/null 2>&1 || {
@@ -232,12 +321,18 @@ verify_paths() {
   }
   cfg_file="$(mktemp)"
   printf '%s' "$cfg" > "$cfg_file"
-  python3 - "$cfg_file" "$release" "$WORKSPACE" <<'PY' || { rm -f "$cfg_file"; return 1; }
+  python3 - "$cfg_file" "$release" "$WORKSPACE" \
+      "$EXPECT_BINDS" "$EXPECT_SECRETS" "$EXPECT_CONTEXTS" "$EXPECT_ADDCTX" <<'PY' \
+    || { rm -f "$cfg_file"; return 1; }
 import json, os, sys
 
 cfg = json.load(open(sys.argv[1]))
 release = os.path.realpath(sys.argv[2])
 workspace = os.path.realpath(sys.argv[3])
+expect_binds = sys.argv[4].split()
+expect_secrets = sys.argv[5].split()
+expect_contexts = sys.argv[6].split()
+expect_addctx = sys.argv[7].split()
 problems = []
 
 
@@ -245,15 +340,19 @@ def real(path):
     return os.path.realpath(path) if path else path
 
 
-def expect_bind(service, target, expected):
-    for vol in cfg["services"][service].get("volumes") or []:
+def service(name):
+    return cfg["services"].get(name) or {}
+
+
+def expect_bind(service_name, target, expected):
+    for vol in service(service_name).get("volumes") or []:
         if vol.get("type") == "bind" and vol.get("target") == target:
             if real(vol.get("source")) != real(expected):
                 problems.append(
                     "%s 的 %s 挂载 %s，期望 %s"
-                    % (service, target, vol.get("source"), expected))
+                    % (service_name, target, vol.get("source"), expected))
             return
-    problems.append("%s 缺少 %s 的 bind 挂载" % (service, target))
+    problems.append("%s 缺少 %s 的 bind 挂载" % (service_name, target))
 
 
 def expect_secret(name, expected):
@@ -274,28 +373,34 @@ def expect_secret(name, expected):
         pass
 
 
-expect_bind("host", "/data", os.path.join(workspace, "data/host"))
-expect_bind("superagent", "/var/lib/dsh", os.path.join(workspace, "data/superagent/dsh"))
-expect_bind("superagent", "/var/lib/along", os.path.join(workspace, "data/superagent/along"))
-expect_bind("superagent", "/var/lib/memory", os.path.join(workspace, "data/superagent/memory"))
+for item in expect_binds:
+    spec, _, rel = item.partition("=")
+    service_name, _, target = spec.partition(":")
+    expect_bind(service_name, target, os.path.join(workspace, rel))
 
-build = cfg["services"]["superagent"].get("build") or {}
-contexts = build.get("additional_contexts") or {}
-if "along" not in contexts:
-    problems.append("superagent 的构建缺少 additional_contexts.along")
-elif real(contexts["along"]) != real(os.path.join(release, "along-superagent")):
-    problems.append(
-        "superagent 的 bundle 来源是 %s，期望 %s"
-        % (contexts["along"], os.path.join(release, "along-superagent")))
+for item in expect_secrets:
+    name, _, rel = item.partition("=")
+    expect_secret(name, os.path.join(workspace, rel))
 
-host_ctx = (cfg["services"]["host"].get("build") or {}).get("context")
-if real(host_ctx) != real(os.path.join(release, "along")):
-    problems.append(
-        "host 的构建上下文是 %s，期望 %s" % (host_ctx, os.path.join(release, "along")))
+for item in expect_contexts:
+    service_name, _, rel = item.partition("=")
+    ctx = (service(service_name).get("build") or {}).get("context")
+    if real(ctx) != real(os.path.join(release, rel)):
+        problems.append(
+            "%s 的构建上下文是 %s，期望 %s"
+            % (service_name, ctx, os.path.join(release, rel)))
 
-expect_secret("runner-token", os.path.join(workspace, "secrets/runner-token"))
-expect_secret("memory-env", os.path.join(workspace, "secrets/memory-env"))
-expect_secret("bridge-token", os.path.join(workspace, "data/superagent/along/data/bridge-token"))
+for item in expect_addctx:
+    spec, _, rel = item.partition("=")
+    service_name, _, context_name = spec.partition(":")
+    contexts = (service(service_name).get("build") or {}).get("additional_contexts") or {}
+    if context_name not in contexts:
+        problems.append("%s 的构建缺少 additional_contexts.%s" % (service_name, context_name))
+    elif real(contexts[context_name]) != real(os.path.join(release, rel)):
+        problems.append(
+            "%s 的 %s 来源是 %s，期望 %s"
+            % (service_name, context_name, contexts[context_name],
+               os.path.join(release, rel)))
 
 if problems:
     for problem in problems:
@@ -304,6 +409,61 @@ if problems:
 print("PATH-CHECK-OK 卷、凭证与构建输入都指向预期位置")
 PY
   rm -f "$cfg_file"
+}
+
+# ---------- 核对镜像产物与源码一致 ----------
+
+# 核对镜像里的产物与本轮钉住的源码逐文件一致。
+#
+# 挡住的是「镜像里跑的是旧内容、台账记的却是新提交」这类问题：内容对不上就
+# 当轮失败，不切换、不写成功记录，下一轮重来。
+#
+# 方向是**镜像 → 源码**：镜像里可以比源码少（.dockerignore 会筛掉一部分文件），
+# 但每个镜像里的文件都必须在源码里存在且内容一致。
+#
+# 规格：<镜像>|<源码在发布目录下的相对目录>|<镜像内路径>:<源码内路径>，逗号分隔。
+# 两侧的路径都可以是目录（逐个文件比对相对路径）或单个文件（直接比）。
+verify_image_content() {
+  local spec="$1" release="$2"
+  local image source_rel pairs
+  image="$(printf '%s' "$spec" | cut -d'|' -f1)"
+  source_rel="$(printf '%s' "$spec" | cut -d'|' -f2)"
+  pairs="$(printf '%s' "$spec" | cut -d'|' -f3)"
+  local source_root="$release/$source_rel"
+  [ -d "$source_root" ] || { log "ERROR 源码目录不存在：$source_root"; return 1; }
+
+  local checked=0 item img_path src_path part
+  for item in $(printf '%s' "$pairs" | tr ',' ' '); do
+    img_path="$(printf '%s' "$item" | cut -d: -f1)"
+    src_path="$(printf '%s' "$item" | cut -d: -f2)"
+    part="$(docker run --rm --entrypoint sh "$image" -c \
+      "if [ -d '$img_path' ]; then cd '$img_path' && find . -type f | LC_ALL=C sort | while IFS= read -r f; do printf '%s\t%s\n' \"\$(sha256sum \"\$f\" | cut -d' ' -f1)\" \"\${f#./}\"; done; elif [ -f '$img_path' ]; then printf '%s\t%s\n' \"\$(sha256sum '$img_path' | cut -d' ' -f1)\" \"\$(basename '$img_path')\"; fi" 2>&1)" || {
+      log "ERROR 无法从镜像 $image 读取 $img_path 的产物清单：$part"
+      return 1
+    }
+    local img_hash rel src_hash
+    while IFS="$(printf '\t')" read -r img_hash rel; do
+      [ -n "$rel" ] || continue
+      checked=$((checked + 1))
+      if [ -d "$source_root/$src_path" ]; then
+        src_hash="$(sha256sum "$source_root/$src_path/$rel" 2>/dev/null | cut -d' ' -f1)"
+      else
+        src_hash="$(sha256sum "$source_root/$src_path" 2>/dev/null | cut -d' ' -f1)"
+      fi
+      if [ -z "$src_hash" ]; then
+        log "ERROR 镜像 $image 里的 $src_path/$rel 在源码里不存在"
+        return 1
+      fi
+      if [ "$src_hash" != "$img_hash" ]; then
+        log "ERROR 镜像 $image 里的 $src_path/$rel 与源码不一致（镜像 $img_hash / 源码 $src_hash）"
+        return 1
+      fi
+    done <<EOF
+$part
+EOF
+  done
+  [ "$checked" -gt 0 ] || { log "ERROR 镜像 $image 的比对范围内没有文件"; return 1; }
+  log "VERIFY 镜像 $image 的产物与源码逐文件一致（核对了 $checked 个文件）"
 }
 
 # ---------- 构建 ----------
@@ -333,7 +493,7 @@ build_images() {
 probe_health() {
   local host_code jump_code
   host_code="$(curl -sk -o /dev/null -w '%{http_code}' --max-time 5 "$HEALTH_URL" 2>/dev/null || true)"
-  jump_code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:3083/ 2>/dev/null || true)"
+  jump_code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$PROBE_URL" 2>/dev/null || true)"
   [ "$host_code" = "200" ] || return 1
   [ "$jump_code" != "000" ] && [ -n "$jump_code" ] || return 1
   return 0
@@ -342,14 +502,14 @@ probe_health() {
 wait_healthy() {
   local deadline=$(( $(date +%s) + HEALTH_TIMEOUT ))
   while :; do
-    if [ "$(container_health along-host)" = "healthy" ] \
-      && [ "$(container_health along-superagent)" = "healthy" ] \
+    if [ "$(container_health "$HOST_CONTAINER")" = "healthy" ] \
+      && [ "$(container_health "$SUPERAGENT_CONTAINER")" = "healthy" ] \
       && probe_health; then
       log "HEALTH 两个服务都健康（Host /health 与锚点跳板可达）"
       return 0
     fi
     if [ "$(date +%s)" -ge "$deadline" ]; then
-      log "ERROR 探活超时（host=$(container_health along-host) superagent=$(container_health along-superagent)）"
+      log "ERROR 探活超时（host=$(container_health "$HOST_CONTAINER") superagent=$(container_health "$SUPERAGENT_CONTAINER")）"
       return 1
     fi
     sleep 5
@@ -363,10 +523,17 @@ wait_healthy() {
 # compose 的配置指纹因此变了，锚点本来就会被重建。命名空间跟着持有它的容器走，
 # 单独重建 host/superagent 会把它们留在旧 netns 里（外部入口静默断掉），
 # 所以锚点与两个使用方必须在同一次操作里一起重建。
+#
+# compose up 可能**部分成功**：锚点与 Super Agent 已经重建，Host 容器创建失败
+# （比如新增了一个指向不存在路径的 bind），此时线上入口是断的，而命令返回非零。
+# 所以这里必须把返回码带出去，由调用方进回退——只看「命令失败」是不够的。
 switch_stack() {
   local compose_file="$1"
   log "SWITCH 用新镜像重建锚点与两个服务（命名空间随之更新）"
-  docker compose -f "$compose_file" up -d --no-build --force-recreate anchor superagent host
+  if ! docker compose -f "$compose_file" up -d --no-build --force-recreate anchor superagent host; then
+    log "ERROR compose up 失败（可能部分切换：锚点与 Super Agent 已重建，Host 未起来）"
+    return 1
+  fi
 }
 
 # ---------- 回退 ----------
@@ -421,8 +588,8 @@ version_file() {
 record_success() {
   local along_sha="$1" sa_sha="$2" release="$3" compose_file="$4"
   local host_image sa_image id host_tag sa_tag
-  host_image="$(container_image_id along-host)"
-  sa_image="$(container_image_id along-superagent)"
+  host_image="$(container_image_id "$HOST_CONTAINER")"
+  sa_image="$(container_image_id "$SUPERAGENT_CONTAINER")"
   id="$(version_id "$along_sha" "$sa_sha")"
   host_tag="along-host:rel-$(printf '%s' "$along_sha" | cut -c1-12)-$(printf '%s' "$sa_sha" | cut -c1-12)"
   sa_tag="along-superagent:rel-$(printf '%s' "$along_sha" | cut -c1-12)-$(printf '%s' "$sa_sha" | cut -c1-12)"
@@ -564,8 +731,8 @@ cmd_status() {
     [ -n "$vf" ] || continue
     while IFS= read -r line; do log "VERSION $line"; done < "$vf"
   done < <(ls -1t "$VERSIONS_DIR"/*.env 2>/dev/null)
-  log "RUNTIME along-host 镜像 $(container_image_id along-host) 健康 $(container_health along-host)"
-  log "RUNTIME along-superagent 镜像 $(container_image_id along-superagent) 健康 $(container_health along-superagent)"
+  log "RUNTIME $HOST_CONTAINER 镜像 $(container_image_id "$HOST_CONTAINER") 健康 $(container_health "$HOST_CONTAINER")"
+  log "RUNTIME $SUPERAGENT_CONTAINER 镜像 $(container_image_id "$SUPERAGENT_CONTAINER") 健康 $(container_health "$SUPERAGENT_CONTAINER")"
   if probe_health; then log "HEALTH 当前探活通过"; else log "HEALTH 当前探活失败"; fi
 }
 
@@ -576,6 +743,10 @@ cmd_verify() {
 # 首次安装时把「当前正在跑的版本」登记成基线：之后每轮才有「变没变」可比，
 # 而不是第一轮就无条件重装一遍。登记的是现场 checkout 的 HEAD 与运行中容器的
 # 镜像 ID、编排文件路径。
+#
+# **必须以服务账号运行**：状态目录归服务账号所有，root 建出来的目录服务账号
+# 写不进去——下一轮取锁直接 Permission denied，定时任务从此每轮都失败。
+# 所以这里先检查目录属主，属主不对就明确报错，而不是留下一个装不上的定时器。
 cmd_bootstrap() {
   local force="" along_sha="" sa_sha=""
   for arg in "$@"; do
@@ -587,12 +758,28 @@ cmd_bootstrap() {
   if [ -f "$STATE_FILE" ] && [ -z "$force" ]; then
     die "$STATE_FILE 已存在（要覆盖请加 --force）"
   fi
+  # 状态目录必须归服务账号所有。属主不对就当场说清楚，别等到定时任务每轮失败。
+  mkdir -p "$STATE_DIR" 2>/dev/null || true
+  if [ -d "$STATE_DIR" ]; then
+    local owner
+    owner="$(stat -c '%U' "$STATE_DIR" 2>/dev/null || stat -f '%Su' "$STATE_DIR" 2>/dev/null || echo '?')"
+    if [ "$(id -u)" = "0" ] && [ -n "$STATE_USER" ] && [ "$owner" != "$STATE_USER" ]; then
+      # 以 root 跑 bootstrap 却把目录留成 root 所有 —— 服务账号下一轮取锁就
+      # Permission denied。直接改成服务账号所有。
+      chown -R "$STATE_USER" "$STATE_DIR" 2>/dev/null \
+        && log "BOOTSTRAP 状态目录 $STATE_DIR 已改为 $STATE_USER 所有"
+      owner="$STATE_USER"
+    fi
+    if [ "$(id -u)" != "0" ] && [ "$owner" != "$(id -un)" ] && [ "$owner" != "?" ]; then
+      die "状态目录 $STATE_DIR 归 $owner 所有，当前账号 $(id -un) 写不进去。请以服务账号运行本命令：sudo -u $owner $0 bootstrap"
+    fi
+  fi
   # 不给提交号时用现场 checkout 的 HEAD——这只在「现场 HEAD 就是当前运行的版本」
   # 时成立；否则显式给两个提交号。
   [ -n "$along_sha" ] || along_sha="$(git -C "$ALONG_CHECKOUT" rev-parse HEAD)"
   [ -n "$sa_sha" ] || sa_sha="$(git -C "$SUPERAGENT_CHECKOUT" rev-parse HEAD)"
   local compose_file checkout_root
-  compose_file="$(container_compose_file along-host)"
+  compose_file="$(container_compose_file "$HOST_CONTAINER")"
   [ -n "$compose_file" ] && [ -f "$compose_file" ] || die "取不到当前运行实例的编排文件路径"
   checkout_root="$(cd "$(dirname "$(dirname "$compose_file")")" && pwd)"
   # 发布布局里编排文件在 <发布根>/along/deploy/ 下，发布根才是可清理的单位。
@@ -672,18 +859,42 @@ cmd_run() {
     return 0
   fi
 
+  # 构建完、切换前核对镜像产物与源码一致。
+  #
+  # 挡住的是「构建缓存把旧内容烤进镜像，台账却记了新提交」这类问题：源码与镜像
+  # 对不上就当轮失败，不切换、不写成功记录，下一轮重来。
+  # 放在切换前，是因为内容不对的镜像根本不该上线。
+  if [ "$VERIFY_IMAGE" = "1" ]; then
+    [ -n "$VERIFY_HOST_IMAGE" ] && {
+      verify_image_content "$VERIFY_HOST_IMAGE" "$release" \
+        || die "Host 镜像产物与源码不一致，不切换"
+    }
+    [ -n "$VERIFY_SUPERAGENT_IMAGE" ] && {
+      verify_image_content "$VERIFY_SUPERAGENT_IMAGE" "$release" \
+        || die "Super Agent 镜像产物与源码不一致，不切换"
+    }
+  fi
+
   # 切换前的现场：回退要靠它。
   local prev_host_image prev_sa_image prev_compose_file
-  prev_host_image="$(container_image_id along-host)"
-  prev_sa_image="$(container_image_id along-superagent)"
-  prev_compose_file="$(container_compose_file along-host)"
+  prev_host_image="$(container_image_id "$HOST_CONTAINER")"
+  prev_sa_image="$(container_image_id "$SUPERAGENT_CONTAINER")"
+  prev_compose_file="$(container_compose_file "$HOST_CONTAINER")"
   log "SWITCH 切换前的现场：along-host=$prev_host_image along-superagent=$prev_sa_image 编排=$prev_compose_file"
 
   if [ "$TEST_FAULT" = "switch" ]; then
     die "TEST-FAULT 注入：切换阶段失败"
   fi
-  switch_stack "$compose_file"
+  # 切换返回非零同样要回退：compose up 可能部分成功（锚点与 Super Agent 已重建、
+  # Host 容器创建失败），此时线上入口是断的，不能就这么走人。
+  if ! switch_stack "$compose_file"; then
+    log "ERROR 切换失败，进入回退"
+    rollback_to "$prev_host_image" "$prev_sa_image" "$prev_compose_file" || true
+    die "切换失败，本轮未推进成功记录"
+  fi
 
+  # 切换后核对镜像产物与源码一致：内容对不上就是旧内容进了镜像，
+  # 这种轮次不能算成功，也不能写成功记录。
   if [ "$TEST_FAULT" = "health" ]; then
     log "ERROR TEST-FAULT 注入：探活失败"
     rollback_to "$prev_host_image" "$prev_sa_image" "$prev_compose_file" || true
