@@ -289,12 +289,14 @@ footer { padding: 0 0 26px; color: #aaa; text-align: center; font-size: 12px; }
 .agent-message p { overflow-wrap: anywhere; }
 .agent-message.pending { padding: 12px 16px; color: #777; }
 .agent-message > p.agent-disclaimer { font-size: var(--text-caption); color: #8a8a8a; }
-.agent-thinking { display: flex; align-items: center; gap: 9px; }
+.agent-thinking { display: flex; align-items: center; gap: 9px; position: relative; }
 .agent-thinking > span { display: flex; gap: 3px; }
 .agent-thinking i { width: 4px; height: 4px; border-radius: 50%; background: #8d8d8d; animation: agent-thinking 1.2s infinite ease-in-out; }
 .agent-thinking i:nth-child(2) { animation-delay: .16s; }
 .agent-thinking i:nth-child(3) { animation-delay: .32s; }
 .agent-thinking p { font-size: var(--text-caption); }
+/* 等待回复只留三个动态点：状态文字退出视觉布局，但仍留在无障碍树里，读屏照旧播报「Agent 正在回复…」。 */
+.agent-thinking-status { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 @keyframes agent-thinking { 0%, 70%, 100% { opacity: .35; transform: translateY(0); } 35% { opacity: 1; transform: translateY(-2px); } }
 .goal-orchestration { margin: 20px 0; padding: 18px; border: 1px solid #dededd; border-radius: 18px; background: #f7f7f6; }
 .goal-orchestration.blocked { border-color: #e2b7b0; background: #fffafa; }

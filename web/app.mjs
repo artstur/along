@@ -1710,7 +1710,8 @@ function eventWorkspacePage() {
   const timeline=chatTimeline(messages);
   const history=messages.map((message,index)=>`${timeline[index]?`<time class="agent-time-divider" datetime="${esc(new Date(timeline[index].at).toISOString())}">${esc(timeline[index].label)}</time>`:''}<div ${message.notificationEventId?`id="event-message-${esc(message.notificationEventId)}"`: ''} class="agent-message ${message.role==='user'?'user':'assistant'}" data-event-id="${esc(message.eventId)}"><p>${esc(message.text)}</p>${message.status==='pending'?'<p class="agent-disclaimer">待同步</p>':message.status==='rejected'||message.status==='failed'?'<p class="agent-disclaimer">发送未完成，请通过聊天重新说明。</p>':''}</div>`).join('');
   // 等待态由缓存派生（见 event-workspace.mjs 的 awaitingReply），同步与重渲染不会把它冲掉。
-  const waiting=view.awaiting?`<div class="agent-message assistant pending" role="status"><div class="agent-thinking"><span aria-hidden="true"><i></i><i></i><i></i></span><p>Agent 正在回复…</p></div></div>`:'';
+  // 等待行只显示三个动态点：状态文字留在 DOM 里但退出视觉布局，读屏仍能播报「Agent 正在回复…」。
+  const waiting=view.awaiting?`<div class="agent-message assistant pending" role="status"><div class="agent-thinking"><span aria-hidden="true"><i></i><i></i><i></i></span><p class="agent-thinking-status">Agent 正在回复…</p></div></div>`:'';
   const content=chat?`${backButton('agent-back','返回目标')}<div class="agent-title"><h1>${esc(goal?.title||'说说你想做什么')}</h1></div>${connection}<div class="agent-messages" role="log" aria-live="polite">${history}${waiting||(history?'':'<p class="agent-empty">说说你的想法，Along 会和你一起理清下一步。</p>')}</div>`
     :goal&&screen==='task'?eventTaskDetail(goal,scopedMessages)
     :goal&&screen==='history'?eventTaskHistory(goal,pendingCompletions)
