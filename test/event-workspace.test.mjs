@@ -392,8 +392,11 @@ test('archiving after switching goals detaches any previously bound conversation
   });
   await workspace.sync();
   workspace.select('g_one');const first=await workspace.submit('First goal message');
-  workspace.select('g_two');await workspace.submit('Archive second goal');
-  assert.equal(workspace.view().conversationId,first,'the old root must be present to expose this boundary');
+  workspace.select('g_two');const second=await workspace.submit('Archive second goal');
+  // 目标内的消息各自起一段会话（服务端只给未绑定目标的会话带 causation_id），
+  // 切换目标后当前会话根必须跟着换，旧目标的会话根不能被沿用。
+  assert.notEqual(workspace.view().conversationId,first,'the old root must not be reused after switching goals');
+  assert.equal(workspace.view().conversationId,second,'the current goal owns the conversation root');
   items=[item(3,'g_two','archived',2)];await workspace.sync();
   assert.equal(workspace.view().activeGoalId,'g_one','upstream restores the remaining active goal');
   assert.equal(workspace.view().conversationId,null);

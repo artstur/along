@@ -777,3 +777,38 @@ test('binding the conversation to a goal keeps the waiting row on screen',async(
   assert.match(dom.app.innerHTML,/Agent 正在回复…/,'会话被绑定到目标不结束等待');
   assert.match(dom.app.innerHTML,/我在新对话里说的第一句/,'原话仍在会话里');
 });
+
+// 切换目标后，请求、原话和等待行必须一起归到新目标：目标内的消息各自起一段会话，
+// 旧目标的会话根不能被沿用。否则新目标的原话挂到旧会话上——当前目标看不到自己的原话和
+// 等待行，切回旧目标反而看到别人的原话（独立复核第 1 条回归）。
+test('switching goals keeps the request, the original message and the waiting row on the new goal',async()=>{
+  const goalA={id:'g_switch_a',domain:'custom',status:'active',revision:1,title:'目标 A',metric:null,context:[],tasks:[]};
+  const goalB={id:'g_switch_b',domain:'custom',status:'active',revision:1,title:'目标 B',metric:null,context:[],tasks:[]};
+  const saved={version:1,userId:'u_app_b',cursor:0,activeGoalId:goalA.id,conversationId:null,returnGoalId:goalA.id,
+    goals:{[goalA.id]:goalA,[goalB.id]:goalB},messages:{},drafts:{}};
+  const dom=installDomStub({storage:{'along.agent.v1':JSON.stringify(config),
+    'along.event-workspace.v1:u_app_b':JSON.stringify(saved)}});
+  document.visibilityState='visible';
+  const bridge={syncItems:[]};
+  const requests=installEventBridge(bridge);
+  await import(`../web/app.mjs?chat-goal-switch=${Date.now()}`);await settle();
+  await dom.click({action:'event-chat'});
+  await submitChat(dom,'目标 A 的原话');await settle();
+  assert.match(dom.app.innerHTML,/Agent 正在回复…/,'提交后立即显示等待');
+  await dom.app.dispatch('change',{target:{id:'event-goal-select',value:goalB.id}});
+  await dom.click({action:'event-chat'});
+  assert.doesNotMatch(dom.app.innerHTML,/目标 A 的原话|Agent 正在回复…/,'旧目标的原话和等待不留在新目标里');
+  await submitChat(dom,'目标 B 的原话');await settle();
+  const events=requests.filter(item=>item.path==='/events');
+  assert.deepEqual(events.map(item=>item.body.goal_id),[goalA.id,goalB.id],'两个请求分别属于各自的目标');
+  const stored=JSON.parse(dom.storage.get('along.event-workspace.v1:u_app_b')).messages;
+  assert.equal(stored[events[1].body.event_id].goalId,goalB.id,'本地记录属于新目标');
+  assert.notEqual(stored[events[1].body.event_id].conversationId,stored[events[0].body.event_id].conversationId,
+    '新目标的原话不并入旧目标的会话');
+  assert.match(dom.app.innerHTML,/目标 B 的原话/,'新目标显示自己的原话');
+  assert.match(dom.app.innerHTML,/Agent 正在回复…/,'新目标显示自己的等待行');
+  await dom.app.dispatch('change',{target:{id:'event-goal-select',value:goalA.id}});
+  await dom.click({action:'event-chat'});
+  assert.doesNotMatch(dom.app.innerHTML,/目标 B 的原话/,'旧目标不显示别人的原话');
+  assert.match(dom.app.innerHTML,/Agent 正在回复…/,'旧目标仍显示自己的等待行');
+});

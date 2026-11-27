@@ -47,3 +47,42 @@ test('the legacy chat drops its connecting row when the binding changes mid-requ
   await dom.click({action:'edit-goal'});
   assert.doesNotMatch(dom.app.innerHTML,/正在连接/,'重新配对后不留永久的假等待');
 });
+
+// 旧 Host 的迟到结果只能释放它自己持有的状态：请求在途时重新配对并发出新请求后，
+// 旧请求结束不得解除新请求的忙碌保护——运行时切换保护会在新请求还在途中时被放开
+// （独立复核第 2 条回归）。
+test('the old Host response cannot unlock a newer request after pairing again',async()=>{
+  const oldToken='a'.repeat(64),newToken='b'.repeat(64);
+  const dom=installDomStub({storage:{[AGENT_KEY]:JSON.stringify({token:oldToken,baseURL:'https://along.test',runtime:'kimi-code-swarm'})}});
+  const pending=new Map();
+  window.AlongAgentBridge={request:input=>{
+    if (input.path==='/super-agent/goals') return new Promise((_,reject)=>pending.set(input.token,reject));
+    if (input.path==='/pair') return Promise.resolve({token:newToken});
+    if (input.path==='/connection/status') return Promise.resolve({along:true,ready:true,runtime:'kimi-code-swarm'});
+    return Promise.resolve({});
+  }};
+  await import(`../web/app.mjs?legacy-late-host=${Date.now()}`);
+  await dom.click({action:'edit-goal'});
+  const first=dom.submit();
+  await Promise.resolve();
+  assert.ok(pending.has(oldToken),'旧请求在途');
+  await dom.app.dispatch('submit',{target:{id:'pair-form',fields:{code:'123456',baseURL:'https://along.test'},
+    querySelector:()=>null,reset(){},setAttribute(){}},preventDefault(){}});
+  const second=dom.submit();
+  await Promise.resolve();
+  assert.ok(pending.has(newToken),'新请求在途');
+  await dom.click({action:'agent-back'});
+  await dom.click({action:'edit-goal'});
+  const waitingId=()=>dom.app.innerHTML.match(/data-agent-run="(pending-[^"]+)"/)?.[1];
+  const owned=waitingId();
+  assert.ok(owned,'新请求显示自己的等待行');
+  await dom.click({action:'select-runtime',runtime:'dsh-superagent'});
+  assert.match(dom.app.innerHTML,/class="active" aria-pressed="true">Kimi Swarm/,'新请求在途时运行时切换仍被保护');
+  pending.get(oldToken)(Error('旧宿主迟到失败'));
+  await first;
+  assert.equal(waitingId(),owned,'旧请求的迟到结果不能清掉新请求的等待行');
+  await dom.click({action:'select-runtime',runtime:'dsh-superagent'});
+  assert.match(dom.app.innerHTML,/class="active" aria-pressed="true">Kimi Swarm/,'新请求仍在途时运行时切换继续被保护');
+  pending.get(newToken)(Error('结束探测'));
+  await second;
+});
