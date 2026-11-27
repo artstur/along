@@ -148,3 +148,35 @@
 修法：给分页会话一个身份。切换目标立即作废旧会话（`web/event-workspace.mjs` 的 `select()`），响应写入前先核对会话身份，身份已作废的响应一律丢弃。已有的「当前目标／当前游标／已落地批次序号」三道判定保留。
 
 复测（客户端 `ca355e0`、服务端 `134f7b5`，四个脚本原样跑，只改 harness 版本钉住）：四段 PASS 不变；`withBResponseHeld.oldResponseIgnored` 由 `false` 变 **`true`**——放行旧 A 前后当前状态逐字段一致（仍 200 张卡、游标仍是 `t_large_001`、未收口、加载按钮可见）；随后放行新 A，正常翻到第 201 张并收口隐藏按钮。客户端 `npm run check` 870 项：867 通过、0 失败、3 跳过（新增 1 项：换目标前发出的页在新的目标仍在加载时必须被忽略）。
+
+### 第五轮：最终审核退回的「缓存升级」
+
+最终审核用附件 `task76-cache-upgrade.mjs` 复现：模拟 GitHub Pages 的 `Cache-Control: max-age=600` 时，已缓存主干 v95 的浏览器在源站切到候选版后，首次在线启动和断网冷重开都执行了主干脚本；两次页面都能正常打开，只看能否打开会误判为升级成功。根因有三层：
+
+1. **静态托管的缓存头**：GitHub Pages 给所有响应 `max-age=600`，浏览器在缓存仍新鲜时直接用旧副本。Service Worker 的回源是 `fetch(event.request)`（默认走 HTTP 缓存），于是源站已经更新，客户端拿到的仍是旧字节——审核脚本里这次访问的源站请求数为 0。
+2. **浏览器 24 小时才查一次 Service Worker 更新**：脚本地址不变时，Chrome 在上次更新后 24 小时内不做更新检查，导航和 `register()` 都被节流；已缓存客户端一直跑旧的 `sw.js`，新的回源策略也就无从生效（实测：重启浏览器后直接导航仍然零回源，`caches` 里仍只有 `along-shell-v95`）。
+3. **主干与交付分支同为 v95**：主干 `dbcd253` 与本分支各自把资源版本推到 95，两边内容不同、版本号相同，合并后客户端无法靠版本号分辨新旧。
+
+修法（客户端 `along`）：
+
+- `web/sw.js`：预缓存与回源都绕过 HTTP 缓存（`fetch(url,{cache:'no-store'})`），离线时回退 CacheStorage；缓存名推进到 `along-shell-v97`。
+- `web/app.mjs`：每次启动强制检查一次 Service Worker 更新（`registration.update()`，绕开 24 小时节流），新 SW 接管后重载一次，让本次启动也用上新资源；每个会话最多重载一次。
+- `web/index.html` 与 `ios/AlongHealth/Sources/AlongShellView.swift`：资源版本推进到 v97（`?v=97`、`build=97`）。v96 已被 `feature/task-79-font-scale` 占用，故取 v97，避免两个分支再次撞号。
+- 本分支先合入主干 `66bfd52`（无冲突），使版本推进不再与主干的 v95 撞行，后续合并主干不需要手工解冲突。
+
+复测（附件 `task76-cache-upgrade-verify.mjs`，Chrome 158，Node 22，真实 HTTP 源站模拟 `max-age=600`）六条泳道：
+
+| 泳道 | 场景 | 结果 |
+| --- | --- | --- |
+| L1 | 干净 profile 打开候选版 | PASS |
+| L2 | 已缓存主干 + `no-cache` | PASS |
+| L3 | 已缓存主干 + `max-age=600`（审核脚本原场景） | **FAIL** |
+| L4 | 客户端已用上 v97 壳，源站发布 v98 | PASS |
+| L5 | 已缓存主干，客户端强制检查更新后 | PASS |
+| L6 | 已缓存主干 + `max-age=600`，旧 HTML 缓存过期后 | PASS |
+
+L4 是稳态结论：客户端换上新版 Service Worker 之后，下一次发布在首次在线启动就能执行新版本，旧缓存仍新鲜也不影响。
+
+L3 仍不通过，且客户端侧无解：这一档客户端跑的是**修复前**的主干代码，它的 `register('./sw.js')` 被 24 小时节流，浏览器连新的 `sw.js` 都不去取（源站请求数 0、`caches` 里仍只有 `along-shell-v95`），旧 Service Worker 又必然命中仍新鲜的 HTTP 缓存。L6 显示这段迁移期会自愈：旧 HTML 的 600 秒缓存过期后，客户端下一次访问即拿到新版本，并顺势换上新版 Service Worker。L5 显示一旦客户端主动检查更新（新版 `app.mjs` 每次启动都会做），换壳在紧接着的一次访问内完成。
+
+未验证：iPhone/WKWebView 真机升级、正式 Host 部署态联调、服务端在翻页期间并发更新任务。
