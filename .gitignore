@@ -16,3 +16,6 @@ ios/build/
 
 # Tier 2 隔离 Linux Compose 集成验证的工作目录（ALONG_TIER2_INTEGRATION=1 时生成）
 .tier2-integration/
+
+# 自动部署器的隔离 Linux 集成验证工作目录（ALONG_AUTO_DEPLOY_INTEGRATION=1 时生成）
+.auto-deploy-integration/

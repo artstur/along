@@ -1,11 +1,11 @@
-import {agentCall, queueEvent, flushEventQueue, pendingEvents, readEventFailures,bindEventAuthority,retireEventAuthority} from './agent-client.mjs';
-import {assembleEnvelope} from './event-envelope.mjs';
-import {validateGoalReply} from './goal-agent-core.mjs';
-import {safeAdaptiveLayout} from './adaptive-ui.mjs';
-import {safeRecommendation} from './recommendations.mjs';
-import {safeDataSources} from './data-sources.mjs';
-import {taskResultRelevant,resultEvidence,validResultEvidence} from './task-results.mjs';
-import {safeResultPresentation,RESULT_TEXT_LIMIT,wellFormedResultText} from './task-result-view.mjs';
+import {agentCall, queueEvent, flushEventQueue, pendingEvents, readEventFailures,bindEventAuthority,retireEventAuthority} from './agent-client.mjs?v=97';
+import {assembleEnvelope} from './event-envelope.mjs?v=97';
+import {validateGoalReply} from './goal-agent-core.mjs?v=97';
+import {safeAdaptiveLayout} from './adaptive-ui.mjs?v=97';
+import {safeRecommendation} from './recommendations.mjs?v=97';
+import {safeDataSources} from './data-sources.mjs?v=97';
+import {taskResultRelevant,resultEvidence,validResultEvidence} from './task-results.mjs?v=97';
+import {safeResultPresentation,RESULT_TEXT_LIMIT,wellFormedResultText} from './task-result-view.mjs?v=97';
 
 const id = value => typeof value==='string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$/.test(value);
 const record = value => value!==null && typeof value==='object' && !Array.isArray(value);

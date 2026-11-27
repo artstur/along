@@ -1,20 +1,20 @@
-import {KEY, loadState, setSnapshot} from './health.mjs';
-import {ACTIVE_GOAL_KEY, FINANCE_KEY, ensureHealthGoal, withoutDefaultHealthGoal, loadFinance, connectFinanceDemo, addFinanceDemoRecord, healthView, financeView} from './workspace.mjs';
-import {EXPERIMENT, startExperiment, routeHealthEvent, acceptAgentSuggestion, agentRequestPayload} from './loop.mjs';
-import {goalChangeText} from './goal-agent-core.mjs';
-import {createEventWorkspace, recurringPlan} from './event-workspace.mjs';
-import {recommendationCard} from './recommendations.mjs';
-import {dataSourceProvider} from './data-sources.mjs';
-import {taskResultBodyRelevant} from './task-results.mjs';
-import {taskResultCard,captureResultReading,restoreResultReading} from './task-result-view.mjs';
-import {AGENT_KEY, GOALS_KEY, CONVERSATIONS_KEY, readStored, agentCall, loadNativeConnection, saveNativeConnection} from './agent-client.mjs';
-import {ADAPTIVE_LAYOUTS_KEY, customGoalEntries, findInitialCustomGoalCandidate, goalDomain, isCustomGoalKey, safeAdaptiveLayout, validateAdaptiveLayout} from './adaptive-ui.mjs';
+import {KEY, loadState, setSnapshot} from './health.mjs?v=97';
+import {ACTIVE_GOAL_KEY, FINANCE_KEY, ensureHealthGoal, withoutDefaultHealthGoal, loadFinance, connectFinanceDemo, addFinanceDemoRecord, healthView, financeView} from './workspace.mjs?v=97';
+import {EXPERIMENT, startExperiment, routeHealthEvent, acceptAgentSuggestion, agentRequestPayload} from './loop.mjs?v=97';
+import {goalChangeText} from './goal-agent-core.mjs?v=97';
+import {createEventWorkspace, recurringPlan} from './event-workspace.mjs?v=97';
+import {recommendationCard} from './recommendations.mjs?v=97';
+import {dataSourceProvider} from './data-sources.mjs?v=97';
+import {taskResultBodyRelevant} from './task-results.mjs?v=97';
+import {taskResultCard,captureResultReading,restoreResultReading} from './task-result-view.mjs?v=97';
+import {AGENT_KEY, GOALS_KEY, CONVERSATIONS_KEY, readStored, agentCall, loadNativeConnection, saveNativeConnection} from './agent-client.mjs?v=97';
+import {ADAPTIVE_LAYOUTS_KEY, customGoalEntries, findInitialCustomGoalCandidate, goalDomain, isCustomGoalKey, safeAdaptiveLayout, validateAdaptiveLayout} from './adaptive-ui.mjs?v=97';
 import {GOAL_SUPER_AGENT_RUNS_KEY, SUPER_AGENT_RUNS_KEY, createFailedGoalSuperAgentRun, createFailedSuperAgentRun,
   createGoalSuperAgentRequest, createPendingGoalSuperAgentRun, createPendingSuperAgentRun, createSuperAgentRequest,
-  safeGoalSuperAgentRun, safeSuperAgentRun, withRunError, AGENT_RUN_TIMEOUT_MS, AGENT_RUNTIME_KEY, CLOUD_RUN_NOT_FOUND, DSH_RUNTIME, KIMI_RUNTIME, agentRuntimeLabel, safeAgentRuntime, newId} from './super-agent.mjs';
+  safeGoalSuperAgentRun, safeSuperAgentRun, withRunError, AGENT_RUN_TIMEOUT_MS, AGENT_RUNTIME_KEY, CLOUD_RUN_NOT_FOUND, DSH_RUNTIME, KIMI_RUNTIME, agentRuntimeLabel, safeAgentRuntime, newId} from './super-agent.mjs?v=97';
 import {AGENT_NOTIFICATION_LEDGER_KEY, goalRunNotification, taskRunNotification, healthProposalNotification,
-  notificationWasDelivered, recordNotificationDelivered} from './agent-notifications.mjs';
-import {PLANNING_STATE_KEY,cleanDailyDelegation,validateDailyActions,agentHealthSnapshot,cleanPlanningContext,healthContextChanges,createPlanningContext,validateReassessment,buildBackgroundReviewRequest} from './contextual-planning.mjs';
+  notificationWasDelivered, recordNotificationDelivered} from './agent-notifications.mjs?v=97';
+import {PLANNING_STATE_KEY,cleanDailyDelegation,validateDailyActions,agentHealthSnapshot,cleanPlanningContext,healthContextChanges,createPlanningContext,validateReassessment,buildBackgroundReviewRequest} from './contextual-planning.mjs?v=97';
 const TICKET_KEY = 'along.goal-ticket.v1';
 const REMINDER_SYNC_KEY='along.health-reminder-sync.v1';
 const HEALTH_SHARING_KEY='along.health-sharing.v1';
@@ -440,10 +440,19 @@ if (draftKey&&!eventConnection()) {
 function syncAgentViewportHeight() {
   const height=window.visualViewport?.height || window.innerHeight;
   document.documentElement.style.setProperty('--agent-viewport-height',`${Math.round(height)}px`);
+  resetDocumentScroll();
+}
+// 软键盘弹出时 iOS 会滚动文档去露出输入框。原生壳的页面主体是 position:fixed 的，
+// 这一滚会把整个界面（含底部输入区）顶到可视区上方，发送键就落在可视区外点不到。
+// 输入区本来就在按可视区收缩后的界面底部，把文档滚回顶部就能让它留在屏内。
+// 只在原生壳里复位：网页端的文档滚动就是正常浏览，拦掉会让人没法往下看。
+function resetDocumentScroll() {
+  if (nativePage && window.scrollY) window.scrollTo(0,0);
 }
 syncAgentViewportHeight();
 window.visualViewport?.addEventListener('resize',syncAgentViewportHeight);
 window.addEventListener('resize',syncAgentViewportHeight);
+if (nativePage) window.addEventListener('scroll',resetDocumentScroll,{passive:true});
 if (!eventConnection()||restoringExperiment) persistHealthState(state);
 
 const esc = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
@@ -1332,10 +1341,22 @@ function setAgentComposerBusy(busy) {
   if (form) form.setAttribute('aria-busy',String(busy));
   if (button) button.disabled=busy || !agentConfig.token;
 }
+// 滚到容器底部会停在编排面板的末尾，最新回复被面板挤到可视区之外；
+// 这里改成把最后一条消息的底边对齐到可视区底边，回复才完整可见。
+function lastMessageScrollTop(scroller) {
+  if (!scroller) return 0;
+  const messages=scroller.querySelectorAll?.('.agent-message')||[];
+  const last=messages[messages.length-1];
+  if (!last||typeof last.getBoundingClientRect!=='function'||typeof scroller.getBoundingClientRect!=='function')
+    return scroller.scrollHeight||0;
+  const delta=last.getBoundingClientRect().bottom-scroller.getBoundingClientRect().bottom;
+  const top=scroller.scrollTop+delta;
+  return Math.min(Math.max(0,top),Math.max(0,scroller.scrollHeight-scroller.clientHeight));
+}
 function scrollAgentConversationToBottom() {
   requestAnimationFrame(()=>{
     const scroller=app.querySelector('.agent-scroll');
-    scroller?.scrollTo({top:scroller.scrollHeight,behavior:'smooth'});
+    scroller?.scrollTo({top:lastMessageScrollTop(scroller),behavior:'smooth'});
   });
 }
 function pairForm() {
@@ -1704,7 +1725,7 @@ function renderEventUpdate() {
   const next=app.querySelector('#agent-form textarea');
   if (sameScope&&next&&typeof draft==='string') {next.value=draft;if (focused) {next.focus();next.setSelectionRange?.(selection,selection);}}
   const nextScroller=app.querySelector('.agent-scroll');
-  nextScroller?.scrollTo({top:follow?nextScroller.scrollHeight:scrollTop,behavior:'instant'});
+  nextScroller?.scrollTo({top:follow?lastMessageScrollTop(nextScroller):scrollTop,behavior:'instant'});
   const pending=pendingRecommendationOpen;
   if (pending?.binding===eventWorkspaceBinding&&eventWorkspace.view().messages.some(m=>m.goalId===pending.route.goalId&&m.notificationEventId===pending.route.eventId)) {
     pendingRecommendationOpen=null;void openEventNotification(pending.route,true);
@@ -1738,7 +1759,7 @@ function renderAgentUpdate({follow=false}={}) {
   render();
   const next=app.querySelector('.agent-scroll');
   if (!next) return;
-  next.scrollTop=follow||nearBottom?next.scrollHeight:Math.min(scrollTop,Math.max(0,next.scrollHeight-next.clientHeight));
+  next.scrollTop=follow||nearBottom?lastMessageScrollTop(next):Math.min(scrollTop,Math.max(0,next.scrollHeight-next.clientHeight));
 }
 window.__alongNavigateBack = () => {
   const button=app.querySelector('.back-button[data-action]');
