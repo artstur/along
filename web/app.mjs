@@ -422,16 +422,17 @@ function syncAgentViewportHeight() {
   document.documentElement.style.setProperty('--agent-viewport-height',`${Math.round(height)}px`);
   resetDocumentScroll();
 }
-// 软键盘弹出时 iOS 会滚动文档去露出输入框。页面主体是 position:fixed 的，
+// 软键盘弹出时 iOS 会滚动文档去露出输入框。原生壳的页面主体是 position:fixed 的，
 // 这一滚会把整个界面（含底部输入区）顶到可视区上方，发送键就落在可视区外点不到。
 // 输入区本来就在按可视区收缩后的界面底部，把文档滚回顶部就能让它留在屏内。
+// 只在原生壳里复位：网页端的文档滚动就是正常浏览，拦掉会让人没法往下看。
 function resetDocumentScroll() {
-  if (window.scrollY) window.scrollTo(0,0);
+  if (nativePage && window.scrollY) window.scrollTo(0,0);
 }
 syncAgentViewportHeight();
 window.visualViewport?.addEventListener('resize',syncAgentViewportHeight);
 window.addEventListener('resize',syncAgentViewportHeight);
-window.addEventListener('scroll',resetDocumentScroll,{passive:true});
+if (nativePage) window.addEventListener('scroll',resetDocumentScroll,{passive:true});
 if (!eventConnection()||restoringExperiment) persistHealthState(state);
 
 const esc = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
