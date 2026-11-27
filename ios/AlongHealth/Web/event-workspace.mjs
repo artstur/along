@@ -1,11 +1,11 @@
-import {agentCall, queueEvent, flushEventQueue, pendingEvents, readEventFailures,bindEventAuthority,retireEventAuthority} from './agent-client.mjs?v=101';
-import {assembleEnvelope} from './event-envelope.mjs?v=101';
-import {validateGoalReply} from './goal-agent-core.mjs?v=101';
-import {safeAdaptiveLayout} from './adaptive-ui.mjs?v=101';
-import {safeRecommendation} from './recommendations.mjs?v=101';
-import {safeDataSources} from './data-sources.mjs?v=101';
-import {taskResultRelevant,resultEvidence,validResultEvidence} from './task-results.mjs?v=101';
-import {safeResultPresentation,RESULT_TEXT_LIMIT,wellFormedResultText} from './task-result-view.mjs?v=101';
+import {agentCall, queueEvent, flushEventQueue, pendingEvents, readEventFailures,bindEventAuthority,retireEventAuthority} from './agent-client.mjs?v=102';
+import {assembleEnvelope} from './event-envelope.mjs?v=102';
+import {validateGoalReply} from './goal-agent-core.mjs?v=102';
+import {safeAdaptiveLayout} from './adaptive-ui.mjs?v=102';
+import {safeRecommendation} from './recommendations.mjs?v=102';
+import {safeDataSources} from './data-sources.mjs?v=102';
+import {taskResultRelevant,resultEvidence,validResultEvidence} from './task-results.mjs?v=102';
+import {safeResultPresentation,RESULT_TEXT_LIMIT,wellFormedResultText} from './task-result-view.mjs?v=102';
 
 const id = value => typeof value==='string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$/.test(value);
 const record = value => value!==null && typeof value==='object' && !Array.isArray(value);
@@ -552,13 +552,23 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
     restoreSelection(next);save(next);onChange();
     return next.activeGoalId;
   }
-  // 已入队但尚未送达的完成反馈：同一个任务不重复提交（服务端按事件号幂等，重复提交也不会累加执行次数）。
+  /**
+   * 尚未了结的完成反馈：同一个任务不重复提交（服务端按事件号幂等，重复提交也不会累加执行次数）。
+   *
+   * 终态回执（被拒／冲突）已经了结——那条事实不会再送达，任务回到可完成状态，用户可以重试。
+   * 判定只读本地两份记录（待发队列与终态失败台账），不依赖同步是否成功：回执到了就是终态，
+   * 同步挂着也不该把完成键一直扣住。
+   */
   function pendingTaskCompletions() {
     const ids=new Set();
+    const failed=new Set(readEventFailures(config).map(item=>item.event_id));
     for (const {envelope} of pendingEvents(config)) {
       if (envelope?.kind==='task.completed'&&typeof envelope.task_id==='string') ids.add(envelope.task_id);
     }
-    for (const taskId of Object.keys(state.completions??{})) ids.add(taskId);
+    for (const [taskId,entry] of Object.entries(completionsOf(state.completions))) {
+      if (failed.has(entry.eventId)) continue;
+      ids.add(taskId);
+    }
     return ids;
   }
   /**
