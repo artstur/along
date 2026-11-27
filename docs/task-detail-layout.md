@@ -268,3 +268,33 @@ L3 仍不通过，且客户端侧无解：这一档客户端跑的是**修复前
 ### 顺带修掉的既有偶发失败（与本任务无关，单独提交）
 
 `test/chat-time-divider.test.mjs` 的「the chat renders one centred time divider per break and keeps every bubble」在本地 00:50–01:00 之间必失败：它用「N 分钟前」构造三条消息，跨过午夜时跨日本身就是一条分割线，「隔 10 分钟不出线」变成「跨日出线」。改法是把相对时刻锚在同一个钟点（今天 10:00），与同文件其它用例的固定基准一致。该失败在改动前的 `5067c04` 上同样复现，与本任务无关，单独提交。
+
+### 独立验收再退回：失败记录被淘汰后，被拒的完成事实被当成「已受理」（Bug#3）
+
+独立验收补测（附件 `task86-receipt-retention-probe.mjs`）发现：一条完成事实被服务端终态拒收后，同一工作区再累计 50 条别的终态拒收，最早的失败记录被挤出本地 50 条上限——**任务从「动态任务」里消失了**，状态仍是 `open`，刷新后也不回来，用户既看不到它也点不了完成。
+
+根因：上一轮把「服务端已受理」判定成「不在待发队列里、也不在失败台账里」。失败台账是**有上限的诊断记录**（`web/agent-client.mjs` 的 `EVENT_FAILED_LIMIT = 50`，最旧的会被挤掉），别的任务失败得多了就会把这条挤掉；那时「没在失败台账里」不再等于「被受理过」，被拒的事实被当成了已受理。
+
+修法：**受理这件事由这条完成事实自己的回执说明，不再推断。**
+
+- `web/agent-client.mjs` 的 `flushEventQueue` 逐项带回终态回执（accepted／duplicate／rejected／conflict）。本地失败台账退回它本来的角色：只做诊断记录（「为什么没有生效」），不再当正确性依据。
+- `web/event-workspace.mjs` 的完成事实台账记下这条事实自己的 `outcome`（queued／accepted／failed），**按任务记账**：别的任务失败再多也挤不掉它。
+- `acceptedTaskCompletions()` 只认 `outcome==='accepted'`；`pendingTaskCompletions()` 把 `outcome==='failed'` 排除在外（完成键回来，用户可以重试）。没有 `outcome` 的旧台账条目沿用旧口径推断（兼容更早的客户端写的缓存）。
+- 投递回执在投递后立即记账，与同步成败无关：同步挂着时，被拒的完成照样回到可完成状态。
+
+契约变更：`flushEventQueue` 的返回值多了 `outcomes`（逐项终态回执）。事件队列的两份契约测试按新形状改写，断言未削弱——终态与重试的判定、顺序与幂等语义都不变。
+
+验收：被拒的完成事实在失败记录被淘汰后仍然可见可重试，刷新后也是；只有这次重试获明确受理之后，这一项才从当前列表移除。
+
+本轮实测：客户端 `npm run check` 911 项：907 通过、0 失败、4 跳过（新增 1 项：失败记录淘汰后仍可重试）。回退检测：把受理判定改回「不在队列里、也不在失败台账里」→ 新增用例变红。
+
+用独立验收的探针原样复跑（`task86-receipt-retention-probe.mjs`，真实客户端队列 + DOM 桩）：
+
+| 客户端 | `visibleAfterEviction` | `clickableAfterEviction` | `visibleAfterReload` | `clickableAfterReload` |
+| --- | --- | --- | --- | --- |
+| `ee6e41f`（修前） | false | false | false | false |
+| 本轮（修后） | true | true | true | true |
+
+原验收脚本与补充脚本（`task86-review.mjs`、`task86-review-persistent-503.mjs`，真实 Host + 真实旧 Agent `d16a98b` + 临时 SQLite + Chrome 158）复跑：`accepted`、`recovery`、`retry`、`transport`、`rejectedThenSyncUnavailable` 全部保持通过——`rejectedThenSyncUnavailable` 为 `taskVisible: true`、`buttonWhileFailed: 1`、`buttonAfterReload: 1`、`removedAfterRetry: true`、`dbCompletionCount: 1`、`syncStill503: true`、`successfulSyncsSinceRejection: 0`。
+
+未验证：iPhone/WKWebView 真机、原生桥、App 升级缓存切换，以及正式 Host / Compose / 线上部署态。
