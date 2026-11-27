@@ -34,6 +34,7 @@
 | `auto-deploy-install.sh` | 把部署器装到目标机（脚本进 `/usr/local/libexec/along/`，unit 进 `/etc/systemd/system/`，配置进 `/etc/along-auto-deploy.env`）。**不装定时器**——调度归 Multica |
 | `along-auto-deploy.service` | systemd 单元：一次性部署入口（`sudo systemctl start along-auto-deploy.service`）。**没有 timer**——调度归 Multica |
 | `auto-deploy.env.example` | 部署器配置模板（路径与版本来源，不含凭证） |
+| `auto-deploy-isolated-test.sh` | 隔离端到端验收：真安装器 → root 登记基线 → 服务账号首次更新，核对双服务健康、运行镜像与成功台账一致 |
 | `../test/auto-deploy-integration.test.mjs` | 部署器的隔离集成验证（`ALONG_AUTO_DEPLOY_INTEGRATION=1` 开启）：部分切换回退、同秒等长改动、解包失败重试 |
 
 ## Tier 2：长驻 Super Agent（§3.5，验证项 V-1）
@@ -488,9 +489,16 @@ netns，host 与 superagent 加入它），逐条验：无更新跳过、同秒�
 同一 checkout 上并发 fetch 别的分支时本轮仍部署 main、compose up 部分失败时回退到
 上一成功版本。
 
-**按实际入口的端到端**（安装 → root 登记基线 → 服务账号首次更新）另在隔离 Linux 主机上
-用真安装器跑：安装器生成 `/etc/along-auto-deploy.env`（含服务账号），以 root 跑
-`bootstrap`（**不预先导出** `ALONG_DEPLOY_STATE_USER`），再以 unit 的服务账号
-`systemctl start along-auto-deploy.service` 完成首次真实更新，核对双服务健康、运行镜像
-ID 与成功台账一致。这条路径是"按手册装"的真实形状，配置文件的读取顺序必须对——
-配置文件在参数解析**之后**才被 source 的话，配置文件里的服务账号、工作区全都不生效。
+**按实际入口的端到端**（安装 → root 登记基线 → 服务账号首次更新）另有一个可直接跑的
+脚本：
+
+```sh
+sudo bash deploy/auto-deploy-isolated-test.sh deploy /tmp/along-iso
+```
+
+它在隔离 Linux 主机上用**真安装器**跑：安装器生成 `/etc/along-auto-deploy.env`
+（含服务账号），以 root 跑 `bootstrap`（**不预先导出** `ALONG_DEPLOY_STATE_USER`），
+再以 unit 的服务账号 `systemctl start along-auto-deploy.service` 完成首次真实更新，
+最后核对双服务健康、运行镜像 ID 与成功台账一致，任何一项对不上就退出非零。
+这条路径是"按手册装"的真实形状，配置文件的读取顺序必须对——配置文件在参数解析**之后**
+才被 source 的话，配置文件里的服务账号、工作区全都不生效。
