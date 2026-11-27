@@ -57,21 +57,27 @@ export function chatTimeline(messages, now = Date.now()) {
  * 阅读锚点：记下读者正在看的那条气泡在视口里的位置。
  * 只按 scrollTop 复位不够——历史回放补时间会在阅读位置上方插入分割线，
  * 同样的 scrollTop 会让整段内容下移，读者正在读的那条气泡被推走。
- * 锚点取「第一条完整露出来的气泡」：只露出一条边的上一条已经在被读过去了。
+ *
+ * 选哪一条：
+ * - 完全在视口外的气泡不能当锚点（读者根本没在看它）。
+ * - 视口上沿压在一条长回复中间时，那条长回复就是读者正在读的，整屏都是它。
+ * - 否则取第一条在视口里露全的气泡：只露出一条边的上一条已经在被读过去了。
  * 锚点用消息自己的 eventId 认人，不用下标：消息列表可能增删，下标会指错人。
  */
 export function captureChatAnchor(scroller) {
   if (!scroller||typeof scroller.getBoundingClientRect!=='function') return null;
   const box=scroller.getBoundingClientRect();
   if (!box) return null;
+  let covering=null;
   for (const bubble of scroller.querySelectorAll?.('.agent-message')||[]) {
     const id=bubble.dataset?.eventId;
     if (!id) continue;
     const rect=bubble.getBoundingClientRect?.();
-    if (!rect||rect.top<box.top) continue;
+    if (!rect||rect.bottom<=box.top||rect.top>=box.bottom) continue;
+    if (rect.top<box.top) { covering=covering??{id,offset:rect.top-box.top}; continue; }
     return {id,offset:rect.top-box.top};
   }
-  return null;
+  return covering;
 }
 
 /** 按锚点复位：让同一条气泡回到同一个视口位置，锚点找不到就交回调用方按原逻辑处理。 */

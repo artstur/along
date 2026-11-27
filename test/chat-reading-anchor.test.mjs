@@ -21,6 +21,23 @@ test('the anchor is the first bubble that starts inside the viewport',()=>{
   assert.deepEqual(captureChatAnchor(box),{id:'m10',offset:120});
 });
 
+test('a long reply covering the viewport is the anchor and an off-screen bubble below it is not',()=>{
+  // 消息区 681px 高，第 11 条长回复从 -200 铺到 1764，整屏都是它；第 12 条在屏幕外。
+  const box=scroller({bubbles:[
+    bubble('m9',-2140,-1900),  // 完全在视口上方
+    bubble('m10',-200,1764),  // 覆盖整个视口，读者正读它的中段
+    bubble('m11',1776,2564),  // 完全在视口下方
+  ],clientHeight:681});
+  assert.deepEqual(captureChatAnchor(box),{id:'m10',offset:-200});
+});
+
+test('a bubble entirely outside the viewport is never the anchor',()=>{
+  const above=scroller({bubbles:[bubble('m0',-300,-100)],clientHeight:681});
+  assert.equal(captureChatAnchor(above),null);
+  const below=scroller({bubbles:[bubble('m0',900,1100)],clientHeight:681});
+  assert.equal(captureChatAnchor(below),null);
+});
+
 test('a bubble without an event id is never used as the anchor',()=>{
   const waiting={dataset:{},getBoundingClientRect:()=>({top:10,bottom:60})};
   const box=scroller({bubbles:[waiting,bubble('m10',120,320)]});
