@@ -315,3 +315,5 @@ Historical audience-only corrections carry `classification_only:true`: retain ev
 - **token过渡键不能证明原origin**。真换端先写配置后清事件缓存，中断会留下新origin配置和旧用户token-scope；即使下一次native load和新配置相同也不能认领。新事件绑定保存规范origin，Build78无origin的旧记录只接受原生已验证的同完整binding/user元数据；缺失或歧义时保留缓存、等待原Host身份确认。
 - **只读恢复路径也要执行真实文件方法**。解析既有队列绑定元数据不调用HealthKit采集或发送；缺目录不能创建，损坏文件不能覆盖，bytes/属性/enabled与授权不变。测试整体提取Swift类时，同步其引用的真实依赖，不能把新增缺失替身误报为产品或环境失败。
 - **同一 Mac 换地址要有原生认证的别名证明，不能直接改 binding 或放宽 origin**：legacy 原 pin/token 与 same-user status 验证、连接写入代次/队列快照未变后，先原子保存原完整 queue 与受验证 transport，再改连接；Web 两键中断、原 daily grant、通知 scope 和旧在途 ACK 都要沿同一证明恢复。地址更新前置 verify 也必须在 bearer 出网前拒绝变 pin/policy 或 PKI 跨 origin，不能只在最后的迁移 helper 防护。复现和反例见 `test/ios-health-transport*.test.mjs`、`test/app-health-transport.test.mjs`，合成数据不替代真机。
+
+- **用「N 分钟前」构造时间戳的测试会在午夜附近必然失败**。跨日本身就是一条时间分割线，期望值会随运行时刻漂移（本地 00:50–01:00 之间）。相对时刻要锚在同一个钟点，或用固定基准。

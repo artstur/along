@@ -214,3 +214,13 @@ L3 仍不通过，且客户端侧无解：这一档客户端跑的是**修复前
 客户端 `node --test test/*.test.mjs` 865 项：856 通过、0 失败、6 跳过（新增 4 项版本守卫）；`test/device-source-gateway.test.mjs` 在本机文件级超时，用主干快照 `66bfd52` 单跑同样超时（该文件与主干逐字节相同、不依赖本轮改动），属环境问题。`npm run build` 22 文件，web/dist/iOS 逐字节一致。
 
 未验证：iPhone/WKWebView 真机升级、正式 Host 与 GitHub Pages 部署态联调、服务端翻页期间并发更新任务；`Info.plist` 的 `CFBundleVersion` 仍随主干（87），发布流程处理。
+
+## 聊天时间分割线用例的午夜漂移（Bug#1）
+
+主分类 ui，与任务完成无关。
+
+问题：`test/chat-time-divider.test.mjs` 的「the chat renders one centred time divider per break and keeps every bubble」在本地 00:50–01:00 之间必失败——它用「N 分钟前」构造三条消息（60 分钟前、50 分钟前、20 分钟前），跨过午夜时跨日本身就是一条分割线，「隔 10 分钟不出线」变成「跨日出线」，期望的分割线条数从 2 变成 3。
+
+改法：把相对时刻锚在同一个钟点（今天 10:00），与同文件其它用例的固定基准一致。这条测试此后与运行时刻无关。
+
+复现与核实：在主干基线 `5b2ec03` 上锁定上海时间 00:55，该用例失败；只应用本提交的补丁后，聊天定向测试 6/6 通过。全量 `npm run check` 不受影响。
