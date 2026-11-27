@@ -22,7 +22,7 @@ p { line-height: 1.5; }
 .along-native .topbar { position: sticky; top: 0; z-index: 1; }
 .topbar { height: 64px; border-bottom: 1px solid #eaeae9; background: #fff; }
 .topbar-inner { max-width: 620px; height: 100%; padding: 0 24px; margin: auto; display: flex; align-items: center; justify-content: space-between; }
-.brand { display: flex; align-items: center; gap: 8px; font-size: 20px; font-weight: 650; letter-spacing: -.65px; }
+.brand { display: flex; align-items: center; gap: 8px; font-size: 20px; font-weight: 650; letter-spacing: -.65px; touch-action: manipulation; }
 .brand-symbol { display: block; width: 26px; height: 26px; border-radius: 7px; object-fit: cover; }
 .topbar-caption { color: #8a8a8a; font-size: 12px; }
 .content { max-width: 620px; padding: 28px 24px 56px; margin: auto; }

@@ -32,6 +32,7 @@
 - [技术链路与旧 Host 参考](goal-agent-flow.md)：开头列现行事件入口，第 1–8 节是旧双运行时及采用流程，不作为新协议规范。
 - [健康评估离线恢复草案](offline-health-review-plan.md)：旧 Host 的历史方案；现行补传以阶段 A/B/C 为准。
 - [新目标返回修复](bugfix-new-goal-back.md)：PR #16 的行为与验收标准；后续归档问题见本轮质量记录。
+- [左上角图标连点缩放修复](bugfix-brand-double-tap-zoom.md)：Bug#4 的正确行为、局部 `touch-action` 方案与模拟器手势实测；真机复测待做。
 
 ## 开发与质量流程
 
