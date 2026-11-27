@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
-import {existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, chmodSync} from 'node:fs';
+import {existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync, chmodSync} from 'node:fs';
 import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {randomBytes} from 'node:crypto';
@@ -159,8 +159,8 @@ function writeUpstream() {
   mkdirSync(join(wcSa,'prompts'),{recursive:true});
   writeFileSync(join(wcSa,'prompts','worker.md'),'worker-v1\n');
 
-  git(['add','-A'],wcAlong); git(['commit','-qm','v1'],wcAlong); git(['push','-q','origin','HEAD:main'],wcAlong);
-  git(['add','-A'],wcSa); git(['commit','-qm','v1'],wcSa); git(['push','-q','origin','HEAD:main'],wcSa);
+  git(['add','--','.'],wcAlong); git(['commit','-qm','v1'],wcAlong); git(['push','-q','origin','HEAD:main'],wcAlong);
+  git(['add','--','.'],wcSa); git(['commit','-qm','v1'],wcSa); git(['push','-q','origin','HEAD:main'],wcSa);
   return {originAlong,originSa,wcAlong,wcSa};
 }
 
@@ -170,13 +170,13 @@ function commitUpstream({alongContent,saContent,fixedDate}) {
   const env=fixedDate?{GIT_AUTHOR_DATE:fixedDate,GIT_COMMITTER_DATE:fixedDate}:{};
   if (alongContent) {
     writeFileSync(join(BASE,'work','along','www','health'),alongContent);
-    git(['add','-A'],join(BASE,'work','along'));
+    git(['add','--','.'],join(BASE,'work','along'));
     git(['commit','-qm','update'],join(BASE,'work','along'));
     git(['push','-q','origin','HEAD:main'],join(BASE,'work','along'));
   }
   if (saContent) {
     writeFileSync(join(BASE,'work','along-superagent','prompts','worker.md'),saContent);
-    git(['add','-A'],join(BASE,'work','along-superagent'));
+    git(['add','--','.'],join(BASE,'work','along-superagent'));
     git(['commit','-qm','update'],join(BASE,'work','along-superagent'));
     git(['push','-q','origin','HEAD:main'],join(BASE,'work','along-superagent'));
   }
@@ -315,6 +315,73 @@ test('自动部署器的隔离集成验证', {skip:!ENABLED?'未设置 ALONG_AUT
     rmSync(stub);
     const retry=deploy(deployEnv());
     assert.equal(retry.status,0,`恢复后应当能重试成功：\n${retry.stderr}`);
+  });
+
+  await t.test('台账写不进去时在切换前就失败，不切过去', () => {
+    // 台账目录对服务账号不可写（root 登记过基线、目录留成 root 所有的典型后果）。
+    // 预期：本轮在切换**之前**就失败，容器保持上一版本，台账不变。
+    const before=spawnSync('docker',['ps','--format','{{.ID}} {{.Names}}'],
+      {encoding:'utf8',timeout:60_000}).stdout;
+    const versionsDir=join(BASE,'state','versions');
+    mkdirSync(versionsDir,{recursive:true});
+    const mode=statSync(versionsDir).mode&0o777;
+    chmodSync(versionsDir,0o555);
+    try {
+      commitUpstream({alongContent:'ok-v5\n'});
+      const result=deploy(deployEnv());
+      assert.notEqual(result.status,0,'台账不可写时本轮应当失败');
+      assert.match(result.stderr,/台账/,'失败原因要指向台账写不进去');
+      assert.doesNotMatch(result.stderr,/SWITCH 用新镜像重建/,'失败必须发生在切换之前');
+      const after=spawnSync('docker',['ps','--format','{{.ID}} {{.Names}}'],
+        {encoding:'utf8',timeout:60_000}).stdout;
+      assert.equal(after,before,'失败轮次不能动容器');
+    } finally {
+      chmodSync(versionsDir,mode);
+    }
+  });
+
+  await t.test('同一个 checkout 上并发 fetch 别的分支，本轮仍部署 main', () => {
+    // 复现：部署器 fetch 之后，别人在**同一个 checkout** 上 fetch 了另一个分支。
+    // 用 git 桩——fetch 成功后再跑一次真实的 fetch（拉别的分支），把 FETCH_HEAD 覆盖掉。
+    const stubDir=join(BASE,'bin');
+    const realGit=spawnSync('bash',['-c','command -v git'],{encoding:'utf8'}).stdout.trim();
+    const otherBranch='other-branch';
+    // 先在两个 origin 上造一个 other 分支。
+    for (const [origin,work] of [['along.git','along'],['superagent.git','along-superagent']]) {
+      const wc=join(BASE,'work',work);
+      git(['branch',otherBranch,'main'],wc);
+      git(['push','-q','origin',`${otherBranch}:${otherBranch}`],wc);
+    }
+    writeFileSync(join(stubDir,'git'),[
+      '#!/bin/bash',
+      `REAL="${realGit}"`,
+      'for a in "$@"; do',
+      '  if [ "$a" = "fetch" ]; then',
+      '    "$REAL" "$@"',
+      '    # 别人的 fetch：同一个 checkout 上拉另一个分支，FETCH_HEAD 被覆盖。',
+      `    for d in ${join(BASE,'work','along')} ${join(BASE,'work','along-superagent')}; do`,
+      `      ( cd "\$d" && "$REAL" fetch -q "${join(BASE,'origin','along.git')}" "${otherBranch}:${otherBranch}" >/dev/null 2>&1 )`,
+      '    done',
+      '    exit 0',
+      '  fi',
+      'done',
+      'exec "$REAL" "$@"',
+      '',
+    ].join('\n'));
+    chmodSync(join(stubDir,'git'),0o755);
+
+    commitUpstream({alongContent:'ok-v6\n'});
+    const mainSha=git(['rev-parse','HEAD'],join(BASE,'work','along'));
+    const result=deploy(deployEnv({PATH:`${stubDir}:${process.env.PATH}`}));
+    assert.equal(result.status,0,`部署应当成功：\n${result.stderr}`);
+    // 部署的必须是 main，不是被并发 fetch 覆盖后指向的 other 分支。
+    const state=readState();
+    assert.match(state,new RegExp(`ALONG_SHA=${mainSha}`),'台账必须记 main 的提交');
+    assert.doesNotMatch(state,/ALONG_SHA=.*other/);
+    const marker=spawnSync('docker',['run','--rm','--entrypoint','sh',`${IMAGE_TAG}-host`,
+      '-c','cat /www/health'],{encoding:'utf8',timeout:120_000});
+    assert.equal(marker.stdout.trim(),'ok-v6','运行的内容必须是 main 的');
+    rmSync(join(stubDir,'git'),{force:true});
   });
 
   await t.test('compose up 部分失败时回退到上一成功版本', () => {

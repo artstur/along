@@ -58,6 +58,8 @@ TEST_FAULT="${ALONG_DEPLOY_TEST_FAULT:-}"
 ALONG_SHA_PIN="${ALONG_DEPLOY_ALONG_SHA:-}"
 # 定时任务以这个账号运行；状态目录与版本记录都必须归它所有。
 STATE_USER="${ALONG_DEPLOY_STATE_USER:-}"
+# 部署专用引用：本轮 fetch 的落点。只有部署器写它。
+DEPLOY_REF="${ALONG_DEPLOY_REF:-refs/along-auto-deploy/$BRANCH}"
 SUPERAGENT_SHA_PIN="${ALONG_DEPLOY_SUPERAGENT_SHA:-}"
 
 STATE_FILE="$STATE_DIR/last-success.env"
@@ -161,26 +163,75 @@ acquire_lock() {
   log "LOCK 本轮持有部署锁 $LOCK_FILE"
 }
 
+# 核对所有台账写入路径在**当前账号**下真的写得进去。
+#
+# 为什么要在切换前查：台账写不进去时，容器已经切过去了，台账却还指着旧版本——
+# 线上跑的是新版本，台账说旧版本，下一轮的"变没变"判断全错。用 `-w` 判不可靠
+# （目录可写但没有创建文件的权限、或父目录权限不对），所以真写一个探针文件试试。
+check_state_writable() {
+  local dir probe owner
+  mkdir -p "$VERSIONS_DIR" 2>/dev/null || true
+  for dir in "$STATE_DIR" "$VERSIONS_DIR"; do
+    [ -d "$dir" ] || { log "ERROR 台账目录不存在：$dir"; return 1; }
+    probe="$dir/.writable-probe.$$"
+    if ! : > "$probe" 2>/dev/null; then
+      log "ERROR 台账目录 $dir 写不进去（当前账号 $(id -un)）："
+      log "ERROR   定时任务以服务账号运行，目录必须归它所有。"
+      if [ -n "$STATE_USER" ]; then
+        log "ERROR   以 root 登记过基线的话，执行：chown -R $STATE_USER $STATE_DIR"
+      fi
+      rm -f "$probe" 2>/dev/null || true
+      return 1
+    fi
+    rm -f "$probe"
+    # 以 root 跑时，"当前账号写得进去"不代表服务账号写得进去——目录可能还是 root 所有。
+    # 所以另外核对属主：服务账号要能写，目录就得归它。
+    if [ "$(id -u)" = "0" ] && [ -n "$STATE_USER" ]; then
+      owner="$(stat -c '%U' "$dir" 2>/dev/null || stat -f '%Su' "$dir" 2>/dev/null || echo '?')"
+      if [ "$owner" != "$STATE_USER" ]; then
+        log "ERROR 台账目录 $dir 归 $owner 所有，服务账号 $STATE_USER 写不进去"
+        log "ERROR   执行：chown -R $STATE_USER $STATE_DIR"
+        return 1
+      fi
+    fi
+  done
+  log "STATE 台账路径可写（$STATE_DIR、$VERSIONS_DIR）"
+}
+
 # ---------- 取提交 ----------
+
+# 对某个 checkout 跑 git。
+#
+# 为什么要加 safe.directory：checkout 归服务账号所有，而部署器**可能以 root 跑**
+# （手册里的 `sudo … bootstrap`、人工排查）。git 见到"仓库属主与当前用户不同"就
+# 拒绝操作（dubious ownership），root 跑时每一句 git 都会失败。
+# 显式声明这一个 checkout 是安全的——只声明已知的那个路径，不是放开全部。
+git_in() {
+  local checkout="$1"; shift
+  git -c "safe.directory=$checkout" -C "$checkout" "$@"
+}
 
 # fetch 两个仓库，让目标 SHA 落进本地对象库。fetch 只写对象库，不动现场工作区。
 #
-# 顺带把本轮要用的 SHA 固定下来：fetch 写进 FETCH_HEAD 的就是远端分支当轮的尖端，
-# 不再单独 ls-remote 一次——多一次远端读取就多一个窗口，远端在 fetch 与读取之间
-# 推进时，本轮会拿到一个还没被取下来的提交（fetch/ls-remote 之间的竞争）。
+# 本轮要用的 SHA **固定在部署专用引用**上（`refs/along-auto-deploy/<分支>`），
+# 不再用 FETCH_HEAD：FETCH_HEAD 是 checkout 里的全局可变文件——同一个 checkout 上
+# 任何一次别的 fetch（哪怕拉的是另一个分支）都会把它覆盖，本轮就会拿到
+# 那个分支的提交并部署出去。专用引用只有部署器自己会写，别人的 fetch 碰不到。
 fetch_repos() {
   local repo
   for repo in "$ALONG_CHECKOUT" "$SUPERAGENT_CHECKOUT"; do
     [ -d "$repo/.git" ] || die "找不到 checkout：$repo"
   done
-  log "FETCH 拉取 $ALONG_URL 与 $SUPERAGENT_URL 的 $BRANCH"
-  git -C "$ALONG_CHECKOUT" fetch --quiet "$ALONG_URL" "$BRANCH" || die "拉取 $ALONG_URL 失败"
-  git -C "$SUPERAGENT_CHECKOUT" fetch --quiet "$SUPERAGENT_URL" "$BRANCH" || die "拉取 $SUPERAGENT_URL 失败"
+  log "FETCH 拉取 $ALONG_URL 与 $SUPERAGENT_URL 的 $BRANCH 到 $DEPLOY_REF"
+  git_in "$ALONG_CHECKOUT" fetch --quiet "$ALONG_URL" "+refs/heads/$BRANCH:$DEPLOY_REF" \
+    || die "拉取 $ALONG_URL 失败"
+  git_in "$SUPERAGENT_CHECKOUT" fetch --quiet "$SUPERAGENT_URL" "+refs/heads/$BRANCH:$DEPLOY_REF" \
+    || die "拉取 $SUPERAGENT_URL 失败"
 }
 
-# 本轮 fetch 取下来的提交（FETCH_HEAD 就是远端分支尖端）。
+# 本轮 fetch 取下来的提交（写在部署专用引用上，别人的 fetch 覆盖不了）。
 fetched_sha() {
-  git -C "$1" rev-parse --verify --quiet FETCH_HEAD
+  git_in "$1" rev-parse --verify --quiet "$DEPLOY_REF"
 }
 
 resolve_sha() {
@@ -193,7 +244,7 @@ resolve_sha() {
     [ -n "$sha" ] || { log "ERROR $url 的 $BRANCH 没有取到提交"; return 1; }
     log "SHA $url 的 $BRANCH 是 $sha"
   fi
-  git -C "$checkout" cat-file -e "${sha}^{commit}" 2>/dev/null || {
+  git_in "$checkout" cat-file -e "${sha}^{commit}" 2>/dev/null || {
     log "ERROR 本地对象库里没有 $sha（先 fetch 一次）"
     return 1
   }
@@ -236,7 +287,7 @@ stamp_tree_mtime() {
 expand_tree() {
   local checkout="$1" sha="$2" dest="$3" tarball
   tarball="$(mktemp)"
-  if ! git -C "$checkout" archive --format=tar "$sha" > "$tarball"; then
+  if ! git_in "$checkout" archive --format=tar "$sha" > "$tarball"; then
     rm -f "$tarball"
     log "ERROR 从 $checkout 导出 $sha 失败"
     return 1
@@ -763,21 +814,14 @@ cmd_bootstrap() {
   if [ -d "$STATE_DIR" ]; then
     local owner
     owner="$(stat -c '%U' "$STATE_DIR" 2>/dev/null || stat -f '%Su' "$STATE_DIR" 2>/dev/null || echo '?')"
-    if [ "$(id -u)" = "0" ] && [ -n "$STATE_USER" ] && [ "$owner" != "$STATE_USER" ]; then
-      # 以 root 跑 bootstrap 却把目录留成 root 所有 —— 服务账号下一轮取锁就
-      # Permission denied。直接改成服务账号所有。
-      chown -R "$STATE_USER" "$STATE_DIR" 2>/dev/null \
-        && log "BOOTSTRAP 状态目录 $STATE_DIR 已改为 $STATE_USER 所有"
-      owner="$STATE_USER"
-    fi
     if [ "$(id -u)" != "0" ] && [ "$owner" != "$(id -un)" ] && [ "$owner" != "?" ]; then
       die "状态目录 $STATE_DIR 归 $owner 所有，当前账号 $(id -un) 写不进去。请以服务账号运行本命令：sudo -u $owner $0 bootstrap"
     fi
   fi
   # 不给提交号时用现场 checkout 的 HEAD——这只在「现场 HEAD 就是当前运行的版本」
   # 时成立；否则显式给两个提交号。
-  [ -n "$along_sha" ] || along_sha="$(git -C "$ALONG_CHECKOUT" rev-parse HEAD)"
-  [ -n "$sa_sha" ] || sa_sha="$(git -C "$SUPERAGENT_CHECKOUT" rev-parse HEAD)"
+  [ -n "$along_sha" ] || along_sha="$(git_in "$ALONG_CHECKOUT" rev-parse HEAD)"
+  [ -n "$sa_sha" ] || sa_sha="$(git_in "$SUPERAGENT_CHECKOUT" rev-parse HEAD)"
   local compose_file checkout_root
   compose_file="$(container_compose_file "$HOST_CONTAINER")"
   [ -n "$compose_file" ] && [ -f "$compose_file" ] || die "取不到当前运行实例的编排文件路径"
@@ -789,6 +833,18 @@ cmd_bootstrap() {
   log "BOOTSTRAP 基线：along=$along_sha superagent=$sa_sha 编排=$compose_file"
   # 基线版本的发布目录就是现场 checkout（不是发布目录，清理时不会删它）。
   record_success "$along_sha" "$sa_sha" "$checkout_root" "$compose_file"
+  # 登记过程可能以 root 跑（手册里是 `sudo … bootstrap`）：那样写出来的文件与
+  # `versions/` 子目录都是 root 所有，服务账号下一轮写台账就 Permission denied
+  # ——而那时容器已经切过去了，台账却还指着旧版本。**登记完整体交给服务账号**。
+  if [ "$(id -u)" = "0" ] && [ -n "$STATE_USER" ]; then
+    if chown -R "$STATE_USER" "$STATE_DIR" 2>/dev/null; then
+      log "BOOTSTRAP 状态目录 $STATE_DIR（含版本台账）已交给 $STATE_USER"
+    else
+      log "ERROR 没能把 $STATE_DIR 交给 $STATE_USER：服务账号下一轮写台账会 Permission denied"
+    fi
+  fi
+  # 登记完当场自检：服务账号能不能写。
+  check_state_writable || die "登记后台账仍不可写，服务账号下一轮会失败"
 }
 
 cmd_rollback() {
@@ -858,6 +914,11 @@ cmd_run() {
     log "BUILD-ONLY 只构建不切换，成功版本记录不变"
     return 0
   fi
+
+  # **切换前**核对台账写得进去：台账写不进去时，容器切过去了台账却还指着旧版本，
+  # 线上跑的是新版本、台账说旧版本，下一轮的"变没变"判断全错。
+  # 所以宁可在切换前就失败，也不要切过去之后写不进记录。
+  check_state_writable || die "台账路径不可写，不切换"
 
   # 构建完、切换前核对镜像产物与源码一致。
   #

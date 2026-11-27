@@ -320,12 +320,13 @@ CI 方案要把部署身份交给 GitHub，信任面更大。
 | 阶段 | 做什么 | 为什么这么定 |
 | --- | --- | --- |
 | 锁 | `flock` 非阻塞；抢不到就跳过本轮 | 重复触发不能并发切换。**`flock` 不存在时直接报错**——当成"锁被占"会让每一轮都静默跳过，定时任务看着在跑其实什么都没做 |
-| 取提交 | fetch 两个仓库，取 **fetch 自己写下的 `FETCH_HEAD`**（即本轮真正取下来的那个提交），**当轮固定这一对** | 上游中途再推不影响本轮；两个 SHA 都进构建。不再单独 `ls-remote` 一次：多一次远端读取就多一个窗口，远端在两次读取之间推进时，本轮会读到一个还没取下来的提交 |
+| 取提交 | fetch 两个仓库到**部署专用引用** `refs/along-auto-deploy/<分支>`，从那里取本轮固定的那对提交 | 上游中途再推不影响本轮；两个 SHA 都进构建。**不用 `FETCH_HEAD`**：它是 checkout 里的全局可变文件，同一个 checkout 上任何一次别的 fetch（哪怕拉的是另一个分支）都会把它覆盖，本轮就会部署那个分支的提交。专用引用只有部署器自己会写 |
 | 展开 | `git archive` 把两个提交展开成干净源码树，放在 `release/<两个 SHA 前 12 位>/` | 现场 checkout 可能有本地改动，构建不该被它们影响。**先展开到暂存目录，完整展开成功后才发布**——半成品目录不能被下一轮复用 |
 | 隔离 mtime | 展开后把每个文件的 mtime 设成**该文件内容派生**的时间戳 | `git archive` 给的 mtime 是提交时间：同秒提交、同样字节长度的改动，路径+大小+mtime 三项都不变，构建的本地源同步会认为"什么都没变"，直接复用上一次的**内容**——镜像里留下旧代码，台账却记了新提交。`--no-cache` 救不了：旧的是源同步那一层，不是构建缓存层 |
 | 核对 | `docker compose config` 解析出的卷、凭证、构建输入逐条比对预期路径 | 相对路径配错是静默降级（卷挂空目录、数据看着"配好了"其实没生效） |
 | 构建 | `docker compose build`，产物打版本化标签（标签里带两个 SHA） | 运行中的镜像 ID 可反查到当轮固定的提交 |
 | 核对产物 | 逐文件比对镜像里的产物与本轮钉住的源码 | 挡住"镜像里跑的是旧内容、台账记的却是新提交"。**在切换前做**——内容不对的镜像根本不该上线 |
+| **核对台账** | **切换前**真写一个探针文件，检查状态目录与版本台账目录在**当前账号**下写得进去 | 台账写不进去时，容器已经切过去了、台账却还指着旧版本：线上跑的是新版本、台账说旧版本，下一轮的"变没变"判断全错。宁可在切换前就失败 |
 | 切换 | `up -d --no-build --force-recreate anchor superagent host` | 锚点与两个使用方一起重建：命名空间跟着持有它的容器走，只重建一边会把另一边落在旧 netns 里（外部入口静默断掉，见 [Host 云端部署经验 §2.3](../docs/host-cloud-deploy.md#23-命名空间必须由第三方容器持有这条最隐蔽)） |
 | 探活 | 两个容器 `healthy` + Host 的 HTTPS `/health` 200 + 锚点跳板可达 | 跳板在锚点的命名空间里，够不着就说明被落下 |
 | 记录 | **两个服务都健康之后**才把这一对 SHA 写成成功版本 | 失败轮次不推进记录，下一轮可以重试 |
@@ -334,6 +335,10 @@ CI 方案要把部署身份交给 GitHub，信任面更大。
 部分成功：锚点与 Super Agent 已重建、Host 容器没起来，此时线上入口是断的）与
 **探活失败**都进同一条回退路径：把镜像标签打回旧 ID、按旧编排重建三个容器并重新探活。
 **失败轮次不写成功记录**，上一成功版本保持健康或经恢复后重新健康。
+
+对 checkout 跑 git 时一律带 `safe.directory=<那个 checkout>`：checkout 归服务账号所有，
+而部署器可能以 root 跑（`sudo … bootstrap`、人工排查），git 见到属主不同就拒绝操作
+（dubious ownership），root 跑时每一句 git 都会失败。
 
 ### 发布目录的形状是刻意的
 
@@ -370,9 +375,10 @@ journalctl -u along-auto-deploy.service -n 100 --no-pager
 sudo -u ecs-user /usr/local/libexec/along/auto-deploy.sh bootstrap
 ```
 
-**必须以服务账号运行**（单元里的 `User=`）。状态目录归服务账号所有：root 建出来的目录
-服务账号写不进去，下一轮取锁直接 `Permission denied`，定时任务从此每轮都失败。
-以 root 跑也行——部署器会按 `ALONG_DEPLOY_STATE_USER` 把状态目录改成服务账号所有。
+**必须以服务账号运行**（单元里的 `User=`）。状态目录与版本台账都归服务账号所有：root
+建出来的目录服务账号写不进去，下一轮取锁直接 `Permission denied`，定时任务从此每轮
+都失败。以 root 跑也行——部署器在登记**之后**把整个状态目录（含 `versions/` 台账与
+台账文件）`chown` 给 `ALONG_DEPLOY_STATE_USER` 指定的账号，并在登记完当场自检。
 
 `bootstrap` 默认取现场 checkout 的 HEAD——只在"现场 HEAD 就是当前运行的版本"时成立；
 否则显式给两个提交号：`bootstrap <along SHA> <superagent SHA>`。
@@ -414,6 +420,7 @@ sudo systemctl daemon-reload
 | `ALONG_DEPLOY_HEALTH_TIMEOUT` / `ALONG_DEPLOY_BUILD_TIMEOUT` | 探活与构建的超时（秒） |
 | `ALONG_DEPLOY_KEEP_RELEASES` | 保留几个版本（当前与上一成功版本必须留着，前者用于运行、后者用于回退） |
 | `ALONG_DEPLOY_STATE_USER` | 定时任务的服务账号。状态目录与版本记录必须归它所有；以 root 跑 `bootstrap` 时据此 chown |
+| `ALONG_DEPLOY_REF` | 部署专用引用（默认 `refs/along-auto-deploy/<分支>`）：本轮 fetch 的落点，别人的 fetch 覆盖不了 |
 | `ALONG_DEPLOY_HOST_IMAGE` / `ALONG_DEPLOY_SUPERAGENT_IMAGE` | 两个镜像的标签（默认 `along-host:cloud` / `along-superagent:local`） |
 | `ALONG_DEPLOY_HOST_CONTAINER` / `ALONG_DEPLOY_SUPERAGENT_CONTAINER` | 两个容器的名字（默认 `along-host` / `along-superagent`） |
 | `ALONG_DEPLOY_PROBE_URL` | 锚点跳板的探活地址（默认 `http://127.0.0.1:3083/`） |

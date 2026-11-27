@@ -441,5 +441,22 @@ superagent host` 可能把锚点与 Super Agent 重建完、Host 容器却创建
 
 **六、状态目录必须归服务账号所有。** root 建出来的目录服务账号写不进去，下一轮取锁
 直接 `Permission denied`，定时任务从此每轮都失败，而且失败得很安静。安装脚本按
-`ALONG_DEPLOY_STATE_USER` 建目录；`bootstrap` 若以 root 运行会顺带 chown。
+`ALONG_DEPLOY_STATE_USER` 建目录；`bootstrap` 若以 root 运行，会在**登记之后**把整个
+状态目录（含 `versions/` 版本台账与台账文件）chown 给服务账号——登记前 chown 不够：
+`record_success` 随后以 root 建出来的 `versions/` 仍然是 root 的，服务账号下一轮写
+台账就 Permission denied，而那时容器已经切过去了、台账还指着旧版本。
 安装顺序：先 `--no-enable` 装 → 以服务账号 `bootstrap` → 手动跑一轮 → 再启用定时器。
+
+**七、台账写不进去要在切换前就发现。** 上一条的失败形态是"容器切过去了、台账写不进去"：
+线上跑的是新版本，台账说旧版本，下一轮的"变没变"判断全错。所以切换前先真写一个探针
+文件，确认状态目录与版本台账目录在**当前账号**下写得进去；写不进去就在切换前失败。
+（`-w` 判不可靠：目录看着可写却建不了文件，或父目录权限不对。）
+
+**八、同一 checkout 上的并发 fetch 会污染本轮提交。** `FETCH_HEAD` 是 checkout 里的
+全局可变文件——别人在这个 checkout 上 fetch 另一个分支，它就被覆盖了，本轮会拿到那个
+分支的提交并部署出去（台账也记成它）。所以本轮的提交固定在**部署专用引用**
+`refs/along-auto-deploy/<分支>` 上：只有部署器写它，别人的 fetch 碰不到。
+
+**九、以 root 跑时 git 会拒绝操作服务账号的 checkout。** checkout 归服务账号所有，
+root 跑 git 会报 "dubious ownership" 而失败。部署器对 checkout 的每次 git 调用都带
+`-c safe.directory=<那个 checkout>`——只声明已知的那个路径，不是放开全部。
