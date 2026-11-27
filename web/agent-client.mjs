@@ -1,4 +1,4 @@
-import {assembleEnvelope} from './event-envelope.mjs?v=102';
+import {assembleEnvelope} from './event-envelope.mjs?v=103';
 
 export const AGENT_KEY = 'along.agent.v1';
 export const GOALS_KEY = 'along.goal-custom.v1';
