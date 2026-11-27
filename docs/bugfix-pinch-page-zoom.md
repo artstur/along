@@ -4,14 +4,15 @@
 
 在 Along iPhone App 里，普通页面（内置页面）的比例固定在 1 倍：双指张开放大、双指收拢缩小，都不改变页面比例。
 单指滚动、点按、输入照旧；iOS 辅助功能缩放是系统级能力，不受这里影响。
-有意提供缩放的独立内容（独立内容页、网页里自己实现双指手势的控件）维持原有行为。
+保持原有缩放行为的是：网页版本（GitHub Pages）、独立内容页（原生允许的 `https://artstur.github.io/Personality-Demo/`
+用自己的 viewport）、以及 iOS 辅助功能缩放。本仓 `web/` 里没有自实现双指手势的控件（`grep` 零命中），这一条没有对象。
 
 ## 现象与复现
 
 用户原话：APP 页面不应该能双指滑动放大。
 
 复现（模拟器真实触点，见「实测证据」）：在 App 首页双指张开，品牌文字「along」的辅助功能 frame
-从 61.56×31.41 变成 106.78×55.28（比例 ×1.76），页面被整体放大。
+从 61.56×31.41 变成 92.96×47.74（高度比 ×1.52），页面被整体放大。
 
 ## 范围与方案
 
@@ -31,7 +32,7 @@
 | `scrollView.pinchGestureRecognizer?.isEnabled = false` + `maximumZoomScale = 1` | 页面仍放大 ×1.56～×1.84 | WebKit 的页面双指缩放不走 UIScrollView 的捏合识别器，原生容器拦不住 |
 | 延迟到加载后再补一次同样的原生锁 | 第一次捏合被挡住，第二次又放大 ×1.52 | 原生锁不稳定，WebKit 会把缩放上限抬回去 |
 | CSS `touch-action: pan-x pan-y`（只在 App 内置页面上） | 页面仍放大 ×1.68 | WebKit 的页面双指缩放不归 `touch-action` 管；`none` 能挡住但会连单指滚动一起关掉 |
-| viewport `maximum-scale=1, user-scalable=no` | 两个方向的比例都是 1.0000 | 有效。WKWebView 认这两个参数（Safari 自己那个 App 不认，iOS 10 起忽略） |
+| viewport `maximum-scale=1, user-scalable=no` | 两个方向的比例都是 1.0000 | 有效。WKWebView 认这两个参数；Safari（自己的 App 与 SFSafariViewController）从 iOS 10 起忽略它们，所以网页版本在 iPhone 上不受这条影响 |
 
 ## 验收标准
 
@@ -49,16 +50,20 @@ iPhone 17 Pro 模拟器，iOS 26.3.1（23D8133），Xcode 27.2。
 
 | 手势 | 修复前 | 修复后 |
 | --- | --- | --- |
-| 首页 双指张开（80→200pt） | 高度比 ×1.5600（31.41→48.99pt） | ×1.0000 |
-| 首页 双指收拢（200→80pt） | 相对上一状态再放大 ×1.4872（48.99→72.86pt） | ×1.0000 |
-| 首页 系统 pinch（scale 2.0） | 再放大 ×1.6034（72.86→116.83pt） | ×1.0000 |
-| 首页 系统 pinch（scale 0.5） | 页面仍是放大后的状态 | ×1.0000 |
-| 第二个普通页面（目标聊天页，点「编辑目标」进入）双指张开 | 页面被放大 | ×1.0000（31.41→31.41pt） |
+| 首页 双指张开（80→200pt） | 高度比 ×1.5200（61.56×31.41 → 92.96×47.74pt） | ×1.0000 |
+| 首页 双指收拢（200→80pt） | 相对上一状态再放大 ×1.4737 | ×1.0000 |
+| 首页 系统 pinch（scale 2.0） | 再放大 ×1.6429 | ×1.0000 |
+| 首页 系统 pinch（scale 0.5） | 页面被缩小 ×0.5978 | ×1.0000 |
+| 第二个普通页面（目标聊天页，点「编辑目标」进入）双指张开 | 高度比 ×1.5200 | ×1.0000（31.41→31.41pt） |
 | 单指拖动（滚动） | 内容跟着动 | 20 个可见文本里 19 个位移（锁缩放没有牵连滚动） |
 | 点按页面控件 | 可点 | 可点：首页「编辑目标」进聊天页、聊天页「交给 Super Agent」有响应 |
 | 输入框敲字 | 收到 | 收到：聊天页输入框的值变成 `a` |
 
-修复前的复现命令与输出：
+「修复前」一列是独立核实者从基线提交（`5b2ec03`）重新构建、安装后在同一模拟器、同一手势下实测的值；
+本轮自己那次基线跑出的数值与之同量级（双指张开 ×1.5600、双指收拢 ×1.4872、系统 pinch ×1.6034），
+差别来自手势时序，不是结论差别。
+
+复现与复测的命令（手势测试放在仓库外的 XCUITest 工程里，跑在真实 App 上）：
 
 ```
 xcodebuild test-without-building -xctestrun .../ZoomTests_iphonesimulator27.2-arm64.xctestrun \
@@ -70,6 +75,17 @@ xcodebuild test-without-building -xctestrun .../ZoomTests_iphonesimulator27.2-ar
 TASK85 before rect=(67.84,233.49,61.56,31.41)
 TASK85 after pinch-open rect=(67.84,233.49,61.56,31.41)   ← 修复后：比例 1.0000
 ```
+
+同一个用例在基线构建（`5b2ec03`）上的输出：
+
+```
+TASK85 before rect=(67.84,233.49,61.56,31.41)
+TASK85 after pinch-open rect=(101.76,243.54,92.96,47.74)   ← 修复前：比例 1.5200
+→ testPinchKeepsPageScale FAILED
+```
+
+手势测试的三个用例与对应结论：`testPinchKeepsPageScale`（首页四种捏合方向）、
+`testPinchKeepsPageScaleOnSecondPage`（目标聊天页）、`testScrollTapAndInputStillWork`（滚动、点按、输入）。
 
 ## 回归测试
 
