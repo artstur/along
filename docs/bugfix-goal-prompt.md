@@ -278,6 +278,12 @@ Along 是手机优先的目标工作台：把一个目标拆成「目标 / 来�
 
 - **执行时刻不自动等于提前提醒**：完整同步向原生投影 reminders 时，typed Agent 且 notifyBefore:false 只保留后台执行与结果通道；legacy/user/显式提前提醒保持原计划，activeTasks 不得一起删。真实事件工作区的 finance 域也不能自动贴上静态演示标签。分别用完整sync投影和详情DOM回归，不把系统待发、结果入队和实际送达混为一谈。
 
+- **在 iOS 上关掉双击缩放，同时保住滚动与双指缩放，只能用 `touch-action: manipulation`**：`none` 也能挡住双击缩放，但会把整片区域的单指滚动与双指缩放一起关掉（实测位移 0.00pt、放大 ×1.000），那是从「缩放没了」换来的另一处回归，不是修复。`pan-x pan-y pinch-zoom` 不带 WebCore 的 `Manipulation` 位，双击缩放照旧。
+
+- **平台行为要按目标版本实测，源码推断可能给出相反结论**：WebKit 的 iOS 手势层在部分 Safari 发布分支上只认 `none`（WebKit bug 319664），但 iOS 26.3.1 实测 `manipulation` 就能挡住双击缩放。只读源码得出的平台结论，必须用目标平台上的真实手势复核再落方案；GitHub 镜像上的 Safari 发布分支不等于手机 iOS 版本里的 WebKit。
+
+- **手势类修复不能只靠 CSS 断言**：CSS 里写了什么值，断言它「写了」并不能证明手势对——`touch-action: none` 在单元测试里完全正常，在手机上却把滚动和双指缩放关掉了。要用模拟器发真实触点（`XCPointerEventPath` 发双击、拖动、两指同时接触），同时量「缩放没了」和「滚动/双指缩放还在」两件事，再和基线逐项比。
+
 === END GOAL PROMPT ===
 
 ---
