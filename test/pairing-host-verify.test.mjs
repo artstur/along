@@ -4,7 +4,7 @@ import {spawn} from 'node:child_process';
 import {request as tlsRequest} from 'node:https';
 import {createServer} from 'node:http';
 import net from 'node:net';
-import {createHash, randomBytes} from 'node:crypto';
+import {createHash} from 'node:crypto';
 import {mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';

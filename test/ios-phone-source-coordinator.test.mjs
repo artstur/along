@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {readFileSync, mkdtempSync, writeFileSync, rmSync} from 'node:fs';
+import {mkdtempSync, writeFileSync, rmSync} from 'node:fs';
 import {execFileSync, spawnSync} from 'node:child_process';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
