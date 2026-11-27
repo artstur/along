@@ -2,7 +2,7 @@ import {KEY, loadState, setSnapshot} from './health.mjs?v=99';
 import {ACTIVE_GOAL_KEY, FINANCE_KEY, ensureHealthGoal, withoutDefaultHealthGoal, loadFinance, connectFinanceDemo, addFinanceDemoRecord, healthView, financeView} from './workspace.mjs?v=99';
 import {EXPERIMENT, startExperiment, routeHealthEvent, acceptAgentSuggestion, agentRequestPayload} from './loop.mjs?v=99';
 import {goalChangeText} from './goal-agent-core.mjs?v=99';
-import {createEventWorkspace, recurringPlan} from './event-workspace.mjs?v=99';
+import {createEventWorkspace, recurringPlan, chatTimeline, captureChatAnchor, anchoredScrollTop} from './event-workspace.mjs?v=99';
 import {recommendationCard} from './recommendations.mjs?v=99';
 import {dataSourceProvider} from './data-sources.mjs?v=99';
 import {taskResultBodyRelevant} from './task-results.mjs?v=99';
@@ -1703,7 +1703,9 @@ function eventWorkspacePage() {
   const pendingCompletions=eventWorkspace.pendingTaskCompletions();
   const goalPicker=`<div class="goal-switch"><label for="event-goal-select">当前目标</label><div class="goal-switch-actions"><div class="select-wrap"><select id="event-goal-select" aria-label="切换目标"><option value="" ${!localSelection&&!view.activeGoalId?'selected':''}>新目标</option>${options}${localChoices.length?`<optgroup label="本机已存目标">${localChoices.map(l=>`<option value="local:${esc(l.key)}" ${localSelection?.key===l.key?'selected':''}>${esc(l.title)}</option>`).join('')}</optgroup>`:''}</select></div><button class="goal-add-button" data-action="new-goal">新建</button></div></div>`;
   if (selectedLocal) return localRecordPage(localSelection,selectedLocal.title,goalPicker,connection);
-  const history=messages.map(message=>`<div ${message.notificationEventId?`id="event-message-${esc(message.notificationEventId)}"`: ''} class="agent-message ${message.role==='user'?'user':'assistant'}"><p>${esc(message.text)}</p>${message.status==='pending'?'<p class="agent-disclaimer">待同步</p>':message.status==='rejected'||message.status==='failed'?'<p class="agent-disclaimer">发送未完成，请通过聊天重新说明。</p>':''}</div>`).join('');
+  // 时间分割线按整条可见消息列表算：首条有时间的消息前一条，之后看间隔和跨日。
+  const timeline=chatTimeline(messages);
+  const history=messages.map((message,index)=>`${timeline[index]?`<time class="agent-time-divider" datetime="${esc(new Date(timeline[index].at).toISOString())}">${esc(timeline[index].label)}</time>`:''}<div ${message.notificationEventId?`id="event-message-${esc(message.notificationEventId)}"`: ''} class="agent-message ${message.role==='user'?'user':'assistant'}" data-event-id="${esc(message.eventId)}"><p>${esc(message.text)}</p>${message.status==='pending'?'<p class="agent-disclaimer">待同步</p>':message.status==='rejected'||message.status==='failed'?'<p class="agent-disclaimer">发送未完成，请通过聊天重新说明。</p>':''}</div>`).join('');
   // 等待态由缓存派生（见 event-workspace.mjs 的 awaitingReply），同步与重渲染不会把它冲掉。
   const waiting=view.awaiting?`<div class="agent-message assistant pending" role="status"><div class="agent-thinking"><span aria-hidden="true"><i></i><i></i><i></i></span><p>Agent 正在回复…</p></div></div>`:'';
   const content=chat?`${backButton('agent-back','返回目标')}<div class="agent-title"><h1>${esc(goal?.title||'说说你想做什么')}</h1></div>${connection}<div class="agent-messages" role="log" aria-live="polite">${history}${waiting||(history?'':'<p class="agent-empty">说说你的想法，Along 会和你一起理清下一步。</p>')}</div>`
@@ -1727,13 +1729,19 @@ function renderEventUpdate() {
   const scroller=app.querySelector('.agent-scroll');
   const scrollTop=scroller?.scrollTop??0;
   const follow=scroller&&(scroller.scrollHeight-scroller.scrollTop-scroller.clientHeight<80);
+  // 读者在看历史时，重渲染可能在他上方插入内容（历史回放补时间就会加分割线）。
+  // 先记下他正在看的那条气泡，重渲染后按它复位，而不是按同一个 scrollTop。
+  const anchor=follow?null:captureChatAnchor(scroller);
   const reading=captureResultReading(app,{activeElement:document.activeElement,scrollY:nativePage?app.scrollTop:window.scrollY});
   render();
   restoreResultReading(app,reading,{scrollTo:options=>pageScroller.scrollTo(options)});
   const next=app.querySelector('#agent-form textarea');
   if (sameScope&&next&&typeof draft==='string') {next.value=draft;if (focused) {next.focus();next.setSelectionRange?.(selection,selection);}}
   const nextScroller=app.querySelector('.agent-scroll');
-  nextScroller?.scrollTo({top:follow?lastMessageScrollTop(nextScroller):scrollTop,behavior:'instant'});
+  if (nextScroller) {
+    const top=follow?lastMessageScrollTop(nextScroller):(anchoredScrollTop(nextScroller,anchor)??scrollTop);
+    nextScroller.scrollTo({top,behavior:'instant'});
+  }
   const pending=pendingRecommendationOpen;
   if (pending?.binding===eventWorkspaceBinding&&eventWorkspace.view().messages.some(m=>m.goalId===pending.route.goalId&&m.notificationEventId===pending.route.eventId)) {
     pendingRecommendationOpen=null;void openEventNotification(pending.route,true);
