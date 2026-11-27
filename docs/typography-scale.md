@@ -18,6 +18,7 @@
 | 变量 | 值 | 用途 |
 | --- | --- | --- |
 | `--text-body` | 15px | 常规正文：卡片说明、任务描述、列表摘要、提示文案 |
+| `--text-body-large` | 16px | 稍重的正文：任务标题、结果正文、输入框 |
 | `--text-chat` | 17px | 对话收发正文（两条聊天路径共用 `.agent-message > p`） |
 | `--text-caption` | 13px | 辅助信息：时间戳、状态、来源标签、脚注 |
 
@@ -38,7 +39,8 @@
   - `.agent-message > p.agent-disclaimer`（"待同步"、"发送未完成"）单独 13px，避免被正文选择器一起放大。
   - `.agent-composer textarea` → 16px（占位文字同样 16px；同时避免 iOS 输入框自动放大）。
   - 目标列表与详情、任务列表与结果、设置与连接页、弹层（`#sheet`）逐项调整。
-  - 随字号变化的容器：`.agent-message` 的最大宽度、`.agent-composer textarea` 的高度上下限、`.select-wrap select` 的最小宽度。
+  - 随字号变化的容器：`.agent-message` 的最大宽度、`.agent-composer textarea` 的高度上下限、`.select-wrap select` 的宽度。
+- `web/app.mjs`：对话滚动目标从「容器底部」改为「最后一条消息的底边」（编排面板在消息之后，滚到底会把最新回复挤到可视区外）。
 - `web/index.html` 的 `?v=`、`web/sw.js` 的 `CACHE`、`ios/AlongHealth/Sources/AlongShellView.swift` 的 `build=`、`ios/AlongHealth/Info.plist` 的 `CFBundleVersion`：94 → 95、86 → 87。
 - `npm run build` 重新生成 `ios/AlongHealth/Web/` 产物。
 
@@ -54,7 +56,21 @@
 2. 在约 375 与 440 CSS px 视口检查目标、任务、设置与弹层：正文清晰，主要文字与按钮可读可点，无新增横向溢出或遮挡；键盘打开时输入框与发送按钮可用，发送后能滚动到最新消息。桌面网页做一次显示回归。
 3. `npm run check` 与 `npm run build` 通过。
 
+## 复核中发现并修掉的问题
+
+第一轮交付后，独立复核在 WKWebView 里发现三处问题，逐一处理：
+
+1. **长链接截断**（两条聊天路径共用）。对话正文是 `white-space: pre-wrap`，它只在空格处换行，长 URL 没有任何断点，文字会溢出气泡被裁掉。
+   修法：给 `.agent-message p` 加 `overflow-wrap: anywhere`，链接在词内折行。实测（WKWebView，320 CSS px）气泡 `scrollWidth == clientWidth`，不再裁切。
+2. **窄屏目标下拉框越界**。`<select>` 的固有宽度来自最长选项文案，会把「当前目标」整行撑出视口；`min-width` 又让下拉框不能随外层收缩，320 px 下还会压到「新建」按钮。
+   修法：宽度改由 `.select-wrap` 决定（`flex: 0 1 auto` + `max-width: 220px`），`select` 用 `width: 100%` 填满外层、外层可收缩。选项文字在框内截断，整行不再越界。
+3. **发送后最新回复不在可视区**。滚到底会停在编排面板末尾，最新回复被面板挤到可视区上缘。
+   修法：`web/app.mjs` 新增 `lastMessageScrollTop()`，滚动目标改成把最后一条消息的底边对齐到可视区底边。
+
+另外把 `.agent-composer textarea` 的 `min-height` 保持在 48px：16px 字号下实际高度仍是 51px，与改动前一致，输入区不因字号上调而变高。
+
 ## 已验证 / 待确认
 
-- 见本工单的交付评论：本地无头 Chrome 实测的计算字号、截图与视口溢出检查。
-- 真机（iPhone WKWebView）观感、键盘遮挡与安装后生效**待确认**，由独立验证人复核。
+- 见本工单交付评论：无头 Chrome 实测的计算字号、视口溢出与滚动目标；iPhone 17 Pro 模拟器 WKWebView 实测的气泡计算样式与几何。
+- **320 CSS px 下的软键盘发送不可点，是改动前就存在的问题**，根因是 `Info.plist` 没有 `UILaunchScreen`：iOS 按 320×480 兼容模式运行，WKWebView 可视区只有 384 CSS px，软键盘弹出后剩余约 150 px，放不下 58 px 顶栏加输入区。同一环境对照 `944da99` 的发送键位置与本轮一致（相差 3 px），确认不是字号改动引入。彻底解决需要补 `UILaunchScreen` 拿到整屏视口，属打包改动，另开工单。
+- 真机（iPhone）观感、真机重装与真机键盘**待确认**，由独立验证人复核。

@@ -30,8 +30,10 @@ p { line-height: 1.5; }
 .goal-switch { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 17px; }
 .goal-switch label { color: #191919; font-size: 18px; font-weight: 640; letter-spacing: -.25px; white-space: nowrap; }
 .goal-switch-actions { display: flex; min-width: 0; align-items: center; justify-content: flex-end; gap: 8px; }
-.select-wrap { position: relative; min-width: 0; }
-.select-wrap select { appearance: none; max-width: 100%; min-width: 168px; padding: 10px 36px 10px 14px; border: 1px solid #dededd; border-radius: 11px; background: #fff; color: #252525; font-size: 15px; font-weight: 600; }
+/* 下拉框的固有宽度来自最长选项文案，会把整行撑出视口；宽度改由外层决定，
+   窄屏时整体收缩，选项文字在框内截断。 */
+.select-wrap { position: relative; flex: 0 1 auto; min-width: 0; max-width: 220px; }
+.select-wrap select { appearance: none; width: 100%; max-width: 100%; min-width: 0; padding: 10px 36px 10px 14px; border: 1px solid #dededd; border-radius: 11px; background: #fff; color: #252525; font-size: 15px; font-weight: 600; }
 .select-wrap span { position: absolute; top: 50%; right: 13px; transform: translateY(-58%); pointer-events: none; color: #777; font-size: 20px; }
 .goal-add-button { flex: none; padding: 11px 13px; border: 0; border-radius: 11px; background: #202020; color: #fff; font-size: 15px; font-weight: 650; }
 
@@ -284,6 +286,8 @@ footer { padding: 0 0 26px; color: #aaa; text-align: center; font-size: 12px; }
 .agent-message.user { align-self: flex-end; margin-left: 42px; border-color: #eeeeed; border-bottom-right-radius: 6px; background: #eeeeed; }
 .agent-message.assistant { margin-right: 28px; border-bottom-left-radius: 6px; }
 .agent-message > p { white-space: pre-wrap; font-size: var(--text-chat); line-height: 1.6; }
+/* 对话正文里的长链接没有空格可断，pre-wrap 不会在词内换行，文字会溢出气泡。 */
+.agent-message p { overflow-wrap: anywhere; }
 .agent-message.pending { padding: 12px 16px; color: #777; }
 .agent-message > p.agent-disclaimer { font-size: var(--text-caption); color: #8a8a8a; }
 .agent-thinking { display: flex; align-items: center; gap: 9px; }
@@ -313,7 +317,7 @@ footer { padding: 0 0 26px; color: #aaa; text-align: center; font-size: 12px; }
 .proposal-preview button { margin-top: 8px; }
 .agent-composer-dock { z-index: 5; padding: 11px 0 calc(9px + env(safe-area-inset-bottom)); background: linear-gradient(to bottom,#f6f6f500 0,#f6f6f5 18px,#f6f6f5 100%); flex: none; }
 .agent-composer { position: relative; padding-top: 9px; }
-.agent-composer textarea { display: block; width: 100%; min-height: 54px; max-height: 128px; padding: 13px 52px 12px 15px; overflow-y: auto; resize: none; border: 1px solid #d8d8d7; border-radius: 20px; outline: none; background: #fff; color: #222; box-shadow: 0 5px 18px #0000000a; font: inherit; font-size: 16px; line-height: 1.5; }
+.agent-composer textarea { display: block; width: 100%; min-height: 48px; max-height: 128px; padding: 13px 52px 12px 15px; overflow-y: auto; resize: none; border: 1px solid #d8d8d7; border-radius: 20px; outline: none; background: #fff; color: #222; box-shadow: 0 5px 18px #0000000a; font: inherit; font-size: 16px; line-height: 1.5; }
 .agent-composer textarea:focus { border-color: #bdbdbb; box-shadow: 0 6px 20px #00000010; }
 .agent-send { position: absolute; right: 7px; bottom: 6px; display: grid; width: 36px; height: 36px; place-items: center; padding: 0; border: 0; border-radius: 50%; background: #202020; color: #fff; }
 .agent-send svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }

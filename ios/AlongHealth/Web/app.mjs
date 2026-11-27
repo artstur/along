@@ -1312,10 +1312,22 @@ function setAgentComposerBusy(busy) {
   if (form) form.setAttribute('aria-busy',String(busy));
   if (button) button.disabled=busy || !agentConfig.token;
 }
+// 滚到容器底部会停在编排面板的末尾，最新回复被面板挤到可视区之外；
+// 这里改成把最后一条消息的底边对齐到可视区底边，回复才完整可见。
+function lastMessageScrollTop(scroller) {
+  if (!scroller) return 0;
+  const messages=scroller.querySelectorAll?.('.agent-message')||[];
+  const last=messages[messages.length-1];
+  if (!last||typeof last.getBoundingClientRect!=='function'||typeof scroller.getBoundingClientRect!=='function')
+    return scroller.scrollHeight||0;
+  const delta=last.getBoundingClientRect().bottom-scroller.getBoundingClientRect().bottom;
+  const top=scroller.scrollTop+delta;
+  return Math.min(Math.max(0,top),Math.max(0,scroller.scrollHeight-scroller.clientHeight));
+}
 function scrollAgentConversationToBottom() {
   requestAnimationFrame(()=>{
     const scroller=app.querySelector('.agent-scroll');
-    scroller?.scrollTo({top:scroller.scrollHeight,behavior:'smooth'});
+    scroller?.scrollTo({top:lastMessageScrollTop(scroller),behavior:'smooth'});
   });
 }
 function pairForm() {
@@ -1633,7 +1645,7 @@ function renderEventUpdate() {
   const next=app.querySelector('#agent-form textarea');
   if (sameScope&&next&&typeof draft==='string') {next.value=draft;if (focused) {next.focus();next.setSelectionRange?.(selection,selection);}}
   const nextScroller=app.querySelector('.agent-scroll');
-  nextScroller?.scrollTo({top:follow?nextScroller.scrollHeight:scrollTop,behavior:'instant'});
+  nextScroller?.scrollTo({top:follow?lastMessageScrollTop(nextScroller):scrollTop,behavior:'instant'});
   const pending=pendingRecommendationOpen;
   if (pending?.binding===eventWorkspaceBinding&&eventWorkspace.view().messages.some(m=>m.goalId===pending.route.goalId&&m.notificationEventId===pending.route.eventId)) {
     pendingRecommendationOpen=null;void openEventNotification(pending.route,true);
@@ -1667,7 +1679,7 @@ function renderAgentUpdate({follow=false}={}) {
   render();
   const next=app.querySelector('.agent-scroll');
   if (!next) return;
-  next.scrollTop=follow||nearBottom?next.scrollHeight:Math.min(scrollTop,Math.max(0,next.scrollHeight-next.clientHeight));
+  next.scrollTop=follow||nearBottom?lastMessageScrollTop(next):Math.min(scrollTop,Math.max(0,next.scrollHeight-next.clientHeight));
 }
 window.__alongNavigateBack = () => {
   const button=app.querySelector('.back-button[data-action]');
