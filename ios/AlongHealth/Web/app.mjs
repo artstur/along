@@ -27,7 +27,25 @@ const pageScroller = nativePage ? app : window;
 if (nativePage) document.documentElement.classList.add('along-native');
 // 离线缓存：只有浏览器支持时才注册（App 内的 along:// 不是安全上下文，会自动跳过）。
 if ('serviceWorker' in navigator) {
-  try { void navigator.serviceWorker.register('./sw.js').catch(()=>{}); }
+  try {
+    // 首次注册前先记下有没有被接管：首次装上 Service Worker 时不该重载页面。
+    const hadController=Boolean(navigator.serviceWorker.controller);
+    void navigator.serviceWorker.register('./sw.js').catch(()=>{});
+    // 脚本地址不变时，浏览器 24 小时内只检查一次更新；这里强制检查一次，
+    // 否则发布新版本后客户端可能一直跑旧脚本（见 web/sw.js 的缓存版本）。
+    const pending=navigator.serviceWorker.getRegistration?.();
+    if(pending)void pending.then(registration=>registration?.update()).catch(()=>{});
+    // 新 Service Worker 接管后重载一次，让本次启动也用上新资源。
+    // 每个会话最多重载一次，避免反复重载。
+    navigator.serviceWorker.addEventListener?.('controllerchange',()=>{
+      if(!hadController)return;
+      try {
+        if(sessionStorage.getItem('along.shell-reloaded'))return;
+        sessionStorage.setItem('along.shell-reloaded','1');
+      } catch { /* 隐私模式下拿不到 sessionStorage，重载一次也无妨。 */ }
+      location.reload();
+    });
+  }
   catch { /* 注册失败不影响正常使用。 */ }
 }
 let state = loadState(localStorage.getItem(KEY));
