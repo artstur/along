@@ -315,3 +315,7 @@ Historical audience-only corrections carry `classification_only:true`: retain ev
 - **token过渡键不能证明原origin**。真换端先写配置后清事件缓存，中断会留下新origin配置和旧用户token-scope；即使下一次native load和新配置相同也不能认领。新事件绑定保存规范origin，Build78无origin的旧记录只接受原生已验证的同完整binding/user元数据；缺失或歧义时保留缓存、等待原Host身份确认。
 - **只读恢复路径也要执行真实文件方法**。解析既有队列绑定元数据不调用HealthKit采集或发送；缺目录不能创建，损坏文件不能覆盖，bytes/属性/enabled与授权不变。测试整体提取Swift类时，同步其引用的真实依赖，不能把新增缺失替身误报为产品或环境失败。
 - **同一 Mac 换地址要有原生认证的别名证明，不能直接改 binding 或放宽 origin**：legacy 原 pin/token 与 same-user status 验证、连接写入代次/队列快照未变后，先原子保存原完整 queue 与受验证 transport，再改连接；Web 两键中断、原 daily grant、通知 scope 和旧在途 ACK 都要沿同一证明恢复。地址更新前置 verify 也必须在 bearer 出网前拒绝变 pin/policy 或 PKI 跨 origin，不能只在最后的迁移 helper 防护。复现和反例见 `test/ios-health-transport*.test.mjs`、`test/app-health-transport.test.mjs`，合成数据不替代真机。
+
+- **「完成」这件事不能只押在服务端推送上**。任务列表的内容来自目标快照，任务是否完成由服务端的 `task_updated` 同步项驱动；只要运行中的服务端版本不补发这条同步项（哪怕它已经把任务状态写成 done），客户端就永远收不到新快照，卡片会一直挂在当前列表里，刷新也不消失。修法有两层：服务端补发同步项（`along-superagent` 的 `6fab775`），客户端把「服务端已受理完成事实」也算作已完成（`web/event-workspace.mjs` 的 `acceptedTaskCompletions()`，台账＋队列＋失败三态判定，周期任务不记台账）。只做客户端这一层时，用户看到的是「点完就消失，但进不了历史任务」——历史任务仍然要等服务端补发快照。
+
+- **改本地缓存写入时机要盯住「同步失败不写缓存」这条约束**。工作台层有一条既有不变量：同步失败时不把本地缓存写出去（`test/event-workspace.test.mjs` 的「foreign fallback alerts and receipts never cross into the paired workspace」钉住）。收敛完成事实台账这类动作要放在**同步成功之后**写缓存，否则一次失败同步就会把半截状态落盘；顺带注意 `JSON.stringify(undefined)` 是 `undefined` 而不是 `'{}'`，比较前后台账前先过一遍 `completionsOf()`，否则空台账会被误判成「变了」。
