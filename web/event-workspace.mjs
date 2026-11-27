@@ -128,20 +128,15 @@ function completionsOf(value) {
   }
   return out;
 }
-// 历史任务分页缓存：按目标分别存放目标快照之外、按需取回的那些任务。损坏的条目直接丢弃。
+// 历史任务分页缓存：目标快照之外、按需取回的那些任务（当前目标一份，切换目标即从头再来）。
 function historyOf(value) {
-  if (!record(value)) return {};
-  const out={};
-  for (const [goalId,entry] of Object.entries(value)) {
-    if (!id(goalId)||!record(entry)||!Array.isArray(entry.tasks)) continue;
-    const tasks=[];
-    for (const task of entry.tasks) {
-      if (!record(task)||!id(task.id)||!text(task.content,120)||!version(task.revision)) continue;
-      tasks.push(task);
-    }
-    out[goalId]={tasks,cursor:typeof entry.cursor==='string'&&entry.cursor.length>0?entry.cursor:undefined,exhausted:entry.exhausted===true};
+  if (!record(value)||!id(value.goalId)||!Array.isArray(value.tasks)) return undefined;
+  const tasks=[];
+  for (const task of value.tasks) {
+    if (!record(task)||!id(task.id)||!text(task.content,120)||!version(task.revision)) continue;
+    tasks.push(task);
   }
-  return out;
+  return {goalId:value.goalId,tasks,cursor:typeof value.cursor==='string'&&value.cursor.length>0?value.cursor:undefined,exhausted:value.exhausted===true};
 }
 
 // One task of a goal, cleaned by the same rules the goal snapshot uses.
@@ -476,7 +471,7 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
     const goalId=state.activeGoalId, goal=goalId?state.goals[goalId]:undefined;
     if (!goalId||!goal) throw Error('没有选中目标');
     const history=historyOf(state.history);
-    const current=history[goalId]??{tasks:[],cursor:undefined,exhausted:false};
+    const current=history&&history.goalId===goalId?history:{tasks:[],cursor:undefined,exhausted:false};
     if (current.exhausted) return {added:0,exhausted:true};
     const page=await agentCall(config,'/sync',{after_seq:state.cursor,limit:1,conversation_version:1,
       tasks_page:{goal_id:goalId,status:'done',limit:50,...(current.cursor?{cursor:current.cursor}:{})}});
@@ -491,7 +486,7 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
     const fresh=pageTasks.filter(task=>!visible.has(task.id));
     const known=new Set(current.tasks.map(task=>task.id));
     const tasks=[...current.tasks,...fresh.filter(task=>!known.has(task.id))];
-    const next={...state,history:{...history,[goalId]:{tasks,cursor,exhausted:cursor===undefined}}};
+    const next={...state,history:{goalId,tasks,cursor,exhausted:cursor===undefined}};
     try { save(next); } catch { state=next; }
     onChange();
     return {added:fresh.length,exhausted:cursor===undefined};
@@ -501,20 +496,21 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
     const goal=state.activeGoalId?state.goals[state.activeGoalId]:undefined;
     if (!goal) return [];
     const base=goal.tasks.filter(task=>task.status==='done');
-    const entry=historyOf(state.history)[goal.id];
-    if (!entry) return base;
+    const history=historyOf(state.history);
+    if (!history||history.goalId!==goal.id) return base;
     const seen=new Set(base.map(task=>task.id));
-    return [...base,...entry.tasks.filter(task=>!seen.has(task.id))];
+    return [...base,...history.tasks.filter(task=>!seen.has(task.id))];
   }
   /** 历史任务是否已翻到尽头（没翻过时保守当作还有更早的，翻页确认后才收口）。 */
   function historyExhausted() {
     const goal=state.activeGoalId?state.goals[state.activeGoalId]:undefined;
     if (!goal) return true;
-    const entry=historyOf(state.history)[goal.id];
-    return entry?entry.exhausted:false;
+    const history=historyOf(state.history);
+    if (!history||history.goalId!==goal.id) return false;
+    return history.exhausted;
   }
   /**
-   * 当前目标（或指定目标）的某个任务：先看目标快照，再看按需翻页取回的那部分。
+   * 某个目标的某个任务：先看目标快照，再看按需翻页取回的那部分。
    * 分页加载出来的历史卡片因此也能打开自己的详情。
    */
   function taskById(goalId,taskId) {
@@ -522,8 +518,9 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
     if (!goal||!id(taskId)) return undefined;
     const found=goal.tasks.find(task=>task.id===taskId);
     if (found) return found;
-    const entry=historyOf(state.history)[goal.id];
-    return entry?.tasks.find(task=>task.id===taskId);
+    const history=historyOf(state.history);
+    if (!history||history.goalId!==goal.id) return undefined;
+    return history.tasks.find(task=>task.id===taskId);
   }
   /**
    * 台账收敛：服务端快照确认完成（或版本前进）后移除记录；终态回执（被拒／冲突）同样移除，
