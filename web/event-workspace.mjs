@@ -60,24 +60,28 @@ export function chatTimeline(messages, now = Date.now()) {
  *
  * 选哪一条：
  * - 完全在视口外的气泡不能当锚点（读者根本没在看它）。
- * - 视口上沿压在一条长回复中间时，那条长回复就是读者正在读的，整屏都是它。
- * - 否则取第一条在视口里露全的气泡：只露出一条边的上一条已经在被读过去了。
+ * - 优先取第一条**完整可见**的气泡：只露出一条边的已经在被读过去。
+ * - 没有完整可见的气泡时，取**露出最多**的那条：一条长回复盖住整屏时，
+ *   或者视口两端各露一点时，露出的那条才是读者正在读的；下沿只露 6px 的
+ *   那条不是。
  * 锚点用消息自己的 eventId 认人，不用下标：消息列表可能增删，下标会指错人。
  */
 export function captureChatAnchor(scroller) {
   if (!scroller||typeof scroller.getBoundingClientRect!=='function') return null;
   const box=scroller.getBoundingClientRect();
   if (!box) return null;
-  let covering=null;
+  let largest=null;
   for (const bubble of scroller.querySelectorAll?.('.agent-message')||[]) {
     const id=bubble.dataset?.eventId;
     if (!id) continue;
     const rect=bubble.getBoundingClientRect?.();
-    if (!rect||rect.bottom<=box.top||rect.top>=box.bottom) continue;
-    if (rect.top<box.top) { covering=covering??{id,offset:rect.top-box.top}; continue; }
-    return {id,offset:rect.top-box.top};
+    if (!rect) continue;
+    const visible=Math.min(rect.bottom,box.bottom)-Math.max(rect.top,box.top);
+    if (visible<=0) continue;
+    if (rect.top>=box.top&&rect.bottom<=box.bottom) return {id,offset:rect.top-box.top};
+    if (!largest||visible>largest.visible) largest={id,offset:rect.top-box.top,visible};
   }
-  return covering;
+  return largest?{id:largest.id,offset:largest.offset}:null;
 }
 
 /** 按锚点复位：让同一条气泡回到同一个视口位置，锚点找不到就交回调用方按原逻辑处理。 */

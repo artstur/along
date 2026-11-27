@@ -31,11 +31,34 @@ test('a long reply covering the viewport is the anchor and an off-screen bubble 
   assert.deepEqual(captureChatAnchor(box),{id:'m10',offset:-200});
 });
 
+test('when both edges are clipped the anchor is the bubble showing the most, not the sliver below it',()=>{
+  // 消息区 681px 高：第 11 条长回复露出 663px，第 12 条只在下沿露 6px。
+  const box=scroller({bubbles:[
+    bubble('m10',-1301,663),   // 上沿被切，露出 663px
+    bubble('m11',675,2600),    // 下沿只露出 6px
+  ],clientHeight:681});
+  assert.deepEqual(captureChatAnchor(box),{id:'m10',offset:-1301});
+});
+
+test('a fully visible bubble wins over a longer bubble clipped above it',()=>{
+  const box=scroller({bubbles:[
+    bubble('m10',-400,300),    // 上沿被切，露出 300px
+    bubble('m11',320,520),     // 完整可见
+  ],clientHeight:681});
+  assert.deepEqual(captureChatAnchor(box),{id:'m11',offset:320});
+});
+
 test('a bubble entirely outside the viewport is never the anchor',()=>{
   const above=scroller({bubbles:[bubble('m0',-300,-100)],clientHeight:681});
   assert.equal(captureChatAnchor(above),null);
   const below=scroller({bubbles:[bubble('m0',900,1100)],clientHeight:681});
   assert.equal(captureChatAnchor(below),null);
+});
+
+test('the only bubble clipped at the bottom edge is still the anchor',()=>{
+  // 视口 237px 高，首条只在下沿露出 6px。
+  const box=scroller({bubbles:[bubble('m0',231,600)],clientHeight:237});
+  assert.deepEqual(captureChatAnchor(box),{id:'m0',offset:231});
 });
 
 test('a bubble without an event id is never used as the anchor',()=>{
