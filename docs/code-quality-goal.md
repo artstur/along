@@ -87,3 +87,57 @@ python3 docs/verification/pr-61/replay.py
 ```
 
 [PR #61](https://github.com/artstur/along/pull/61) 的清理前提交为 `c90569368330eb3a5394e7116d6e63cea491d269`，验收提交为 `c29928e21178ee0c6b80e8fc2482aa26071ec7af`。
+
+## 2026-11-27 死代码清理（TASK-83）
+
+### 范围与口径
+
+只删除**确认无入口且无兼容用途**的导入、失效样式与私有辅助逻辑；涉及接口、持久化数据或兼容性语义的候选只记录证据，留待单独评估，不在本轮删除。沿用本文档的两仓库口径，Along 与 Along Agent 同批排查、同批交付。
+
+### 排查手段
+
+- **模块可达性**：从真实入口（`web/index.html` → `web/app.mjs`、`web/sw.js`、`host/server.mjs`、`host/agent-host.mjs`、`tools/*`、`deploy/*`、`test/*`）沿 `import` / `import()` 边遍历，列出无任何入口引用的模块；CLI 类脚本（`host/pair-code.mjs`、`host/workspace-handoff-admin.mjs`、`tools/*`、`deploy/*`）按进程入口计。
+- **导入级死代码**：解析 `web/`、`host/`、`tools/`、`deploy/`、`examples/`、`test/` 的全部 `import`（含跨行写法），对每个绑定名在导入文件其余部分做词边界检索。
+- **声明级死代码**：`function` / `class` / `const` / `let` / `var` 的名字在全仓出现次数 ≤ 1（只有声明处）才列为候选。
+- **未使用参数**：逐函数体括号配平后，对形参在函数体内做词边界检索；`...spread` 形式按同一前缀排除误判。
+- **样式级死代码**：解析 `web/style.css` 的类选择器，逐个在 `web/`、`host/`、`ios/AlongHealth/Sources/` 的 HTML/JS/Swift 源码里反查；同时反查 `hidden-`、`generated-`、`orchestration-`、`architecture-` 等前缀，确认没有拼接生成的同名类。`ios/AlongHealth/Web/` 是 `web/` 的构建产物，不计入重复。
+- **端点侧休眠**：列出 `host/` 暴露的 HTTP 路径，在 `web/`、`ios/AlongHealth/Sources/`、`deploy/`、`test/`、`docs/` 反查调用方。
+
+### 已删除
+
+**1. 4 条失效样式规则（`web/style.css`）**——没有任何标记使用，且不存在拼接生成的同名类：
+
+| 类 | 原位置 | 判断依据 |
+| --- | --- | --- |
+| `.hidden-count` | `web/style.css:65`（与 `.module-more` 合并声明） | 全仓无 `hidden-count`；源码里也没有 `hidden-` 前缀的类名 |
+| `.generated-status` | `web/style.css:98`（独立规则） | 全仓无 `generated-status`；源码里只有 `generated-task` |
+| `.orchestration-section` | `web/style.css:152`（与 `.workers-section`、`.activity-section` 合并声明） | 全仓无 `orchestration-section`；源码里只有 `orchestration-flow` |
+| `.architecture-note` | `web/style.css:187-189`（含 `strong`、`p` 两条子选择器） | 全仓无 `architecture-` 前缀的类名 |
+
+合并声明里仍在使用的 `.module-more`、`.workers-section`、`.activity-section` 保留。
+
+**2. `test/` 6 处未使用导入**（生产代码零命中）：
+
+| 文件 | 删除的绑定 |
+| --- | --- |
+| `test/ca-tls-material.test.mjs` | `readdirSync` |
+| `test/ios-phone-source-coordinator.test.mjs` | `readFileSync` |
+| `test/pairing-host-verify.test.mjs` | `randomBytes` |
+| `test/tier2-orchestration.test.mjs` | `existsSync` |
+| `test/workspace-handoff-companion.test.mjs` | `writeFileSync` |
+| `test/workspace-handoff-proof.test.mjs` | `chmodSync` |
+
+### 已记录、未删除的候选
+
+- **`POST /goal/chat`（`host/agent-host.mjs:758`）**：全仓反查 `web/`、`ios/AlongHealth/Sources/`、`deploy/`、`test/`、`docs/` 均无调用方。属接口语义，删除需要裁决，留待单独评估。
+- **`POST /goal/event` 与 `host/codex-agent.mjs`**：仓库文档已记录该路径为休眠路径（`docs/cloud-deploy-multi-user.md:54`、`:66`「`web/` 无任何调用 `/goal/event` 的代码……属休眠路径」）。它仍在 iPhone 连接自检白名单里（`ios/AlongHealth/Sources/AlongShellView.swift:1169`），且被 `docs/cloud-security-hardening.md` 记为 Mac 真实功能；删除会改变接口语义，不在本轮范围。
+- **9 处只被本文件使用的 `export` 修饰**（`host/okx-history.mjs` 的 `OKX_HISTORY_TYPES`、`host/source-event-bridge.mjs` 的 `SourceBridgeError`、`host/workspace-handoff.mjs` 的 `handoffSigningBytes` / `HANDOFF_FIELDS`、`deploy/superagent-preset-lockdown.mjs` 的 `rootEntryIds` / `presetRegistryRow` / `globalDenials`、`examples/guangzhou-health-replay.mjs` 的 `makeRequest`、`test/fixtures/okx-history.mjs` 的 `START`）：符号本身都在本文件内被使用，死的只是 `export` 关键字。收窄模块公开面属于接口变更，未纳入本轮。
+
+### 结论与验证
+
+除上述 4 条样式规则外，Along 仓的生产代码（`web/`、`host/`、`tools/`、`deploy/`、`examples/`、`ios/AlongHealth/Sources/`）在本轮口径下**没有**可达性缺失的模块、没有未使用导入、没有未使用参数或局部量、没有只声明不使用的符号、没有其余未被引用的 CSS 类。沿用多轮记录的结论：死代码在本仓主要集中在导入层与样式层，且此前已被逐步清掉。
+
+- `npm run check`：**887** 项，**883 passed / 0 failed / 4 skipped**，与清理前基线逐项一致；差异只删除未使用绑定，未增删用例（`git diff -U0 -- test` 无用例声明行变化）。
+- 样式改动按 `AGENTS.md` 第 2 节同步资源版本：`node tools/bump-shell-version.mjs 100` 把 `web/index.html` 的 `?v=`、`web/sw.js` 的 `CACHE`、`ios/AlongHealth/Sources/AlongShellView.swift` 的 `build=` 与全部 `web/*.mjs` 的模块说明符一起推进到 **v100**，并重新生成 `dist/` 与 `ios/AlongHealth/Web/`（22 份产物与 `web/` 逐字节一致）。
+- **版本号说明**：本轮最初把版本推进到 v99，但主干随后合入 PR #80（聊天流时间分割线）并已占用 v99。合入主干时 `web/app.mjs:5` 与 `ios/AlongHealth/Web/app.mjs:5` 的同一行 import 冲突（#80 新增 `chatTimeline`、`captureChatAnchor`、`anchoredScrollTop`），按主干版本解决并保留这三个符号；资源版本随之推进到 **v100**——停在 v99 会让已缓存 v99 的客户端继续用 #80 的样式，本轮删除不生效。
+- 未验证事项：未安装真机、未部署公开环境、未替换线上 Host/Agent；这些流程本轮未执行，不得记为已验收。删除的样式没有任何标记使用，因此不改变渲染结果；但「渲染结果逐像素不变」未在真机或真实浏览器上复核。
