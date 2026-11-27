@@ -252,6 +252,15 @@ L3 仍不通过，且客户端侧无解：这一档客户端跑的是**修复前
 
 本轮实测：客户端 `npm run check` 910 项：906 通过、0 失败、4 跳过（新增 2 项：拒收且同步故障时仍可重试、回执丢失时同号重投）。回退检测：回退「终态失败不算待处理」→ 新增的拒收用例变红。另单独修掉一处**与本轮无关**的既有偶发失败（见下）。
 
+用独立验收的原脚本复跑（`task86-review.mjs`，真实 Host + 真实旧 Agent `d16a98b` + 临时 SQLite + Chrome 158 + 构建产物），同一套脚本只换客户端版本：
+
+| 客户端 | `rejectedThenSyncUnavailable` |
+| --- | --- |
+| `5067c04`（修前） | `taskVisible: true`、`buttonWhileFailed: 0`、`buttonAfterReload: 0` |
+| `ec253a7`（修后） | `taskVisible: true`、`buttonWhileFailed: 1`、`buttonAfterReload: 1`、`retryAccepted: true` |
+
+同一脚本的其余泳道修后不变：`accepted`（`removedFromCurrent: true`、`siblingIdentical: true`）、`recovery`（`goalSwitch: true`、`reload: true`）、`retry`（`visibleAndClickable: true`、`sentNewEventId: true`）、`transport`（回执丢失后同号重投，`sameEventId: true`、`noSecondRevision: true`）。
+
 ### 相邻问题（记录，本轮未修）
 
 历史任务列表翻到尽头后再完成另一项，新完成的任务不再出现在历史任务里，也没有新的分页请求（验收证据 `previouslyLoadedHistory`：`newCompletionVisible: false`、`newHistoryRequests: 0`）。分页会话在收口后不再翻页，而旧 Agent 不把完成事实写进目标快照，新完成的任务既不在快照里、也不再被翻页取回。修法需要让历史列表在有新的完成事实时重新取页，属独立一轮；本轮验收聚焦动态列表，先记录。
