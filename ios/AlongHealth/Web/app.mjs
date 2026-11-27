@@ -1,20 +1,20 @@
-import {KEY, loadState, setSnapshot} from './health.mjs';
-import {ACTIVE_GOAL_KEY, FINANCE_KEY, ensureHealthGoal, withoutDefaultHealthGoal, loadFinance, connectFinanceDemo, addFinanceDemoRecord, healthView, financeView} from './workspace.mjs';
-import {EXPERIMENT, startExperiment, routeHealthEvent, acceptAgentSuggestion, agentRequestPayload} from './loop.mjs';
-import {goalChangeText} from './goal-agent-core.mjs';
-import {createEventWorkspace} from './event-workspace.mjs';
-import {recommendationCard} from './recommendations.mjs';
-import {dataSourceProvider} from './data-sources.mjs';
-import {taskResultBodyRelevant} from './task-results.mjs';
-import {taskResultCard,captureResultReading,restoreResultReading} from './task-result-view.mjs';
-import {AGENT_KEY, GOALS_KEY, CONVERSATIONS_KEY, readStored, agentCall, loadNativeConnection, saveNativeConnection} from './agent-client.mjs';
-import {ADAPTIVE_LAYOUTS_KEY, customGoalEntries, findInitialCustomGoalCandidate, goalDomain, isCustomGoalKey, safeAdaptiveLayout, validateAdaptiveLayout} from './adaptive-ui.mjs';
+import {KEY, loadState, setSnapshot} from './health.mjs?v=97';
+import {ACTIVE_GOAL_KEY, FINANCE_KEY, ensureHealthGoal, withoutDefaultHealthGoal, loadFinance, connectFinanceDemo, addFinanceDemoRecord, healthView, financeView} from './workspace.mjs?v=97';
+import {EXPERIMENT, startExperiment, routeHealthEvent, acceptAgentSuggestion, agentRequestPayload} from './loop.mjs?v=97';
+import {goalChangeText} from './goal-agent-core.mjs?v=97';
+import {createEventWorkspace, recurringPlan} from './event-workspace.mjs?v=97';
+import {recommendationCard} from './recommendations.mjs?v=97';
+import {dataSourceProvider} from './data-sources.mjs?v=97';
+import {taskResultBodyRelevant} from './task-results.mjs?v=97';
+import {taskResultCard,captureResultReading,restoreResultReading} from './task-result-view.mjs?v=97';
+import {AGENT_KEY, GOALS_KEY, CONVERSATIONS_KEY, readStored, agentCall, loadNativeConnection, saveNativeConnection} from './agent-client.mjs?v=97';
+import {ADAPTIVE_LAYOUTS_KEY, customGoalEntries, findInitialCustomGoalCandidate, goalDomain, isCustomGoalKey, safeAdaptiveLayout, validateAdaptiveLayout} from './adaptive-ui.mjs?v=97';
 import {GOAL_SUPER_AGENT_RUNS_KEY, SUPER_AGENT_RUNS_KEY, createFailedGoalSuperAgentRun, createFailedSuperAgentRun,
   createGoalSuperAgentRequest, createPendingGoalSuperAgentRun, createPendingSuperAgentRun, createSuperAgentRequest,
-  safeGoalSuperAgentRun, safeSuperAgentRun, withRunError, AGENT_RUN_TIMEOUT_MS, AGENT_RUNTIME_KEY, CLOUD_RUN_NOT_FOUND, DSH_RUNTIME, KIMI_RUNTIME, agentRuntimeLabel, safeAgentRuntime, newId} from './super-agent.mjs';
+  safeGoalSuperAgentRun, safeSuperAgentRun, withRunError, AGENT_RUN_TIMEOUT_MS, AGENT_RUNTIME_KEY, CLOUD_RUN_NOT_FOUND, DSH_RUNTIME, KIMI_RUNTIME, agentRuntimeLabel, safeAgentRuntime, newId} from './super-agent.mjs?v=97';
 import {AGENT_NOTIFICATION_LEDGER_KEY, goalRunNotification, taskRunNotification, healthProposalNotification,
-  notificationWasDelivered, recordNotificationDelivered} from './agent-notifications.mjs';
-import {PLANNING_STATE_KEY,cleanDailyDelegation,validateDailyActions,agentHealthSnapshot,cleanPlanningContext,healthContextChanges,createPlanningContext,validateReassessment,buildBackgroundReviewRequest} from './contextual-planning.mjs';
+  notificationWasDelivered, recordNotificationDelivered} from './agent-notifications.mjs?v=97';
+import {PLANNING_STATE_KEY,cleanDailyDelegation,validateDailyActions,agentHealthSnapshot,cleanPlanningContext,healthContextChanges,createPlanningContext,validateReassessment,buildBackgroundReviewRequest} from './contextual-planning.mjs?v=97';
 const TICKET_KEY = 'along.goal-ticket.v1';
 const REMINDER_SYNC_KEY='along.health-reminder-sync.v1';
 const HEALTH_SHARING_KEY='along.health-sharing.v1';
@@ -27,7 +27,28 @@ const pageScroller = nativePage ? app : window;
 if (nativePage) document.documentElement.classList.add('along-native');
 // 离线缓存：只有浏览器支持时才注册（App 内的 along:// 不是安全上下文，会自动跳过）。
 if ('serviceWorker' in navigator) {
-  try { void navigator.serviceWorker.register('./sw.js').catch(()=>{}); }
+  try {
+    // 首次注册前先记下有没有被接管：首次装上 Service Worker 时不该重载页面。
+    const hadController=Boolean(navigator.serviceWorker.controller);
+    void navigator.serviceWorker.register('./sw.js').catch(()=>{});
+    // 脚本地址不变时，浏览器 24 小时内只检查一次更新；这里强制检查一次，
+    // 否则发布新版本后客户端可能一直跑旧脚本（见 web/sw.js 的缓存版本）。
+    // 离线时不去试：离线取不到脚本，只会多一次失败请求。
+    if (navigator.onLine) {
+      const pending=navigator.serviceWorker.getRegistration?.();
+      if(pending)void pending.then(registration=>registration?.update()).catch(()=>{});
+    }
+    // 新 Service Worker 接管后重载一次，让本次启动也用上新资源。
+    // 每个会话最多重载一次，避免反复重载。
+    navigator.serviceWorker.addEventListener?.('controllerchange',()=>{
+      if(!hadController)return;
+      try {
+        if(sessionStorage.getItem('along.shell-reloaded'))return;
+        sessionStorage.setItem('along.shell-reloaded','1');
+      } catch { /* 隐私模式下拿不到 sessionStorage，重载一次也无妨。 */ }
+      location.reload();
+    });
+  }
   catch { /* 注册失败不影响正常使用。 */ }
 }
 let state = loadState(localStorage.getItem(KEY));
@@ -61,6 +82,8 @@ const okxStates=new Map();
 const okxPending=new Map();
 let focusedEventRecommendation=null;
 let selectedEventTaskId=null;
+// 任务详情是从哪里进来的：动态任务列表还是历史任务列表——返回时回到同一处。
+let eventTaskDetailOrigin='home';
 let pendingRecommendationOpen=null;
 let localSelection=null,waitingForSavedGoal=false;
 let lastNotificationProjection='',lastNotificationCheck=0;
@@ -193,7 +216,7 @@ function disconnectEventWorkspace() {
   eventWorkspace=null;
   eventWorkspaceBinding=null;
   okxStates.clear();okxPending.clear();
-  focusedEventRecommendation=null;selectedEventTaskId=null;pendingRecommendationOpen=null;
+  focusedEventRecommendation=null;selectedEventTaskId=null;pendingRecommendationOpen=null;eventTaskDetailOrigin='home';
   waitingForSavedGoal=false;
   lastNotificationProjection='';lastNotificationCheck=0;
 }
@@ -1496,7 +1519,8 @@ async function openEventNotification(route,synced=false) {
     void eventWorkspace.sync();return;
   }
   const linkedTaskId=route.taskId??recommendationMessage?.taskId;
-  const task=goal.tasks.find(t=>t.id===linkedTaskId&&t.status!=='cancelled');
+  // 通知指向的任务可能在按需翻页取回的那部分里：快照与分页缓存都算数。
+  const task=eventWorkspace.taskById(goal.id,linkedTaskId);
   const recommendation=Boolean(recommendationMessage?.recommendation);
   // A result can never cross a task boundary merely because the goal matches.
   const matchesResult=!recommendation||recommendationMessage.taskId===task?.id;
@@ -1506,6 +1530,7 @@ async function openEventNotification(route,synced=false) {
   eventWorkspace.select(goal.id);
   focusedEventRecommendation=recommendation&&matchesResult?recommendationMessage.eventId:null;
   selectedEventTaskId=task?.id??null;
+  eventTaskDetailOrigin='home';
   screen=task&&goal.status==='active'?'task':'home';render();
   if (task) {
     const target=document.getElementById(recommendation&&matchesResult?'event-message-'+route.eventId:'event-task-'+task.id);
@@ -1589,17 +1614,64 @@ function eventTaskTime(task) {
 function isEventTimedTask(task) {
   return task.status==='open'&&(!task.trigger||task.trigger.kind==='time')&&Boolean(task.scheduledAt)&&task.reminderPlan?.state==='scheduled';
 }
-function eventTaskCard(task) {
-  return `<article class="task-row event-task-card" tabindex="-1" id="event-task-${esc(task.id)}"><div><strong>${esc(task.content)}</strong><p>执行时间 · ${esc(eventTaskTime(task))}</p><div class="event-task-footer">${isEventTimedTask(task)?'<span class="task-schedule-tag">定时任务</span>':''}</div></div><div class="event-task-meta"><span class="task-row-status">${task.status==='done'?'已完成':'待完成'}</span><button class="task-detail-link" data-action="event-task-detail" data-task-id="${esc(task.id)}">查看详情<span class="task-detail-chevron" aria-hidden="true">›</span></button></div></article>`;
+function eventTaskCard(task,pending=new Set()) {
+  // 完成键只出现在 open 任务上；已入队待发的完成反馈期间不再重复提供（服务端按事件号幂等）。
+  const complete=task.status==='open'&&!pending.has(task.id)
+    ?`<button class="task-detail-link" data-action="event-task-complete" data-task-id="${esc(task.id)}">完成</button>`:'';
+  return `<article class="task-row event-task-card" tabindex="-1" id="event-task-${esc(task.id)}"><div><strong>${esc(task.content)}</strong><p>执行时间 · ${esc(eventTaskTime(task))}</p><div class="event-task-footer">${isEventTimedTask(task)?'<span class="task-schedule-tag">定时任务</span>':''}</div></div><div class="event-task-meta"><span class="task-row-status">${task.status==='done'?'已完成':'待完成'}</span><div class="event-task-links">${complete}<button class="task-detail-link" data-action="event-task-detail" data-task-id="${esc(task.id)}">查看详情<span class="task-detail-chevron" aria-hidden="true">›</span></button></div></div></article>`;
+}
+// 历史任务入口复用同一份目标快照里的任务，只列 status==='done'；快照之外更早的任务按需翻页取回。
+function eventTaskHistory(goal,pending) {
+  const done=eventWorkspace?eventWorkspace.historyTasks():goal.tasks.filter(task=>task.status==='done');
+  const more=eventWorkspace?!eventWorkspace.historyExhausted():false;
+  return `${backButton('event-task-history-back','返回动态任务')}<section class="task-section"><div class="section-heading"><h2>历史任务</h2></div><div class="task-list">${done.map(task=>eventTaskCard(task,pending)).join('')||'<p class="agent-empty">还没有已完成的任务。</p>'}</div>${more?'<div class="history-more"><button class="minor-action" data-action="event-task-history-more">加载更早的任务</button></div>':''}</section>`;
+}
+// 历史任务翻页：目标快照只带最近 200 条任务，一直翻到找到快照之外的任务或翻到尽头。
+async function loadMoreHistory() {
+  if (!eventWorkspace) return;
+  const workspace=eventWorkspace;
+  try {
+    for (let page=0;page<10;page++) {
+      const result=await workspace.loadHistoryPage();
+      if (result.added>0||result.exhausted) break;
+    }
+  } catch(error) {
+    if (eventWorkspace===workspace) notice(error?.message||'历史任务加载失败');
+  }
+}
+// 完成确认层：取消不发任何请求，卡片状态原样保留（服务端只认确认后发出的 task.completed）。
+// 周期任务完成的是「本次」：服务端续排并保持 open，文案必须与实际行为一致。
+function openEventTaskCompleteConfirm(taskId) {
+  if (!eventWorkspace||!taskId) return;
+  const view=eventWorkspace.view();
+  const task=view.goals[view.activeGoalId]?.tasks.find(item=>item.id===taskId&&item.status==='open');
+  if (!task) return;
+  const copy=recurringPlan(task)
+    ?'确认后完成本次安排，任务会继续按原计划续排，仍在动态任务里。'
+    :'确认后任务会移入历史任务。';
+  show(`<div class="sheet-head"><h2>确认完成</h2><button class="icon-button" data-action="close" aria-label="关闭">×</button></div><p class="sheet-copy">确认「${esc(task.content)}」已完成？${copy}</p><div class="sheet-actions"><button class="button sheet-main-button" data-action="event-task-complete-confirm" data-task-id="${esc(task.id)}">确认完成</button><button class="button secondary" data-action="event-task-complete-cancel">取消</button></div>`);
+}
+async function completeEventTask(taskId) {
+  if (!eventWorkspace||!taskId) return;
+  const workspace=eventWorkspace;
+  try {
+    await workspace.completeTask(taskId);
+    if (eventWorkspace!==workspace) return;
+    // 与既有发送路径同型：先投递队列，再拉一次同步，状态以服务端快照为准。
+    await workspace.sync();
+  } catch(error) {
+    if (eventWorkspace===workspace) notice(error?.message||'完成反馈未提交，请稍后重试');
+  }
 }
 function eventTaskDetail(goal,messages) {
-  const task=goal.tasks.find(t=>t.id===selectedEventTaskId&&t.status!=='cancelled');
-  if (!task) return `${backButton('event-task-back','返回动态任务')}<section class="goal-card"><h1>任务已更新</h1><p>请返回查看最新安排。</p></section>`;
+  // 分页加载出来的历史任务不在目标快照里：先看快照，再看按需翻页取回的那部分。
+  const task=eventWorkspace?eventWorkspace.taskById(goal.id,selectedEventTaskId):goal.tasks.find(t=>t.id===selectedEventTaskId&&t.status!=='cancelled');
+  if (!task) return `${backButton('event-task-back',eventTaskDetailOrigin==='history'?'返回历史任务':'返回动态任务')}<section class="goal-card"><h1>任务已更新</h1><p>请返回查看最新安排。</p></section>`;
   const candidates=messages.filter(m=>m.goalId===goal.id&&m.taskId===task.id&&(m.recommendation||taskResultBodyRelevant(m,goal,task)));
   const result=candidates.find(m=>m.eventId===focusedEventRecommendation)??candidates.at(-1);
   const execution=task.execution;
   const history=execution?.records??[];
-  return `${backButton('event-task-back','返回动态任务')}<section class="goal-card" tabindex="-1" id="event-task-${esc(task.id)}"><p class="goal-note">${esc(goal.title)}</p><h1>${esc(task.content)}</h1><p>执行时间 · ${esc(eventTaskTime(task))}</p>${isEventTimedTask(task)?'<span class="task-schedule-tag">定时任务</span>':''}${taskReminderLine(task)}</section>${result?`<section class="task-section" id="event-message-${esc(result.notificationEventId??result.eventId)}">${result.recommendation?recommendationCard(result.recommendation,{eventId:result.eventId}):taskResultCard(result)}</section>`:''}<section class="task-section"><div class="section-heading"><h2>已记录 ${execution?.count??0} 次执行</h2></div>${history.length?`<ol class="task-execution-list">${history.map(record=>`<li><strong>${esc(record.summary??(record.kind==='research'?'已整理推荐方案':record.kind==='calculation'?'已完成计算':'已确认完成'))}</strong><p>${esc(eventTaskStamp(record.executedAt,task.reminderPlan?.timezone))}</p></li>`).join('')}</ol>`:'<p class="goal-note">暂无可核实的执行记录</p>'}</section>`;
+  return `${backButton('event-task-back',eventTaskDetailOrigin==='history'?'返回历史任务':'返回动态任务')}<section class="goal-card" tabindex="-1" id="event-task-${esc(task.id)}"><p class="goal-note">${esc(goal.title)}</p><h1>${esc(task.content)}</h1><p>执行时间 · ${esc(eventTaskTime(task))}</p>${isEventTimedTask(task)?'<span class="task-schedule-tag">定时任务</span>':''}${taskReminderLine(task)}</section>${result?`<section class="task-section" id="event-message-${esc(result.notificationEventId??result.eventId)}">${result.recommendation?recommendationCard(result.recommendation,{eventId:result.eventId}):taskResultCard(result)}</section>`:''}<section class="task-section"><div class="section-heading"><h2>已记录 ${execution?.count??0} 次执行</h2></div>${history.length?`<ol class="task-execution-list">${history.map(record=>`<li><strong>${esc(record.summary??(record.kind==='research'?'已整理推荐方案':record.kind==='calculation'?'已完成计算':'已确认完成'))}</strong><p>${esc(eventTaskStamp(record.executedAt,task.reminderPlan?.timezone))}</p></li>`).join('')}</ol>`:'<p class="goal-note">暂无可核实的执行记录</p>'}</section>`;
 }
 function recommendationValidity(view) {
   const now=Date.now();
@@ -1623,6 +1695,7 @@ function eventWorkspacePage() {
     ?message.goalId===view.activeGoalId:message.conversationId===view.conversationId));
   const messages=scopedMessages.filter(message=>message.audience!=='background'&&message.presentation!=='execution');
   const connection=connectionSetup(view.error||agentConnection.error);
+  const pendingCompletions=eventWorkspace.pendingTaskCompletions();
   const goalPicker=`<div class="goal-switch"><label for="event-goal-select">当前目标</label><div class="goal-switch-actions"><div class="select-wrap"><select id="event-goal-select" aria-label="切换目标"><option value="" ${!localSelection&&!view.activeGoalId?'selected':''}>新目标</option>${options}${localChoices.length?`<optgroup label="本机已存目标">${localChoices.map(l=>`<option value="local:${esc(l.key)}" ${localSelection?.key===l.key?'selected':''}>${esc(l.title)}</option>`).join('')}</optgroup>`:''}</select></div><button class="goal-add-button" data-action="new-goal">新建</button></div></div>`;
   if (selectedLocal) return localRecordPage(localSelection,selectedLocal.title,goalPicker,connection);
   const history=messages.map(message=>`<div ${message.notificationEventId?`id="event-message-${esc(message.notificationEventId)}"`: ''} class="agent-message ${message.role==='user'?'user':'assistant'}"><p>${esc(message.text)}</p>${message.status==='pending'?'<p class="agent-disclaimer">待同步</p>':message.status==='rejected'||message.status==='failed'?'<p class="agent-disclaimer">发送未完成，请通过聊天重新说明。</p>':''}</div>`).join('');
@@ -1630,7 +1703,8 @@ function eventWorkspacePage() {
   const waiting=view.awaiting?`<div class="agent-message assistant pending" role="status"><div class="agent-thinking"><span aria-hidden="true"><i></i><i></i><i></i></span><p>Agent 正在回复…</p></div></div>`:'';
   const content=chat?`${backButton('agent-back','返回目标')}<div class="agent-title"><h1>${esc(goal?.title||'说说你想做什么')}</h1></div>${connection}<div class="agent-messages" role="log" aria-live="polite">${history}${waiting||(history?'':'<p class="agent-empty">说说你的想法，Along 会和你一起理清下一步。</p>')}</div>`
     :goal&&screen==='task'?eventTaskDetail(goal,scopedMessages)
-    :goal?`${connection}<section class="goal-card"><h1>${esc(goal.title)}</h1>${goal.metric?`<p class="goal-note">${esc(goal.metric.target)} ${esc(goal.metric.unit)} · ${esc(goal.metric.period)}</p>`:''}${goal.context.length?`<p class="goal-note">${goal.context.map(item=>esc(typeof item==='string'?item:item.text)).join('；')}</p>`:''}<div class="card-actions"><button class="agent-action" data-action="event-chat">聊聊这个目标</button></div></section><section class="task-section"><div class="section-heading"><h2>动态任务</h2></div><div class="task-list">${goal.tasks.filter(task=>task.status!=='cancelled').map(eventTaskCard).join('')||'<p class="agent-empty">通过聊天安排下一步。</p>'}</div></section>${eventDataSources(goal)}`:connection;
+    :goal&&screen==='history'?eventTaskHistory(goal,pendingCompletions)
+    :goal?`${connection}<section class="goal-card"><h1>${esc(goal.title)}</h1>${goal.metric?`<p class="goal-note">${esc(goal.metric.target)} ${esc(goal.metric.unit)} · ${esc(goal.metric.period)}</p>`:''}${goal.context.length?`<p class="goal-note">${goal.context.map(item=>esc(typeof item==='string'?item:item.text)).join('；')}</p>`:''}<div class="card-actions"><button class="agent-action" data-action="event-chat">聊聊这个目标</button></div></section><section class="task-section"><div class="section-heading"><h2>动态任务</h2><button class="section-link" data-action="event-task-history">历史任务</button></div><div class="task-list">${goal.tasks.filter(task=>task.status==='open').map(task=>eventTaskCard(task,pendingCompletions)).join('')||'<p class="agent-empty">通过聊天安排下一步。</p>'}</div></section>${eventDataSources(goal)}`:connection;
   return `<div class="app-shell ${chat?'agent-shell':''}"><header class="topbar"><div class="topbar-inner">${brand()}</div></header><main class="content ${chat?'agent-page':goal&&screen==='task'?'event-task-detail':''}"><div class="${chat?'agent-scroll':''}">${goalPicker}${content}</div>${chat?`<div class="agent-composer-dock"><form id="agent-form" class="agent-composer"><textarea name="message" rows="1" placeholder="说说你的想法" maxlength="800" data-draft-scope="${esc(view.draftScope)}" required>${esc(eventWorkspace.draft())}</textarea><button class="agent-send" aria-label="发送" ${agentBusy?'disabled':''}>↑</button></form><p class="agent-disclaimer">Along · 一起，慢慢向前</p></div>`:''}</main></div>`;
 }
 function renderEventUpdate() {
@@ -1825,7 +1899,7 @@ app.addEventListener('change', event => {
       const key=value.slice(6);
       if (localGoalEntries().some(l=>l.key===key)) {localSelection={key};screen='home';render();}
     } else {
-      localSelection=null;selectedEventTaskId=null;focusedEventRecommendation=null;eventWorkspace.select(value||null);screen=value?'home':'agent';render();
+      localSelection=null;selectedEventTaskId=null;focusedEventRecommendation=null;eventTaskDetailOrigin='home';eventWorkspace.select(value||null);screen=value?'home':'agent';render();
     }
     return;
   }
@@ -1858,17 +1932,30 @@ app.addEventListener('click', event => {
     else if (action==='local-task'&&localSelection&&localTasks(localSelection.key).some(t=>t.id===actionTarget.dataset.taskId)) {
       localSelection={key:localSelection.key,taskId:actionTarget.dataset.taskId};render();
     } else if (action==='event-task-detail') {
-      const task=eventWorkspace.view().goals[eventWorkspace.view().activeGoalId]?.tasks.find(t=>t.id===actionTarget.dataset.taskId&&t.status!=='cancelled');
-      if (task) {selectedEventTaskId=task.id;focusedEventRecommendation=null;screen='task';render();}
-    } else if (action==='event-task-back') {selectedEventTaskId=null;focusedEventRecommendation=null;screen='home';render();}
-    else if (action==='event-chat') {selectedEventTaskId=null;focusedEventRecommendation=null;screen='agent';render();}
+      // 分页加载出来的历史卡片同样能打开详情：任务在快照里或按需翻页取回的都算数。
+      const view=eventWorkspace.view();
+      const task=eventWorkspace.taskById(view.activeGoalId,actionTarget.dataset.taskId);
+      if (task&&task.status!=='cancelled') {
+        selectedEventTaskId=task.id;focusedEventRecommendation=null;
+        eventTaskDetailOrigin=screen==='history'?'history':'home';
+        screen='task';render();
+      }
+    } else if (action==='event-task-history') {screen='history';render();void loadMoreHistory();}
+    else if (action==='event-task-history-more') {void loadMoreHistory();}
+    else if (action==='event-task-history-back') {screen='home';eventTaskDetailOrigin='home';render();}
+    else if (action==='event-task-complete') {openEventTaskCompleteConfirm(actionTarget.dataset.taskId);}
+    else if (action==='event-task-back') {
+      selectedEventTaskId=null;focusedEventRecommendation=null;
+      screen=eventTaskDetailOrigin==='history'?'history':'home';eventTaskDetailOrigin='home';render();
+    }
+    else if (action==='event-chat') {selectedEventTaskId=null;focusedEventRecommendation=null;eventTaskDetailOrigin='home';screen='agent';render();}
     else if (action==='event-recommendation-feedback') {
       if (eventWorkspace.prepareRecommendationFeedback(actionTarget.dataset.eventId)) {focusedEventRecommendation=null;screen='agent';render();}
     }
     else if (action==='event-health-connect') {void connectHealth();}
     else if (action==='event-okx-connect') {void connectOkx();}
     else if (action==='agent-back') {
-      selectedEventTaskId=null;focusedEventRecommendation=null;
+      selectedEventTaskId=null;focusedEventRecommendation=null;eventTaskDetailOrigin='home';
       if (!eventWorkspace.view().activeGoalId) eventWorkspace.leaveConversation();
       screen='home';render();
     }
@@ -2925,6 +3012,12 @@ window.addEventListener('along-notification-open',event=>receiveAlongNotificatio
 sheet.addEventListener('click', event => {
   const action = event.target.closest('[data-action]')?.dataset.action;
   if (action === 'close') sheet.close();
+  if (action === 'event-task-complete-cancel') sheet.close();
+  if (action === 'event-task-complete-confirm') {
+    const taskId = event.target.closest('[data-action]')?.dataset.taskId;
+    sheet.close();
+    void completeEventTask(taskId);
+  }
   if (action === 'open-duolingo') window.location.href='https://www.duolingo.com/learn';
   if (action === 'health-demo') {
     saveHealth(setSnapshot(state, {steps:6842, weightKg:64.2, workoutMinutes:75, workoutCount:2, sleepMinutes:437}, 'demo'));

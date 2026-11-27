@@ -453,6 +453,22 @@ async function handleAlongNewLink(req,res,path) {
       readGoal:goalId=>upstream(()=>bridge.call(`/along-source/api/goals/${encodeURIComponent(goalId)}`,{method:'GET',identity:who})),
       disconnect:(goalId,revokeIf)=>sourceConnections.handle({userId:who.userId,goalId,input:{action:'disconnect'},stillAuthorized:()=>stillPaired(who),revokeIf}),
     });
+    // 历史任务按需翻页：目标快照有界（最多 200 条任务），更早的已完成任务在这里按页取回。
+    // 手机到 Host 的路径白名单不新增端点，这一页只随 /sync 的请求与应答一起走。
+    if (input?.tasks_page!==undefined) {
+      const request=input.tasks_page;
+      if (typeof request!=='object'||request===null||Array.isArray(request)) throw new HostError('历史任务请求无效',400);
+      const goalId=typeof request.goal_id==='string'?request.goal_id:'';
+      if (!goalId) throw new HostError('缺少目标',400);
+      const status=request.status===undefined||request.status===null?'':String(request.status);
+      if (status!==''&&!['open','done','cancelled'].includes(status)) throw new HostError('任务状态无效',400);
+      const pageLimit=Number.isInteger(request.limit)?Math.min(Math.max(request.limit,1),200):50;
+      const cursor=typeof request.cursor==='string'&&request.cursor.length>0?request.cursor:'';
+      const query=new URLSearchParams({user_id:who.userId,goal_id:goalId,limit:String(pageLimit)});
+      if (status) query.set('status',status);
+      if (cursor) query.set('cursor',cursor);
+      result.tasks_page=await upstream(()=>bridge.call(`/along-source/api/tasks?${query.toString()}`,{method:'GET',identity:who}));
+    }
     return respond(res,200,notificationService(who.userId).decorate(who,result,input));
   }
   if (path==='/sync/ack') {
