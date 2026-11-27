@@ -244,7 +244,7 @@ test('a completion already submitted is not submitted again until the server sna
 // ---- 页面层：卡片、确认层与历史任务入口 ----
 
 let instance=0;
-async function pageFixture({pending=false,offline=false,refused=false}={}) {
+async function pageFixture({pending=false,offline=false,refused=false,syncFails=false,storage=null}={}) {
   const goal={id:GOAL,domain:'custom',status:'active',revision:1,title:'睡眠目标',metric:null,context:[],dataSources:[],
     tasks:[{id:'t_open',goalId:GOAL,status:'open',content:'睡前放下手机',revision:1},
       {id:'t_repeat',goalId:GOAL,status:'open',content:'每天快走',revision:1,scheduledAt:'2099-01-02T11:00:00Z',
@@ -252,13 +252,13 @@ async function pageFixture({pending=false,offline=false,refused=false}={}) {
       {id:'t_done',goalId:GOAL,status:'done',content:'早起的散步',revision:2}]};
   const saved={version:1,recommendationsVersion:1,conversationVersion:1,executionVersion:2,userId:config.userId,cursor:3,
     activeGoalId:GOAL,conversationId:null,goals:{[GOAL]:goal},messages:{},drafts:{}};
-  const storage={'along.agent.v1':JSON.stringify({baseURL:config.baseURL,fingerprint:config.fingerprint,token:config.token}),
+  const fresh={'along.agent.v1':JSON.stringify({baseURL:config.baseURL,fingerprint:config.fingerprint,token:config.token}),
     ['along.event-workspace.v1:'+config.userId]:JSON.stringify(saved)};
-  if(pending) storage['along.events.pending.v1:'+config.userId]=JSON.stringify([
+  if(pending) fresh['along.events.pending.v1:'+config.userId]=JSON.stringify([
     {event_id:'evt_queued_one',envelope:{event_id:'evt_queued_one',schema_version:'1',event_type:'along.message',kind:'task.completed',
       occurred_at:'2026-11-27T08:00:00.000Z',timezone:'Asia/Shanghai',goal_id:GOAL,task_id:'t_open',
       payload:{event_type:'along.message',kind:'task.completed',task_id:'t_open',completed_at:'2026-11-27T08:00:00.000Z'}}}]);
-  const dom=installDomStub({storage});
+  const dom=installDomStub({storage:storage??fresh});
   const calls=[];
   window.AlongAgentBridge={request:async r=>{calls.push(r);
     if(r.path==='/connection/status')return {along:true,ready:true,eventProtocol:1,userId:config.userId};
@@ -267,7 +267,9 @@ async function pageFixture({pending=false,offline=false,refused=false}={}) {
       // 终态回执（被拒）与真机一致：桥接把非 2xx 的回执体挂在 Error.receipt 上。
       if(refused){const error=Error('完成事实被拒');error.receipt={status:'rejected',event_id:r.body.event_id,reason:'invalid_envelope'};throw error;}
       return {status:'accepted',event_id:r.body.event_id};}
-    if(r.path==='/sync')return {items:[],...(r.body?.tasks_page?{tasks_page:{items:[{id:'t_older',goalId:GOAL,content:'更早的历史任务',status:'done',currentRevision:1}]}}:{})};
+    if(r.path==='/sync'){
+      if(syncFails)throw Error('同步暂不可用');
+      return {items:[],...(r.body?.tasks_page?{tasks_page:{items:[{id:'t_older',goalId:GOAL,content:'更早的历史任务',status:'done',currentRevision:1}]}}:{})};}
     if(r.path==='/sync/ack')return {acked:0};
     throw Error(r.path);},notification:async()=>({})};
   await import('../web/app.mjs?task-completion='+ ++instance);
@@ -275,6 +277,10 @@ async function pageFixture({pending=false,offline=false,refused=false}={}) {
   return {dom,calls};
 }
 const sheetClick=dataset=>document.querySelector('#sheet').dispatch('click',{target:{closest:()=>({dataset})}});
+// 重载页面：把本地存储原样带过去，模拟刷新／重新进入。
+const STORAGE_KEYS=['along.agent.v1','along.event-workspace.v1:'+config.userId,
+  'along.events.pending.v1:'+config.userId,'along.events.failed.v1:'+config.userId];
+const reloadedStorage=dom=>Object.fromEntries(STORAGE_KEYS.map(key=>[key,dom.storage.get(key)]).filter(([,value])=>value!==null));
 
 test('the open task carries a completion key while the done task does not',async()=>{
   const {dom}=await pageFixture();
@@ -354,6 +360,54 @@ test('a completion the server refused keeps the task in the current list and let
   const open=dom.app.innerHTML.split('id="event-task-t_open"')[1]?.split('</article>')[0]??'';
   assert.match(open,/待完成/);
   assert.match(open,/data-action="event-task-complete"/);
+});
+
+test('a refused completion lets the task be submitted again even while the sync stays broken',async()=>{
+  const {dom,calls}=await pageFixture({refused:true,syncFails:true});
+  await dom.click({action:'event-task-complete',taskId:'t_open'});
+  await sheetClick({action:'event-task-complete-confirm',taskId:'t_open'});
+  await new Promise(r=>setTimeout(r,50));
+  // 终态拒收已经了结：任务留在当前列表，完成键立刻回来，不等同步恢复。
+  const open=dom.app.innerHTML.split('id="event-task-t_open"')[1]?.split('</article>')[0]??'';
+  assert.match(open,/待完成/);
+  assert.match(open,/data-action="event-task-complete"/);
+  const firstEventId=calls.find(call=>call.path==='/events')?.body.event_id;
+  // 刷新后仍可点击重试：终态回执与完成键都只依赖本地记录，不依赖同步成功。
+  const reloaded=await pageFixture({refused:true,syncFails:true,storage:reloadedStorage(dom)});
+  const again=reloaded.dom.app.innerHTML.split('id="event-task-t_open"')[1]?.split('</article>')[0]??'';
+  assert.match(again,/待完成/);
+  assert.match(again,/data-action="event-task-complete"/);
+  // 重试是新的完成事实：新的事件号，服务端据此只记一次完成。
+  await reloaded.dom.click({action:'event-task-complete',taskId:'t_open'});
+  await sheetClick({action:'event-task-complete-confirm',taskId:'t_open'});
+  await new Promise(r=>setTimeout(r,50));
+  const retried=reloaded.calls.filter(call=>call.path==='/events');
+  assert.equal(retried.length,1);
+  assert.notEqual(retried[0].body.event_id,firstEventId);
+});
+
+test('a lost receipt is retried with the same event id so the completion is not counted twice',async()=>{
+  const dom=installDomStub();
+  const sent=[];
+  window.AlongAgentBridge={request:async input=>{
+    if(input.path==='/events'){
+      sent.push(input.body.event_id);
+      if(sent.length===1)throw Error('回执丢失');
+      return {status:'duplicate',event_id:input.body.event_id};}
+    if(input.path==='/sync')return {items:[taskItem('open')]};
+    return {acked:0};}};
+  const workspace=createEventWorkspace({config});
+  await workspace.sync();
+  await workspace.completeTask('t_open');
+  await workspace.sync();
+  // 回执丢失：事实留在待发队列里，等下一次投递。
+  assert.equal(pendingEvents(config).length,1);
+  await workspace.sync();
+  // 自动重投沿用同一份信封、同一事件号：服务端按事件号幂等，完成只记一次。
+  assert.equal(sent.length,2);
+  assert.equal(sent[0],sent[1]);
+  assert.equal(pendingEvents(config).length,0);
+  assert.ok(workspace.acceptedTaskCompletions().has('t_open'));
 });
 
 test('a recurring task stays in the current list because only this occurrence is completed',async()=>{
