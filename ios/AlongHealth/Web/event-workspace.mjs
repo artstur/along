@@ -287,8 +287,9 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
   bindEventAuthority(config);
   const key=`along.event-workspace.v1:${config.userId}`;
   let state=empty(config.userId),flight=null,lastError='',disposed=false;
-  // 历史翻页的批次序号：已落地的批次号，用来识别迟到的旧批次响应。
-  let historySeq=0,appliedHistorySeq=0;
+  // 历史翻页的批次序号与会话号：已落地的批次号用来识别迟到的旧批次响应，
+  // 会话号在切换目标时立即作废，用来识别换目标前发出的旧请求。
+  let historySeq=0,appliedHistorySeq=0,historySession=0;
   try {
     const saved=JSON.parse(localStorage.getItem(key));
     if (saved?.version===1&&saved.userId===config.userId&&version(saved.cursor)&&record(saved.goals)&&record(saved.messages)) {
@@ -414,6 +415,8 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
   }
   function select(goalId) {
     if (goalId!==null&&!isActiveGoal(state,goalId)) return;
+    // 换了目标：旧的分页会话立即作废，在途的旧响应回来时不得再写入任何状态。
+    if (goalId!==state.activeGoalId) historySession+=1;
     const returnGoalId=goalId===null
       ? (state.goals[state.activeGoalId]?.status==='active'?state.activeGoalId:state.returnGoalId)
       : goalId;
@@ -475,12 +478,13 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
     const history=historyOf(state.history);
     const current=history&&history.goalId===goalId?history:{tasks:[],cursor:undefined,exhausted:false};
     if (current.exhausted) return {added:0,exhausted:true};
-    // 记住发起请求时的那一批（游标）与序号：响应只能写回同一目标、同一批次。
-    const batch=current.cursor, seq=++historySeq;
+    // 记住发起请求时的那一批（游标）、序号与会话：响应只能写回同一目标、同一批次、同一会话。
+    const batch=current.cursor, seq=++historySeq, session=historySession;
     const page=await agentCall(config,'/sync',{after_seq:state.cursor,limit:1,conversation_version:1,
       tasks_page:{goal_id:goalId,status:'done',limit:50,...(current.cursor?{cursor:current.cursor}:{})}});
-    // 迟到的响应（期间换了目标，同一目标已经翻到别的批次，或已有更新的批次落地）直接丢弃：
+    // 迟到的响应（换了目标导致会话作废、期间换了目标、同目标已翻到别的批次，或已有更新的批次落地）直接丢弃：
     // 它不得改写当前目标的卡片、游标与「加载更早的任务」收口状态。
+    if (session!==historySession) return {added:0,exhausted:true};
     if (state.activeGoalId!==goalId) return {added:0,exhausted:true};
     if (seq<=appliedHistorySeq) return {added:0,exhausted:true};
     const latest=historyOf(state.history);

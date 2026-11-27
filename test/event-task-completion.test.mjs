@@ -125,6 +125,59 @@ test('a late page from an earlier batch does not land in the reloaded cache of t
   assert.equal(workspace.historyExhausted(),true);
 });
 
+test('a page sent before the target switch is ignored while the new target is still loading',async()=>{
+  const secondGoal='g_second';
+  const snapshotOf=(id,title)=>({goal:{id,domain:'custom',status:'active',currentRevision:1},
+    revision:{goalId:id,revision:1,title,status:'active'},
+    tasks:[{id:'t_'+id,goalId:id,content:id+' 的任务',status:'open',currentRevision:1}]});
+  // A 的末页在途 → 切到 B，B 的响应也在途 → 切回 A，新 A 的请求在途。
+  const gates=[];
+  const gate=()=>{let release;const promise=new Promise(resolve=>{release=resolve});gates.push({release,promise});return gates[gates.length-1];};
+  const aGate=gate(),bGate=gate(),aGate2=gate();
+  let aCalls=0;
+  const {workspace}=setup(async input=>{
+    if(input.path==='/sync'&&input.body?.tasks_page) {
+      const goalId=input.body.tasks_page.goal_id;
+      if(goalId===GOAL) {
+        aCalls+=1;
+        await (aCalls===1?aGate:aGate2).promise;
+        return {items:[],tasks_page:{items:[{id:'t_a_'+aCalls,goalId:GOAL,content:'A 的第 '+aCalls+' 批',status:'done',currentRevision:1}]}};
+      }
+      await bGate.promise;
+      return {items:[],tasks_page:{items:[{id:'t_b_1',goalId:secondGoal,content:'B 的任务',status:'done',currentRevision:1}]}};
+    }
+    if(input.path==='/sync')return {items:[
+      {seq:1,userId:config.userId,kind:'goal_updated',goalId:GOAL,payload:{snapshot:snapshotOf(GOAL,'目标 A')}},
+      {seq:2,userId:config.userId,kind:'goal_updated',goalId:secondGoal,payload:{snapshot:snapshotOf(secondGoal,'目标 B')}}]};
+    return {acked:0};
+  });
+  await workspace.sync();
+  workspace.select(GOAL);
+  const oldA=workspace.loadHistoryPage();
+  await new Promise(r=>setTimeout(r,10));
+  workspace.select(secondGoal);
+  const pendingB=workspace.loadHistoryPage();
+  await new Promise(r=>setTimeout(r,10));
+  workspace.select(GOAL);
+  const newA=workspace.loadHistoryPage();
+  await new Promise(r=>setTimeout(r,10));
+  // 只放行旧 A：新的 A 还没回来，状态必须原样不动（仍无分页结果、未收口）。
+  aGate.release();
+  await oldA;
+  assert.deepEqual(workspace.historyTasks(),[]);
+  assert.equal(workspace.historyExhausted(),false);
+  // 放行 B：B 已经不是当前目标，同样不得写入。
+  bGate.release();
+  await pendingB;
+  assert.deepEqual(workspace.historyTasks(),[]);
+  assert.equal(workspace.historyExhausted(),false);
+  // 放行新 A：正常写入，分页收口。
+  aGate2.release();
+  await newA;
+  assert.deepEqual(workspace.historyTasks().map(task=>task.id),['t_a_2']);
+  assert.equal(workspace.historyExhausted(),true);
+});
+
 test('the same task is not submitted twice while its completion is still queued',async()=>{
   const {workspace}=setup(input=>input.path==='/sync'?{items:[taskItem('open')]}:{acked:0});
   await workspace.sync();
