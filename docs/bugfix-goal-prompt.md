@@ -286,6 +286,8 @@ Along 是手机优先的目标工作台：把一个目标拆成「目标 / 来�
 
 - **页面级双指缩放只能靠 viewport 锁，原生容器和 CSS 都拦不住**：WKWebView 里关掉 `scrollView` 的捏合识别器、把 `maximumZoomScale` 收成 1 倍，页面照样被放大（模拟器实测 1.5～1.8 倍），加载完再补一次也稳不住——WebKit 会把缩放上限抬回去；CSS 的 `touch-action: pan-x pan-y` 同样拦不住（`none` 能拦住，但会把单指滚动一起关掉）。真正有效的是 viewport 的 `maximum-scale=1, user-scalable=no`：WKWebView 认这两个参数；Safari（自己的 App 与 SFSafariViewController）从 iOS 10 起忽略它们，所以网页版本在 iPhone 上不受这条影响。要只锁 App、不牵连网页版本，就在 head 里按 `location.protocol === 'along:'` 判断后改写 viewport——必须赶在首次布局前，模块脚本是延迟加载的，等它跑就来不及。
 
+- **测试同日聊天时间分割线时，把消息时间固定在同一个本地日期**。用运行时刻减去相对间隔，消息可能在午夜附近意外跨日。逐条重新取当天日期也会在测试执行跨过午夜时漂移。测试开始时计算一次本地 10:00，整组样本都用这个基准，跨日规则用显式的两天时间戳覆盖。
+
 === END GOAL PROMPT ===
 
 ---

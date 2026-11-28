@@ -9,7 +9,9 @@ import {chatTimeline} from '../web/event-workspace.mjs';
 
 const config={baseURL:'https://localhost:4176',fingerprint:'A'.repeat(64),token:'b'.repeat(64)};
 const settle=()=>new Promise(resolve=>setTimeout(resolve,30));
-const at=offset=>new Date(Date.now()+offset).toISOString();
+// 只取一次本地 10:00，让这些消息即使在测试运行跨过午夜时也属于同一天。
+const fixtureTime=new Date().setHours(10,0,0,0);
+const at=offset=>new Date(fixtureTime+offset).toISOString();
 
 // 期望文案走 Intl，与实现里的 Date 取值是两条独立路径。
 function expectedLabel(value,reference=Date.now()) {
