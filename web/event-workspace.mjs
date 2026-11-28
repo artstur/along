@@ -254,6 +254,10 @@ export function safeWorkspaceGoal(snapshot) {
   if (goal.domain==='custom' ? metric!=null : !record(metric)||!text(metric.type,64)||!text(metric.unit,16)||!text(metric.period,32)) throw Error('目标指标格式不正确');
   if (revision.context!=null && (!Array.isArray(revision.context)||revision.context.length>20||revision.context.some(item=>
     typeof item==='string'?!text(item,300):!record(item)||!text(item.text,300)||(item.until!==undefined&&!time(item.until))))) throw Error('目标情境格式不正确');
+  const context=revision.context??[];
+  const summaries=context.filter(item=>record(item)&&item.kind==='goal_summary');
+  const summary=summaries.length===1&&summaries[0].until===undefined&&text(summaries[0].text,120)&&!/[\r\n]/.test(summaries[0].text)
+    ?summaries[0].text.trim():'';
   const seen=new Set();
   const cleanTasks=tasks.map(task=>cleanGoalTask(task,goal.id,seen));
   validateGoalReply({reply:'目标已同步',proposal:{title:revision.title,target:metric?.target??null,
@@ -263,7 +267,7 @@ export function safeWorkspaceGoal(snapshot) {
       title:'下一步',detail:task.content,state:'planned'})),questions:[],connections:[]},goal.domain);
   if (!layout) throw Error('目标页面校验失败');
   return {id:goal.id,domain:goal.domain,status:goal.status,revision:goal.currentRevision,title:revision.title,
-    metric:metric??null,context:revision.context??[],tasks:cleanTasks,layout,dataSources:safeDataSources(snapshot.dataSources)};
+    metric:metric??null,context,...(summary?{summary}:{}),tasks:cleanTasks,layout,dataSources:safeDataSources(snapshot.dataSources)};
 }
 
 function safeMessage(message,item) {

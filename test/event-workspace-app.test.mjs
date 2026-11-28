@@ -20,6 +20,68 @@ function installEventBridge(state={syncItems:[]}) {
 
 const settle=()=>new Promise(resolve=>setTimeout(resolve,30));
 
+test('goal cards summarize synced and cached goals without exposing historical context',async()=>{
+  const healthId='g_summary_health',plainId='g_summary_plain',metricId='g_summary_metric';
+  const health={id:healthId,domain:'custom',status:'active',currentRevision:1};
+  const plain={id:plainId,domain:'custom',status:'active',currentRevision:1};
+  const metricGoal={id:metricId,domain:'health',status:'active',currentRevision:1};
+  const context=['观测活动：今日步数 8694（旧记录）',{text:'健康数据源原始单位为分钟，展示前必须换算'}];
+  const summary={kind:'goal_summary',text:'持续关注整体健康，从改善睡眠入手，逐步建立更规律的作息。'};
+  const tasks=[
+    ['a','done','已经完成的测试安排'],['b','open','睡前准备 <留出二十分钟>'],
+    ['c','open','睡前准备 <留出二十分钟>'],['d','open','早上看健康小结'],['e','open','第三条当前任务'],
+  ].map(([id,status,content])=>({id:'t_summary_'+id,goalId:healthId,status,content,currentRevision:1}));
+  const snapshot=(goal,title,fields={})=>({goal,revision:{goalId:goal.id,revision:1,status:'active',title,context,...fields},
+    tasks:goal.id===healthId?tasks:[]});
+  const healthSnapshot={...snapshot(health,'改善我的健康'),
+    dataSources:[{provider:'apple-health',status:'recommended',reason:'查看已选的健康摘要'}]};
+  const syncItems=[
+    {seq:1,userId:'u_app_b',kind:'goal_updated',goalId:healthId,payload:{snapshot:healthSnapshot}},
+    {seq:2,userId:'u_app_b',kind:'goal_updated',goalId:plainId,payload:{snapshot:snapshot(plain,'读完这本书')}},
+    {seq:3,userId:'u_app_b',kind:'goal_updated',goalId:metricId,payload:{snapshot:snapshot(metricGoal,'增加每周运动',
+      {metric:{type:'workout',target:120,unit:'分钟',period:'每周'}})}},
+  ];
+  const dom=installDomStub({storage:{'along.agent.v1':JSON.stringify(config),'along.health.v1':JSON.stringify({
+    version:1,source:'healthkit',goals:[],snapshot:{contextReviewAllowed:true,selectedTypes:['sleep','steps']},
+  })}});
+  document.visibilityState='visible';
+  installEventBridge({syncItems});
+  await import('../web/app.mjs?goal-card-summary');await settle();
+  const select=(page,id)=>page.app.dispatch('change',{target:{id:'event-goal-select',value:id}});
+  const card=page=>page.app.innerHTML.match(/<section class="goal-card">([\s\S]*?)<\/section>/)?.[1]??'';
+  await select(dom,healthId);
+  const assertHealthCard=(page,expected)=>{
+    const html=card(page);
+    assert.match(html,/<h1>改善我的健康<\/h1>/);
+    assert.doesNotMatch(html,/8694|展示前必须换算|已选健康数据|步数、睡眠/);
+    assert.equal(html.match(/<p class="event-goal-summary">([^<]*)<\/p>/)?.[1],expected);
+    assert.doesNotMatch(html,/已经完成的测试安排|第三条当前任务|<留出二十分钟>/);
+    assert.match(html,/data-action="event-chat"/);
+    assert.match(page.app.innerHTML,/<strong>第三条当前任务<\/strong>/);
+  };
+  assertHealthCard(dom,'目前从「睡前准备 &lt;留出二十分钟&gt;」和「早上看健康小结」着手。');
+  await select(dom,plainId);
+  assert.match(card(dom),/<h1>读完这本书<\/h1>/);
+  assert.doesNotMatch(card(dom),/event-goal-summary|8694|展示前必须换算|睡眠/);
+  await select(dom,metricId);
+  assert.match(card(dom),/<p class="goal-note">120 分钟 · 每周<\/p>/);
+  await select(dom,healthId);
+  syncItems.push({seq:4,userId:'u_app_b',kind:'goal_updated',goalId:healthId,payload:{snapshot:{
+    ...healthSnapshot,goal:{...health,currentRevision:2},
+    revision:{...healthSnapshot.revision,revision:2,context:[summary,...context]},
+  }}});
+  await dom.tick(3000);await settle();
+  assertHealthCard(dom,summary.text);
+  assert.doesNotMatch(card(dom),/睡前准备|早上看健康小结/);
+
+  const cached=JSON.parse(dom.storage.get('along.event-workspace.v1:u_app_b'));
+  assert.deepEqual(cached.goals[healthId].context,[summary,...context]);
+  const offline=installDomStub({storage:Object.fromEntries(dom.store)});
+  window.AlongAgentBridge={request:async()=>{throw Error('offline');}};
+  await import('../web/app.mjs?goal-card-summary-offline');await settle();
+  assertHealthCard(offline,summary.text);
+});
+
 test('task reminder text preserves the Agent timezone, cadence and escaped explanation in the existing task row',async()=>{
   const goal={id:'g_plan_ui',domain:'custom',status:'active',revision:1,title:'有提醒的目标',metric:null,context:[],tasks:[
     {id:'t_plan_ui',goalId:'g_plan_ui',status:'open',content:'准备休息',revision:1,scheduledAt:'2099-01-01T17:30:00Z',

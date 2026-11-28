@@ -1687,6 +1687,12 @@ function recommendationValidity(view) {
 function refreshRecommendationValidity() {
   if (eventWorkspace&&recommendationValidity(eventWorkspace.view())!==renderedRecommendationValidity) renderEventUpdate();
 }
+function eventGoalSummary(goal,openTasks) {
+  if (goal.summary) return goal.summary;
+  const briefTasks=openTasks.map(task=>task.content.trim()).filter(text=>text.length<=36&&!/[\r\n]/.test(text));
+  const examples=[...new Set(briefTasks)].slice(0,2).map(text=>`「${text}」`);
+  return examples.length?`目前从${examples.join('和')}着手。`:'';
+}
 function eventWorkspacePage() {
   const view=eventWorkspace.view();
   renderedRecommendationValidity=recommendationValidity(view);
@@ -1704,6 +1710,8 @@ function eventWorkspacePage() {
   // 服务端已受理的完成事实：这一项已经不是「待完成」，不再留在当前列表里
   // （服务端补发快照后它在快照里就是 done，两处口径一致）。
   const acceptedCompletions=eventWorkspace.acceptedTaskCompletions();
+  const openTasks=goal?.tasks.filter(task=>task.status==='open'&&!acceptedCompletions.has(task.id))??[];
+  const goalSummary=goal?eventGoalSummary(goal,openTasks):'';
   const goalPicker=`<div class="goal-switch"><label for="event-goal-select">当前目标</label><div class="goal-switch-actions"><div class="select-wrap"><select id="event-goal-select" aria-label="切换目标"><option value="" ${!localSelection&&!view.activeGoalId?'selected':''}>新目标</option>${options}${localChoices.length?`<optgroup label="本机已存目标">${localChoices.map(l=>`<option value="local:${esc(l.key)}" ${localSelection?.key===l.key?'selected':''}>${esc(l.title)}</option>`).join('')}</optgroup>`:''}</select></div><button class="goal-add-button" data-action="new-goal">新建</button></div></div>`;
   if (selectedLocal) return localRecordPage(localSelection,selectedLocal.title,goalPicker,connection);
   // 时间分割线按整条可见消息列表算：首条有时间的消息前一条，之后看间隔和跨日。
@@ -1715,7 +1723,7 @@ function eventWorkspacePage() {
   const content=chat?`${backButton('agent-back','返回目标')}<div class="agent-title"><h1>${esc(goal?.title||'说说你想做什么')}</h1></div>${connection}<div class="agent-messages" role="log" aria-live="polite">${history}${waiting||(history?'':'<p class="agent-empty">说说你的想法，Along 会和你一起理清下一步。</p>')}</div>`
     :goal&&screen==='task'?eventTaskDetail(goal,scopedMessages)
     :goal&&screen==='history'?eventTaskHistory(goal,pendingCompletions)
-    :goal?`${connection}<section class="goal-card"><h1>${esc(goal.title)}</h1>${goal.metric?`<p class="goal-note">${esc(goal.metric.target)} ${esc(goal.metric.unit)} · ${esc(goal.metric.period)}</p>`:''}${goal.context.length?`<p class="goal-note">${goal.context.map(item=>esc(typeof item==='string'?item:item.text)).join('；')}</p>`:''}<div class="card-actions"><button class="agent-action" data-action="event-chat">聊聊这个目标</button></div></section><section class="task-section"><div class="section-heading"><h2>动态任务</h2><button class="section-link" data-action="event-task-history">历史任务</button></div><div class="task-list">${goal.tasks.filter(task=>task.status==='open'&&!acceptedCompletions.has(task.id)).map(task=>eventTaskCard(task,pendingCompletions)).join('')||'<p class="agent-empty">通过聊天安排下一步。</p>'}</div></section>${eventDataSources(goal)}`:connection;
+    :goal?`${connection}<section class="goal-card"><h1>${esc(goal.title)}</h1>${goalSummary?`<p class="event-goal-summary">${esc(goalSummary)}</p>`:''}${goal.metric?`<p class="goal-note">${esc(goal.metric.target)} ${esc(goal.metric.unit)} · ${esc(goal.metric.period)}</p>`:''}<div class="card-actions"><button class="agent-action" data-action="event-chat">聊聊这个目标</button></div></section><section class="task-section"><div class="section-heading"><h2>动态任务</h2><button class="section-link" data-action="event-task-history">历史任务</button></div><div class="task-list">${openTasks.map(task=>eventTaskCard(task,pendingCompletions)).join('')||'<p class="agent-empty">通过聊天安排下一步。</p>'}</div></section>${eventDataSources(goal)}`:connection;
   return `<div class="app-shell ${chat?'agent-shell':''}"><header class="topbar"><div class="topbar-inner">${brand()}</div></header><main class="content ${chat?'agent-page':goal&&screen==='task'?'event-task-detail':''}"><div class="${chat?'agent-scroll':''}">${goalPicker}${content}</div>${chat?`<div class="agent-composer-dock"><form id="agent-form" class="agent-composer"><textarea name="message" rows="1" placeholder="说说你的想法" maxlength="800" data-draft-scope="${esc(view.draftScope)}" required>${esc(eventWorkspace.draft())}</textarea><button class="agent-send" aria-label="发送" ${agentBusy?'disabled':''}>↑</button></form><p class="agent-disclaimer">Along · 一起，慢慢向前</p></div>`:''}</main></div>`;
 }
 function renderEventUpdate() {
