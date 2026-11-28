@@ -1,11 +1,11 @@
-import {agentCall, queueEvent, flushEventQueue, pendingEvents, readEventFailures,bindEventAuthority,retireEventAuthority} from './agent-client.mjs?v=100';
-import {assembleEnvelope} from './event-envelope.mjs?v=100';
-import {validateGoalReply} from './goal-agent-core.mjs?v=100';
-import {safeAdaptiveLayout} from './adaptive-ui.mjs?v=100';
-import {safeRecommendation} from './recommendations.mjs?v=100';
-import {safeDataSources} from './data-sources.mjs?v=100';
-import {taskResultRelevant,resultEvidence,validResultEvidence} from './task-results.mjs?v=100';
-import {safeResultPresentation,RESULT_TEXT_LIMIT,wellFormedResultText} from './task-result-view.mjs?v=100';
+import {agentCall, queueEvent, flushEventQueue, dropQueuedEvent, dropQueuedCompletions, pendingEvents, readEventFailures,bindEventAuthority,retireEventAuthority} from './agent-client.mjs?v=109';
+import {assembleEnvelope} from './event-envelope.mjs?v=109';
+import {validateGoalReply} from './goal-agent-core.mjs?v=109';
+import {safeAdaptiveLayout} from './adaptive-ui.mjs?v=109';
+import {safeRecommendation} from './recommendations.mjs?v=109';
+import {safeDataSources} from './data-sources.mjs?v=109';
+import {taskResultRelevant,resultEvidence,validResultEvidence} from './task-results.mjs?v=109';
+import {safeResultPresentation,RESULT_TEXT_LIMIT,wellFormedResultText} from './task-result-view.mjs?v=109';
 
 const id = value => typeof value==='string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$/.test(value);
 const record = value => value!==null && typeof value==='object' && !Array.isArray(value);
@@ -204,12 +204,16 @@ function cleanTaskTrigger(t) {
 }
 
 // 完成事实台账（本地）：已提交但服务端快照尚未确认的任务。损坏的条目直接丢弃，不让整份缓存作废。
+// outcome 是这条完成事实自己的终态回执：queued=已入队还没有终态回执，accepted=服务端已受理，
+// failed=服务端终态拒收。台账按任务记账，不受别的任务的失败记录影响。
 function completionsOf(value) {
   if (!record(value)) return {};
   const out={};
   for (const [taskId,entry] of Object.entries(value)) {
     if (!id(taskId)||!record(entry)||!eventId(entry.eventId)||!id(entry.goalId)||!version(entry.revision)) continue;
-    out[taskId]={eventId:entry.eventId,goalId:entry.goalId,revision:entry.revision};
+    if (entry.outcome!==undefined&&!['queued','unconfirmed','accepted','failed','unknown'].includes(entry.outcome)) continue;
+    out[taskId]={eventId:entry.eventId,goalId:entry.goalId,revision:entry.revision,
+      ...(entry.outcome===undefined?{}:{outcome:entry.outcome})};
   }
   return out;
 }
@@ -552,13 +556,47 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
     restoreSelection(next);save(next);onChange();
     return next.activeGoalId;
   }
-  // 已入队但尚未送达的完成反馈：同一个任务不重复提交（服务端按事件号幂等，重复提交也不会累加执行次数）。
+  /**
+   * 尚未了结的完成反馈：同一个任务不重复提交（服务端按事件号幂等，重复提交也不会累加执行次数）。
+   *
+   * 依据是**这条完成事实自己的回执**（台账里的 outcome），不是本地失败台账：失败台账有 50 条上限，
+   * 别的任务失败得多了会把这条挤掉，那时「没在失败台账里」不再等于「被受理过」。
+   *
+   * - failed（终态拒收）：了结，任务回到可完成状态，用户可以重试。
+   * - unknown（服务端快照说这项任务还没完成）：结果不明，保持可重试，也不再反复回放。
+   * - accepted（明确受理）：已收下，快照确认前不重复提交。
+   * - queued / 旧缓存里没有回执的条目：只有它真的还在待发队列里才算待处理——队列里存着
+   *   原始信封与原事件号，重投时沿用它。没有受理证据就不当已受理，宁可让用户重试。
+   */
   function pendingTaskCompletions() {
     const ids=new Set();
+    const queued=new Set(pendingEvents(config).map(item=>item.event_id));
     for (const {envelope} of pendingEvents(config)) {
       if (envelope?.kind==='task.completed'&&typeof envelope.task_id==='string') ids.add(envelope.task_id);
     }
-    for (const taskId of Object.keys(state.completions??{})) ids.add(taskId);
+    for (const [taskId,entry] of Object.entries(completionsOf(state.completions))) {
+      if (entry.outcome==='failed'||entry.outcome==='unknown') continue;
+      if (entry.outcome==='accepted'||entry.outcome==='unconfirmed') {ids.add(taskId);continue;}
+      if (queued.has(entry.eventId)) ids.add(taskId);
+    }
+    return ids;
+  }
+  /**
+   * 服务端已受理的完成事实：台账里这条完成事实的终态回执是 accepted。
+   *
+   * 服务端受理了完成事实，这条任务就不再是「待完成」——即便这一版服务端不为完成事实
+   * 补发带目标快照的同步项（那样客户端永远等不到新快照，任务会一直挂在当前列表里）。
+   * 服务端补发了快照时，这条任务在快照里已经是 done，两者口径一致。
+   *
+   * 判据是**受理这件事本身**（回执），不是「没被拒收」：没有受理证据的条目（被拒收的旧条目、
+   * 更早的客户端写的、只有诊断记录没有回执的）一律不算已受理——宁可让用户重试，也不要把
+   * 一项没做完的任务凭空藏起来。
+   */
+  function acceptedTaskCompletions() {
+    const ids=new Set();
+    for (const [taskId,entry] of Object.entries(completionsOf(state.completions))) {
+      if (entry.outcome==='accepted') ids.add(taskId);
+    }
     return ids;
   }
   /**
@@ -581,10 +619,44 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
     // 普通任务：提交后等服务端快照确认（完成或版本前进）。同步故障期间不重复提交，
     // 同一任务只产生一次 done 版本与一条同步项。周期任务由服务端按周期去重，下一次仍可完成。
     const completions={...completionsOf(state.completions)};
-    if (!recurringPlan(task)) completions[taskId]={eventId:receipt.event_id,goalId,revision:task.revision};
+    // 原本没核对过的任务：台账继续记着那条旧事实（服务端可能已经收过），用户这次提交的
+    // 换了事件号，在核对完成前不送达——先送会被服务端记成第二次完成。
+    const previous=completions[taskId];
+    const wasUnconfirmed=previous!==undefined&&(previous.outcome===undefined||previous.outcome==='unconfirmed');
+    if (!recurringPlan(task)) completions[taskId]=wasUnconfirmed
+      ? {...previous,outcome:'unconfirmed'}
+      : {eventId:receipt.event_id,goalId,revision:task.revision,outcome:'queued'};
     try { save({...state,completions}); } catch { state={...state,completions}; }
     onChange();
     return receipt.event_id;
+  }
+  /**
+   * 把投递的终态回执记到各自的完成事实上：accepted/duplicate=服务端已受理，rejected/conflict=终态拒收。
+   * 依据是这条事实自己的回执，与同步成败无关，也与别的任务的失败记录无关。
+   */
+  function recordDeliveryOutcomes(outcomes) {
+    if (!Array.isArray(outcomes)||outcomes.length===0) return;
+    const completions={...completionsOf(state.completions)};
+    let changed=false;
+    for (const outcome of outcomes) {
+      const status=outcome?.status;
+      if (status!=='accepted'&&status!=='duplicate'&&status!=='rejected'&&status!=='conflict') continue;
+      const resolved=status==='accepted'||status==='duplicate'?'accepted':'failed';
+      // 归属按任务：用户重新提交过完成事实时，事件号换了，回执仍算在这项任务上。
+      for (const [taskId,entry] of Object.entries(completions)) {
+        if (outcome.task_id!==undefined&&outcome.task_id!==taskId) continue;
+        if (outcome.task_id===undefined&&entry.eventId!==outcome.event_id) continue;
+        if (entry.outcome===resolved) continue;
+        completions[taskId]={...entry,outcome:resolved};
+        changed=true;
+        // 服务端已经收下这条完成事实：排队里为这项任务等着的其他完成事实不必再送达。
+        if (resolved==='accepted') dropQueuedCompletions(config,taskId);
+      }
+    }
+    if (!changed) return;
+    const next={...state,completions};
+    try { save(next); } catch { state=next; }
+    onChange();
   }
   /**
    * 历史任务按需翻页：目标快照只带最近 200 条任务，更早的按页取回，不放大每次同步的快照。
@@ -657,15 +729,83 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
     return history.tasks.find(task=>task.id===taskId);
   }
   /**
-   * 台账收敛：服务端快照确认完成（或版本前进）后移除记录；终态回执（被拒／冲突）同样移除，
-   * 让用户可以重新提交。周期任务不记台账——服务端按周期去重，下一次仍可完成。
+   * 旧缓存里的完成条目（更早的客户端写的，没有 outcome）：结果不明。
+   * 它们需要一次同步回放——服务端在读取时把**当前**的目标快照挂在同步项上，
+   * 客户端因此能按服务端真实状态收敛，而不是靠本地猜测。
+   */
+  function hasUnresolvedCompletions() {
+    return Object.values(completionsOf(state.completions)).some(entry=>entry.outcome===undefined||entry.outcome==='unconfirmed');
+  }
+  /**
+   * 还没确认状态的任务（台账里没有回执的旧条目）：它们的服务端状态还没核对过，
+   * 在核对完成前不能替用户再投一次完成事实——否则服务端会记成第二次完成。
+   */
+  function unconfirmedTasks() {
+    const ids=new Set();
+    for (const [taskId,entry] of Object.entries(completionsOf(state.completions))) {
+      if (entry.outcome===undefined||entry.outcome==='unconfirmed') ids.add(taskId);
+    }
+    return ids;
+  }
+  /**
+   * 待同步项是不是「还没确认状态的那条完成事实」：是就先不送达，等核对结果。
+   *
+   * 台账记着的那条旧事实（更早的客户端留下的）重投是安全的——服务端按事件号幂等，
+   * 同号重投不会变成第二次完成；用户重新提交的那条换了事件号，在核对完成前不送达。
+   */
+  function deferredCompletion(item) {
+    const envelope=item?.envelope;
+    if (envelope?.kind!=='task.completed'||typeof envelope.task_id!=='string') return false;
+    if (!unconfirmedTasks().has(envelope.task_id)) return false;
+    const entry=completionsOf(state.completions)[envelope.task_id];
+    return entry?.eventId!==envelope.event_id;
+  }
+  /**
+   * 回放之后收敛旧条目：服务端快照说这项任务已经完成，就让它退出当前列表（台账一并清掉）；
+   * 快照说还没完成，就标成「结果不明」——保持可见可重试，也不再反复回放。
+   */
+  function resolveUnresolvedCompletions(next) {
+    const completions={...completionsOf(next.completions)};
+    let changed=false;
+    for (const [taskId,entry] of Object.entries(completions)) {
+      if (entry.outcome!==undefined&&entry.outcome!=='unconfirmed') continue;
+      // 服务端说还没完成（或这次没拿到快照）：结果不明，保持可重试，也不再反复回放。
+      completions[taskId]={...entry,outcome:'unknown'};
+      changed=true;
+    }
+    if (changed) next.completions=completions;
+    return changed;
+  }
+  /**
+   * 服务端快照说这项任务已经完成：以服务端为准，这项任务退出当前列表（台账一并清掉），
+   * 排队里为它等着的完成事实也不必再送达——服务端已经收过同一次完成了。
+   *
+   * 这一步**每页都做**：目标快照可能落在回放的中间某页，不能等到最后一页才清理。
+   */
+  function confirmCompletedTasks(next) {
+    const completions={...completionsOf(next.completions)};
+    let changed=false;
+    for (const [taskId,entry] of Object.entries(completions)) {
+      if (entry.outcome!==undefined&&entry.outcome!=='unconfirmed') continue;
+      const goal=next.goals[entry.goalId];
+      const task=goal?.tasks.find(item=>item.id===taskId);
+      if (task?.status!=='done') continue;
+      delete completions[taskId];changed=true;
+      dropQueuedCompletions(config,taskId);
+    }
+    if (changed) next.completions=completions;
+    return changed;
+  }
+  /**
+   * 台账收敛：服务端快照确认完成（或版本前进）后移除记录；终态拒收的记录同样移除——那条事实
+   * 不会再送达，留着也只是历史，用户重新提交时会写新的记录。周期任务不记台账——服务端按周期
+   * 去重，下一次仍可完成。
    */
   function pruneCompletions(next) {
     const completions=completionsOf(next.completions);
-    const failed=new Set(readEventFailures(config).map(item=>item.event_id));
     const kept={};
     for (const [taskId,entry] of Object.entries(completions)) {
-      if (failed.has(entry.eventId)) continue;
+      if (entry.outcome==='failed') continue;
       const goal=next.goals[entry.goalId];
       const task=goal?.tasks.find(item=>item.id===taskId);
       if (task&&(task.status==='done'||task.revision>entry.revision)) continue;
@@ -715,9 +855,16 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
       save({...state,pendingAck:[]});
     }
     const pendingBefore=JSON.stringify([pendingEvents(config),readEventFailures(config)]);
-    await flushEventQueue(config);
+    // 还没确认状态的那条完成事实先不送达：等核对结果，别让服务端记成第二次完成。
+    const flushed=await flushEventQueue(config,{defer:deferredCompletion});
     if(disposed) return;
+    // 投递的终态回执先记到各自的完成事实上：受理了就不再是「待完成」，终态拒收就回到可重试。
+    // 这一步与同步成败无关，也不依赖本地失败台账（那份台账有上限，会被别的任务挤掉）。
+    recordDeliveryOutcomes(flushed?.outcomes);
     if (JSON.stringify([pendingEvents(config),readEventFailures(config)])!==pendingBefore) onChange();
+    // 分页游标：回放与普通同步都要按服务端给的 nextCursor 接着取页，不能跳回旧游标——
+    // 目标快照可能落在后面几页，跳过去就永远读不到它。
+    let pageCursor;
     for (;;) {
       const receipts=onNotifications?(state.notificationReceipts??[]).slice(0,50):[];
       // Old clients acknowledged messages without retaining the optional recommendation.
@@ -725,12 +872,15 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
       const replayConversation=state.conversationVersion!==1;
       const replaySources=state.dataSourcesVersion!==1;
       const replayResults=state.resultPresentationVersion!==1;
-      const replay=state.recommendationsVersion!==1||replayConversation||replaySources||state.executionVersion!==2||state.taskCapabilityVersion!==1||replayResults;
+      // 旧缓存里的完成条目没有结果：回放一次同步，把服务端当前的目标快照拿回来再收敛。
+      const replayCompletions=hasUnresolvedCompletions();
+      const replay=state.recommendationsVersion!==1||replayConversation||replaySources||state.executionVersion!==2||state.taskCapabilityVersion!==1||replayResults||replayCompletions;
       // An older migration may already be part-way through. A newly added projection
       // still needs its earlier pages, so all pending migrations share the earliest cursor.
       const replayCursors=[...(state.recommendationsVersion!==1?[state.recommendationReplayAfter??0]:[]),
-        ...(replayConversation?[state.conversationReplayAfter??0]:[]),...(replaySources?[state.dataSourcesReplayAfter??0]:[]),...(state.executionVersion!==2?[state.executionReplayAfter??0]:[]),...(state.taskCapabilityVersion!==1?[state.taskCapabilityReplayAfter??0]:[]),...(replayResults?[state.resultPresentationReplayAfter??0]:[])];
-      const after=replay?Math.min(...replayCursors):state.cursor;
+        ...(replayConversation?[state.conversationReplayAfter??0]:[]),...(replaySources?[state.dataSourcesReplayAfter??0]:[]),...(state.executionVersion!==2?[state.executionReplayAfter??0]:[]),...(state.taskCapabilityVersion!==1?[state.taskCapabilityReplayAfter??0]:[]),...(replayResults?[state.resultPresentationReplayAfter??0]:[]),...(replayCompletions?[0]:[])];
+      // 回放从最早的游标起步；后续页沿用上一页的 nextCursor。
+      const after=pageCursor??(replay?Math.min(...replayCursors):state.cursor);
       const page=await agentCall(config,'/sync',{after_seq:after,limit:50,conversation_version:1,
         ...(onNotifications?{notificationFallback:true,notificationReceipts:receipts}:{})});
       if(disposed) return;
@@ -748,7 +898,16 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
       if (page.items.length===0) {
         if (page.nextCursor!==undefined) throw Error('同步分页游标不正确');
         if (replay) {next.recommendationsVersion=1;next.conversationVersion=1;next.dataSourcesVersion=1;next.executionVersion=2;next.taskCapabilityVersion=1;next.resultPresentationVersion=1;delete next.resultPresentationReplayAfter;delete next.taskCapabilityReplayAfter;delete next.recommendationReplayAfter;delete next.conversationReplayAfter;delete next.dataSourcesReplayAfter;delete next.executionReplayAfter;delete next.executionReplayVersion;}
-        if (replay||fallbacks.length||receipts.length) save(next);
+        // 先按服务端当前快照确认「已经完成」的任务（目标快照可能就在这一页）。
+        confirmCompletedTasks(next);
+        // 回放完成：其余旧条目收敛为「结果不明」，保持可重试，也不再反复回放。
+        if (replay) resolveUnresolvedCompletions(next);
+        // 终态回执（被拒／冲突）立刻收敛完成事实台账：任务回到可完成状态，不必等下一张有内容的同步页。
+        const beforeCompletions=JSON.stringify(completionsOf(next.completions));
+        pruneCompletions(next);
+        const completionsChanged=JSON.stringify(next.completions)!==beforeCompletions;
+        if (replay||fallbacks.length||receipts.length||completionsChanged) save(next);
+        if (completionsChanged) onChange();
         break;
       }
       let previous=after;
@@ -783,6 +942,12 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
       }
       if (page.nextCursor!==undefined&&String(page.nextCursor)!==String(previous)) throw Error('同步分页游标不正确');
       restoreSelection(next);
+      // 先按服务端当前快照确认「已经完成」的任务（每页都做），再剪枝：剪枝会先删掉
+      // 「服务端说已完成」的条目，清理排队里那条完成事实就来不及了。
+      confirmCompletedTasks(next);
+      // 回放结束（最后一页）才把其余旧条目收敛为「结果不明」：中途收敛会把还没读到的
+      // 目标快照当成「服务端没说完成」。
+      if (replay&&page.nextCursor===undefined) resolveUnresolvedCompletions(next);
       // 快照确认后收敛完成事实台账：同一任务不再重复提交完成事实。
       pruneCompletions(next);
       next.cursor=Math.max(next.cursor,previous);next.pendingAck=seqs;
@@ -795,6 +960,8 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
       await agentCall(config,'/sync/ack',{seqs});
       save({...state,pendingAck:[]});
       if (page.nextCursor===undefined) break;
+      // 下一页接着本页的游标取。
+      pageCursor=Number(page.nextCursor);
     }
     if (onNotifications&&!disposed) {
       // Reconcile only a complete sync. A torn page, stale connection or offline cache must never withdraw other tasks.
@@ -826,5 +993,5 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
       .finally(()=>{flight=null;if(!disposed&&lastError!==beforeError) onChange();});
     return flight;
   }
-  return {view,draft,setDraft,select,leaveConversation,prepareRecommendationFeedback,completeTask,pendingTaskCompletions,loadHistoryPage,historyTasks,historyExhausted,taskById,submit,sync,dispose:()=>{disposed=true;retireEventAuthority(config);}};
+  return {view,draft,setDraft,select,leaveConversation,prepareRecommendationFeedback,completeTask,pendingTaskCompletions,acceptedTaskCompletions,loadHistoryPage,historyTasks,historyExhausted,taskById,submit,sync,dispose:()=>{disposed=true;retireEventAuthority(config);}};
 }

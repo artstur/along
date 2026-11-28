@@ -98,7 +98,8 @@ test('BC-08-01：200 但回执不可识别（无 status）→ 按可重试处理
   // 桥恢复成合法回执后一次 flush 清掉。
   bridge(input => ({status: 'accepted', event_id: input.body.event_id}));
   const after = await flushEventQueue(CONFIG);
-  assert.deepEqual(after, {pending: 0, retried: 1, removed: 1});
+  assert.deepEqual(after, {pending: 0, retried: 1, removed: 1,
+    outcomes: [{event_id: 'evt-unknown', status: 'accepted'}]});
 });
 
 test('BC-08-03：flush 中 duplicate 与 accepted 都是终态、继续处理后续项', async () => {
@@ -112,7 +113,9 @@ test('BC-08-03：flush 中 duplicate 与 accepted 都是终态、继续处理后
     return {status: 'accepted', event_id: input.body.event_id, received_seq: 7};
   });
   const outcome = await flushEventQueue(CONFIG);
-  assert.deepEqual(outcome, {pending: 0, retried: 2, removed: 2});
+  assert.deepEqual(outcome, {pending: 0, retried: 2, removed: 2,
+    outcomes: [{event_id: 'evt-dup-mid', status: 'duplicate'},
+      {event_id: 'evt-acc-mid', status: 'accepted', received_seq: 7}]});
   assert.deepEqual(pending(), []);
   assert.equal(readEventFailures().length, 0, 'duplicate/accepted 不算失败状态');
 });
@@ -127,7 +130,9 @@ test('BC-08-02：flush 首项暂时性失败即停，队列原样保留、顺序
     return {status: 'accepted', event_id: input.body.event_id};
   });
   const outcome = await flushEventQueue(CONFIG);
-  assert.deepEqual(outcome, {pending: 2, retried: 1, removed: 0}, '第一项失败即停，第二项不跳发（至少一次、保序）');
+  assert.deepEqual(outcome, {pending: 2, retried: 1, removed: 0,
+    outcomes: [{event_id: 'evt-stop-1', status: 'retry', error: '网络失败'}]},
+  '第一项失败即停，第二项不跳发（至少一次、保序）');
   assert.deepEqual(pending().map(item => item.event_id), ['evt-stop-1', 'evt-stop-2']);
 });
 

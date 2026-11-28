@@ -130,7 +130,8 @@ test('BC-08-02：网络失败本地保留，同一份序列化信封同号重试
   assert.equal(first.status, 'retry');
   assert.equal(pending().length, 1, '失败保留待同步项');
   const second = await flushEventQueue(CONFIG);
-  assert.deepEqual(second, {pending: 0, retried: 1, removed: 1});
+  assert.deepEqual(second, {pending: 0, retried: 1, removed: 1,
+    outcomes: [{event_id: 'evt-retry', status: 'accepted', received_seq: 9}]});
   assert.deepEqual(pending(), []);
   assert.equal(requests.length, 2);
   // 重试复用同一份信封：body 逐字段相同（不重新组包，payload_hash 才稳定，§2.2.7）。
@@ -166,7 +167,7 @@ test('BC-08-02：400 rejected 终止重试并删除本地项，失败状态本�
     [{event_id: 'evt-rej', status: 'rejected', reason: 'invalid_envelope', at: readEventFailures()[0].at}]);
   // 被拒事件重发不会变成 accepted：flush 队列已空，不再发送。
   const after = await flushEventQueue(CONFIG);
-  assert.deepEqual(after, {pending: 0, retried: 0, removed: 0});
+  assert.deepEqual(after, {pending: 0, retried: 0, removed: 0, outcomes: []});
 });
 
 test('BC-08-02：409 conflict 同号不同内容是终态，删除本地项并记录', async () => {
@@ -206,13 +207,16 @@ test('flush 按入队顺序处置：终态继续、暂时性失败即停，顺�
     throw Error('网络失败');
   });
   const first = await flushEventQueue(CONFIG);
-  assert.deepEqual(first, {pending: 2, retried: 2, removed: 1}, '被拒项删除后继续，网络失败即停');
+  assert.deepEqual(first, {pending: 2, retried: 2, removed: 1,
+    outcomes: [{event_id: 'evt-order-1', status: 'rejected', reason: 'invalid_envelope'},
+      {event_id: 'evt-order-2', status: 'retry', error: '网络失败'}]}, '被拒项删除后继续，网络失败即停');
   assert.deepEqual(pending().map(item => item.event_id), ['evt-order-2', 'evt-order-3'], '顺序保持');
   assert.equal(readEventFailures()[0].event_id, 'evt-order-1');
   // 桥恢复后一次 flush 清空剩余项。
   bridge(input => ({status: 'accepted', event_id: input.body.event_id}));
   const second = await flushEventQueue(CONFIG);
-  assert.deepEqual(second, {pending: 0, retried: 2, removed: 2});
+  assert.deepEqual(second, {pending: 0, retried: 2, removed: 2,
+    outcomes: [{event_id: 'evt-order-2', status: 'accepted'}, {event_id: 'evt-order-3', status: 'accepted'}]});
 });
 
 test('同号不重复入队（服务端可能已见过第一份信封），缺号时生成稳定新号', async () => {

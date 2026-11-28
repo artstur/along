@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
 import {installDomStub} from './dom-stub.mjs';
 
 const config={baseURL:'https://localhost:4176',fingerprint:'A'.repeat(64),token:'b'.repeat(64)};
@@ -730,6 +731,11 @@ test('a submitted chat keeps an accessible waiting row until its own visible rep
   const sent=requests.find(item=>item.path==='/events').body.event_id;
   assert.match(dom.app.innerHTML,/Agent 正在回复…/,'提交后立即显示等待');
   assert.match(dom.app.innerHTML,/agent-thinking[\s\S]*role="status"|role="status"[\s\S]*agent-thinking/,'等待提示可被辅助技术读出');
+  // 等待行只保留三个动态点：状态文字还在 DOM 里，但挂上只对读屏可见的隐藏类。
+  const waitingRow=/<div class="agent-message assistant pending" role="status"><div class="agent-thinking">([\s\S]*?)<\/div><\/div>/.exec(dom.app.innerHTML);
+  assert.ok(waitingRow,'等待行应当存在');
+  assert.match(waitingRow[1],/<span aria-hidden="true"><i><\/i><i><\/i><i><\/i><\/span>/,'等待行里是三个动态点');
+  assert.match(waitingRow[1],/<p class="agent-thinking-status">Agent 正在回复…<\/p>/,'状态文字保留在 DOM 里并挂上隐藏类');
   bridge.syncItems=[
     {seq:1,userId:'u_app_b',kind:'message',goalId:waitingGoal.id,payload:{snapshot:waitingSnapshot,presentation:'execution',
       message:{id:'msg_exec_ui',eventId:'out:wait:worker',role:'assistant',direction:'outbound',text:'后台执行完成',seq:1}}},
@@ -738,13 +744,32 @@ test('a submitted chat keeps an accessible waiting row until its own visible rep
   ];
   await dom.tick(3000);await settle();
   assert.match(dom.app.innerHTML,/Agent 正在回复…/,'同步和重渲染后仍在，后台与其他会话的消息不会提前清除');
+  assert.match(dom.app.innerHTML,/<p class="agent-thinking-status">Agent 正在回复…<\/p>/,'重渲染后状态文字仍挂上隐藏类');
   bridge.syncItems.push({seq:3,userId:'u_app_b',kind:'message',goalId:waitingGoal.id,payload:{snapshot:waitingSnapshot,
     message:{id:'msg_user_ui',eventId:sent,role:'user',direction:'inbound',text:'帮我安排今晚的睡前提醒',seq:3}}});
   bridge.syncItems.push({seq:4,userId:'u_app_b',kind:'message',goalId:waitingGoal.id,payload:{snapshot:waitingSnapshot,conversation_id:sent,
     message:{id:'msg_reply_ui',eventId:'reply_wait_ui',role:'assistant',direction:'outbound',text:'十一点前放下手机',seq:4,causationId:sent}}});
   await dom.tick(3000);await settle();
   assert.doesNotMatch(dom.app.innerHTML,/Agent 正在回复…/,'当前请求的可见回复结束等待');
+  assert.doesNotMatch(dom.app.innerHTML,/agent-thinking/,'回复到达后整条等待气泡移除');
   assert.match(dom.app.innerHTML,/十一点前放下手机/);
+});
+
+// 等待文案不出现在屏幕上：它退出视觉布局，但留在无障碍树里，读屏照旧播报。
+test('the waiting status text is hidden from the screen but kept for screen readers',()=>{
+  const css=readFileSync(new URL('../web/style.css',import.meta.url),'utf8');
+  const declarations=css.match(/\.agent-thinking-status\s*\{([^}]*)\}/)?.[1]??'';
+  assert.ok(declarations,'必须有 .agent-thinking-status 规则');
+  assert.match(declarations,/position:\s*absolute;/,'状态文字要退出视觉流，不占位');
+  assert.match(declarations,/width:\s*1px;/);
+  assert.match(declarations,/height:\s*1px;/);
+  assert.match(declarations,/overflow:\s*hidden;/);
+  assert.match(declarations,/clip-path:\s*inset\(50%\);/);
+  assert.match(declarations,/white-space:\s*nowrap;/);
+  assert.doesNotMatch(declarations,/display:\s*none/,'display:none 会把状态文字从无障碍树里摘掉，读屏就不再播报');
+  assert.doesNotMatch(declarations,/visibility:\s*hidden/,'visibility:hidden 同样会让读屏读不到');
+  // 隐藏的文字不能撑开布局：等待气泡里只剩三个点。
+  assert.match(css,/\.agent-thinking\s*\{[^}]*position:\s*relative;/,'隐藏文字要有定位基准');
 });
 
 test('a failed chat ends the waiting row and keeps the failure feedback',async()=>{
