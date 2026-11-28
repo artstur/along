@@ -284,7 +284,7 @@ Along 是手机优先的目标工作台：把一个目标拆成「目标 / 来�
 
 - **手势类修复不能只靠 CSS 断言**：CSS 里写了什么值，断言它「写了」并不能证明手势对——`touch-action: none` 在单元测试里完全正常，在手机上却把滚动和双指缩放关掉了。要用模拟器发真实触点（`XCPointerEventPath` 发双击、拖动、两指同时接触），同时量「缩放没了」和「滚动/双指缩放还在」两件事，再和基线逐项比。
 
-- **页面级双指缩放只能靠 viewport 锁，原生容器和 CSS 都拦不住**：WKWebView 里关掉 `scrollView` 的捏合识别器、把 `maximumZoomScale` 收成 1 倍，页面照样被放大（模拟器实测 1.5～1.8 倍），加载完再补一次也稳不住——WebKit 会把缩放上限抬回去；CSS 的 `touch-action: pan-x pan-y` 同样拦不住（`none` 能拦住，但会把单指滚动一起关掉）。真正有效的是 viewport 的 `maximum-scale=1, user-scalable=no`：WKWebView 认这两个参数，Safari 自己那个 App 不认（iOS 10 起忽略）。要只锁 App、不牵连网页版本，就在 head 里按 `location.protocol === 'along:'` 判断后改写 viewport——必须赶在首次布局前，模块脚本是延迟加载的，等它跑就来不及。
+- **页面级双指缩放只能靠 viewport 锁，原生容器和 CSS 都拦不住**：WKWebView 里关掉 `scrollView` 的捏合识别器、把 `maximumZoomScale` 收成 1 倍，页面照样被放大（模拟器实测 1.5～1.8 倍），加载完再补一次也稳不住——WebKit 会把缩放上限抬回去；CSS 的 `touch-action: pan-x pan-y` 同样拦不住（`none` 能拦住，但会把单指滚动一起关掉）。真正有效的是 viewport 的 `maximum-scale=1, user-scalable=no`：WKWebView 认这两个参数；Safari（自己的 App 与 SFSafariViewController）从 iOS 10 起忽略它们，所以网页版本在 iPhone 上不受这条影响。要只锁 App、不牵连网页版本，就在 head 里按 `location.protocol === 'along:'` 判断后改写 viewport——必须赶在首次布局前，模块脚本是延迟加载的，等它跑就来不及。
 
 === END GOAL PROMPT ===
 
