@@ -17,7 +17,7 @@ function block(source,marker) {
  return source.slice(start,end);
 }
 
-test('actual native agentRequest authenticates the status through its pinned TLS delegate before sending application bytes',{skip:!hasSwift},async()=>{
+test('actual native agentRequest rejects LAN endpoints, cross-origin bearers and untrusted cloud TLS before HTTP',{skip:!hasSwift},async()=>{
  const dir=mkdtempSync(join(tmpdir(),'along-transport-tls-'));
  let server;
  try {
@@ -26,43 +26,45 @@ test('actual native agentRequest authenticates the status through its pinned TLS
   const pin=createHash('sha256').update(new X509Certificate(cert).raw).digest('hex').toUpperCase();
   const source=readFileSync(new URL('../ios/AlongHealth/Sources/AlongShellView.swift',import.meta.url),'utf8');
   const native=block(source,'        static func agentRequest(');
-  const pinned=block(source,'final class PinnedAgentDelegate:');
   const system=block(source,'final class SystemTrustAgentDelegate:');
   writeFileSync(join(dir,'TLS.swift'),`import Foundation
 import CryptoKit
 import Security
 import CFNetwork
-// The fixture has only a loopback listener. Adapt address acceptance/routing to
-// loopback; the complete production HTTP implementation and both TLS delegates
-// below are unmodified. No system trust store, Host, device or real token is used.
+// The fixture uses loopback only to exercise system TLS evaluation. The
+// production address admission check still runs for the LAN test below.
 enum AlongConnectionStore {
- static let legacyPinPolicy="legacy-local-pin-v1",systemTrustPolicy="system-pki-v1"
- static func hostAccepted(_ host:String)->Bool {host=="127.0.0.1"}
- static func trustPolicy(forHost host:String)->String {host=="127.0.0.1" && CommandLine.arguments.count>3 ? systemTrustPolicy : legacyPinPolicy}
- static func load()->[String:String]? {
-  CommandLine.arguments.count>3 ? ["baseURL":"https://192.168.10.2:4176","token":"synthetic-token-only","fingerprint":CommandLine.arguments[2]] : nil
+ static let systemTrustPolicy="system-pki-v1"
+ static func cloudHostAccepted(_ host:String)->Bool {
+  (host=="127.0.0.1" && CommandLine.arguments.last != "lan") || productionCloudHostAccepted(host)
+ }
+ static let legacyKey="along.test.legacy"
+ static func storedConnection()->[String:Any]? {
+  switch CommandLine.arguments.last {
+  case "retired-bearer": return ["baseURL":"https://192.168.10.2:4176","token":String(repeating:"b",count:64),"trustPolicy":"legacy-local-pin-v1"]
+  case "cloud-bearer": return ["baseURL":"https://along.example.com","token":String(repeating:"b",count:64),"trustPolicy":systemTrustPolicy]
+  default: return nil
+  }
  }
  ${block(source,'    static func bindingScopeId(')}
+ ${block(source,'    static func cloudHostAccepted(').replace('func cloudHostAccepted','func productionCloudHostAccepted')}
  ${block(source,'    static func permitsPairedTransport(')}
- ${block(source,'    static func pinnedFingerprint(')}
- ${block(source,'    static func acceptsPin(')}
+ ${block(source,'    static func clean(')}
 }
 enum AgentBridgeError:Error {
  case invalidConfiguration,invalidResponse,receipt([String:Any]),server(String),httpStatus(Int,String)
  static func transportMessage(_ error:Error)->String? {nil}
 }
-${pinned}
 ${system}
 enum Probe {
 ${native}
 }
 @main struct Fixture {
  static func main()async throws {
-  let handoff=CommandLine.arguments.last=="handoff"
-  let input:[String:Any]=["baseURL":CommandLine.arguments[1],"fingerprint":CommandLine.arguments[2],"token":handoff ? "new-cloud-synthetic-token" : "synthetic-token-only","path":handoff ? "/workspace-handoff/status" : "/connection/status","body":handoff ? [:] : ["runtime":"dsh-superagent"]]
+  let retiredPath=CommandLine.arguments.last=="retired-path"
+  let input:[String:Any]=["baseURL":CommandLine.arguments[1],"fingerprint":CommandLine.arguments[2],"token":String(repeating:"b",count:64),"path":retiredPath ? "/workspace-handoff/status" : "/connection/status","body":retiredPath ? [:] : ["runtime":"dsh-superagent"]]
   do {
-   let status=try await Probe.agentRequest(input,background:true,privateWorkspaceHandoffRequest:handoff)
-   precondition(status["userId"] as? String=="synthetic-user" && status["ready"] as? Bool==true)
+   _ = try await Probe.agentRequest(input,background:true)
    print("authenticated")
   }catch AgentBridgeError.invalidConfiguration {print("preflight-blocked")}
   catch {print("refused")}
@@ -76,14 +78,12 @@ ${native}
   });
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
   const url='https://127.0.0.1:'+server.address().port;
-  assert.match((await execAsync(join(dir,'tls'),[url,pin],{timeout:20000})).stdout,/authenticated/);
-  assert.deepEqual(requests,[{path:'/connection/status',authorization:'Bearer synthetic-token-only'}]);
-  assert.match((await execAsync(join(dir,'tls'),[url,'C'.repeat(64)],{timeout:20000})).stdout,/refused/);
-  assert.equal(requests.length,1,'a mismatched leaf must receive zero application bytes/token');
-  assert.match((await execAsync(join(dir,'tls'),[url,pin,'public-target'],{timeout:20000})).stdout,/preflight-blocked/);
-  assert.equal(requests.length,1,'changing a local paired bearer to PKI must be blocked before any request');
-  assert.match((await execAsync(join(dir,'tls'),[url,pin,'handoff'],{timeout:20000})).stdout,/refused/);
-  assert.equal(requests.length,1,'the new cloud credential handoff probe still requires system PKI and never falls back to the old pin');
+  for (const mode of ['lan','retired-bearer','cloud-bearer','retired-path']) {
+   assert.equal((await execAsync(join(dir,'tls'),[url,pin,mode],{timeout:20000})).stdout.trim(),'preflight-blocked');
+  }
+  assert.match((await execAsync(join(dir,'tls'),[url,pin,'cloud'],{timeout:20000})).stdout,/^refused$/m);
+  assert.deepEqual(requests,[],'even the matching old leaf fingerprint must never release application bytes');
+
  } finally {
   if(server)await new Promise(resolve=>server.close(resolve));
   rmSync(dir,{recursive:true,force:true});

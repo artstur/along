@@ -17,7 +17,6 @@ import CryptoKit
 
 enum AgentBridgeError: Error { case receipt([String:Any]); case server(String) }
 @MainActor enum AlongConnectionStore {
- static let legacyPinPolicy="legacy-local-pin-v1"
  static let systemTrustPolicy="system-pki-v1"
  static func load() -> [String:String]? { nil }
  // 绑定作用域 ID 与真实实现同语义（docs/iphone-ca-profile-design.md §2.2）。
@@ -43,7 +42,7 @@ private final class Clock: @unchecked Sendable {
     func advance(_ seconds:Double){lock.lock();date=date.addingTimeInterval(seconds);lock.unlock()}
 }
 @MainActor private final class Pair {
-    var value=["baseURL":"https://192.168.1.4:4176","fingerprint":String(repeating:"a",count:64),"token":String(repeating:"b",count:64)]
+    var value=["baseURL":"https://along.example.com","trustPolicy":"system-pki-v1","token":String(repeating:"b",count:64)]
     var unlocked=true
 }
 @MainActor private final class Keys: PhoneSourceCredentialStore {
@@ -278,7 +277,7 @@ private actor API {
         precondition(k.host.rotations==rotations && k.host.requests.contains{$0["action"]as?String=="status"&&$0["requestId"] != nil})
 
         let l=World(),lc=l.coordinator();_=try await connected(lc)
-        l.pair.value["baseURL"]="https://192.168.1.9:4176"
+        l.pair.value["baseURL"]="https://along.example.com:443"
         check(try await lc.status(goalID:"g_fixture"),"connected","received")
         l.pair.unlocked=false
         do{_=try await lc.status(goalID:"g_fixture");fatalError("locked data must defer")}catch{precondition(error as?PhoneSourceCoordinatorError == .protectedDataUnavailable)}

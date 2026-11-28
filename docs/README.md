@@ -12,7 +12,6 @@
 | iPhone OKX 只读成交、账单与复盘口径 | [历史接入契约](okx-trade-history.md) | 明细私有、窗口与分页覆盖、分币种确定性报告 |
 | 云端部署、配对与入口选择 | [部署产物与运维入口](../deploy/README.md) | 先区分 Tier 1、Tier 2 和 Linux 实测栈 |
 | 云端部署与 2 用户（host/agent 上云、配对多绑定、Runbook） | [云端部署与多用户](cloud-deploy-multi-user.md) | Tier 1 的设计与施工记录；上线按 Runbook §6.4 由用户手动执行，Tier 2 见 §6.5 |
-| 保全原个人工作区、待发队列与通知 | [冷交接与恢复契约](personal-workspace-handoff.md) | 不是普通跨 Host 配对；源码、云部署、手机安装与送达分开验收 |
 | 云端公网安全加固（应用准入、配对会话、容器与凭证面；G-1～G-22） | [云端安全加固](cloud-security-hardening.md) | 设计、实施偏差记录（§8）与上线手动步骤；CA 信任迁移另见下行 |
 | Linux 云端部署实测（V-1 通过、settings seed、资源与网络约束） | [Along Agent 云端部署经验](superagent-cloud-deploy.md) | 2026-11-23 的验证记录；现行编排看 `deploy/` |
 | Along Host 云端部署实测（三容器栈、两层证书、命名空间锚点、MiniMax 接线） | [Host 云端部署经验](host-cloud-deploy.md) | 实测事实与踩过的坑；编排见 `deploy/docker-compose.cloud.yml` |

@@ -1,21 +1,21 @@
-import {KEY, loadState, setSnapshot, summaryHasData} from './health.mjs?v=112';
-import {ACTIVE_GOAL_KEY, FINANCE_KEY, ensureHealthGoal, withoutDefaultHealthGoal, loadFinance, connectFinanceDemo, addFinanceDemoRecord, healthView, financeView} from './workspace.mjs?v=112';
-import {EXPERIMENT, startExperiment, routeHealthEvent, acceptAgentSuggestion, agentRequestPayload} from './loop.mjs?v=112';
-import {goalChangeText} from './goal-agent-core.mjs?v=112';
-import {createEventWorkspace, recurringPlan, chatTimeline, captureChatAnchor, anchoredScrollTop} from './event-workspace.mjs?v=112';
-import {recommendationCard} from './recommendations.mjs?v=112';
-import {dataSourceProvider} from './data-sources.mjs?v=112';
-import {taskResultBodyRelevant} from './task-results.mjs?v=112';
-import {taskResultCard,captureResultReading,restoreResultReading} from './task-result-view.mjs?v=112';
-import {AGENT_KEY, GOALS_KEY, CONVERSATIONS_KEY, readStored, agentCall, loadNativeConnection, saveNativeConnection} from './agent-client.mjs?v=112';
-import {ADAPTIVE_LAYOUTS_KEY, customGoalEntries, findInitialCustomGoalCandidate, goalDomain, isCustomGoalKey, safeAdaptiveLayout, validateAdaptiveLayout} from './adaptive-ui.mjs?v=112';
+import {KEY, loadState, setSnapshot, summaryHasData} from './health.mjs?v=114';
+import {ACTIVE_GOAL_KEY, FINANCE_KEY, ensureHealthGoal, withoutDefaultHealthGoal, loadFinance, connectFinanceDemo, addFinanceDemoRecord, healthView, financeView} from './workspace.mjs?v=114';
+import {EXPERIMENT, startExperiment, routeHealthEvent, acceptAgentSuggestion, agentRequestPayload} from './loop.mjs?v=114';
+import {goalChangeText} from './goal-agent-core.mjs?v=114';
+import {createEventWorkspace, recurringPlan, chatTimeline, captureChatAnchor, anchoredScrollTop} from './event-workspace.mjs?v=114';
+import {recommendationCard} from './recommendations.mjs?v=114';
+import {dataSourceProvider} from './data-sources.mjs?v=114';
+import {taskResultBodyRelevant} from './task-results.mjs?v=114';
+import {taskResultCard,captureResultReading,restoreResultReading} from './task-result-view.mjs?v=114';
+import {AGENT_KEY, GOALS_KEY, CONVERSATIONS_KEY, readStored, agentCall, loadNativeConnection, saveNativeConnection} from './agent-client.mjs?v=114';
+import {ADAPTIVE_LAYOUTS_KEY, customGoalEntries, findInitialCustomGoalCandidate, goalDomain, isCustomGoalKey, safeAdaptiveLayout, validateAdaptiveLayout} from './adaptive-ui.mjs?v=114';
 import {GOAL_SUPER_AGENT_RUNS_KEY, SUPER_AGENT_RUNS_KEY, createFailedGoalSuperAgentRun, createFailedSuperAgentRun,
   createGoalSuperAgentRequest, createPendingGoalSuperAgentRun, createPendingSuperAgentRun, createSuperAgentRequest,
-  safeGoalSuperAgentRun, safeSuperAgentRun, withRunError, AGENT_RUN_TIMEOUT_MS, AGENT_RUNTIME_KEY, CLOUD_RUN_NOT_FOUND, DSH_RUNTIME, KIMI_RUNTIME, agentRuntimeLabel, safeAgentRuntime, newId} from './super-agent.mjs?v=112';
+  safeGoalSuperAgentRun, safeSuperAgentRun, withRunError, AGENT_RUN_TIMEOUT_MS, AGENT_RUNTIME_KEY, CLOUD_RUN_NOT_FOUND, DSH_RUNTIME, KIMI_RUNTIME, agentRuntimeLabel, safeAgentRuntime, newId} from './super-agent.mjs?v=114';
 import {AGENT_NOTIFICATION_LEDGER_KEY, goalRunNotification, taskRunNotification, healthProposalNotification,
-  notificationWasDelivered, recordNotificationDelivered} from './agent-notifications.mjs?v=112';
-import {PLANNING_STATE_KEY,cleanDailyDelegation,validateDailyActions,agentHealthSnapshot,cleanPlanningContext,healthContextChanges,createPlanningContext,validateReassessment,buildBackgroundReviewRequest} from './contextual-planning.mjs?v=112';
-import {NICKNAME_MAX,cleanNickname,readProfile,writeProfile,scopeKey,DEVICE_SCOPE,isLegacyScope,hostOfScope,bindingFingerprint,profileNickname as profileNicknameFor,adoptProfile as adoptProfileFor,setNickname} from './user-profile.mjs?v=112';
+  notificationWasDelivered, recordNotificationDelivered} from './agent-notifications.mjs?v=114';
+import {PLANNING_STATE_KEY,cleanDailyDelegation,validateDailyActions,agentHealthSnapshot,cleanPlanningContext,healthContextChanges,createPlanningContext,validateReassessment,buildBackgroundReviewRequest} from './contextual-planning.mjs?v=114';
+import {NICKNAME_MAX,cleanNickname,readProfile,writeProfile,scopeKey,DEVICE_SCOPE,isLegacyScope,hostOfScope,bindingFingerprint,profileNickname as profileNicknameFor,adoptProfile as adoptProfileFor,setNickname} from './user-profile.mjs?v=114';
 const TICKET_KEY = 'along.goal-ticket.v1';
 const REMINDER_SYNC_KEY='along.health-reminder-sync.v1';
 const HEALTH_SHARING_KEY='along.health-sharing.v1';
@@ -83,7 +83,8 @@ let agentBusyOwner = null;
 // 旧 Host 兼容路径的三点等待提示：记录发起的原目标，重渲染后仍只在原对话显示。
 let agentPendingRequest = null;
 let connectionBusy = false;
-let agentConfig = readStored(AGENT_KEY, {});
+const storedAgentConfig=readStored(AGENT_KEY,{});
+let agentConfig=nativePage&&isRetiredLocalConnection(storedAgentConfig)?{}:storedAgentConfig;
 let agentRuntime = safeAgentRuntime(localStorage.getItem(AGENT_RUNTIME_KEY) || agentConfig.runtime || KIMI_RUNTIME);
 let verifiedHealthHost=false;
 let checkingHealthHost=null;
@@ -146,44 +147,12 @@ function originOf(baseURL) {
     return `${url.protocol}//${url.hostname.toLowerCase()}:${port}`;
   } catch { return null; }
 }
-// Only native-authenticated local transport evidence can preserve a binding
-// across origins. Ordinary sameBindingIdentity/eventConnection guards stay strict.
-function verifiedLocalTransport(previous,config,proof) {
-  const saved=readStored(EVENT_CONNECTION_KEY,null);
-  // EVENT and AGENT are separate localStorage writes. After a crash the pointer
-  // may already name the new transport while the connection is still old. Both
-  // exact endpoints are covered by the same native proof; no other scope is.
-  const savedEndpoint=proof&&saved&&[
-    [proof.fromBindingScopeId,originOf(proof.fromBaseURL)],
-    [proof.toBindingScopeId,originOf(proof.toBaseURL)],
-  ].some(([scope,origin])=>origin&&saved.bindingScopeId===scope&&saved.bindingOrigin===origin);
-  return proof&&savedEndpoint&&saved.userId===proof.userId&&
-    [[proof.fromBaseURL,proof.fromBindingScopeId],[proof.toBaseURL,proof.toBindingScopeId]]
-      .some(([base,scope])=>base===previous.baseURL&&scope===bindingKeyOf(previous))&&
-    proof.toBaseURL===config.baseURL&&proof.toBindingScopeId===bindingKeyOf(config)&&
-    typeof previous.fingerprint==='string'&&/^[A-Fa-f0-9]{64}$/.test(previous.fingerprint)&&
-    previous.fingerprint===config.fingerprint&&previous.token===config.token&&
-    (previous.trustPolicy??'legacy-local-pin-v1')==='legacy-local-pin-v1'&&config.trustPolicy==='legacy-local-pin-v1'&&
-    originOf(previous.baseURL)&&originOf(config.baseURL);
-}
-function verifiedWorkspaceHandoff(previous,config,proof) {
-  if(!proof||proof.purpose!=='along-personal-workspace-handoff/v1'||
-    !/^[A-Za-z0-9][A-Za-z0-9_-]{7,95}$/.test(proof.migrationId??'')||
-    !['manifestSHA256','snapshotSHA256','syncPrefixSHA256'].every(key=>/^[0-9a-f]{64}$/.test(proof[key]??''))||
-    !Number.isSafeInteger(proof.syncHighWaterMark)||proof.syncHighWaterMark<0||config.trustPolicy!=='system-pki-v1')return false;
-  const saved=readStored(EVENT_CONNECTION_KEY,null),workspace=readStored(`along.event-workspace.v1:${proof.userId}`,null);
-  const persisted=workspace?.workspaceHandoff;
-  const recovered=persisted&&Object.keys(persisted).length===Object.keys(proof).length&&Object.keys(proof).every(k=>persisted[k]===proof[k])&&
-    previous.baseURL===proof.toBaseURL&&bindingKeyOf(previous)===proof.toBindingScopeId&&
-    saved?.bindingOrigin===originOf(proof.toBaseURL)&&saved?.bindingScopeId===proof.toBindingScopeId;
-  return saved?.userId===proof.userId&&workspace?.userId===proof.userId&&Number.isSafeInteger(workspace.cursor)&&
-    (workspace.cursor<=proof.syncHighWaterMark||recovered)&&
-    [[proof.fromBaseURL,proof.fromBindingScopeId],[proof.toBaseURL,proof.toBindingScopeId]]
-      .some(([base,scope])=>base===previous.baseURL&&scope===bindingKeyOf(previous))&&
-    [[proof.fromBaseURL,proof.fromBindingScopeId],[proof.toBaseURL,proof.toBindingScopeId]]
-      .some(([base,scope])=>originOf(base)===saved.bindingOrigin&&scope===saved.bindingScopeId)&&
-    proof.toBaseURL===config.baseURL&&proof.toBindingScopeId===bindingKeyOf(config)&&originOf(config.baseURL)&&
-    /^u_[0-9a-f]{8}$/.test(proof.userId)&&/^d_[0-9a-f]{8}$/.test(proof.deviceId);
+function isRetiredLocalConnection(config) {
+  if (config?.trustPolicy==='legacy-local-pin-v1') return true;
+  const origin=originOf(config?.baseURL);
+  // Old WebView caches predate trustPolicy.
+  return /^https:\/\/(?:10\.|192\.168\.|172\.(?:1[6-9]|2[0-9]|3[01])\.)[\d.]+:/.test(origin)||
+    /^https:\/\/(?:[^:]+\.)?(?:local|localhost|home\.arpa):/.test(origin);
 }
 function eventConnection(config=agentConfig) {
   const saved=readStored(EVENT_CONNECTION_KEY,null);
@@ -281,42 +250,25 @@ let sourceGeneration=0;
 const BG_TEMPLATE_KEY='along.health-background-template.v1';
 let nativeConnectionRestored=false;
 let backgroundReplace=null,backgroundClaim=null,backgroundSyncQueued=false;
-function persistAgentConfig(config,{preserveTransport=false}={}) {
+function persistAgentConfig(config) {
   const previous=readStored(AGENT_KEY,{});
   // 只有真换端才撤销每日委托：换 origin 或换 token。
   // 同一绑定的口径升级（旧记录没有 bindingScopeId，升级当次原生回填）保留授权与提醒时间——
   // 否则 CA 迁移升级会静默删掉用户已授权的每日提醒（复核报告「高」风险项）。
-  if (previous.token&&!preserveTransport&&!sameBindingIdentity(previous,config)) {
+  if (previous.token&&!sameBindingIdentity(previous,config)) {
     for (const key of healthGoalKeys()) reviewFor(key).revokeDaily();
   }
-  if (!preserveTransport&&!sameBindingIdentity(previous,config)) localStorage.removeItem(BG_TEMPLATE_KEY);
+  if (!sameBindingIdentity(previous,config)) localStorage.removeItem(BG_TEMPLATE_KEY);
   localStorage.setItem(AGENT_KEY,JSON.stringify(config));
 }
-function activateAgentConfig(config,{rebind=false,runtime=agentRuntime,transportMigration=null,workspaceHandoff=null}={}) {
+function activateAgentConfig(config,{rebind=false,runtime=agentRuntime}={}) {
   const previous=agentConfig;
-  // 同一绑定 + 同一运行时的口径升级不算换端：归属键只是从 token 补齐成 bindingScopeId，
-  // 事件工作区与本地归属都要延续，不能按新用户处理（docs/iphone-ca-profile-design.md §2.2）。
-  const handoff=!rebind&&verifiedWorkspaceHandoff(previous,config,workspaceHandoff);
-  if(workspaceHandoff&&!handoff)throw Error('原工作区与云交接证明不一致，已保留原缓存');
-  const preserveTransport=handoff||!rebind&&verifiedLocalTransport(previous,config,transportMigration);
-  const migration=handoff?workspaceHandoff:transportMigration;
-  const sameBinding=preserveTransport||sameBindingIdentity(previous,config);
-  if (preserveTransport) {
-    if(handoff) {
-      const key=`along.event-workspace.v1:${migration.userId}`,cached=readStored(key,null);
-      localStorage.setItem(key,JSON.stringify({...cached,workspaceHandoff:migration,
-        notificationHandoffThrough:Math.max(cached.notificationHandoffThrough??0,migration.syncHighWaterMark)}));
-    }
-    localStorage.setItem(EVENT_CONNECTION_KEY,JSON.stringify({bindingScopeId:bindingKeyOf(config),userId:migration.userId,
-      bindingOrigin:originOf(config.baseURL)}));
-    // Finish every surviving original grant before the same-config early return.
-    // Replays skip recipients already moved and never adopt an unrelated scope.
-    migrateDailyRecipient(bindingKeyOf(config),migration.fromBindingScopeId);
-  } else if (!rebind&&sameBinding) migrateEventConnection(previous,config);
+  const sameBinding=sameBindingIdentity(previous,config);
+  if (!rebind&&sameBinding) migrateEventConnection(previous,config);
   if (!rebind&&runtime===agentRuntime&&sameBinding&&['baseURL','token','runtime'].every(field=>previous[field]===config[field])&&
       bindingKeyOf(previous)===bindingKeyOf(config)) return;
   const replaceBinding=rebind||previous.token&&!sameBinding;
-  persistAgentConfig(config,{preserveTransport});
+  persistAgentConfig(config);
   if (replaceBinding) {
     if (eventWorkspace&&screen!=='settings') screen='agent';
     disconnectEventWorkspace();
@@ -342,7 +294,7 @@ function activateAgentConfig(config,{rebind=false,runtime=agentRuntime,transport
     for (const key of healthGoalKeys()) reviewFor(key).retireConnection();
     backgroundReplace=null;
     void Promise.resolve(window.AlongHealthBridge?.backgroundReview?.('disarm',{})).catch(()=>{});
-  } else if (sameBinding&&!preserveTransport) {
+  } else if (sameBinding) {
     // 同一绑定的口径升级：把每日委托的接收人从旧键迁移到新键，并保留原授权与提醒时间。
     // 用户主动撤销过的授权不进 dailyRevokedIds 的回滚范围——这里只迁移接收人键，
     // 不恢复任何已被撤销的 grant。
@@ -435,8 +387,8 @@ function reviewFor(key) {
 }
 // 同一绑定的口径升级：把所有健康目标的每日委托接收人迁到新归属键。
 // 用户主动撤销过的授权不在恢复范围（各目标的 migrateDailyRecipient 只改接收人键）。
-function migrateDailyRecipient(nextKey,previousKey=null) {
-  for (const key of healthGoalKeys()) reviewFor(key).migrateDailyRecipient(nextKey,previousKey);
+function migrateDailyRecipient(nextKey) {
+  for (const key of healthGoalKeys()) reviewFor(key).migrateDailyRecipient(nextKey);
 }
 // 当前目标可能是一个还没确认的新目标（草稿）。
 // - 有内容可恢复（写下的消息、没跑完的运行）：回到那一页，用户写下的东西
@@ -698,7 +650,7 @@ async function refreshAgentConnection({healthOnly=false}={}) {
       void eventWorkspace.sync();
       return;
     }
-    if (eventConnection()) throw Error('Mac 尚未开启新链路，请检查 Along 服务配置');
+    if (eventConnection()) throw Error('Along 服务尚未开启新链路，请检查服务配置');
     if (!status?.along || !status?.ready || status.runtime!==agentRuntime) throw Error(`${agentRuntimeLabel(agentRuntime)} 尚未就绪`);
     verifiedHealthHost=true;
     agentConnection={status:'ready',error:'',httpStatus:null};
@@ -937,7 +889,7 @@ async function submitSuperAgentTask(task,{retry=false}={}) {
     if (agentConfig!==config||!taskCallIsCurrent(task.id,goalKey,request.runtime,callKey)) return;
     const run=response?.run;
     if (run?.actual!==true || run.runtime!==request.runtime || run.requestId!==request.requestId)
-      throw Error(typeof run?.error==='string'&&run.error||'Mac 没有返回与本次任务匹配的运行记录');
+      throw Error(typeof run?.error==='string'&&run.error||'Along 服务没有返回与本次任务匹配的运行记录');
     storeTaskReply(key,goalKey,task,{...run,task:request.task},startedAt,taskScope(goalKey));
   } catch(error) {
     if (agentConfig===config&&taskCallIsCurrent(task.id,goalKey,request.runtime,callKey))
@@ -961,8 +913,8 @@ async function refreshSuperAgentTask(task,{retry=false}={}) {
     const run=await agentCall(config,'/super-agent/tasks/status',{requestId:current.requestId,runtime:current.runtime});
     if (agentConfig!==config||!taskCallIsCurrent(task.id,goalKey,current.runtime,callKey)) return;
     if (run?.actual!==true || run.runtime!==current.runtime || run.requestId!==current.requestId)
-      throw Error(typeof run?.error==='string'&&run.error||'Mac 没有返回与本次任务匹配的运行记录');
-    if (!safeSuperAgentRun(run)) throw Error(typeof run.error==='string'&&run.error||'Mac 返回了无法识别的任务状态');
+      throw Error(typeof run?.error==='string'&&run.error||'Along 服务没有返回与本次任务匹配的运行记录');
+    if (!safeSuperAgentRun(run)) throw Error(typeof run.error==='string'&&run.error||'Along 服务返回了无法识别的任务状态');
     storeTaskReply(key,goalKey,task,{...run,task:current.task??run.task},Number.isFinite(current.createdAt)?current.createdAt:Date.now(),taskScope(goalKey));
   } catch(error) {
     if (agentConfig===config&&taskCallIsCurrent(task.id,goalKey,current.runtime,callKey))
@@ -1160,7 +1112,7 @@ function taskProposalCard() {
       message='暂时读不到新的健康摘要，已有安排仍保存在这里。';
       action='refresh-health';label='重新读取';
     } else if (state.source==='healthkit'&&!agentConfig.token) {
-      message='已收到健康摘要，连接 Mac 上的 Along 后即可评估当前任务。';
+      message='已收到健康摘要，连接 Along 服务后即可评估当前任务。';
       action='edit-goal';label='连接 Along';
     }
     if (action) return `<div class="task-proposal"><p>${esc(message)}</p><button class="button" data-action="${action}">${label}</button></div>`;
@@ -1382,13 +1334,13 @@ function taskDetailPage() {
     const reasons=stopped&&Array.isArray(run.eval.reasons)?run.eval.reasons.map(taskReasonText).filter(Boolean):[];
     reason=[run.error,...reasons,(!run.error&&run.status==='blocked')?run.report?.summary:''].filter(item=>typeof item==='string'&&item).join(' ');
     if (stopped&&!reason) reason=`${meta.short} 已返回这项决定。`;
-    if (run.refreshFailed) {action=agentConfig.token?'refresh-task':'edit-goal';button=agentConfig.token?'重新读取状态':'连接 Mac';}
-    else if (stopped&&run.eval.decision==='unavailable') reason+=' 请在 Mac 查看接单评估。';
+    if (run.refreshFailed) {action=agentConfig.token?'refresh-task':'edit-goal';button=agentConfig.token?'重新读取状态':'连接 Along';}
+    else if (stopped&&run.eval.decision==='unavailable') reason+=' 请在 Along 服务端查看接单评估。';
   } else if (!agentConfig.token && !run?.error) {
-    status='待连接 Mac';reason='请先在“编辑目标”中连接这台 Mac，然后再打开任务。';action='edit-goal';button='连接 Mac';
+    status='待连接 Along';reason='请先连接 Along 服务，然后再打开任务。';action='edit-goal';button='连接 Along';
   } else if (run?.error) {
     status='提交未获确认';reason=run.error;
-    action=agentConfig.token?'retry-task':'edit-goal';button=agentConfig.token?'重试提交':'连接 Mac';
+    action=agentConfig.token?'retry-task':'edit-goal';button=agentConfig.token?'重试提交':'连接 Along';
   } else {
     status=submitting?`正在提交给 ${meta.short}`:'待提交';
   }
@@ -1456,15 +1408,10 @@ function scrollAgentConversationToBottom() {
   });
 }
 function pairForm() {
-  // 连接指纹只在 Mac 私网（旧的叶指纹钉扎）需要；云端域名和公网 IPv4 走系统信任评估，不再手抄叶指纹
-  // （docs/iphone-ca-profile-design.md §2.2/§7）。因此它不是必填项，提交时按主机形态校验。
-  return `<form id="pair-form"><input name="baseURL" type="url" aria-label="Along 服务地址" placeholder="Along 服务地址" value="${esc(agentConfig.baseURL||'')}" required><input name="fingerprint" aria-label="连接指纹（仅 Mac 私网需要）" placeholder="连接指纹（仅 Mac 私网需要）" value="${esc(agentConfig.fingerprint||'')}"><input name="code" aria-label="一次性连接码" placeholder="一次性连接码" inputmode="numeric" required><button class="button" ${connectionBusy?'disabled':''}>${agentConfig.token?'重新配对':'连接 Along'}</button></form>`;
+  return `<form id="pair-form"><input name="baseURL" type="url" aria-label="Along 服务地址" placeholder="Along 服务地址" value="${esc(agentConfig.baseURL||'')}" required><input name="code" aria-label="一次性连接码" placeholder="一次性连接码" inputmode="numeric" required><button class="button" ${connectionBusy?'disabled':''}>${agentConfig.token?'重新配对':'连接 Along'}</button></form>`;
 }
 function connectionSetup(error) {
-  return `<details class="agent-setup" data-agent-connection><summary>${error?`连接需处理 · ${esc(error)}`:'Along 连接'}</summary>${pairForm()}${error?hostAddressForm():''}</details>`;
-}
-function hostAddressForm() {
-  return `<form id="host-address-form"><label>只更新服务地址<input name="baseURL" type="url" value="${esc(agentConfig.baseURL||'')}" required></label><button class="button" ${connectionBusy||agentBusy?'disabled':''}>验证并更新</button></form>`;
+  return `<details class="agent-setup" data-agent-connection><summary>${error?`连接需处理 · ${esc(error)}`:'Along 连接'}</summary>${pairForm()}</details>`;
 }
 // 设置页的三个功能都用同一批既有流程：健康与 OKX 走原生桥接的既有授权，
 // 配对走既有的 /pair 与 Keychain 凭据。设置页只做状态汇总与入口，不新造连接逻辑。
@@ -1491,7 +1438,7 @@ function okxSourceStatus(goal) {
   const where=goal?.title?`「${goal.title}」`:'';
   if (!status) return {label:'未连接',kind:'none',detail:`${where}只读接入 · 尚未连接`};
   if (status.error) return {label:'连接失败',kind:'none',detail:`${where}连接状态暂不可用，可以重试。`};
-  if (status.state==='connected') return {label:'已连接',kind:'real',detail:`${where}只读 · ${status.syncState==='received'?'Mac 已收到摘要':'等待同步到 Mac'}`};
+  if (status.state==='connected') return {label:'已连接',kind:'real',detail:`${where}只读 · ${status.syncState==='received'?'云端已收到摘要':'等待同步到云端'}`};
   // 本机已经停了采集、但撤回还排着队等 Host 收尾：这跟「从没连过」不是一回事，
   // 不能混成同一句话（原生 PhoneSourceCoordinator 的 syncState 就是这么分的）。
   if (status.syncState==='pending') return {label:'已停止采集',kind:'none',detail:`${where}本机已停止采集，撤回仍待 Host 接收。`};
@@ -1571,7 +1518,7 @@ function settingsPage() {
     <section class="settings-section" aria-label="Along 服务">
       <div class="section-heading"><h2>Along 服务</h2><span>配对与连接</span></div>
       <div class="connection-card"><div class="connection-symbol" aria-hidden="true">⌘</div><div class="connection-copy"><div class="connection-name"><strong>Along 服务</strong><span class="source-tag ${esc(serverLabel.kind)}">${esc(serverLabel.label)}</span></div><p>${esc(serverLabel.detail)}</p></div>${agentConfig.token?`<button class="agent-action connection-agent-action" data-action="settings-retry-connection" ${connectionBusy?'disabled':''}>重试连接</button>`:''}</div>
-      ${agentConfig.token?`<details class="agent-setup" data-agent-connection open><summary>重新配对或更新服务地址</summary>${pairForm()}${agentConnection.error?hostAddressForm():''}</details>`
+      ${agentConfig.token?`<details class="agent-setup" data-agent-connection open><summary>重新配对</summary>${pairForm()}</details>`
         :`<details class="agent-setup" data-agent-connection open><summary>连接 Along</summary>${pairForm()}</details>`}
     </section>
   </main></div>`;
@@ -1668,7 +1615,7 @@ function eventDataSources(goal) {
     const okx=okxStates.get(goal.id);
     const connected=health?state.source==='healthkit'&&state.snapshot?.contextReviewAllowed:okx?.state==='connected';
     const detail=health?(connected?'所选健康摘要变化后，Along 会自动跟进。':'连接所选健康摘要，让 Along 随变化自动跟进。')
-      :okx?.error?'连接状态暂不可用，请打开管理重试。':connected?(okx?.syncState==='received'?'只读 · iPhone 已连接，Mac 已接收摘要':'只读 · iPhone 已连接，等待同步至 Mac'):'只读接入 · 尚未连接';
+      :okx?.error?'连接状态暂不可用，请打开管理重试。':connected?(okx?.syncState==='received'?'只读 · iPhone 已连接，云端已接收摘要':'只读 · iPhone 已连接，等待同步至云端'):'只读接入 · 尚未连接';
     const action=health?`<button class="agent-action connection-agent-action" data-action="event-health-connect">${connected?'管理':'连接'}</button>`
       :`<button class="agent-action connection-agent-action" data-action="event-okx-connect">${connected?'管理连接':'连接'}</button>`;
     return `<div class="connection-card"><div class="connection-symbol" aria-hidden="true">${provider.symbol}</div><div class="connection-copy"><div class="connection-name"><strong>${provider.name}</strong><span class="source-tag">Agent 推荐</span></div><p>${esc(source.reason)}</p><p>${detail}</p></div>${action}</div>`;
@@ -1704,7 +1651,7 @@ async function connectOkx(goalId) {
   try {
     const value=await window.AlongAgentBridge.source('connect',goalId);
     if(current())okxStates.set(goalId,{state:value?.provider==='okx'&&value.state==='connected'?'connected':'disconnected',syncState:okxSyncState(value)});
-  }catch{if(current())notice('无法打开连接，请检查 Mac 连接后重试');}
+  }catch{if(current())notice('无法打开连接，请检查 Along 服务后重试');}
   if(current()){okxPending.delete(goalId);render();}
 }
 async function syncEventNotifications(value,binding) {
@@ -2327,7 +2274,7 @@ app.addEventListener('click', event => {
   if (action === 'event-steps') injectEvent({type:'steps', amount:100});
 });
 app.addEventListener('submit', async event => {
-  if (!['pair-form','agent-form','health-review-answer','host-address-form','nickname-form'].includes(event.target.id)) return;
+  if (!['pair-form','agent-form','health-review-answer','nickname-form'].includes(event.target.id)) return;
   event.preventDefault();
   if (event.target.id==='nickname-form') {
     // 换绑进行中时，页面上的表单还属于上一台 Host：这时保存昵称会把旧身份的草稿
@@ -2352,46 +2299,23 @@ app.addEventListener('submit', async event => {
   const formElement=event.target;
   const form=new FormData(formElement);
   if (connectionBusy) return;
-  if (formElement.id==='pair-form'||formElement.id==='host-address-form') {
-    const pairing=formElement.id==='pair-form';
-    if (!pairing&&agentBusy) return;
+  if (formElement.id==='pair-form') {
     connectionBusy=true;
     formElement.querySelector?.('button')?.setAttribute('disabled','');
     try {
       await connectionRestoration;
       const baseURL=String(form.get('baseURL')||'').trim().replace(/\/$/,'');
-      let config={...agentConfig,baseURL};
-      let runtime=agentRuntime;
-      if (pairing) {
-        const fingerprint=String(form.get('fingerprint')||'').trim().replace(/[^a-fA-F0-9]/g,'').toUpperCase();
-        // 只有 Mac 私网（旧的叶指纹钉扎）才需要叶指纹；云端域名和公网 IPv4 走系统信任评估。
-        // 这里不判断信任策略——那是原生的判定，网页只负责不把指纹当必填项。
-        config=fingerprint?{baseURL,fingerprint}:{baseURL};
-        const result=await agentCall(config,'/pair',{code:String(form.get('code')||'').trim()});
-        if (typeof result?.token!=='string'||!/^[a-f0-9]{64}$/i.test(result.token)) throw Error('Along 未返回有效配对凭证');
-        config={...config,token:result.token};
-        if (result.runtime===DSH_RUNTIME) {
-          runtime=DSH_RUNTIME;
-          config.runtime=runtime;
-        }
-      } else {
-        const verified=await agentCall(config,'/connection/verify',{});
-        if (!verified?.paired) throw Error('未能验证当前 Along 连接');
-      }
+      const result=await agentCall({baseURL},'/pair',{code:String(form.get('code')||'').trim()});
+      if (typeof result?.token!=='string'||!/^[a-f0-9]{64}$/i.test(result.token)) throw Error('Along 未返回有效配对凭证');
+      const runtime=result.runtime===DSH_RUNTIME?DSH_RUNTIME:agentRuntime;
+      const config={baseURL,token:result.token,...(result.runtime===DSH_RUNTIME?{runtime}:{})};
       const saved=await saveNativeConnection(config);
-      // 原生确认过的连接（带 trustPolicy 与 bindingScopeId）才是生效值。
-      const {transportMigration,workspaceHandoff,...confirmed}=saved&&typeof saved==='object'?saved:{};
-      if (confirmed.baseURL) config={...config,...confirmed};
-      activateAgentConfig(config,{rebind:pairing,runtime,transportMigration,workspaceHandoff});
+      activateAgentConfig({...config,...saved},{rebind:true,runtime});
       await refreshAgentConnection();
       if (!eventWorkspace) void reviewAll();
-      // 提示要说实话：配对成功但服务检查没通过时，不能报「已连接」。
-      // 配对已经生效（凭据已存），下一步是重试或重新配对，不是「连上了」。
-      if (pairing) {
-        if (agentConnection.status==='ready') notice('已连接 Along，之后会自动恢复');
-        else if (agentConnection.status==='error') notice('已配对 Along，但服务暂不可用，可以在设置里重试');
-        else notice('已配对 Along，正在确认服务状态');
-      } else notice('已更新 Along 服务地址');
+      if (agentConnection.status==='ready') notice('已连接 Along，之后会自动恢复');
+      else if (agentConnection.status==='error') notice('已配对 Along，但服务暂不可用，可以在设置里重试');
+      else notice('已配对 Along，正在确认服务状态');
     } catch(error) { notice(error.message || 'Along 连接未更新'); }
     finally { connectionBusy=false;render(); }
     return;
@@ -2484,7 +2408,7 @@ function healthConnection(key) {
     const names=(state.snapshot?.selectedTypes||[]).map(t=>healthTypeLabels[t]).filter(Boolean);
     const includesComparison=state.snapshot?.comparisonHistoryAllowed&&(state.snapshot.selectedTypes||[]).some(t=>t==='sleep'||t==='weight');
     return {name:'Apple Health',label:'待关联',kind:'none',actionId:'link-goal-health',
-      detail:approved?`使用${names.join('、')}的汇总${includesComparison?'（含已选睡眠或体重的近两周对比）':''}，在已配对的 Mac 上评估此目标的任务。`:'选择用于此目标任务评估的健康摘要。',
+      detail:approved?`使用${names.join('、')}的汇总${includesComparison?'（含已选睡眠或体重的近两周对比）':''}，在已配对的 Along 服务上评估此目标的任务。`:'选择用于此目标任务评估的健康摘要。',
       action:approved?'允许此目标使用所选摘要':'连接 Apple Health'};
   }
   if (nativeHealthStatus==='unlinked') return {name:'Apple Health',label:'未连接',kind:'none',actionId:'connect-health',action:'连接',detail:'在 iPhone 上选择用于任务评估的数据。'};
@@ -2519,7 +2443,7 @@ function reviewAll(cause='observation',previous=null) {
 // Match transport failures narrowly; a rejected model response remains a manual retry.
 function localConnectionError(message) {
   if (typeof message!=='string') return false;
-  if (/^(?:代理未能连接到 Mac|iPhone 未能验证 Mac 的安全连接|连接 Mac 失败)。/.test(message)) return true;
+  if (/^(?:代理未能连接到 Along 服务|iPhone 未能验证 Along 服务的证书|连接 Along 服务失败|代理未能连接到 Mac|iPhone 未能验证 Mac 的安全连接|连接 Mac 失败)。/.test(message)) return true;
   return /kCFErrorDomainCFNetwork\s+(?:error\s+|Code=)310\b|到 Mac 的安全连接|网络连接.*(中断|丢失|断开)|未能连接到服务器|无法连接到服务器|未连接到互联网|网络似乎已断开|请求超时|network connection was lost|not connected to the internet|could not connect to the server|couldn.t connect to the server|request timed out|secure connection could not be established|NSURLErrorDomain.*-(?:1001|1004|1005|1009|1200)\b/i.test(message);
 }
 function moduleReviewText(module) {
@@ -2564,7 +2488,7 @@ function openReviewAccess(key) {
     <details><summary>预览内容</summary><p>${esc(option.text)}</p></details>`).join('');
   if (sheet.open) sheet.close();
   show(`<div class="sheet-head"><h2>此目标的评估内容</h2><button class="icon-button" data-action="close" aria-label="关闭">×</button></div>
-    <p class="sheet-copy">勾选的内容将随本目标的健康评估发给已配对的 Mac。选择会保存在本机，可以随时取消。</p>
+    <p class="sheet-copy">勾选的内容将随本目标的健康评估发给已配对的 Along 服务。选择会保存在本机，可以随时取消。</p>
     <form id="review-access-form">${boxes}<button class="button sheet-main-button">保存并重新评估</button></form>`);
 }
 sheet.addEventListener('submit',event=>{
@@ -2757,9 +2681,8 @@ function createHealthReview(goalKey) {
   // 只改「授权给谁」这一个键，不动 grant 本身——授权内容与提醒时间原样保留。
   // 已经存在于 dailyRevokedIds 的 grant 是用户主动撤销过的，不在这里恢复：
   // 撤销名单里的 grant 本来就没有 dailyDelegation 可迁。
-  function migrateDailyRecipient(nextKey,previousKey=null) {
-    if (!nextKey||!healthSharing.dailyRecipient||healthSharing.dailyRecipient===nextKey||
-        previousKey&&healthSharing.dailyRecipient!==previousKey) return;
+  function migrateDailyRecipient(nextKey) {
+    if (!nextKey||!healthSharing.dailyRecipient||healthSharing.dailyRecipient===nextKey) return;
     const grant=cleanDailyDelegation(healthSharing.dailyDelegation);
     if (!grant||healthSharing.dailyRevokedIds?.includes(grant.id)) return;
     saveHealthSharing({...healthSharing,dailyRecipient:nextKey});
@@ -2804,7 +2727,7 @@ function createHealthReview(goalKey) {
     if (planningState.dailyRecord?.action?.delegationId===grant.id&&Date.parse(planningState.dailyRecord.action.evaluatedAt)>Date.parse(receipt.action.evaluatedAt)) return true;
     saveHealthSharing({...healthSharing,dailyDelegation:grant,dailyRecipient:bindingKeyOf(agentConfig)});
     const previous=planningState;
-    // A Mac handoff acknowledges this daily instruction only. Preserve an
+    // A server receipt acknowledges this daily instruction only. Preserve an
     // unrelated pending adopt/reject proposal or working health review.
     savePlanning({...previous,dailyRecord:receipt});
     if (!previous.evaluated&&!previous.request&&!pendingTask) savePlanning({...planningState,evaluated:receipt.evidence,
@@ -3325,11 +3248,11 @@ async function restoreAlongConnection() {
     const saved=await loadNativeConnection();
     // 系统信任形态下没有叶指纹（docs/iphone-ca-profile-design.md §2.2）；
     // 归属靠 bindingScopeId，凭证靠 token。
-    if (saved?.baseURL&&saved?.token&&(saved?.bindingScopeId||saved?.fingerprint)) {
+    if (saved?.baseURL&&saved?.token&&(saved.bindingScopeId||saved.fingerprint)&&
+        !(nativePage&&isRetiredLocalConnection(saved))) {
       const runtime=!localStorage.getItem(AGENT_RUNTIME_KEY)&&saved.runtime===DSH_RUNTIME?DSH_RUNTIME:agentRuntime;
       const previous=agentConfig;
-      const {transportMigration,workspaceHandoff,...confirmed}=saved;
-      activateAgentConfig(confirmed,{runtime,transportMigration,workspaceHandoff});
+      activateAgentConfig(saved,{runtime});
       // A real endpoint change removes its event binding above. Unknown scopes and
       // users remain isolated even if the network is unavailable.
       if (sameBindingIdentity(previous,agentConfig)) await restoreLegacyEventConnection(agentConfig);
@@ -3347,12 +3270,6 @@ async function restoreAlongConnection() {
   nativeConnectionRestored=true;queueBackgroundSync();
 }
 const connectionRestoration=restoreAlongConnection();
-window.addEventListener('along-native-connection-update',()=>{
-  void restoreAlongConnection().then(async()=>{
-    if(eventConnection())connectEventWorkspace(eventConnection().userId);
-    render();await refreshAgentConnection();
-  });
-});
 void connectionRestoration.then(async()=>{
   const config=agentConfig;
   if (config.token) {

@@ -133,53 +133,7 @@ import UserNotifications
         return request.identifier == prefix + "result." + DailyReminderScope.hash(scope + "\n" + event)
     }
 
-#if DEBUG
-    func repairHandoffScope(from: String, to: String, user: String, connection: [String: String]) async throws -> [String: Any] {
-        try await DailyHealthReminders.serialized { try await self.rekeyHandoffScope(from: from, to: to, user: user, connection: connection) }
-    }
-    private func rekeyHandoffScope(from: String, to: String, user: String, connection: [String: String]) async throws -> [String: Any] {
-        guard WorkspaceHandoffProof.isHash(from), WorkspaceHandoffProof.isHash(to), from != to,
-              AlongConnectionStore.load() == connection,
-              defaults.string(forKey: scopeKey) == to,
-              HealthEventDelivery.shared.notificationScope(connection, user: user) == to else { throw WorkspaceHandoffError.invalidState }
-        let pending = await center.pendingNotificationRequests()
-        let wrong = pending.filter { ownsTaskRequest($0, scope: from, user: user) }
-        let existing = Dictionary(uniqueKeysWithValues: pending.map { ($0.identifier, $0) })
-        var replacements: [UNNotificationRequest] = []
-        for request in wrong {
-            guard var route = request.content.userInfo["along"] as? [String: Any],
-                  let revision = route["revision"] as? Int, revision >= 0,
-                  let trigger = request.trigger as? UNCalendarNotificationTrigger,
-                  let content = request.content.mutableCopy() as? UNMutableNotificationContent else { throw WorkspaceHandoffError.invalidState }
-            let identifier = requestID(scope: to, goal: route["goalId"] as! String, task: route["taskId"] as! String)
-            route["eventId"] = DailyReminderScope.hash(identifier + "|" + String(revision))
-            content.userInfo["along"] = route
-            let replacement = UNNotificationRequest(identifier: identifier, content: content, trigger: trigger)
-            if let old = existing[identifier], !sameRequest(old, replacement) { throw WorkspaceHandoffError.invalidState }
-            replacements.append(replacement)
-        }
-        // Add/read back before removing the wrong IDs. A failure retains the original requests;
-        // the persisted exact repair marker and fixed request make the next launch retry safely.
-        let missing = replacements.filter { existing[$0.identifier] == nil }
-        guard pending.count + missing.count <= 64 else { throw WorkspaceHandoffError.invalidState }
-        for request in missing {
-            guard AlongConnectionStore.load() == connection else { throw WorkspaceHandoffError.invalidState }
-            try await center.add(request)
-        }
-        let confirmed = Dictionary(uniqueKeysWithValues: await center.pendingNotificationRequests().map { ($0.identifier, $0) })
-        guard AlongConnectionStore.load() == connection,
-              replacements.allSatisfy({ request in confirmed[request.identifier].map { sameRequest($0, request) } ?? false }) else { throw WorkspaceHandoffError.invalidState }
-        center.removePendingNotificationRequests(withIdentifiers: wrong.map(\.identifier))
-        let after = await center.pendingNotificationRequests()
-        guard AlongConnectionStore.load() == connection,
-              !after.contains(where: { ownsTaskRequest($0, scope: from, user: user) }),
-              replacements.allSatisfy({ request in after.contains { $0.identifier == request.identifier && sameRequest($0, request) } }) else { throw WorkspaceHandoffError.invalidState }
-        checkedScope = nil; registered = nil; cursor = -1; sentPlan = nil; planExpires = .distantPast
-        return ["rekeyedCount": wrong.count, "preservedOtherCount": pending.count - wrong.count]
-    }
-#endif
-
-    // A migration baseline must not depend on Host connectivity or run reconcile.
+    // The notification inventory is read-only and can run offline.
     // In particular this never requests permission, adds/cancels notifications, or marks a tap.
     func readOnlyInventory() async -> [String: Any] {
         let settings = await center.notificationSettings()

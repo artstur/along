@@ -209,6 +209,10 @@ test('真实 Host：旧绑定升级 + 鉴权门 + 自报身份拒绝 + 归属拒
   assert.equal(registration.headers['x-along-user'],upgraded.user_id);
   assert.equal(registration.headers['x-along-device'],upgraded.device_id);
 
+  const removed=await phoneCall(host.port,'/workspace-handoff/status',{method:'POST',headers:bearer,body:{}});
+  assert.equal(removed.status,404);
+  assert.ok(!agent.calls.some(item=>item.path==='/along-source/api/workspace-handoff/status'));
+
   // 鉴权门：没有 Bearer 的手机请求到不了 Along Agent。
   const anonymous=await phoneCall(host.port,'/events',{method:'POST',body:{event_id:'evt-1'}});
   assert.equal(anonymous.status,401);

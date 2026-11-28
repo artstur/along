@@ -167,7 +167,7 @@ export function createFailedGoalSuperAgentRun(request, error, updatedAt=Date.now
   const detail=cleanText(error,copy.failed,500);
   const connectionFailure=/TLS|secure connection|安全连接|certificate|证书|代理|VPN/i.test(detail);
   return {...createPendingGoalSuperAgentRun(request,updatedAt,runtime),status:'blocked',
-    statusLabel:connectionFailure?'Mac 安全连接失败':copy.unavailable,error:detail,updatedAt};
+    statusLabel:connectionFailure?'Along 安全连接失败':copy.unavailable,error:detail,updatedAt};
 }
 
 export function safeGoalSuperAgentRun(value) {
@@ -178,7 +178,7 @@ export function safeGoalSuperAgentRun(value) {
 }
 
 // 状态读取失败时保留原因，run 继续轮询；下一次成功会覆盖掉这条错误。
-// 但如果一直读不到状态（Mac 上的服务挂了），不能永远停在 working：等到期限就明确停住。
+// 但如果一直读不到状态（Along 服务暂不可用），不能永远停在 working：等到期限就明确停住。
 export function withRunError(run, error, now=Date.now()) {
   if (!run) return null;
   const createdAt=Number.isFinite(run.createdAt)?run.createdAt:now;

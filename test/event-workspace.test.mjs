@@ -248,6 +248,20 @@ test('native result failures survive restart and stale or unmarked progress neve
   await reopened.sync();assert.deepEqual(batches[0].results.map(x=>x.eventId),['result_1']);
 });
 
+test('a stored notification boundary suppresses historical results and allows new ones',async()=>{
+  const entry=seq=>({...change(seq,'测试目标'),createdAt:new Date().toISOString(),
+    payload:{snapshot:snapshot('测试目标'),notification:{kind:'task_result',event_id:'result_'+seq,revision:1}}});
+  const page=[entry(1),entry(2),entry(3)];
+  const {dom}=setup(input=>input.path==='/sync/ack'?{}:{items:page.filter(row=>row.seq>input.body.after_seq),remoteNotifications:false});
+  const key='along.event-workspace.v1:'+config.userId;
+  dom.storage.set(key,JSON.stringify({version:1,userId:config.userId,cursor:0,activeGoalId:null,conversationId:null,goals:{},messages:{},notificationHandoffThrough:2}));
+  const results=[];
+  const workspace=createEventWorkspace({config,onNotifications:async batch=>results.push(...batch.results)});
+  await workspace.sync();
+  assert.equal(workspace.view().cursor,3);
+  assert.deepEqual(results.map(result=>result.eventId),['result_3']);
+});
+
 test('reschedule, cancellation and archive each reconcile a complete authoritative projection',async()=>{
   const at=new Date(Date.now()+3600000).toISOString(), later=new Date(Date.now()+7200000).toISOString();
   const initial=change(1,'一号目标');initial.payload.snapshot.tasks[0].scheduledAt=at;

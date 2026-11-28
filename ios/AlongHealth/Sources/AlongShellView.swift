@@ -3,7 +3,6 @@ import WebKit
 import CryptoKit
 import Security
 import CFNetwork
-import Network
 import ObjectiveC
 import UserNotifications
 
@@ -291,17 +290,11 @@ final class AlongBridgeModel: ObservableObject {
 }
 
 enum AlongConnectionStore {
-    private(set) static var saveRevision: UInt64 = 0
     private static let legacyKey = "along.connection.v1"
     private static let service = "com.artstur.AlongHealth.connection"
     private static let account = "Along"
 
-    // 信任策略（docs/iphone-ca-profile-design.md §2.2）：
-    //   system-pki-v1     —— 云端 DNS 或公网 IPv4。证书由 iOS 系统信任评估，App 不比叶指纹。
-    //   legacy-local-pin-v1 —— Mac 私网 RFC1918 连接。保留原来的叶指纹钉扎，行为不变。
-    // 这不是用户可选的模式开关：策略由主机形态（私网 IPv4、DNS 域名或公网 IPv4）推导后写进持久状态。
     static let systemTrustPolicy = "system-pki-v1"
-    static let legacyPinPolicy = "legacy-local-pin-v1"
 
     // 稳定的绑定作用域 ID（docs/iphone-ca-profile-design.md §2.2「bindingScopeId」）：
     // 由规范化 origin（scheme/host/有效端口）与配对 token 的哈希派生，不随叶证书轮换改变，
@@ -319,73 +312,22 @@ enum AlongConnectionStore {
             .map { String(format: "%02x", $0) }.joined()
     }
 
-    // 连接形态判定：RFC1918 私网 IPv4 走旧 pin，其余已允许的云端主机走系统信任评估。
-    // 不新增用户可选开关，也不接受 JavaScript 自报 trustPolicy 来放宽规则。
-    static func trustPolicy(forHost host: String) -> String {
-        isPrivateIPv4(host) ? legacyPinPolicy : systemTrustPolicy
-    }
-
-    // 旧 pin 形态下取叶指纹；系统信任形态返回 nil（叶指纹不再是信任依据）。
-    // 格式不合法一律返回 nil，由调用方按「没有可用 pin」处理。
-    static func pinnedFingerprint(_ value: String?, policy: String) -> String? {
-        guard policy == legacyPinPolicy, let pin = value, pin.count == 64, pin.allSatisfy(\.isHexDigit) else { return nil }
-        return pin.uppercased()
-    }
-
-    // Reusing this Mac's bearer at another endpoint must retain the original
-    // local pin policy and certificate. Run before creating/sending any request,
-    // including the Web/DEBUG address form's earlier /connection/verify call.
+    // A saved bearer can only be reused with the same TLS origin.
     static func permitsPairedTransport(_ input: [String: Any]) -> Bool {
-        guard let current = load(), let base = current["baseURL"],
-              let oldHost = URLComponents(string: base)?.host,
-              let token = input["token"] as? String,
-              token.lowercased() == current["token"]?.lowercased() else { return true }
-        guard let nextBase = input["baseURL"] as? String,
-              let host = URLComponents(string: nextBase)?.host else { return false }
-        if trustPolicy(forHost: oldHost) == legacyPinPolicy {
-            guard trustPolicy(forHost: host) == legacyPinPolicy,
-                  let pin = input["fingerprint"] as? String,
-                  pin.uppercased() == current["fingerprint"]?.uppercased() else { return false }
-            return true
-        }
-        // A public CA authenticates only its own origin. Reusing an existing
-        // PKI bearer across origins requires a new pairing, even with no pins.
-        guard let oldScope = bindingScopeId(baseURL: base, token: token),
+        guard let current = storedConnection() ?? UserDefaults.standard.dictionary(forKey: legacyKey),
+              let token = input["token"] as? String, let currentToken = current["token"] as? String,
+              token.lowercased() == currentToken.lowercased() else { return true }
+        guard let cloud = clean(current), let nextBase = input["baseURL"] as? String,
               let nextScope = bindingScopeId(baseURL: nextBase, token: token) else { return false }
-        return oldScope == nextScope
+        return cloud["bindingScopeId"] == nextScope
     }
 
-    // 入口守卫用：系统信任形态一律放行（不需要叶指纹）；旧 pin 形态必须带合法 64hex。
-    static func acceptsPin(_ value: String?, policy: String) -> Bool {
-        policy == systemTrustPolicy || pinnedFingerprint(value, policy: policy) != nil
-    }
-
-    static func isPrivateIPv4(_ host: String) -> Bool {
-        let labels = host.split(separator: ".", omittingEmptySubsequences: false)
-        guard labels.count == 4,
-              labels.allSatisfy({ Int($0).map { (0...255).contains($0) } ?? false }),
-              host.hasPrefix("192.168.") || host.hasPrefix("10.") ||
-              ((Int(labels[0]) == 172) && (16...31).contains(Int(labels[1]) ?? 0))
-        else { return false }
-        return true
-    }
-
-    // 统一的「作用域种子」：所有用叶指纹做作用域的地方改用它
-    // （docs/iphone-ca-profile-design.md §2.2「一起迁移；不能只修改一个网络委托」）。
-    //   - 旧 pin 形态：保持原来的 base|fingerprint|token 三段，作用域值与迁移前完全一致；
-    //   - 系统信任形态：改用 bindingScopeId（origin + token 派生），叶证书轮换不改变作用域。
     static func scopeSeed(_ connection: [String: String]) -> String? {
         guard let base = connection["baseURL"], let token = connection["token"] else { return nil }
-        let policy = connection["trustPolicy"] ?? legacyPinPolicy
-        if policy == legacyPinPolicy {
-            guard let pin = connection["fingerprint"], pin.count == 64 else { return nil }
-            return [base, pin, token].joined(separator: "\n")
-        }
-        guard let scope = connection["bindingScopeId"] ?? bindingScopeId(baseURL: base, token: token) else { return nil }
-        return scope
+        return connection["bindingScopeId"] ?? bindingScopeId(baseURL: base, token: token)
     }
 
-    static func load() -> [String: String]? {
+    private static func storedConnection() -> [String: Any]? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -394,11 +336,12 @@ enum AlongConnectionStore {
             kSecMatchLimit as String: kSecMatchLimitOne,
         ]
         var item: CFTypeRef?
-        if SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
-           let data = item as? Data,
-           let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let clean = clean(value) { return clean }
+        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess, let data = item as? Data else { return nil }
+        return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    }
 
+    static func load() -> [String: String]? {
+        if let stored = storedConnection() { return clean(stored) }
         guard let legacy = UserDefaults.standard.dictionary(forKey: legacyKey),
               let clean = clean(legacy) else { return nil }
         // 迁移到钥匙串成功之后才删旧键：写失败还照删，就只剩一份凭证，而且再也回不来。
@@ -406,6 +349,11 @@ enum AlongConnectionStore {
             UserDefaults.standard.removeObject(forKey: legacyKey)
         }
         return clean
+    }
+
+    static func savePairedConnection(_ value: [String: Any]) -> [String: String]? {
+        guard permitsPairedTransport(value) else { return nil }
+        return save(value)
     }
 
     @discardableResult
@@ -427,106 +375,22 @@ enum AlongConnectionStore {
             item.merge(attributes) { _, new in new }
             guard SecItemAdd(item as CFDictionary, nil) == errSecSuccess else { return nil }
         } else if status != errSecSuccess { return nil }
-        saveRevision &+= 1
         return clean
     }
 
 #if DEBUG
-    private static func wifiSubnet(for host: String) -> String {
-        var peer = in_addr()
-        var addresses: UnsafeMutablePointer<ifaddrs>?
-        guard inet_pton(AF_INET, host, &peer) == 1, getifaddrs(&addresses) == 0 else { return "unavailable" }
-        defer { freeifaddrs(addresses) }
-        var cursor = addresses
-        while let entry = cursor?.pointee {
-            cursor = entry.ifa_next
-            guard String(cString: entry.ifa_name) == "en0",
-                  let address = entry.ifa_addr, address.pointee.sa_family == AF_INET,
-                  let netmask = entry.ifa_netmask else { continue }
-            let local = address.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee.sin_addr.s_addr }
-            let mask = netmask.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee.sin_addr.s_addr }
-            return (local & mask) == (peer.s_addr & mask) ? "same subnet" : "different subnet"
-        }
-        return "no Wi-Fi IPv4"
-    }
-
-    private static func checkLocalRoute(_ url: URL) async {
-        guard let host = url.host, let port = NWEndpoint.Port("\(url.port ?? 443)") else { return }
-        print("Along local Wi-Fi: \(wifiSubnet(for: host))")
-        let parameters = NWParameters.tcp
-        parameters.preferNoProxies = true
-        let connection = NWConnection(host: NWEndpoint.Host(host), port: port, using: parameters)
-        let queue = DispatchQueue(label: "Along.paired-host-route")
-        let outcomes = AsyncStream<String> { continuation in
-            connection.stateUpdateHandler = { state in
-                switch state {
-                case .ready: continuation.yield("reachable")
-                case .failed: continuation.yield("failed")
-                case .waiting where connection.currentPath?.unsatisfiedReason == .localNetworkDenied:
-                    print("Along direct local route: waiting for local network access")
-                default: break
-                }
-            }
-            queue.asyncAfter(deadline: .now() + 15) {
-                continuation.yield(connection.currentPath?.unsatisfiedReason == .localNetworkDenied ? "localNetworkDenied" : "timed out")
-                continuation.finish()
-            }
-        }
-        connection.start(queue: queue)
-        for await outcome in outcomes {
-            print("Along direct local route: \(outcome)")
-            break
-        }
-        connection.stateUpdateHandler = nil
-        connection.cancel()
-    }
-
-    static func bootstrapFromEnvironment() async {
+    @MainActor static func bootstrapFromEnvironment() {
         let environment = ProcessInfo.processInfo.environment
-        if environment["ALONG_MIGRATE_URL"] != nil || environment["ALONG_MIGRATE_FINGERPRINT"] != nil {
-            if let settings = try? await AlongWebView.Coordinator.notificationOperation(["action": "status"]),
-               let status = settings["status"] as? String {
-                print("Along notification authorization: \(status)")
-            }
-            guard let baseURL = environment["ALONG_MIGRATE_URL"],
-                  let fingerprint = environment["ALONG_MIGRATE_FINGERPRINT"],
-                  let saved = load(), let token = saved["token"],
-                  saved["fingerprint"] == fingerprint.uppercased(),
-                  let next = clean(["baseURL": baseURL, "fingerprint": fingerprint, "token": token]),
-                  let url = URL(string: baseURL)
-            else {
-                print("Along host migration requires a matching stored pairing")
-                return
-            }
-            await checkLocalRoute(url)
-            var input: [String: Any] = next
-            input["path"] = "/connection/verify"
-            input["body"] = [:] as [String: Any]
-            guard let result = try? await AlongWebView.Coordinator.agentRequest(input),
-                  result["paired"] as? Bool == true, load() == saved else {
-                print("Along host migration could not verify or persist the pairing")
-                return
-            }
-            do { _ = try await HealthEventDelivery.shared.saveConnection(next) }
-            catch {
-                print("Along host migration could not verify or persist the pairing")
-                return
-            }
-            print("Along host migration verified and saved")
-            return
-        }
         guard let json = environment["ALONG_CONNECTION"],
               let data = json.data(using: .utf8),
               let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return }
-        _ = try? await HealthEventDelivery.shared.saveConnection(value)
+        _ = savePairedConnection(value)
     }
 #endif
 
-    // 公网 IPv4 使用十进制标准写法。保留 RFC1918 的既有校验，
-    // 特殊用途地址不进入公网系统信任路径。
-    static func hostAccepted(_ host: String) -> Bool {
-        if isPrivateIPv4(host) { return true }
+    // 公网 IPv4 使用十进制标准写法，排除保留或特殊用途地址。
+    static func cloudHostAccepted(_ host: String) -> Bool {
         let labels = host.split(separator: ".", omittingEmptySubsequences: false)
         if labels.count == 4, labels.allSatisfy({ !$0.isEmpty && $0.utf8.allSatisfy { (48...57).contains($0) } }) {
             let octets = labels.compactMap { label -> Int? in
@@ -537,15 +401,17 @@ enum AlongConnectionStore {
             switch (octets[0], octets[1], octets[2], octets[3]) {
             case (192, 0, 0, 9...10): // IANA 标记为全球可达的两项协议任播地址。
                 return true
-            case (0, _, _, _), (100, 64...127, _, _), (127, _, _, _), (169, 254, _, _),
-                 (192, 0, 0, _), (192, 0, 2, _), (192, 88, 99, _), (198, 18...19, _, _),
+            case (0, _, _, _), (10, _, _, _), (100, 64...127, _, _), (127, _, _, _),
+                 (169, 254, _, _), (172, 16...31, _, _), (192, 168, _, _), (192, 0, 0, _), (192, 0, 2, _), (192, 88, 99, _), (198, 18...19, _, _),
                  (198, 51, 100, _), (203, 0, 113, _), (224...255, _, _, _):
                 return false
             default:
                 return true
             }
         }
-        guard labels.count >= 2, host.count <= 253 else { return false }
+        let name = host.lowercased()
+        guard labels.count >= 2, host.count <= 253, !name.hasSuffix(".local"), !name.hasSuffix(".localhost"),
+              name != "home.arpa", !name.hasSuffix(".home.arpa") else { return false }
         for label in labels {
             if label.isEmpty || label.count > 63 || label.first == "-" || label.last == "-" { return false }
             if !label.allSatisfy({ c in ("a"..."z").contains(c) || ("A"..."Z").contains(c) || ("0"..."9").contains(c) || c == "-" }) { return false }
@@ -560,23 +426,13 @@ enum AlongConnectionStore {
         guard let baseURL = value["baseURL"] as? String,
               let components = URLComponents(string: baseURL),
               components.scheme == "https", let host = components.host,
-              hostAccepted(host),
+              cloudHostAccepted(host),
               components.user == nil, components.password == nil,
               components.path.isEmpty, components.query == nil, components.fragment == nil,
               let token = value["token"] as? String,
               token.count == 64, token.allSatisfy(\.isHexDigit)
         else { return nil }
-        // 信任策略由主机形态推导，不接受调用方自报：云端 DNS 与公网 IPv4 走系统信任评估，
-        // 私网 IPv4 保留旧叶指纹钉扎（docs/iphone-ca-profile-design.md §2.2）。
-        let policy = trustPolicy(forHost: host)
-        var clean = ["baseURL": baseURL, "trustPolicy": policy, "token": token.lowercased()]
-        // 系统信任策略下叶指纹不是信任依据，也不再充当用户/设备绑定 ID；
-        // 只有旧 pin 形态仍需保留它。
-        if policy == legacyPinPolicy {
-            guard let fingerprint = value["fingerprint"] as? String,
-                  fingerprint.count == 64, fingerprint.allSatisfy(\.isHexDigit) else { return nil }
-            clean["fingerprint"] = fingerprint.uppercased()
-        }
+        var clean = ["baseURL": baseURL, "trustPolicy": systemTrustPolicy, "token": token.lowercased()]
         if let scope = bindingScopeId(baseURL: baseURL, token: token) {
             clean["bindingScopeId"] = scope
         }
@@ -589,7 +445,7 @@ enum AlongConnectionStore {
 
 struct AlongWebView: UIViewRepresentable {
     @ObservedObject var bridge: AlongBridgeModel
-    private let site = URL(string: "along://app/index.html?build=112")!
+    private let site = URL(string: "along://app/index.html?build=114")!
 
     func makeCoordinator() -> Coordinator { Coordinator(bridge: bridge) }
 
@@ -613,21 +469,10 @@ struct AlongWebView: UIViewRepresentable {
         webView.navigationDelegate = context.coordinator
         webView.uiDelegate = context.coordinator
         let request = URLRequest(url: site, cachePolicy: .reloadIgnoringLocalCacheData)
-        Task { @MainActor in
-            try? await HealthEventDelivery.shared.recoverWorkspaceHandoff(onlyIfAlreadyTarget: true)
 #if DEBUG
-            await AlongConnectionStore.bootstrapFromEnvironment()
-            await Coordinator.processWorkspaceHandoffRequest()
+        AlongConnectionStore.bootstrapFromEnvironment()
 #endif
-            webView.load(request)
-            let before = AlongConnectionStore.load()
-            do {
-                try await HealthEventDelivery.shared.recoverWorkspaceHandoff()
-                if AlongConnectionStore.load() != before {
-                    _ = try? await webView.evaluateJavaScript("window.dispatchEvent(new Event('along-native-connection-update'))")
-                }
-            } catch { /* Original cache remains usable; the authenticated journal retries next launch. */ }
-        }
+        webView.load(request)
         return webView
     }
 
@@ -679,10 +524,10 @@ struct AlongWebView: UIViewRepresentable {
         else item.reject(Object.assign(new Error(result.error || 'Along 请求失败'), result.receipt ? {receipt: result.receipt} : {}, result.status ? {status: result.status} : {}));
       };
       window.AlongAgentBridge = {
-        request: ({baseURL, fingerprint, path, token, body}) => new Promise((resolve, reject) => {
+        request: ({baseURL, path, token, body}) => new Promise((resolve, reject) => {
           const id = newId();
           agentPending.set(id, {resolve, reject});
-          window.webkit.messageHandlers.alongAgent.postMessage({id, baseURL, fingerprint, path, token, body});
+          window.webkit.messageHandlers.alongAgent.postMessage({id, baseURL, path, token, body});
         }),
         connection: (action, value = null) => new Promise((resolve, reject) => {
           const id = newId();
@@ -828,11 +673,9 @@ struct AlongWebView: UIViewRepresentable {
                             if body["action"] as? String == "save" {
                                 guard origin.protocol == "along", origin.host == "app",
                                       let value = body["value"] as? [String: Any] else { throw AgentBridgeError.invalidConfiguration }
-                                result = ["ok": true, "value": try await HealthEventDelivery.shared.saveConnection(value)]
+                                guard let saved = AlongConnectionStore.savePairedConnection(value) else { throw AgentBridgeError.invalidConfiguration }
+                                result = ["ok": true, "value": saved]
                             } else { result = ["ok": true, "value": try Self.connectionOperation(body)] }
-                            if origin.protocol != "along" || origin.host != "app", var value = result["value"] as? [String: Any] {
-                                value.removeValue(forKey: "workspaceHandoff"); result["value"] = value
-                            }
                         }
                         catch { result = ["ok": false, "error": error.localizedDescription] }
                         Self.deliverAlongResult(id: id, result: result, webView: webView)
@@ -854,66 +697,10 @@ struct AlongWebView: UIViewRepresentable {
             }
         }
 
-#if DEBUG
-        // Deployment copies a request and (for commit) a private offer to these fixed app-container
-        // files. Only the action is a request; no target credential enters argv/env or Web input.
-        @MainActor static func processWorkspaceHandoffRequest() async {
-            guard UIApplication.shared.isProtectedDataAvailable,
-                  let cache = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else { return }
-            let manager = FileManager.default
-            let request = cache.appendingPathComponent("AlongWorkspaceHandoff.request.json")
-            guard manager.fileExists(atPath: request.path) else { return }
-            func read(_ url: URL) throws -> [String: Any] {
-                let a = try manager.attributesOfItem(atPath: url.path)
-                guard a[.type] as? FileAttributeType == .typeRegular,
-                      let size = a[.size] as? NSNumber, size.intValue > 0, size.intValue <= 256 * 1024 else { throw WorkspaceHandoffError.invalidState }
-                try manager.setAttributes([.protectionKey: FileProtectionType.complete, .posixPermissions: 0o600], ofItemAtPath: url.path)
-                guard let value = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any] else { throw WorkspaceHandoffError.invalidState }
-                return value
-            }
-            func write(_ name: String, _ value: [String: Any]) throws {
-                let url = cache.appendingPathComponent(name)
-                try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]).write(to: url, options: [.atomic, .completeFileProtection])
-                try manager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
-            }
-            do {
-                let input = try read(request)
-                guard let action = input["action"] as? String else { throw WorkspaceHandoffError.invalidState }
-                switch action {
-                case "inventory":
-                    guard Set(input.keys) == ["action"] else { throw WorkspaceHandoffError.invalidState }
-                    try write("AlongWorkspaceHandoff.inventory.json", await EventTaskNotifications.shared.readOnlyInventory())
-                case "prepare":
-                    guard Set(input.keys) == ["action", "targetOrigin"], let target = input["targetOrigin"] as? String else { throw WorkspaceHandoffError.invalidState }
-                    try write("AlongWorkspaceHandoff.challenge.json", HealthEventDelivery.shared.prepareWorkspaceHandoff(targetOrigin: target))
-                case "commit":
-                    guard Set(input.keys) == ["action"] else { throw WorkspaceHandoffError.invalidState }
-                    let file = cache.appendingPathComponent("AlongWorkspaceHandoff.offer.json")
-                    let result = try await HealthEventDelivery.shared.commitWorkspaceHandoff(read(file))
-                    guard result["workspaceHandoff"] != nil else { throw WorkspaceHandoffError.invalidState }
-                    try manager.removeItem(at: file)
-                case "repairNotificationScope":
-                    var repair = input
-                    repair.removeValue(forKey: "action")
-                    try write("AlongWorkspaceHandoff.repair.json", await HealthEventDelivery.shared.repairWorkspaceHandoffNotificationScope(repair))
-                default: throw WorkspaceHandoffError.invalidState
-                }
-                try write("AlongWorkspaceHandoff.result.json", ["purpose": WorkspaceHandoffProof.purpose, "action": action,
-                    "status": "completed", "checkedAt": ISO8601DateFormatter().string(from: Date())])
-                try manager.removeItem(at: request)
-            } catch {
-                try? write("AlongWorkspaceHandoff.result.json", ["purpose": WorkspaceHandoffProof.purpose,
-                    "status": "not_completed", "checkedAt": ISO8601DateFormatter().string(from: Date())])
-            }
-        }
-#endif
-
         static func connectionOperation(_ input: [String: Any]) throws -> [String: Any] {
             switch input["action"] as? String {
             case "load":
-                let saved = AlongConnectionStore.load()
-                print("Along connection delivered to web: \(saved != nil)")
-                return saved.map { HealthEventDelivery.shared.connectionForWeb($0) } ?? [:]
+                return AlongConnectionStore.load() ?? [:]
             case "workspace":
                 guard let saved = AlongConnectionStore.load() else { return [:] }
                 return HealthEventDelivery.shared.cachedWorkspaceBinding(saved)
@@ -1160,41 +947,32 @@ struct AlongWebView: UIViewRepresentable {
             try await PhoneSourceCoordinator.shared.status(goalID: goalID)
         }
 
-        static func agentRequest(_ input: [String: Any], background: Bool = false, privateNotificationRequest: Bool = false, privateSourceRequest: Bool = false, privateWorkspaceHandoffRequest: Bool = false) async throws -> [String: Any] {
+        static func agentRequest(_ input: [String: Any], background: Bool = false, privateNotificationRequest: Bool = false, privateSourceRequest: Bool = false) async throws -> [String: Any] {
             guard let base = input["baseURL"] as? String, let components = URLComponents(string: base),
                   components.scheme == "https", let host = components.host,
-                  AlongConnectionStore.hostAccepted(host),
+                  AlongConnectionStore.cloudHostAccepted(host),
                   components.user == nil, components.password == nil,
                   components.path.isEmpty, components.query == nil, components.fragment == nil,
                   let path = input["path"] as? String,
                   // 新链路端点（docs/stage-a-tech-design.md §2.4.2）：全部 POST，语义与旧路径一致——仅网络转发。
-                  (["/pair", "/connection/verify", "/connection/status", "/goal/event", "/super-agent/tasks", "/super-agent/tasks/status", "/super-agent/daily-delegation",
-                   "/super-agent/goals", "/super-agent/goals/status", "/events", "/sync", "/sync/ack"].contains(path) || (privateWorkspaceHandoffRequest && ["/workspace-handoff/status"].contains(path)) || (privateNotificationRequest && ["/notifications/device","/notifications/scheduled"].contains(path)) || (privateSourceRequest && ["/sources/okx", "/sources/device"].contains(path))),
+                  (["/pair", "/connection/status", "/goal/event", "/super-agent/tasks", "/super-agent/tasks/status", "/super-agent/daily-delegation",
+                   "/super-agent/goals", "/super-agent/goals/status", "/events", "/sync", "/sync/ack"].contains(path) || (privateNotificationRequest && ["/notifications/device","/notifications/scheduled"].contains(path)) || (privateSourceRequest && ["/sources/okx", "/sources/device"].contains(path))),
                   let body = input["body"] as? [String: Any],
-                  let url = URL(string: base + path),
-                  // 旧 pin 形态（Mac 私网）必须带合法 64hex 叶指纹；云端系统信任形态不需要。
-                  // 这里在入口守卫里就分好形态，避免后面再判一次。
-                  AlongConnectionStore.acceptsPin(input["fingerprint"] as? String,
-                                                  policy: AlongConnectionStore.trustPolicy(forHost: host))
+                  let url = URL(string: base + path)
             else { throw AgentBridgeError.invalidConfiguration }
-            // 信任策略由主机形态推导（docs/iphone-ca-profile-design.md §2.2）：
-            // 私网 IPv4 走旧叶指纹 pin，云端主机交给系统信任评估。
-            // 不接受 JavaScript 自报 trustPolicy——放宽策略必须走原生自己的判定。
             guard AlongConnectionStore.permitsPairedTransport(input) else { throw AgentBridgeError.invalidConfiguration }
-            let policy = AlongConnectionStore.trustPolicy(forHost: host)
-            let fingerprint = AlongConnectionStore.pinnedFingerprint(input["fingerprint"] as? String, policy: policy)
             var request = URLRequest(url: url)
             request.httpMethod = "POST"
-            request.timeoutInterval = background ? 8 : (["/connection/verify", "/sources/device", "/workspace-handoff/status"].contains(path) ? 12 : 120)
+            request.timeoutInterval = background ? 8 : (path == "/sources/device" ? 12 : 120)
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             if let token = input["token"] as? String, !token.isEmpty {
                 request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
             }
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
-            let delegate: URLSessionDelegate = fingerprint.map { PinnedAgentDelegate(fingerprint: $0) } ?? SystemTrustAgentDelegate(expectedHost: host)
+            let delegate = SystemTrustAgentDelegate(expectedHost: host)
             let configuration = URLSessionConfiguration.ephemeral
             configuration.waitsForConnectivity = !background
-            configuration.timeoutIntervalForResource = background ? 10 : (["/connection/verify", "/sources/device", "/workspace-handoff/status"].contains(path) ? 15 : 120)
+            configuration.timeoutIntervalForResource = background ? 10 : (path == "/sources/device" ? 15 : 120)
             // Every session is tied to one validated origin and disallows redirects.
             configuration.connectionProxyDictionary = [
                 kCFNetworkProxiesProxyAutoConfigEnable as String: true,
@@ -1218,7 +996,8 @@ struct AlongWebView: UIViewRepresentable {
                 if let status = result["status"] as? String, ["rejected", "conflict", "accepted", "duplicate"].contains(status) {
                     throw AgentBridgeError.receipt(result)
                 }
-                let message = result["error"] as? String ?? "Along 请求失败"
+                let hostMessage = result["error"] as? String ?? "Along 请求失败"
+                let message = hostMessage == "请先配对这台 Mac" ? "请先配对 Along 服务" : hostMessage
                 // HTTP 状态码一并带到 web 层：文案不变，但「凭据失效（401/403）」和
                 // 「服务暂不可用（5xx）」要分开说，网页才知道该让用户重新配对还是稍后重试。
                 if let statusCode = (response as? HTTPURLResponse)?.statusCode {
@@ -1414,15 +1193,15 @@ enum AgentBridgeError: LocalizedError {
             $0.domain == NSURLErrorDomain || $0.domain == kCFErrorDomainCFNetwork as String
         }
         if networkErrors.contains(where: { $0.code == CFNetworkErrors.cfErrorHTTPSProxyConnectionFailure.rawValue }) {
-            return "代理未能连接到 Mac。请确认当前代理或 VPN 允许 Along 直连局域网，再重试评估。"
+            return "代理未能连接到 Along 服务。请检查网络后重试。"
         }
         let codes = networkErrors.map { URLError.Code(rawValue: $0.code) }
         if codes.contains(where: { [.secureConnectionFailed, .serverCertificateHasBadDate, .serverCertificateUntrusted,
                                     .serverCertificateHasUnknownRoot, .serverCertificateNotYetValid].contains($0) }) {
-            return "iPhone 未能验证 Mac 的安全连接。若使用代理或 VPN，请允许 Along 直连局域网后重试。"
+            return "iPhone 未能验证 Along 服务的证书。请检查服务地址和证书信任设置。"
         }
         if codes.contains(where: { [.timedOut, .cannotConnectToHost, .notConnectedToInternet, .networkConnectionLost].contains($0) }) {
-            return "连接 Mac 失败。请让 iPhone 和 Mac 接入可互访的网络，并确认 Mac 上的 Along 服务正在运行。若 Mac 地址变了，请到「编辑目标」更新地址后重试。"
+            return "连接 Along 服务失败。请检查网络和服务地址后重试。"
         }
         return nil
     }
@@ -1475,32 +1254,6 @@ final class SystemTrustAgentDelegate: NSObject, URLSessionDelegate, URLSessionTa
     }
 }
 
-// Mac 私网旧连接的叶指纹钉扎委托：行为不变（docs/iphone-ca-profile-design.md §2.2）。
-// 已知局限（错误主机名/过期叶证书只比指纹）不在本方案范围内，本设计不宣称已修复该本地机制。
-final class PinnedAgentDelegate: NSObject, URLSessionDelegate, URLSessionTaskDelegate {
-    private let fingerprint: String
-    init(fingerprint: String) { self.fingerprint = fingerprint }
-
-    func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge,
-                    completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
-        guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
-              let trust = challenge.protectionSpace.serverTrust,
-              let certificate = SecTrustGetCertificateAtIndex(trust, 0) else {
-            completionHandler(.cancelAuthenticationChallenge, nil); return
-        }
-        let digest = SHA256.hash(data: SecCertificateCopyData(certificate) as Data)
-            .map { String(format: "%02X", $0) }.joined()
-        if digest != fingerprint { print("Along certificate pin mismatch") }
-        completionHandler(digest == fingerprint ? .useCredential : .cancelAuthenticationChallenge,
-                          digest == fingerprint ? URLCredential(trust: trust) : nil)
-    }
-
-    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
-                    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
-        completionHandler(nil)
-    }
-}
-
 struct HealthSyncSheet: View {
     @ObservedObject var bridge: AlongBridgeModel
 
@@ -1535,7 +1288,7 @@ struct HealthSyncSheet: View {
                     Section {
                         Toggle("允许 DSH 在后台评估当前目标", isOn: Binding(get: { bridge.backgroundSelected }, set: { bridge.chooseBackground($0) }))
                     } footer: {
-                        Text("已有授权可单独切换，立即生效。DSH 只使用已选摘要，需要能连接已配对的 Mac。锁屏或离线时，打开 Along 后补读。")
+                        Text("已有授权可单独切换，立即生效。DSH 只使用已选摘要，需要能连接已配对的 Along 服务。锁屏或离线时，打开 Along 后补读。")
                     }
                 }
                 Section("睡眠评分") {
@@ -1554,7 +1307,7 @@ struct HealthSyncSheet: View {
                             .font(.footnote).foregroundStyle(.secondary)
                     }
                     Section("导入 Along") {
-                        Text("确认后，已配对的 Mac 可使用上述所选摘要和两个七天窗口的汇总，结合当前目标评估任务调整。")
+                        Text("确认后，已配对的 Along 服务可使用上述所选摘要和两个七天窗口的汇总，结合当前目标评估任务调整。")
                             .font(.footnote).foregroundStyle(.secondary)
                         Button("导入并允许 Agent 评估") { bridge.confirmImport() }
                             .disabled(bridge.busy || !preview.hasReadableValue)
@@ -1596,7 +1349,7 @@ extension AlongBridgeModel {
         Task { @MainActor in
             let result: [String: Any]
             do { result = ["ok": true, "value": try await AlongWebView.Coordinator.okxStatus(goalID: pending.goalID)] }
-            catch { result = ["ok": false, "error": "无法读取连接状态，请检查 Mac 连接后重试"] }
+            catch { result = ["ok": false, "error": "无法读取连接状态，请检查 Along 服务后重试"] }
             AlongWebView.Coordinator.deliverAlongResult(id: pending.id, result: result, webView: pending.view)
         }
     }

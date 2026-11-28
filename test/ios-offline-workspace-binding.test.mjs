@@ -8,7 +8,6 @@ import {join} from 'node:path';
 const hasSwift=process.platform==='darwin'&&spawnSync('swift',['--version']).status===0;
 const shell=readFileSync(new URL('../ios/AlongHealth/Sources/AlongShellView.swift',import.meta.url),'utf8');
 const health=readFileSync(new URL('../ios/AlongHealth/Sources/HealthKitReader.swift',import.meta.url),'utf8');
-const handoff=readFileSync(new URL('../ios/AlongHealth/Sources/WorkspaceHandoff.swift',import.meta.url),'utf8');
 function method(source,marker) {
   const start=source.indexOf(marker);assert.ok(start>=0,marker+' must exist in shipped source');
   const brace=source.indexOf('{',start);let depth=1,end=brace+1;
@@ -29,12 +28,9 @@ test('native offline owner proof reads only an existing full-binding outbox and 
   try {
     const source=`import Foundation
 import CryptoKit
-${handoff}
 
 enum AlongConnectionStore {
-  static let legacyPinPolicy="legacy-local-pin-v1",systemTrustPolicy="system-pki-v1"
-  ${method(shell,'    static func trustPolicy(')}
-  ${method(shell,'    static func isPrivateIPv4(')}
+  static let systemTrustPolicy="system-pki-v1"
   ${method(shell,'    static func bindingScopeId(')}
   ${method(shell,'    static func scopeSeed(')}
 }
@@ -52,12 +48,11 @@ final class Probe {
     if failRead { throw NSError(domain:"locked",code:1) }
     return state
   }
-  ${method(health,'    private func localCredential(')}
   ${method(health,'    private func owns(')}
-  ${method(health,'    private func workspaceHandoffRecord(')}
+  ${method(health,'    private func installedCloudNotificationScope(')}
   ${proof}
 }
-let old:[String:String]=["baseURL":"https://192.168.1.2:4176","fingerprint":String(repeating:"A",count:64),"token":String(repeating:"b",count:64)]
+let old:[String:String]=["baseURL":"https://along.example.com:4176","token":String(repeating:"b",count:64)]
 let scope=AlongConnectionStore.bindingScopeId(baseURL:old["baseURL"]!,token:old["token"]!)!
 var current=old;current["bindingScopeId"]=scope
 let seed=AlongConnectionStore.scopeSeed(current)!
@@ -68,9 +63,9 @@ let original=try JSONSerialization.data(withJSONObject:p.state,options:[.sortedK
 let proof=p.cachedWorkspaceBinding(current)
 precondition(proof==["baseURL":old["baseURL"]!,"bindingScopeId":scope,"userId":"u_original"])
 precondition(!proof.keys.contains("pending") && !proof.keys.contains("token"))
-for field in ["baseURL","token","fingerprint"] {
+for field in ["baseURL","token"] {
   var changed=current
-  changed[field]=field=="baseURL" ? "https://192.168.1.9:4176" : String(repeating:"c",count:64)
+  changed[field]=field=="baseURL" ? "https://other.example.com:4176" : String(repeating:"c",count:64)
   changed["bindingScopeId"]=AlongConnectionStore.bindingScopeId(baseURL:changed["baseURL"]!,token:changed["token"]!)
   precondition(p.cachedWorkspaceBinding(changed).isEmpty,"full original binding must match \\(field)")
 }
@@ -87,7 +82,7 @@ UIApplication.shared.isProtectedDataAvailable=false;let reads=p.reads;preconditi
 UIApplication.shared.isProtectedDataAvailable=true
 let after=try JSONSerialization.data(withJSONObject:p.state,options:[.sortedKeys]);precondition(after==original)
 precondition(p.defaults.enabled==binding && p.defaults.writes==0)
-print("PASS: same binding owner only; origin/token/pin/scope/enabled/user/locked/read failure rejected; outbox and enabled unchanged")
+print("PASS: same binding owner only; origin/token/scope/enabled/user/locked/read failure rejected; outbox and enabled unchanged")
 `;
     const file=join(dir,'proof.swift');writeFileSync(file,source);
     const output=execFileSync('swift',[file],{encoding:'utf8'});
@@ -101,13 +96,10 @@ test('the actual native outbox read path leaves missing directories, existing fi
   try {
     const source=`import Foundation
 import CryptoKit
-${handoff}
 
 enum AgentBridgeError:Error {case invalidConfiguration}
 enum AlongConnectionStore {
-  static let legacyPinPolicy="legacy-local-pin-v1",systemTrustPolicy="system-pki-v1"
-  ${method(shell,'    static func trustPolicy(')}
-  ${method(shell,'    static func isPrivateIPv4(')}
+  static let systemTrustPolicy="system-pki-v1"
   ${method(shell,'    static func bindingScopeId(')}
   ${method(shell,'    static func scopeSeed(')}
 }
@@ -128,14 +120,13 @@ final class Probe {
  let defaults=FakeDefaults(),enabledKey="enabled"
  ${method(native,'    private func stateURL(')}
  ${method(native,'    private func load(')}
- ${method(native,'    private func localCredential(')}
  ${method(native,'    private func owns(')}
- ${method(native,'    private func workspaceHandoffRecord(')}
+ ${method(native,'    private func installedCloudNotificationScope(')}
  ${method(native,'    func cachedWorkspaceBinding(')}
 }
-let base="https://192.168.1.2:4176",token=String(repeating:"b",count:64)
+let base="https://along.example.com:4176",token=String(repeating:"b",count:64)
 let scope=AlongConnectionStore.bindingScopeId(baseURL:base,token:token)!
-let c=["baseURL":base,"token":token,"fingerprint":String(repeating:"A",count:64),"bindingScopeId":scope]
+let c=["baseURL":base,"token":token,"bindingScopeId":scope]
 let binding=SHA256.hash(data:Data(AlongConnectionStore.scopeSeed(c)!.utf8)).map{String(format:"%02x",$0)}.joined()
 let probe=Probe();probe.defaults.enabled=binding
 let root=FileManager.default.root,folder=root.appendingPathComponent("AlongHealthEvents"),file=folder.appendingPathComponent("outbox.json")

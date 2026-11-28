@@ -4,8 +4,8 @@ import {installDomStub} from './dom-stub.mjs';
 
 // 归属标识改用 bindingScopeId（docs/iphone-ca-profile-design.md §2.2）：叶指纹不再充当绑定身份。
 // 这里用可预期的假值即可——网页只把它当作不透明的归属标识。
-const MAC={baseURL:'https://192.168.1.2:4176',fingerprint:'A'.repeat(64),token:'b'.repeat(64),bindingScopeId:'scope-mac'};
-const CLOUD={baseURL:'https://along.example.com',fingerprint:'C'.repeat(64),token:'d'.repeat(64),bindingScopeId:'scope-cloud'};
+const EVENT_HOST={baseURL:'https://event.example.com',token:'b'.repeat(64),bindingScopeId:'scope-event'};
+const CLOUD={baseURL:'https://along.example.com',token:'d'.repeat(64),bindingScopeId:'scope-cloud'};
 const runtime='dsh-superagent';
 const AGENT_KEY='along.agent.v1';
 const RUNTIME_KEY='along.agent-runtime.v1';
@@ -14,7 +14,7 @@ const GOALS_KEY='along.goal-custom.v1';
 const ACTIVE_KEY='along.active-goal.v1';
 const RUNS_KEY='along.goal-super-agent-runs.v1';
 const CONVERSATIONS_KEY='along.goal-conversations.v1';
-const macStatus={along:true,ready:true,runtime,eventProtocol:1,userId:'u_mac'};
+const eventStatus={along:true,ready:true,runtime,eventProtocol:1,userId:'u_event'};
 const cloudStatus={along:true,ready:true,runtime};
 const task={id:'practice',when:'本周',title:'练习一次',detail:'完成一次短练习。',state:'planned'};
 const layout={version:1,title:'本周完成三次练习',summary:'先安排一次。',modules:[],tasks:[task],questions:[]};
@@ -23,6 +23,7 @@ const read=(dom,key)=>JSON.parse(dom.storage.get(key));
 function start(config,bridge,storage={}) {
   const dom=installDomStub({storage:{[AGENT_KEY]:JSON.stringify(config),[RUNTIME_KEY]:runtime,...storage}});
   document.visibilityState='visible';
+  location.protocol='along:';
   window.AlongAgentBridge=bridge;
   return dom;
 }
@@ -31,7 +32,7 @@ function submit(dom,id,fields) {
   return dom.app.dispatch('submit',{target:{id,fields,querySelector:()=>null,reset(){}},preventDefault(){}});
 }
 function pair(dom,config) {
-  return submit(dom,'pair-form',{baseURL:config.baseURL,fingerprint:config.fingerprint,code:'12345678'});
+  return submit(dom,'pair-form',{baseURL:config.baseURL,code:'12345678'});
 }
 function done(request,{target=request.goal?.domain==='custom'?null:180,auto=true}={}) {
   return {
@@ -42,32 +43,32 @@ function done(request,{target=request.goal?.domain==='custom'?null:180,auto=true
   };
 }
 
-test('a paired event workspace can change Hosts and keeps serving the Mac after a failed pair or Keychain write',async()=>{
-  let native=MAC, rejectPair=true,rejectSave=true;
-  let finishMacSync;let holdMacSync=false;
+test('a paired event workspace can change Hosts and keeps serving the original Host after a failed pair or Keychain write',async()=>{
+  let native=EVENT_HOST, rejectPair=true,rejectSave=true;
+  let finishOldSync;let holdOldSync=false;
   const requests=[];
-  const dom=start(MAC,{
+  const dom=start(EVENT_HOST,{
     connection:async (action,value)=>{
       if (action==='load') return native;
-      assert.deepEqual(read(dom,AGENT_KEY),MAC,'the WebView must still use the old connection during native save');
+      assert.deepEqual(read(dom,AGENT_KEY),EVENT_HOST,'the WebView must still use the old connection during native save');
       if (rejectSave) throw Error('钥匙串写入失败');
       // 原生会补上 bindingScopeId（docs/iphone-ca-profile-design.md §2.2），
       // 网页用的是原生确认过的值，不是自己猜的。
-      native={...value,bindingScopeId:value.baseURL===MAC.baseURL?MAC.bindingScopeId:CLOUD.bindingScopeId};
+      native={...value,bindingScopeId:value.baseURL===EVENT_HOST.baseURL?EVENT_HOST.bindingScopeId:CLOUD.bindingScopeId};
       return native;
     },
     request:async input=>{
       requests.push(input);
-      const mac=input.baseURL===MAC.baseURL;
-      if (input.path==='/connection/status') return mac?macStatus:cloudStatus;
+      const oldHost=input.baseURL===EVENT_HOST.baseURL;
+      if (input.path==='/connection/status') return oldHost?eventStatus:cloudStatus;
       if (input.path==='/pair') {
         assert.equal(input.token,'','never forward an old bearer when pairing');
         if (rejectPair) throw Error('验证码不正确');
         return {token:CLOUD.token,runtime};
       }
       if (input.path==='/sync') {
-        assert.ok(mac,'the legacy cloud does not use event sync');
-        if (holdMacSync) return new Promise(resolve=>{finishMacSync=resolve;});
+        assert.ok(oldHost,'the legacy cloud does not use event sync');
+        if (holdOldSync) return new Promise(resolve=>{finishOldSync=resolve;});
         return {items:[]};
       }
       if (input.path==='/super-agent/goals') return {run:done(input.body)};
@@ -78,43 +79,43 @@ test('a paired event workspace can change Hosts and keeps serving the Mac after 
   await settle();
   assert.ok(dom.app.innerHTML.includes('说说你想做什么'));
   await pair(dom,CLOUD);
-  assert.deepEqual(native,MAC);
-  assert.deepEqual(read(dom,EVENT_KEY),{bindingScopeId:MAC.bindingScopeId,userId:'u_mac',bindingOrigin:'https://192.168.1.2:4176'});
+  assert.deepEqual(native,EVENT_HOST);
+  assert.deepEqual(read(dom,EVENT_KEY),{bindingScopeId:EVENT_HOST.bindingScopeId,userId:'u_event',bindingOrigin:'https://event.example.com:443'});
   assert.match(dom.app.innerHTML,/说说你想做什么/);
   rejectPair=false;
   await pair(dom,CLOUD);
-  assert.deepEqual(read(dom,AGENT_KEY),MAC);
-  assert.deepEqual(read(dom,EVENT_KEY),{bindingScopeId:MAC.bindingScopeId,userId:'u_mac',bindingOrigin:'https://192.168.1.2:4176'});
+  assert.deepEqual(read(dom,AGENT_KEY),EVENT_HOST);
+  assert.deepEqual(read(dom,EVENT_KEY),{bindingScopeId:EVENT_HOST.bindingScopeId,userId:'u_event',bindingOrigin:'https://event.example.com:443'});
   assert.match(dom.app.innerHTML,/说说你想做什么/);
 
-  rejectSave=false;holdMacSync=true;
+  rejectSave=false;holdOldSync=true;
   await dom.tick(3000);
-  assert.ok(finishMacSync);
+  assert.ok(finishOldSync);
   await pair(dom,CLOUD);
   assert.deepEqual(native,{...CLOUD,runtime});
   assert.deepEqual(read(dom,AGENT_KEY),{...CLOUD,runtime});
   assert.equal(read(dom,EVENT_KEY),null);
   assert.match(dom.app.innerHTML,/整条目标编排链路可用/);
-  finishMacSync({items:[{seq:1,userId:'u_mac',kind:'message',payload:{conversation_id:'old',
-    message:{id:'m_old',role:'assistant',direction:'outbound',eventId:'old',text:'迟到的 Mac 消息',seq:1}}}]});
+  finishOldSync({items:[{seq:1,userId:'u_event',kind:'message',payload:{conversation_id:'old',
+    message:{id:'m_old',role:'assistant',direction:'outbound',eventId:'old',text:'迟到的原服务消息',seq:1}}}]});
   await settle();
-  assert.doesNotMatch(dom.app.innerHTML,/迟到的 Mac 消息/);
+  assert.doesNotMatch(dom.app.innerHTML,/迟到的原服务消息/);
   assert.equal(requests.some(input=>input.path==='/sync/ack'),false);
   await submit(dom,'agent-form',{message:'把我的目标更新到每周 180 分钟'});
   assert.equal(read(dom,'along.health.v1').goals.find(goal=>goal.type==='workout').target,180);
 });
 
-test('cloud re-pairing to Mac detaches a pending cloud status response and restores the event workspace',async()=>{
+test('re-pairing to an event-capable cloud Host detaches a pending cloud status response and restores the event workspace',async()=>{
   let finishPoll;
   const requests=[];
   const dom=start(CLOUD,{connection:async (action,value)=>{
     if (action==='load') return null;
     // 原生会补上 bindingScopeId（docs/iphone-ca-profile-design.md §2.2）。
-    return {...value,bindingScopeId:value.baseURL===MAC.baseURL?MAC.bindingScopeId:CLOUD.bindingScopeId};
+    return {...value,bindingScopeId:value.baseURL===EVENT_HOST.baseURL?EVENT_HOST.bindingScopeId:CLOUD.bindingScopeId};
   },request:async input=>{
     requests.push(input);
-    if (input.path==='/connection/status') return input.baseURL===MAC.baseURL?macStatus:cloudStatus;
-    if (input.path==='/pair') return {token:MAC.token};
+    if (input.path==='/connection/status') return input.baseURL===EVENT_HOST.baseURL?eventStatus:cloudStatus;
+    if (input.path==='/pair') return {token:EVENT_HOST.token};
     if (input.path==='/sync') return {items:[]};
     if (input.path==='/super-agent/goals/status') return new Promise(resolve=>{finishPoll=resolve;});
     throw Error(input.path);
@@ -123,12 +124,12 @@ test('cloud re-pairing to Mac detaches a pending cloud status response and resto
   await dom.click({action:'edit-goal'});
   await dom.tick(3000);
   assert.ok(finishPoll);
-  await pair(dom,MAC);
+  await pair(dom,EVENT_HOST);
   finishPoll(done({requestId:'req_old',goal:{domain:'health'}}));
   await settle();
-  assert.deepEqual(read(dom,AGENT_KEY),MAC);
-  assert.deepEqual(read(dom,EVENT_KEY),{bindingScopeId:MAC.bindingScopeId,userId:'u_mac',bindingOrigin:'https://192.168.1.2:4176'});
-  assert.ok(requests.some(input=>input.path==='/sync'&&input.token===MAC.token));
+  assert.deepEqual(read(dom,AGENT_KEY),EVENT_HOST);
+  assert.deepEqual(read(dom,EVENT_KEY),{bindingScopeId:EVENT_HOST.bindingScopeId,userId:'u_event',bindingOrigin:'https://event.example.com:443'});
+  assert.ok(requests.some(input=>input.path==='/sync'&&input.token===EVENT_HOST.token));
   assert.doesNotMatch(dom.app.innerHTML,/已整理这次目标|本周完成三次练习/);
   assert.equal(read(dom,GOALS_KEY)?.health,undefined);
   assert.equal(read(dom,CONVERSATIONS_KEY)?.health?.some(item=>item.requestId==='req_old')??false,false);
@@ -168,27 +169,6 @@ test('cloud Keychain restoration works with empty WebView storage',async()=>{
   assert.ok(statuses.length>0&&statuses.every(value=>value===runtime));
   assert.equal(dom.storage.get(RUNTIME_KEY),runtime);
   assert.match(dom.app.innerHTML,/整条目标编排链路可用/);
-});
-
-test('an existing Mac binding can verify an address change using its current credentials',async()=>{
-  const newAddress='https://192.168.1.3:4176';
-  let verified;
-  const dom=start(MAC,{request:async input=>{
-    if (input.path==='/connection/status') {
-      if (input.baseURL===MAC.baseURL) throw Error('Mac 已更换 Wi-Fi 地址');
-      return macStatus;
-    }
-    if (input.path==='/connection/verify') {verified=input;return {paired:true};}
-    if (input.path==='/sync') return {items:[]};
-    throw Error(input.path);
-  }},{[EVENT_KEY]:JSON.stringify({userId:'u_mac',bindingScopeId:MAC.bindingScopeId})});
-  await import('../web/app.mjs?cloud-address-repair');
-  await settle();
-  await submit(dom,'host-address-form',{baseURL:newAddress});
-  assert.deepEqual(verified,{...MAC,baseURL:newAddress,path:'/connection/verify',body:{}});
-  assert.deepEqual(read(dom,AGENT_KEY),{...MAC,baseURL:newAddress});
-  assert.deepEqual(read(dom,EVENT_KEY),{bindingScopeId:MAC.bindingScopeId,userId:'u_mac',bindingOrigin:'https://192.168.1.3:4176'});
-  assert.match(dom.app.innerHTML,/说说你想做什么/);
 });
 
 test('a completed cloud goal submission applies to the existing goal without an adoption preview',async()=>{
@@ -357,13 +337,13 @@ test('a blocked or mismatched cloud run cannot change an existing goal',async()=
   assert.equal(read(dom,CONVERSATIONS_KEY).health.some(item=>item.role==='assistant'),false);
 });
 
-test('legacy Mac submissions retain their adoption preview',async()=>{
-  const dom=start(MAC,{request:async ({path,body})=>{
+test('legacy protocol submissions retain their adoption preview',async()=>{
+  const dom=start(EVENT_HOST,{request:async ({path,body})=>{
     if (path==='/connection/status') return cloudStatus;
     if (path==='/super-agent/goals') return {run:done(body,{auto:false})};
     throw Error(path);
   }});
-  await import('../web/app.mjs?mac-legacy-preview');
+  await import('../web/app.mjs?legacy-protocol-preview');
   await dom.click({action:'edit-goal'});
   await submit(dom,'agent-form',{message:'把我的目标更新到每周 180 分钟'});
   assert.equal(read(dom,GOALS_KEY)?.health,undefined);

@@ -1,11 +1,11 @@
-import {agentCall, queueEvent, flushEventQueue, dropQueuedEvent, dropQueuedCompletions, pendingEvents, readEventFailures,bindEventAuthority,retireEventAuthority} from './agent-client.mjs?v=112';
-import {assembleEnvelope} from './event-envelope.mjs?v=112';
-import {validateGoalReply} from './goal-agent-core.mjs?v=112';
-import {safeAdaptiveLayout} from './adaptive-ui.mjs?v=112';
-import {safeRecommendation} from './recommendations.mjs?v=112';
-import {safeDataSources} from './data-sources.mjs?v=112';
-import {taskResultRelevant,resultEvidence,validResultEvidence} from './task-results.mjs?v=112';
-import {safeResultPresentation,RESULT_TEXT_LIMIT,wellFormedResultText} from './task-result-view.mjs?v=112';
+import {agentCall, queueEvent, flushEventQueue, dropQueuedEvent, dropQueuedCompletions, pendingEvents, readEventFailures,bindEventAuthority,retireEventAuthority} from './agent-client.mjs?v=114';
+import {assembleEnvelope} from './event-envelope.mjs?v=114';
+import {validateGoalReply} from './goal-agent-core.mjs?v=114';
+import {safeAdaptiveLayout} from './adaptive-ui.mjs?v=114';
+import {safeRecommendation} from './recommendations.mjs?v=114';
+import {safeDataSources} from './data-sources.mjs?v=114';
+import {taskResultRelevant,resultEvidence,validResultEvidence} from './task-results.mjs?v=114';
+import {safeResultPresentation,RESULT_TEXT_LIMIT,wellFormedResultText} from './task-result-view.mjs?v=114';
 
 const id = value => typeof value==='string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$/.test(value);
 const record = value => value!==null && typeof value==='object' && !Array.isArray(value);
@@ -925,6 +925,7 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
           if (goal.id!==item.goalId) throw Error('目标同步关联不正确');
           if (!next.goals[goal.id]||goal.revision>=next.goals[goal.id].revision) next.goals[goal.id]=goal;
         }
+        // Existing caches can record a boundary below which notifications were already handled.
         if (onNotifications&&(!replay||item.seq>state.cursor)&&item.seq>(state.notificationHandoffThrough??0)) {
           const notice=localResult(item,item.remoteNotifications??page.remoteNotifications);
           if (notice) {

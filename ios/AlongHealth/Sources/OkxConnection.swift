@@ -35,7 +35,7 @@ struct OKXConnectionSheet: View {
                                     .multilineTextAlignment(.trailing)
                             }
                         }
-                        LabeledContent("数据传递", value: snapshot.syncState == "received" ? "Mac 已接收" : "等待同步至 Mac")
+                        LabeledContent("数据传递", value: snapshot.syncState == "received" ? "云端已接收" : "等待同步至云端")
                         if let summary = snapshot.summary {
                             LabeledContent("交易账户权益（USD）", value: summary.equity)
                             LabeledContent("资产种类", value: String(summary.assetCount))
@@ -47,7 +47,7 @@ struct OKXConnectionSheet: View {
                             .disabled(busy)
                     } else {
                         if snapshot?.syncState == "pending" {
-                            Text("本机已停止采集，等待 Mac 接收撤回。")
+                            Text("本机已停止采集，等待云端接收撤回。")
                                 .foregroundStyle(.secondary)
                         }
                         Button("重新读取状态") { start(.status) }
@@ -72,7 +72,7 @@ struct OKXConnectionSheet: View {
                     } header: {
                         Text("连接只读账户")
                     } footer: {
-                        Text("在 OKX 仅勾选读取权限，完成后回到 Along 填写三项凭证。iPhone 会核实实际权限，只读采集账户摘要和近三个月成交、账单。历史分页达到上限或接口不可用时，会明确保留覆盖限制。凭证只存本机钥匙串，数据经原配对连接发送至 Mac，供 Agent 按目标读取。")
+                        Text("在 OKX 仅勾选读取权限，完成后回到 Along 填写三项凭证。iPhone 会核实实际权限，只读采集账户摘要和近三个月成交、账单。历史分页达到上限或接口不可用时，会明确保留覆盖限制。凭证只存本机钥匙串，数据经原配对连接发送至 Along 服务，供 Agent 按目标读取。")
                     }
                     .disabled(busy)
                 }
@@ -124,7 +124,7 @@ struct OKXConnectionSheet: View {
     private func start(_ action: OKXConnectionAction) {
         guard !busy, !closed else { return }
         guard let pairing = AlongConnectionStore.load() else {
-            errorMessage = "请先连接已配对的 Mac，再连接 OKX。"
+            errorMessage = "请先连接 Along 服务，再连接 OKX。"
             return
         }
         let id = UUID()
@@ -149,7 +149,7 @@ struct OKXConnectionSheet: View {
                 guard AlongConnectionStore.load() == pairing else {
                     clearCredentials()
                     snapshot = nil
-                    errorMessage = "Mac 配对已变化，请关闭后重新连接。"
+                    errorMessage = "Along 配对已变化，请关闭后重新连接。"
                     return
                 }
                 guard let next = OKXConnectionSnapshot(result),
@@ -221,10 +221,10 @@ private enum OKXConnectionAction: String {
     case status, connect, refresh, disconnect
     var failureMessage: String {
         switch self {
-        case .status: "未能读取连接状态。请确认已配对的 Mac 在线后重试。"
+        case .status: "未能读取连接状态。请确认 Along 服务在线后重试。"
         case .connect: "连接未完成，请稍后重试。"
-        case .refresh: "本次刷新失败，仍显示上次同步的摘要。请确认 Mac 在线及 OKX 连接有效后重试。"
-        case .disconnect: "断开失败。请确认 Mac 在线后重试，凭证尚未确认删除。"
+        case .refresh: "本次刷新失败，仍显示上次同步的摘要。请确认 Along 服务在线及 OKX 连接有效后重试。"
+        case .disconnect: "断开失败。请确认 Along 服务在线后重试，凭证尚未确认删除。"
         }
     }
 
@@ -234,9 +234,9 @@ private enum OKXConnectionAction: String {
             // Exact matches only: these are Host-owned constants, never raw OKX messages.
             switch message {
             case "OKX 请求超时，请稍后重试。":
-                reason = "Mac 请求 OKX 超时。请检查 Mac 到 OKX 的网络；这不代表凭证错误。"
+                reason = "Along 服务请求 OKX 超时，请稍后重试。"
             case "暂时无法连接 OKX，请稍后重试。":
-                reason = "Mac 无法连接 OKX。请检查 Mac 到 OKX 的网络后重试。"
+                reason = "Along 服务暂时无法连接 OKX，请稍后重试。"
             case "仅支持只读 API Key，请关闭交易和提现权限后重试。",
                  "OKX 未接受请求，请检查凭证、所属站点及 IP 白名单。",
                  "OKX 返回的数据无法验证，请稍后重试。",
@@ -246,13 +246,12 @@ private enum OKXConnectionAction: String {
                  "此目标尚未连接 OKX。",
                  "这个目标当前无法连接 OKX，请同步目标后重试",
                  "配对已变化，请重新打开连接",
-                 "请先配对这台 Mac":
+                 "代理未能连接到 Along 服务。请检查网络后重试。",
+                 "连接 Along 服务失败。请检查网络和服务地址后重试。",
+                 "iPhone 未能验证 Along 服务的证书。请检查服务地址和证书信任设置。":
                 reason = message
-            case "代理未能连接到 Mac。请确认当前代理或 VPN 允许 Along 直连局域网，再重试评估。",
-                 "连接 Mac 失败。请让 iPhone 和 Mac 接入可互访的网络，并确认 Mac 上的 Along 服务正在运行。若 Mac 地址变了，请到「编辑目标」更新地址后重试。":
-                reason = "iPhone 无法连接 Mac。请确认 Mac 的 Along 服务在线，且手机能访问它。"
-            case "iPhone 未能验证 Mac 的安全连接。若使用代理或 VPN，请允许 Along 直连局域网后重试。":
-                reason = "iPhone 未能验证 Mac 的安全连接。请检查原配对和局域网连接。"
+            case "请先配对这台 Mac", "请先配对 Along 服务":
+                reason = "请先配对 Along 服务。"
             default: return failureMessage
             }
         } else {
@@ -260,7 +259,7 @@ private enum OKXConnectionAction: String {
             guard network.domain == NSURLErrorDomain else { return failureMessage }
             switch URLError.Code(rawValue: network.code) {
             case .timedOut, .cannotConnectToHost, .cannotFindHost, .notConnectedToInternet, .networkConnectionLost:
-                reason = "iPhone 无法连接 Mac。请确认 Mac 的 Along 服务在线，且手机能访问它。"
+                reason = "iPhone 无法连接 Along 服务，请检查网络后重试。"
             default: return failureMessage
             }
         }

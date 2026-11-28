@@ -137,7 +137,7 @@ test('OKX connection button invokes native secure flow for this goal and trusts 
   assert.deepEqual(calls.find(c=>c.action==='connect'),{action:'connect',goalId:'g_okx'});
   assert.match(dom.app.innerHTML,/已连接/);
   assert.match(dom.app.innerHTML,/管理连接/);
-  assert.match(dom.app.innerHTML,/iPhone 已连接，等待同步至 Mac/);
+  assert.match(dom.app.innerHTML,/iPhone 已连接，等待同步至云端/);
   assert.doesNotMatch(dom.app.innerHTML,/Agent 已同步|Agent 已完成/);
   assert.doesNotMatch(JSON.stringify([...dom.store]),/tradingEquityUsd|apiKey|secretKey|passphrase/);
 });

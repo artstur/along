@@ -21,13 +21,11 @@
 	<key>CFBundleShortVersionString</key>
 	<string>1.0</string>
 	<key>CFBundleVersion</key>
-	<string>93</string>
+	<string>95</string>
 	<key>BGTaskSchedulerPermittedIdentifiers</key>
 	<array><string>com.artstur.AlongHealth.daily-review</string></array>
 	<key>UIBackgroundModes</key>
 	<array><string>fetch</string></array>
-	<key>NSLocalNetworkUsageDescription</key>
-	<string>连接同一 Wi-Fi 的 Mac 上的 Along Agent，用于目标问答和任务调整。</string>
 	<key>NSHealthShareUsageDescription</key>
 	<string>仅在你选择并确认后读取步数、健身、活动消耗、体重、静息心率、手腕温度和睡眠；开启情境评估后可包含运动关联心率、距离、用力程度和睡眠分期摘要，用于理解目标和调整任务。</string>
 	<key>NSHealthUpdateUsageDescription</key>

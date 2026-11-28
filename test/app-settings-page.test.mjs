@@ -237,13 +237,13 @@ test('the OKX row is re-read when the settings page is reopened and speaks the r
   await dom.click({action:'open-settings'});
   await settle();
   assert.match(dom.app.innerHTML,/OKX/,'有 OKX 数据源的目标要在设置页列出 OKX');
-  assert.match(dom.app.innerHTML,/等待同步到 Mac/,'还没收到回执时要说明在等 Host 接收');
+  assert.match(dom.app.innerHTML,/等待同步到云端/,'还没收到回执时要说明在等 Host 接收');
   // Host 确认收到后，重开设置页要回读，不能还停在旧状态。
   status={provider:'okx',state:'connected',syncState:'received'};
   await dom.click({action:'settings-back'});
   await dom.click({action:'open-settings'});
   await settle();
-  assert.match(dom.app.innerHTML,/Mac 已收到摘要/,'重开设置页要回读原生状态');
+  assert.match(dom.app.innerHTML,/云端已收到摘要/,'重开设置页要回读原生状态');
   // 撤回排队：本机已停采集，但还等 Host 接收——不能只说「尚未连接」。
   status={provider:'okx',state:'disconnected',syncState:'pending'};
   await dom.click({action:'settings-back'});

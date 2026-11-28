@@ -12,7 +12,6 @@ Along 提供 iPhone、Web 和 Host；相邻 `../along-superagent/` 是 Along Age
 | D：长期记忆 | Runtime、工具与 SQLite 降级已接通；[记忆实施](https://github.com/artstur/along-superagent/blob/main/docs/along/006-memory-implementation.md)；扩大质量集与长期稳定性待验收 |
 | E：批量作业 | [定时记忆维护](https://github.com/artstur/along-superagent/blob/main/docs/along/008-scheduled-maintenance.md)已接通，可配置 `alongMaintenanceTime`；完整复盘、Skill 自动发布及回退待实现 |
 | 运行拓扑 | 本机用 `npm run activate`；云端见[部署入口](../deploy/README.md)。启用 `ALONG_EVENT_INGEST=on` 后 Host 代理 `/events`、`/sync` 和 `/sync/ack`，Along Agent 才是目标、任务和对话的持久写端。基础 Tier 1 不启用该协议，不能用其配对成功证明事件链路可用。 |
-| 个人工作区交接 | [Host / iPhone 交接契约](personal-workspace-handoff.md)与 [Agent 冷导入及单写围栏](https://github.com/artstur/along-superagent/blob/main/docs/along/019-personal-cloud-handoff.md)成对使用。普通新配对不导入业务历史；专用交接验证同步前缀、身份与源退役后再切换手机，保留已验证的作用域。 |
 
 ## 文档分工
 

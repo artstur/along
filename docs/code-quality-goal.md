@@ -96,7 +96,7 @@ python3 docs/verification/pr-61/replay.py
 
 ### 排查手段
 
-- **模块可达性**：从真实入口（`web/index.html` → `web/app.mjs`、`web/sw.js`、`host/server.mjs`、`host/agent-host.mjs`、`tools/*`、`deploy/*`、`test/*`）沿 `import` / `import()` 边遍历，列出无任何入口引用的模块；CLI 类脚本（`host/pair-code.mjs`、`host/workspace-handoff-admin.mjs`、`tools/*`、`deploy/*`）按进程入口计。
+- **模块可达性**：从真实入口（`web/index.html` → `web/app.mjs`、`web/sw.js`、`host/server.mjs`、`host/agent-host.mjs`、`tools/*`、`deploy/*`、`test/*`）沿 `import` / `import()` 边遍历，列出无任何入口引用的模块；CLI 类脚本（`host/pair-code.mjs`、`tools/*`、`deploy/*`）按进程入口计。
 - **导入级死代码**：解析 `web/`、`host/`、`tools/`、`deploy/`、`examples/`、`test/` 的全部 `import`（含跨行写法），对每个绑定名在导入文件其余部分做词边界检索。
 - **声明级死代码**：`function` / `class` / `const` / `let` / `var` 的名字在全仓出现次数 ≤ 1（只有声明处）才列为候选。
 - **未使用参数**：逐函数体括号配平后，对形参在函数体内做词边界检索；`...spread` 形式按同一前缀排除误判。
@@ -124,14 +124,12 @@ python3 docs/verification/pr-61/replay.py
 | `test/ios-phone-source-coordinator.test.mjs` | `readFileSync` |
 | `test/pairing-host-verify.test.mjs` | `randomBytes` |
 | `test/tier2-orchestration.test.mjs` | `existsSync` |
-| `test/workspace-handoff-companion.test.mjs` | `writeFileSync` |
-| `test/workspace-handoff-proof.test.mjs` | `chmodSync` |
 
 ### 已记录、未删除的候选
 
 - **`POST /goal/chat`（`host/agent-host.mjs:758`）**：全仓反查 `web/`、`ios/AlongHealth/Sources/`、`deploy/`、`test/`、`docs/` 均无调用方。属接口语义，删除需要裁决，留待单独评估。
 - **`POST /goal/event` 与 `host/codex-agent.mjs`**：仓库文档已记录该路径为休眠路径（`docs/cloud-deploy-multi-user.md:54`、`:66`「`web/` 无任何调用 `/goal/event` 的代码……属休眠路径」）。它仍在 iPhone 连接自检白名单里（`ios/AlongHealth/Sources/AlongShellView.swift:1169`），且被 `docs/cloud-security-hardening.md` 记为 Mac 真实功能；删除会改变接口语义，不在本轮范围。
-- **9 处只被本文件使用的 `export` 修饰**（`host/okx-history.mjs` 的 `OKX_HISTORY_TYPES`、`host/source-event-bridge.mjs` 的 `SourceBridgeError`、`host/workspace-handoff.mjs` 的 `handoffSigningBytes` / `HANDOFF_FIELDS`、`deploy/superagent-preset-lockdown.mjs` 的 `rootEntryIds` / `presetRegistryRow` / `globalDenials`、`examples/guangzhou-health-replay.mjs` 的 `makeRequest`、`test/fixtures/okx-history.mjs` 的 `START`）：符号本身都在本文件内被使用，死的只是 `export` 关键字。收窄模块公开面属于接口变更，未纳入本轮。
+- **7 处只被本文件使用的 `export` 修饰**（`host/okx-history.mjs` 的 `OKX_HISTORY_TYPES`、`host/source-event-bridge.mjs` 的 `SourceBridgeError`、`deploy/superagent-preset-lockdown.mjs` 的 `rootEntryIds` / `presetRegistryRow` / `globalDenials`、`examples/guangzhou-health-replay.mjs` 的 `makeRequest`、`test/fixtures/okx-history.mjs` 的 `START`）：符号本身都在本文件内被使用，死的只是 `export` 关键字。收窄模块公开面属于接口变更，未纳入本轮。
 
 ### 结论与验证
 

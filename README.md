@@ -124,7 +124,7 @@ npm install
 npm run activate
 ```
 
-它会构建相邻的 `../along-superagent` 和 App 内置页面，首次创建独立的 `along-phone` DSH profile，初始化新链路并启动 DSH 与 Along Host。优先复用桌面 DSH 的模型设置；缺少模型配置或 API Key 时在终端询问，Key 隐藏输入并仅保存在 Mac 的 0600 凭证文件中，后续免输。终端会打印手机所需的地址、指纹和连接码，Ctrl+C 关闭本次服务。数据在 `~/.along/phone-test/`，重跑沿用原数据；iPhone 仍需在 Xcode 安装和授权。首次需要本机已有 DSH、Node/npm 与 pnpm，且 Along 已运行 `npm install`。详情见[一条命令激活](docs/stage-b-tech-design.md#一条命令激活本机服务2026-11-16)。
+它会构建相邻的 `../along-superagent` 和 App 内置页面，首次创建独立的 `along-phone` DSH profile，初始化新链路并启动 DSH 与 Along Host。优先复用桌面 DSH 的模型设置；缺少模型配置或 API Key 时在终端询问，Key 隐藏输入并仅保存在 Mac 的 0600 凭证文件中，后续免输。Ctrl+C 关闭本次服务。数据在 `~/.along/phone-test/`，重跑沿用原数据。iPhone 当前版本通过下文的云端入口配对。首次需要本机已有 DSH、Node/npm 与 pnpm，且 Along 已运行 `npm install`。详情见[一条命令激活](docs/stage-b-tech-design.md#一条命令激活本机服务2026-11-16)。
 
 ```sh
 npm install        # 会安装项目自带的 Node 22.23.4
@@ -168,15 +168,7 @@ Along 本地部署启用 Along Source 并关闭 GitHub Source，不需要 GitHub
 
 ### 和 iPhone 配对
 
-本机使用 `npm run activate`（事件工作区）或 `npm run agent-host`（默认兼容模式）时，使用终端给出的三项信息：
-
-```text
-局域网 HTTPS 地址     https://192.168.x.x:4176
-证书 SHA-256 指纹     AB:CD:...
-一次性配对码          15 分钟内有效
-```
-
-在 iPhone App 的配对入口填写这三项，并确保手机可访问 Mac（例如同一 Wi-Fi）。云端新配对使用部署提供的 HTTPS 地址、一次性配对码和对应的系统信任策略；系统信任入口不填叶指纹。已有个人事件工作区要保留历史、待发与提醒时，不要直接换址或重新配对，走[受保护的冷交接](docs/personal-workspace-handoff.md)。
+打开 iPhone App 的「设置 → Along 服务」，输入云端部署提供的 HTTPS 地址和一次性配对码。首次配对和换服务都走这个入口。已有云端配对随 App 更新继续使用。私有 CA 需要在 iPhone 系统设置中安装并信任其根证书。
 
 iPhone App 的签名、安装与 HealthKit 读取口径见 [ios/README.md](ios/README.md)。
 
@@ -215,7 +207,7 @@ Along 处理的是健康这类敏感数据，所以边界写得很死：
 | 健康数据范围 | 新事件链路在已配对的服务端保存授权摘要，手机保存本地摘要及待同步事件；原始 HealthKit 样本仍留在手机 |
 | 凭证只留服务端 | Kimi、模型、桥接、APNs 凭证只保存在服务端安全存储（Mac 或云主机的卷/secrets/env），绝不发给 iPhone 或网页，也不写进运行结果和日志；配对 token 只在配对响应出现一次，服务端只存哈希 |
 | 部署面收敛 | Mac 本地模式默认不发布公网入口。基础云端 Compose 对外只开放 443 一个端口提供 Along 服务；公共 IP 叠加另开放 80 用于 HTTP-01。其他实测入口见[部署说明](deploy/README.md)。云端配对码另有按来源（连接 IP）失败限速 |
-| TLS 信任 | Mac 私网：服务端启动时现场自签，iPhone 原生网络层校验叶指纹后才传输。云端：服务端读预签发的 CA 叶证书；若由 nginx 终止公网 TLS，手机校验 nginx 的证书。iPhone 按系统信任评估校验链/主机名/有效期，公网 IPv4 核对 IP SAN。仅私有 CA 需要安装根描述文件并开启完全信任（[CA 方案](docs/iphone-ca-profile-design.md)） |
+| TLS 信任 | iPhone 使用云端 HTTPS：服务端读预签发的 CA 叶证书；若由 nginx 终止公网 TLS，手机校验 nginx 的证书。iPhone 按系统信任评估校验链/主机名/有效期，公网 IPv4 核对 IP SAN。仅私有 CA 需要安装根描述文件并开启完全信任（[CA 方案](docs/iphone-ca-profile-design.md)） |
 | 通过聊天纠正 | 新事件链路与云端目标聊天的变更经校验后自动生效。Mac 旧兼容链路保留原有采用流程 |
 | 忘记与历史分开 | 新架构中「忘记这件事」撤回对应记忆，不删除历史聊天；旧聊天不能重新激活已撤回的记忆 |
 
@@ -262,14 +254,14 @@ npm run build   # 产出 dist/（GitHub Pages）与 ios/AlongHealth/Web/（App �
 
 ## 新协议任务通知与到期复查
 
-iPhone 在已同步的任务到点时提醒。Mac 上的 Agent 得出需要告知的推荐或执行结果后，通过通知引导用户回到对应目标和任务。一次性提醒只执行一次，每日续排使用用户已表达的持续委托。复查以持久事件和工单为准，缺少新摘要时可以等待或询问。
+iPhone 在已同步的任务到点时提醒。Along Agent 得出需要告知的推荐或执行结果后，通过通知引导用户回到对应目标和任务。一次性提醒只执行一次，每日续排使用用户已表达的持续委托。复查以持久事件和工单为准，缺少新摘要时可以等待或询问。
 
 - Agent 在既有同步项的 `payload.notification` 标记已生效且需要告知的结果，包括稳定 `event_id`、`kind`（`recommendation_ready` 或 `task_result`）和 `revision`。归属使用该同步项的 `goalId`、可选 `taskId` 和配对用户。普通执行进度和 keep 保持安静，旧版仍能消费同步页。
 - iPhone 从通过校验的有效任务快照维护本地系统队列。授权的设备通过原有固定证书的配对连接向 `POST /notifications/device` 发送 `{token,environment,expectedUserId}`（development 或 production），撤权发送 `{enabled:false,expectedUserId}`。宿主单独消费 Agent 的持久同步记录，iPhone 挂起时仍可将新结果发送至 APNs。远程开启状态随同步页返回；缺少远程能力时，已授权手机在前台同步可补收近期结果。
 - Host 使用专属于 Along 的 Apple APNs 令牌签名密钥。为 Host 进程设置 `ALONG_APNS_KEY_FILE`（私有 P-256 .p8，0600）、`ALONG_APNS_KEY_ID` 和 `ALONG_APNS_TEAM_ID`。App 标识为 `com.artstur.along`。开发和生产设备使用各自签名环境，发布包应具备对应的 aps-environment。设备令牌和签名材料留在私有目录，通知正文只提示用户打开 Along 阅读。
 - 验收覆盖重复同步、改期和取消、授权与配对切换、服务重启、失败重试、实际复评及跨日续排。iOS 系统接受排程、通知中心实际送达、点开定位分别记录。远程送达需要有效签名与 provider，并单独在 App 挂起时验证。
 
-已取得的 iOS 系统排程回执通过 `POST /notifications/scheduled` 回传。Agent 为到点的任务产生 `reminder_due`，Host 遇到同一目标、任务和触发时刻已有本地回执时抑制远程副本。用户一直未打开 App 时，Mac 次日才生成的安排可在到点走 APNs。手机完全离线期间，系统仍可能展示断线前已经预约的旧时刻，重连后按当前任务校准。
+已取得的 iOS 系统排程回执通过 `POST /notifications/scheduled` 回传。Agent 为到点的任务产生 `reminder_due`，Host 遇到同一目标、任务和触发时刻已有本地回执时抑制远程副本。用户一直未打开 App 时，服务端次日才生成的安排可在到点走 APNs。手机完全离线期间，系统仍可能展示断线前已经预约的旧时刻，重连后按当前任务校准。
 
 Host 逐事件保存待发记录。APNs 拒收或短时失败后，已授权 iPhone 下次拉取同步页也能接手近期推荐，即使业务游标已经前进；原生处理后返回回执。到期提醒的远程补送及结果交接只在十分钟有效期内重试。提供方接受请求和设备确实展示分别验收。
 
