@@ -1,5 +1,5 @@
 // Web 壳的缓存版本：改动 web/ 下的静态资源后必须同步推进，否则已缓存的客户端会一直沿用旧副本。
-const CACHE='along-shell-v108';
+const CACHE='along-shell-v109';
 const FILES=['./','./index.html','./style.css','./app.mjs','./health.mjs','./workspace.mjs','./loop.mjs','./goal-agent-core.mjs','./adaptive-ui.mjs','./super-agent.mjs','./agent-client.mjs','./event-envelope.mjs','./event-workspace.mjs','./task-results.mjs','./task-result-view.mjs','./data-sources.mjs','./recommendations.mjs','./agent-notifications.mjs','./contextual-planning.mjs','./agent-replay.json','./app-icon.png','./manifest.webmanifest'];
 // 静态托管（GitHub Pages 等）会给所有响应 max-age=600，缓存仍新鲜时浏览器直接用旧副本，
 // 源站更新后客户端仍加载不到新代码。壳内资源一律绕过 HTTP 缓存回源，离线时再退回 CacheStorage。
