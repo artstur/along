@@ -211,7 +211,7 @@ function completionsOf(value) {
   const out={};
   for (const [taskId,entry] of Object.entries(value)) {
     if (!id(taskId)||!record(entry)||!eventId(entry.eventId)||!id(entry.goalId)||!version(entry.revision)) continue;
-    if (entry.outcome!==undefined&&!['queued','accepted','failed'].includes(entry.outcome)) continue;
+    if (entry.outcome!==undefined&&!['queued','accepted','failed','unknown'].includes(entry.outcome)) continue;
     out[taskId]={eventId:entry.eventId,goalId:entry.goalId,revision:entry.revision,
       ...(entry.outcome===undefined?{}:{outcome:entry.outcome})};
   }
@@ -563,6 +563,7 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
    * 别的任务失败得多了会把这条挤掉，那时「没在失败台账里」不再等于「被受理过」。
    *
    * - failed（终态拒收）：了结，任务回到可完成状态，用户可以重试。
+   * - unknown（服务端快照说这项任务还没完成）：结果不明，保持可重试，也不再反复回放。
    * - accepted（明确受理）：已收下，快照确认前不重复提交。
    * - queued / 旧缓存里没有回执的条目：只有它真的还在待发队列里才算待处理——队列里存着
    *   原始信封与原事件号，重投时沿用它。没有受理证据就不当已受理，宁可让用户重试。
@@ -574,7 +575,7 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
       if (envelope?.kind==='task.completed'&&typeof envelope.task_id==='string') ids.add(envelope.task_id);
     }
     for (const [taskId,entry] of Object.entries(completionsOf(state.completions))) {
-      if (entry.outcome==='failed') continue;
+      if (entry.outcome==='failed'||entry.outcome==='unknown') continue;
       if (entry.outcome==='accepted') {ids.add(taskId);continue;}
       if (queued.has(entry.eventId)) ids.add(taskId);
     }
@@ -717,6 +718,34 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
     return history.tasks.find(task=>task.id===taskId);
   }
   /**
+   * 旧缓存里的完成条目（更早的客户端写的，没有 outcome）：结果不明。
+   * 它们需要一次同步回放——服务端在读取时把**当前**的目标快照挂在同步项上，
+   * 客户端因此能按服务端真实状态收敛，而不是靠本地猜测。
+   */
+  function hasUnresolvedCompletions() {
+    return Object.values(completionsOf(state.completions)).some(entry=>entry.outcome===undefined);
+  }
+  /**
+   * 回放之后收敛旧条目：服务端快照说这项任务已经完成，就让它退出当前列表（台账一并清掉）；
+   * 快照说还没完成，就标成「结果不明」——保持可见可重试，也不再反复回放。
+   */
+  function resolveUnresolvedCompletions(next) {
+    const completions={...completionsOf(next.completions)};
+    let changed=false;
+    for (const [taskId,entry] of Object.entries(completions)) {
+      if (entry.outcome!==undefined) continue;
+      const goal=next.goals[entry.goalId];
+      const task=goal?.tasks.find(item=>item.id===taskId);
+      // 服务端说完成了：以服务端为准，这项任务已经做完（台账一并清掉）。
+      if (task?.status==='done') {delete completions[taskId];changed=true;continue;}
+      // 服务端说还没完成（或这次没拿到快照）：结果不明，保持可重试，也不再反复回放。
+      completions[taskId]={...entry,outcome:'unknown'};
+      changed=true;
+    }
+    if (changed) next.completions=completions;
+    return changed;
+  }
+  /**
    * 台账收敛：服务端快照确认完成（或版本前进）后移除记录；终态拒收的记录同样移除——那条事实
    * 不会再送达，留着也只是历史，用户重新提交时会写新的记录。周期任务不记台账——服务端按周期
    * 去重，下一次仍可完成。
@@ -788,11 +817,13 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
       const replayConversation=state.conversationVersion!==1;
       const replaySources=state.dataSourcesVersion!==1;
       const replayResults=state.resultPresentationVersion!==1;
-      const replay=state.recommendationsVersion!==1||replayConversation||replaySources||state.executionVersion!==2||state.taskCapabilityVersion!==1||replayResults;
+      // 旧缓存里的完成条目没有结果：回放一次同步，把服务端当前的目标快照拿回来再收敛。
+      const replayCompletions=hasUnresolvedCompletions();
+      const replay=state.recommendationsVersion!==1||replayConversation||replaySources||state.executionVersion!==2||state.taskCapabilityVersion!==1||replayResults||replayCompletions;
       // An older migration may already be part-way through. A newly added projection
       // still needs its earlier pages, so all pending migrations share the earliest cursor.
       const replayCursors=[...(state.recommendationsVersion!==1?[state.recommendationReplayAfter??0]:[]),
-        ...(replayConversation?[state.conversationReplayAfter??0]:[]),...(replaySources?[state.dataSourcesReplayAfter??0]:[]),...(state.executionVersion!==2?[state.executionReplayAfter??0]:[]),...(state.taskCapabilityVersion!==1?[state.taskCapabilityReplayAfter??0]:[]),...(replayResults?[state.resultPresentationReplayAfter??0]:[])];
+        ...(replayConversation?[state.conversationReplayAfter??0]:[]),...(replaySources?[state.dataSourcesReplayAfter??0]:[]),...(state.executionVersion!==2?[state.executionReplayAfter??0]:[]),...(state.taskCapabilityVersion!==1?[state.taskCapabilityReplayAfter??0]:[]),...(replayResults?[state.resultPresentationReplayAfter??0]:[]),...(replayCompletions?[0]:[])];
       const after=replay?Math.min(...replayCursors):state.cursor;
       const page=await agentCall(config,'/sync',{after_seq:after,limit:50,conversation_version:1,
         ...(onNotifications?{notificationFallback:true,notificationReceipts:receipts}:{})});
@@ -811,12 +842,14 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
       if (page.items.length===0) {
         if (page.nextCursor!==undefined) throw Error('同步分页游标不正确');
         if (replay) {next.recommendationsVersion=1;next.conversationVersion=1;next.dataSourcesVersion=1;next.executionVersion=2;next.taskCapabilityVersion=1;next.resultPresentationVersion=1;delete next.resultPresentationReplayAfter;delete next.taskCapabilityReplayAfter;delete next.recommendationReplayAfter;delete next.conversationReplayAfter;delete next.dataSourcesReplayAfter;delete next.executionReplayAfter;delete next.executionReplayVersion;}
-        if (replay||fallbacks.length||receipts.length) save(next);
+        // 回放完成：按服务端当前快照收敛旧条目（已完成就退出当前列表，没完成就保持可重试）。
+        if (replay) resolveUnresolvedCompletions(next);
         // 终态回执（被拒／冲突）立刻收敛完成事实台账：任务回到可完成状态，不必等下一张有内容的同步页。
         const beforeCompletions=JSON.stringify(completionsOf(next.completions));
         pruneCompletions(next);
         const completionsChanged=JSON.stringify(next.completions)!==beforeCompletions;
-        if (completionsChanged) {save(next);onChange();}
+        if (replay||fallbacks.length||receipts.length||completionsChanged) save(next);
+        if (completionsChanged) onChange();
         break;
       }
       let previous=after;
@@ -858,6 +891,8 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
         if (page.nextCursor===undefined) {next.recommendationsVersion=1;next.conversationVersion=1;next.dataSourcesVersion=1;next.executionVersion=2;next.taskCapabilityVersion=1;next.resultPresentationVersion=1;delete next.resultPresentationReplayAfter;delete next.taskCapabilityReplayAfter;delete next.recommendationReplayAfter;delete next.conversationReplayAfter;delete next.dataSourcesReplayAfter;delete next.executionReplayAfter;delete next.executionReplayVersion;}
         else {next.recommendationReplayAfter=previous;if(replayConversation)next.conversationReplayAfter=previous;if(replaySources)next.dataSourcesReplayAfter=previous;if(state.executionVersion!==2)next.executionReplayAfter=previous;if(state.taskCapabilityVersion!==1)next.taskCapabilityReplayAfter=previous;if(replayResults)next.resultPresentationReplayAfter=previous;}
       }
+      // 回放完成：按服务端当前快照收敛旧条目（已完成就退出当前列表，没完成就保持可重试）。
+      if (replay) resolveUnresolvedCompletions(next);
       save(next);onChange();
       // Cache commit precedes ack. A failed ack is retried before pulling further, without replaying data.
       await agentCall(config,'/sync/ack',{seqs});

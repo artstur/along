@@ -246,13 +246,15 @@ test('a completion already submitted is not submitted again until the server sna
 let instance=0;
 // 还要拒收几次（跨页面实例共享：重载后的实例接着用同一份额度）。
 let refuseBudget=0;
-async function pageFixture({pending=false,offline=false,refused=false,syncFails=false,completions=null,storage=null}={}) {
+async function pageFixture({pending=false,offline=false,refused=false,syncFails=false,completions=null,doneSnapshot=false,storage=null}={}) {
   const goal={id:GOAL,domain:'custom',status:'active',revision:1,title:'睡眠目标',metric:null,context:[],dataSources:[],
     tasks:[{id:'t_open',goalId:GOAL,status:'open',content:'睡前放下手机',revision:1},
       {id:'t_repeat',goalId:GOAL,status:'open',content:'每天快走',revision:1,scheduledAt:'2099-01-02T11:00:00Z',
         reminderPlan:{state:'scheduled',source:'agent',repeat:'daily',timezone:'Asia/Shanghai',explanation:'每天提醒我快走',wallTime:'2099-01-02T11:00:00Z'}},
       {id:'t_done',goalId:GOAL,status:'done',content:'早起的散步',revision:2}]};
-  const saved={version:1,recommendationsVersion:1,conversationVersion:1,executionVersion:2,userId:config.userId,cursor:3,
+  // 缓存里的迁移版本都已是最新：这样「旧条目需要回放」是唯一的回放触发条件。
+  const saved={version:1,recommendationsVersion:1,conversationVersion:1,dataSourcesVersion:1,executionVersion:2,
+    taskCapabilityVersion:1,resultPresentationVersion:1,userId:config.userId,cursor:3,
     activeGoalId:GOAL,conversationId:null,goals:{[GOAL]:goal},messages:{},drafts:{}};
   if(completions) saved.completions=completions;
   const fresh={'along.agent.v1':JSON.stringify({baseURL:config.baseURL,fingerprint:config.fingerprint,token:config.token}),
@@ -274,7 +276,14 @@ async function pageFixture({pending=false,offline=false,refused=false,syncFails=
       return {status:'accepted',event_id:r.body.event_id};}
     if(r.path==='/sync'){
       if(syncFails)throw Error('同步暂不可用');
-      return {items:[],...(r.body?.tasks_page?{tasks_page:{items:[{id:'t_older',goalId:GOAL,content:'更早的历史任务',status:'done',currentRevision:1}]}}:{})};}
+      // 服务端说这项任务已经完成：同步项带上服务端当前的目标快照。
+      // 同步项的序号比客户端游标小：只有回放（从 0 重拉）才会拿到它，
+      // 普通同步（从游标往后）拿不到——真实服务端就是这样：目标的同步项早就被确认过。
+      const items=doneSnapshot?[{seq:1,userId:config.userId,goalId:GOAL,kind:'goal_updated',payload:{snapshot:{
+        goal:{id:GOAL,domain:'custom',status:'active',currentRevision:1},
+        revision:{goalId:GOAL,revision:1,title:'睡眠目标',status:'active'},
+        tasks:[{id:'t_open',goalId:GOAL,content:'睡前放下手机',status:'done',currentRevision:2}]}}}]:[];
+      return {items,...(r.body?.tasks_page?{tasks_page:{items:[{id:'t_older',goalId:GOAL,content:'更早的历史任务',status:'done',currentRevision:1}]}}:{})};}
     if(r.path==='/sync/ack')return {acked:0};
     throw Error(r.path);},notification:async()=>({})};
   await import('../web/app.mjs?task-completion='+ ++instance);
@@ -464,6 +473,32 @@ test('an old completion entry without a receipt keeps the task visible and retry
   const reloaded=await pageFixture({completions:legacy,storage:reloadedStorage(dom)});
   assert.match(reloaded.dom.app.innerHTML,/睡前放下手机/);
   assert.match(reloaded.dom.app.innerHTML,/data-action="event-task-complete" data-task-id="t_open"/);
+});
+
+test('an old completion entry converges to the server snapshot when the server says the task is done',async()=>{
+  // 旧缓存里的完成条目没有结果，而服务端已经把这项任务写成完成：回放一次同步拿到服务端
+  // 当前的目标快照，这项任务就该退出当前列表，也不该被再提交一次。
+  const legacy={t_open:{eventId:'evt_legacy_0001',goalId:GOAL,revision:1}};
+  const {dom}=await pageFixture({completions:legacy,doneSnapshot:true});
+  await new Promise(r=>setTimeout(r,80));
+  assert.doesNotMatch(dom.app.innerHTML,/睡前放下手机/,'服务端说已完成，这项任务退出当前列表');
+  const cache=JSON.parse(dom.storage.get('along.event-workspace.v1:'+config.userId));
+  assert.deepEqual(cache.completions,{},'服务端确认完成后台账一并清掉');
+});
+
+test('an old completion entry the server still reports as open stays retryable and stops replaying',async()=>{
+  // 服务端说这项任务还没完成：结果不明，保持可见可重试；收敛之后不再反复回放。
+  const legacy={t_open:{eventId:'evt_legacy_0001',goalId:GOAL,revision:1}};
+  const {dom,calls}=await pageFixture({completions:legacy});
+  await new Promise(r=>setTimeout(r,80));
+  assert.match(dom.app.innerHTML,/睡前放下手机/);
+  assert.match(dom.app.innerHTML,/data-action="event-task-complete" data-task-id="t_open"/);
+  const cache=JSON.parse(dom.storage.get('along.event-workspace.v1:'+config.userId));
+  assert.equal(cache.completions.t_open.outcome,'unknown');
+  const syncs=calls.filter(call=>call.path==='/sync').length;
+  await dom.tick(3000);
+  await new Promise(r=>setTimeout(r,50));
+  assert.equal(calls.filter(call=>call.path==='/sync').length-syncs,1,'收敛之后不再回放');
 });
 
 test('an old completion entry whose event is still queued stays pending on its original event id',async()=>{
