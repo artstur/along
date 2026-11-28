@@ -63,12 +63,18 @@ export function installDomStub({storage={}}={}) {
     innerHeight:800,
     visualViewport:{height:800,addEventListener(){}},
     addEventListener(type,handler){ const list=windowListeners.get(type)||[]; list.push(handler); windowListeners.set(type,list); },
+    // app.mjs 用 window.dispatchEvent 把原生健康读数送回页面；桩里要能派发。
+    dispatchEvent(event){ const list=windowListeners.get(event.type)||[]; for (const handler of list) handler(event); return true; },
     scrollTo(){},
   };
   globalThis.document=document;
   globalThis.localStorage=localStorage;
   globalThis.window=window;
   globalThis.history={};
+  // 原生读数通过 CustomEvent 回到页面；Node 里没有这个构造器，桩补一个最小的。
+  globalThis.CustomEvent=class CustomEvent {
+    constructor(type,init={}){ this.type=type; this.detail=init.detail??null; }
+  };
   globalThis.location={hostname:'localhost'};
   globalThis.requestAnimationFrame=fn=>{ fn(); return 0; };
   globalThis.FormData=StubFormData;
@@ -94,6 +100,10 @@ export function installDomStub({storage={}}={}) {
     },
     submit(form) {
       return app.dispatch('submit',{target:{id:'agent-form',fields:{message:'继续'},querySelector:()=>null,reset(){},setAttribute(){}},preventDefault(){}});
+    },
+    // 提交指定 id 的表单：字段按 FormData 的读法放在 fields 上。
+    submitForm(id,fields={}) {
+      return app.dispatch('submit',{target:{id,fields,querySelector:()=>null,reset(){},setAttribute(){}},preventDefault(){}});
     },
   };
 }

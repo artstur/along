@@ -1,4 +1,4 @@
-import {readableResultText,resultPreview} from './task-result-view.mjs?v=111';
+import {readableResultText,resultPreview} from './task-result-view.mjs?v=112';
 // A bounded optional extension to the existing message protocol. No model HTML reaches the DOM.
 const record=v=>v!==null&&typeof v==='object'&&!Array.isArray(v);
 const text=(v,max)=>typeof v==='string'&&v.trim().length>0&&v.length<=max;

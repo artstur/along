@@ -1,11 +1,11 @@
-import {agentCall, queueEvent, flushEventQueue, dropQueuedEvent, dropQueuedCompletions, pendingEvents, readEventFailures,bindEventAuthority,retireEventAuthority} from './agent-client.mjs?v=111';
-import {assembleEnvelope} from './event-envelope.mjs?v=111';
-import {validateGoalReply} from './goal-agent-core.mjs?v=111';
-import {safeAdaptiveLayout} from './adaptive-ui.mjs?v=111';
-import {safeRecommendation} from './recommendations.mjs?v=111';
-import {safeDataSources} from './data-sources.mjs?v=111';
-import {taskResultRelevant,resultEvidence,validResultEvidence} from './task-results.mjs?v=111';
-import {safeResultPresentation,RESULT_TEXT_LIMIT,wellFormedResultText} from './task-result-view.mjs?v=111';
+import {agentCall, queueEvent, flushEventQueue, dropQueuedEvent, dropQueuedCompletions, pendingEvents, readEventFailures,bindEventAuthority,retireEventAuthority} from './agent-client.mjs?v=112';
+import {assembleEnvelope} from './event-envelope.mjs?v=112';
+import {validateGoalReply} from './goal-agent-core.mjs?v=112';
+import {safeAdaptiveLayout} from './adaptive-ui.mjs?v=112';
+import {safeRecommendation} from './recommendations.mjs?v=112';
+import {safeDataSources} from './data-sources.mjs?v=112';
+import {taskResultRelevant,resultEvidence,validResultEvidence} from './task-results.mjs?v=112';
+import {safeResultPresentation,RESULT_TEXT_LIMIT,wellFormedResultText} from './task-result-view.mjs?v=112';
 
 const id = value => typeof value==='string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$/.test(value);
 const record = value => value!==null && typeof value==='object' && !Array.isArray(value);

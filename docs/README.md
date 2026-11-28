@@ -18,6 +18,7 @@
 | Along Host 云端部署实测（三容器栈、两层证书、命名空间锚点、MiniMax 接线） | [Host 云端部署经验](host-cloud-deploy.md) | 实测事实与踩过的坑；编排见 `deploy/docker-compose.cloud.yml` |
 | iPhone 根证书描述文件、系统信任与旧叶指纹迁移 | [CA 描述文件与 TLS 迁移](iphone-ca-profile-design.md) | 私有 CA 路径；公共 CA 的公网 IP 入口见部署文档，不要求安装私有根 |
 | iPhone 安装、桥接、HealthKit 与签名 | [iPhone README](../ios/README.md) | 系统和设备要求以当前工具链为准 |
+| App 内设置页：昵称、数据源与服务端连接 | [用户设置页](user-settings.md) | 昵称只在本机保存；改昵称不动 UID 与配对关系 |
 | Agent 运行时、派工及长期记忆 | [Along Agent 本机运行图](https://github.com/artstur/along-superagent/blob/main/docs/along/009-current-runtime.md) | 2026-11-16 的 Mac 快照，不能作为现行云拓扑或数据库版本依据 |
 
 ## 设计与验收依据

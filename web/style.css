@@ -206,6 +206,18 @@ p { line-height: 1.5; }
 .connection-metrics strong { color: #333; font-size: 14px; font-weight: 600; }
 footer { padding: 0 0 26px; color: #aaa; text-align: center; font-size: 12px; }
 
+/* 顶部栏的个人入口：显示昵称（没有就显示身份标识或「设置」），点进去是设置页。 */
+.topbar-side { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.topbar-profile { flex: none; max-width: 40vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 6px 12px; border: 1px solid #e5e5e4; border-radius: 999px; background: #fff; color: #444; font-size: var(--text-caption); }
+
+/* 设置页：昵称、数据源、Along 服务三段，各自一件主要任务。 */
+.settings-content h1 { margin: 6px 0 4px; font-size: 26px; letter-spacing: -.6px; }
+.settings-section { margin-top: 30px; }
+.settings-form { display: flex; gap: 10px; margin-top: 4px; }
+.settings-form input { flex: 1; min-width: 0; padding: 12px; border: 1px solid #dededd; border-radius: 10px; background: #fff; color: #222; font: inherit; font-size: 16px; }
+.settings-note { margin-top: 10px; color: #8d8d8d; font-size: var(--text-caption); }
+.settings-section .agent-setup { margin-top: 12px; }
+
 .button { border: 1px solid #222; border-radius: 10px; padding: 10px 15px; background: #222; color: #fff; font-size: var(--text-body); font-weight: 580; }
 .button.secondary { border-color: #dedede; background: #fff; color: #333; }
 .button:disabled { opacity: .45; cursor: default; }
