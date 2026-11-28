@@ -1624,7 +1624,7 @@ function eventTaskCard(task,pending=new Set()) {
   // 完成键只出现在 open 任务上；已入队待发的完成反馈期间不再重复提供（服务端按事件号幂等）。
   const complete=task.status==='open'&&!pending.has(task.id)
     ?`<button class="task-detail-link" data-action="event-task-complete" data-task-id="${esc(task.id)}">完成</button>`:'';
-  return `<article class="task-row event-task-card" tabindex="-1" id="event-task-${esc(task.id)}"><div><strong>${esc(task.content)}</strong><p>执行时间 · ${esc(eventTaskTime(task))}</p><div class="event-task-footer">${isEventTimedTask(task)?'<span class="task-schedule-tag">定时任务</span>':''}</div></div><div class="event-task-meta"><span class="task-row-status">${task.status==='done'?'已完成':'待完成'}</span><div class="event-task-links">${complete}<button class="task-detail-link" data-action="event-task-detail" data-task-id="${esc(task.id)}">查看详情<span class="task-detail-chevron" aria-hidden="true">›</span></button></div></div></article>`;
+  return `<article class="task-row event-task-card" id="event-task-${esc(task.id)}"><div><strong>${esc(task.content)}</strong><p>执行时间 · ${esc(eventTaskTime(task))}</p><div class="event-task-footer">${isEventTimedTask(task)?'<span class="task-schedule-tag">定时任务</span>':''}</div></div><div class="event-task-meta"><span class="task-row-status">${task.status==='done'?'已完成':'待完成'}</span><div class="event-task-links">${complete}<button class="task-detail-link" data-action="event-task-detail" data-task-id="${esc(task.id)}">查看详情<span class="task-detail-chevron" aria-hidden="true">›</span></button></div></div></article>`;
 }
 // 历史任务入口复用同一份目标快照里的任务，只列 status==='done'；快照之外更早的任务按需翻页取回。
 function eventTaskHistory(goal,pending) {
