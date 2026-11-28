@@ -33,6 +33,7 @@
 - [健康评估离线恢复草案](offline-health-review-plan.md)：旧 Host 的历史方案；现行补传以阶段 A/B/C 为准。
 - [新目标返回修复](bugfix-new-goal-back.md)：PR #16 的行为与验收标准；后续归档问题见本轮质量记录。
 - [左上角图标连点缩放修复](bugfix-brand-double-tap-zoom.md)：Bug#4 的正确行为、局部 `touch-action` 方案与模拟器手势实测；真机复测待做。
+- [App 页面双指缩放修复](bugfix-pinch-page-zoom.md)：Bug#5 的正确行为、各层实测对比（原生容器与 CSS 都拦不住，只有 viewport 有效）与模拟器手势实测；真机复测待做。
 
 ## 开发与质量流程
 
