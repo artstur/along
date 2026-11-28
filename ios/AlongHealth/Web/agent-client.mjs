@@ -1,4 +1,4 @@
-import {assembleEnvelope} from './event-envelope.mjs?v=101';
+import {assembleEnvelope} from './event-envelope.mjs?v=108';
 
 export const AGENT_KEY = 'along.agent.v1';
 export const GOALS_KEY = 'along.goal-custom.v1';
@@ -82,14 +82,15 @@ async function sendQueuedEvent(config, item) {
     !pendingEvents(config).some(row=>row.event_id===item.event_id&&JSON.stringify(row.envelope)===envelope))
     return {event_id:item.event_id,status:'retry',error:'投递归属或事件已更新'};
   if(receipt?.event_id!==item.event_id)return {event_id:item.event_id,status:'retry',error:'回执事件不匹配'};
+  const taskId=item.envelope?.kind==='task.completed'&&typeof item.envelope.task_id==='string'?item.envelope.task_id:undefined;
   if (receipt?.status === 'accepted' || receipt?.status === 'duplicate') {
     dropPending(item.event_id,config,envelope);
-    return {event_id:item.event_id, status:receipt.status, ...(receipt.received_seq !== undefined ? {received_seq:receipt.received_seq} : {})};
+    return {event_id:item.event_id, status:receipt.status, ...(taskId?{task_id:taskId}:{}), ...(receipt.received_seq !== undefined ? {received_seq:receipt.received_seq} : {})};
   }
   if (receipt?.status === 'rejected' || receipt?.status === 'conflict') {
     recordFailure(item.event_id, receipt,config);
     dropPending(item.event_id,config,envelope);
-    return {event_id:item.event_id, status:receipt.status, reason:receipt.reason};
+    return {event_id:item.event_id, status:receipt.status, reason:receipt.reason, ...(taskId?{task_id:taskId}:{})};
   }
   return {event_id:item.event_id, status:'retry', error:'回执不可识别'};
 }
@@ -115,19 +116,59 @@ export async function queueEvent(config, envelope, {send=true}={}) {
 /**
  * 按入队顺序重投待同步项（同一份序列化信封、同一 event_id）。终态回执（accepted/duplicate/rejected/
  * conflict）继续处理后续项；遇到需要保留重试的暂时性失败即停止，保持顺序与至少一次语义。
+ *
+ * `outcomes` 逐项带上终态回执（accepted/duplicate/rejected/conflict）：调用方据此知道每一条事实的
+ * 下落。本地失败台账是**有上限的诊断记录**（最旧的可能被挤掉），不能拿它当「这条事实有没有被受理」
+ * 的依据——依据必须来自这条事实自己的回执。
+ *
+ * `defer` 用来暂缓某一条待同步项：这一项暂时不能送达（调用方还没确认它的去向），与暂时性失败同样
+ * 停止重投，保留顺序与至少一次语义——它仍留在队列里，下次重投照旧按原顺序、原 event_id 进行。
  */
-export async function flushEventQueue(config) {
+export async function flushEventQueue(config, {defer}={}) {
   let removed = 0, retried = 0;
+  const outcomes = [];
   for (const item of pendingEvents(config)) {
+    if (typeof defer==='function'&&defer(item)) {
+      outcomes.push({event_id:item.event_id, status:'defer'});
+      break;
+    }
     const outcome = await sendQueuedEvent(config, item);
     retried += 1;
+    outcomes.push(outcome);
     if (outcome.status === 'retry') break;
     removed += 1;
   }
-  return {pending:pendingEvents(config).length, retried, removed};
+  return {pending:pendingEvents(config).length, retried, removed, outcomes};
 }
 
-/** 本地失败状态（被拒/冲突回执），供排查「为什么没有生效」；只记录、不提供任何重试入口。 */
+/**
+ * 丢弃一条待同步项（按 event_id）：调用方已经确认这条事实的去落，不必再送达。
+ * 与终态回执同样处理——留在队列里只会一直重投。
+ */
+export function dropQueuedEvent(config, eventId) {
+  if (typeof eventId!=='string'||eventId==='') return false;
+  const queued=pendingEvents(config);
+  const kept=queued.filter(item=>item.event_id!==eventId);
+  if (kept.length===queued.length) return false;
+  writeStored(eventKey(EVENT_QUEUE_KEY,config), kept);
+  return true;
+}
+
+/**
+ * 丢弃某个任务的全部待同步完成事实：调用方已经确认这项任务在服务端已经完成，
+ * 排队里为它等着的完成事实不必再送达——再送一次会被服务端记成第二次完成。
+ */
+export function dropQueuedCompletions(config, taskId) {
+  if (typeof taskId!=='string'||taskId==='') return false;
+  const queued=pendingEvents(config);
+  const isCompletion=item=>item?.envelope?.kind==='task.completed'&&item.envelope.task_id===taskId;
+  const kept=queued.filter(item=>!isCompletion(item));
+  if (kept.length===queued.length) return false;
+  writeStored(eventKey(EVENT_QUEUE_KEY,config), kept);
+  return true;
+}
+
+/** 本地失败状态（被拒/冲突回执），供排查「为什么没有生效」；只记录、不提供任何重试入口。上限 50 条，最旧的会被挤掉。 */
 export function readEventFailures(config) {
   return readStored(eventKey(EVENT_FAILED_KEY,config), []);
 }

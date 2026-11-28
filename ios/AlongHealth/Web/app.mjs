@@ -1,20 +1,20 @@
-import {KEY, loadState, setSnapshot} from './health.mjs?v=101';
-import {ACTIVE_GOAL_KEY, FINANCE_KEY, ensureHealthGoal, withoutDefaultHealthGoal, loadFinance, connectFinanceDemo, addFinanceDemoRecord, healthView, financeView} from './workspace.mjs?v=101';
-import {EXPERIMENT, startExperiment, routeHealthEvent, acceptAgentSuggestion, agentRequestPayload} from './loop.mjs?v=101';
-import {goalChangeText} from './goal-agent-core.mjs?v=101';
-import {createEventWorkspace, recurringPlan, chatTimeline, captureChatAnchor, anchoredScrollTop} from './event-workspace.mjs?v=101';
-import {recommendationCard} from './recommendations.mjs?v=101';
-import {dataSourceProvider} from './data-sources.mjs?v=101';
-import {taskResultBodyRelevant} from './task-results.mjs?v=101';
-import {taskResultCard,captureResultReading,restoreResultReading} from './task-result-view.mjs?v=101';
-import {AGENT_KEY, GOALS_KEY, CONVERSATIONS_KEY, readStored, agentCall, loadNativeConnection, saveNativeConnection} from './agent-client.mjs?v=101';
-import {ADAPTIVE_LAYOUTS_KEY, customGoalEntries, findInitialCustomGoalCandidate, goalDomain, isCustomGoalKey, safeAdaptiveLayout, validateAdaptiveLayout} from './adaptive-ui.mjs?v=101';
+import {KEY, loadState, setSnapshot} from './health.mjs?v=108';
+import {ACTIVE_GOAL_KEY, FINANCE_KEY, ensureHealthGoal, withoutDefaultHealthGoal, loadFinance, connectFinanceDemo, addFinanceDemoRecord, healthView, financeView} from './workspace.mjs?v=108';
+import {EXPERIMENT, startExperiment, routeHealthEvent, acceptAgentSuggestion, agentRequestPayload} from './loop.mjs?v=108';
+import {goalChangeText} from './goal-agent-core.mjs?v=108';
+import {createEventWorkspace, recurringPlan, chatTimeline, captureChatAnchor, anchoredScrollTop} from './event-workspace.mjs?v=108';
+import {recommendationCard} from './recommendations.mjs?v=108';
+import {dataSourceProvider} from './data-sources.mjs?v=108';
+import {taskResultBodyRelevant} from './task-results.mjs?v=108';
+import {taskResultCard,captureResultReading,restoreResultReading} from './task-result-view.mjs?v=108';
+import {AGENT_KEY, GOALS_KEY, CONVERSATIONS_KEY, readStored, agentCall, loadNativeConnection, saveNativeConnection} from './agent-client.mjs?v=108';
+import {ADAPTIVE_LAYOUTS_KEY, customGoalEntries, findInitialCustomGoalCandidate, goalDomain, isCustomGoalKey, safeAdaptiveLayout, validateAdaptiveLayout} from './adaptive-ui.mjs?v=108';
 import {GOAL_SUPER_AGENT_RUNS_KEY, SUPER_AGENT_RUNS_KEY, createFailedGoalSuperAgentRun, createFailedSuperAgentRun,
   createGoalSuperAgentRequest, createPendingGoalSuperAgentRun, createPendingSuperAgentRun, createSuperAgentRequest,
-  safeGoalSuperAgentRun, safeSuperAgentRun, withRunError, AGENT_RUN_TIMEOUT_MS, AGENT_RUNTIME_KEY, CLOUD_RUN_NOT_FOUND, DSH_RUNTIME, KIMI_RUNTIME, agentRuntimeLabel, safeAgentRuntime, newId} from './super-agent.mjs?v=101';
+  safeGoalSuperAgentRun, safeSuperAgentRun, withRunError, AGENT_RUN_TIMEOUT_MS, AGENT_RUNTIME_KEY, CLOUD_RUN_NOT_FOUND, DSH_RUNTIME, KIMI_RUNTIME, agentRuntimeLabel, safeAgentRuntime, newId} from './super-agent.mjs?v=108';
 import {AGENT_NOTIFICATION_LEDGER_KEY, goalRunNotification, taskRunNotification, healthProposalNotification,
-  notificationWasDelivered, recordNotificationDelivered} from './agent-notifications.mjs?v=101';
-import {PLANNING_STATE_KEY,cleanDailyDelegation,validateDailyActions,agentHealthSnapshot,cleanPlanningContext,healthContextChanges,createPlanningContext,validateReassessment,buildBackgroundReviewRequest} from './contextual-planning.mjs?v=101';
+  notificationWasDelivered, recordNotificationDelivered} from './agent-notifications.mjs?v=108';
+import {PLANNING_STATE_KEY,cleanDailyDelegation,validateDailyActions,agentHealthSnapshot,cleanPlanningContext,healthContextChanges,createPlanningContext,validateReassessment,buildBackgroundReviewRequest} from './contextual-planning.mjs?v=108';
 const TICKET_KEY = 'along.goal-ticket.v1';
 const REMINDER_SYNC_KEY='along.health-reminder-sync.v1';
 const HEALTH_SHARING_KEY='along.health-sharing.v1';
@@ -1701,17 +1701,21 @@ function eventWorkspacePage() {
   const messages=view.visibleMessages;
   const connection=connectionSetup(view.error||agentConnection.error);
   const pendingCompletions=eventWorkspace.pendingTaskCompletions();
+  // 服务端已受理的完成事实：这一项已经不是「待完成」，不再留在当前列表里
+  // （服务端补发快照后它在快照里就是 done，两处口径一致）。
+  const acceptedCompletions=eventWorkspace.acceptedTaskCompletions();
   const goalPicker=`<div class="goal-switch"><label for="event-goal-select">当前目标</label><div class="goal-switch-actions"><div class="select-wrap"><select id="event-goal-select" aria-label="切换目标"><option value="" ${!localSelection&&!view.activeGoalId?'selected':''}>新目标</option>${options}${localChoices.length?`<optgroup label="本机已存目标">${localChoices.map(l=>`<option value="local:${esc(l.key)}" ${localSelection?.key===l.key?'selected':''}>${esc(l.title)}</option>`).join('')}</optgroup>`:''}</select></div><button class="goal-add-button" data-action="new-goal">新建</button></div></div>`;
   if (selectedLocal) return localRecordPage(localSelection,selectedLocal.title,goalPicker,connection);
   // 时间分割线按整条可见消息列表算：首条有时间的消息前一条，之后看间隔和跨日。
   const timeline=chatTimeline(messages);
   const history=messages.map((message,index)=>`${timeline[index]?`<time class="agent-time-divider" datetime="${esc(new Date(timeline[index].at).toISOString())}">${esc(timeline[index].label)}</time>`:''}<div ${message.notificationEventId?`id="event-message-${esc(message.notificationEventId)}"`: ''} class="agent-message ${message.role==='user'?'user':'assistant'}" data-event-id="${esc(message.eventId)}"><p>${esc(message.text)}</p>${message.status==='pending'?'<p class="agent-disclaimer">待同步</p>':message.status==='rejected'||message.status==='failed'?'<p class="agent-disclaimer">发送未完成，请通过聊天重新说明。</p>':''}</div>`).join('');
   // 等待态由缓存派生（见 event-workspace.mjs 的 awaitingReply），同步与重渲染不会把它冲掉。
-  const waiting=view.awaiting?`<div class="agent-message assistant pending" role="status"><div class="agent-thinking"><span aria-hidden="true"><i></i><i></i><i></i></span><p>Agent 正在回复…</p></div></div>`:'';
+  // 等待行只显示三个动态点：状态文字留在 DOM 里但退出视觉布局，读屏仍能播报「Agent 正在回复…」。
+  const waiting=view.awaiting?`<div class="agent-message assistant pending" role="status"><div class="agent-thinking"><span aria-hidden="true"><i></i><i></i><i></i></span><p class="agent-thinking-status">Agent 正在回复…</p></div></div>`:'';
   const content=chat?`${backButton('agent-back','返回目标')}<div class="agent-title"><h1>${esc(goal?.title||'说说你想做什么')}</h1></div>${connection}<div class="agent-messages" role="log" aria-live="polite">${history}${waiting||(history?'':'<p class="agent-empty">说说你的想法，Along 会和你一起理清下一步。</p>')}</div>`
     :goal&&screen==='task'?eventTaskDetail(goal,scopedMessages)
     :goal&&screen==='history'?eventTaskHistory(goal,pendingCompletions)
-    :goal?`${connection}<section class="goal-card"><h1>${esc(goal.title)}</h1>${goal.metric?`<p class="goal-note">${esc(goal.metric.target)} ${esc(goal.metric.unit)} · ${esc(goal.metric.period)}</p>`:''}${goal.context.length?`<p class="goal-note">${goal.context.map(item=>esc(typeof item==='string'?item:item.text)).join('；')}</p>`:''}<div class="card-actions"><button class="agent-action" data-action="event-chat">聊聊这个目标</button></div></section><section class="task-section"><div class="section-heading"><h2>动态任务</h2><button class="section-link" data-action="event-task-history">历史任务</button></div><div class="task-list">${goal.tasks.filter(task=>task.status==='open').map(task=>eventTaskCard(task,pendingCompletions)).join('')||'<p class="agent-empty">通过聊天安排下一步。</p>'}</div></section>${eventDataSources(goal)}`:connection;
+    :goal?`${connection}<section class="goal-card"><h1>${esc(goal.title)}</h1>${goal.metric?`<p class="goal-note">${esc(goal.metric.target)} ${esc(goal.metric.unit)} · ${esc(goal.metric.period)}</p>`:''}${goal.context.length?`<p class="goal-note">${goal.context.map(item=>esc(typeof item==='string'?item:item.text)).join('；')}</p>`:''}<div class="card-actions"><button class="agent-action" data-action="event-chat">聊聊这个目标</button></div></section><section class="task-section"><div class="section-heading"><h2>动态任务</h2><button class="section-link" data-action="event-task-history">历史任务</button></div><div class="task-list">${goal.tasks.filter(task=>task.status==='open'&&!acceptedCompletions.has(task.id)).map(task=>eventTaskCard(task,pendingCompletions)).join('')||'<p class="agent-empty">通过聊天安排下一步。</p>'}</div></section>${eventDataSources(goal)}`:connection;
   return `<div class="app-shell ${chat?'agent-shell':''}"><header class="topbar"><div class="topbar-inner">${brand()}</div></header><main class="content ${chat?'agent-page':goal&&screen==='task'?'event-task-detail':''}"><div class="${chat?'agent-scroll':''}">${goalPicker}${content}</div>${chat?`<div class="agent-composer-dock"><form id="agent-form" class="agent-composer"><textarea name="message" rows="1" placeholder="说说你的想法" maxlength="800" data-draft-scope="${esc(view.draftScope)}" required>${esc(eventWorkspace.draft())}</textarea><button class="agent-send" aria-label="发送" ${agentBusy?'disabled':''}>↑</button></form><p class="agent-disclaimer">Along · 一起，慢慢向前</p></div>`:''}</main></div>`;
 }
 function renderEventUpdate() {
