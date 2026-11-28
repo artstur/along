@@ -1,21 +1,21 @@
-import {KEY, loadState, setSnapshot} from './health.mjs?v=111';
-import {ACTIVE_GOAL_KEY, FINANCE_KEY, ensureHealthGoal, withoutDefaultHealthGoal, loadFinance, connectFinanceDemo, addFinanceDemoRecord, healthView, financeView} from './workspace.mjs?v=111';
-import {EXPERIMENT, startExperiment, routeHealthEvent, acceptAgentSuggestion, agentRequestPayload} from './loop.mjs?v=111';
-import {goalChangeText} from './goal-agent-core.mjs?v=111';
-import {createEventWorkspace, recurringPlan, chatTimeline, captureChatAnchor, anchoredScrollTop} from './event-workspace.mjs?v=111';
-import {recommendationCard} from './recommendations.mjs?v=111';
-import {dataSourceProvider} from './data-sources.mjs?v=111';
-import {taskResultBodyRelevant} from './task-results.mjs?v=111';
-import {taskResultCard,captureResultReading,restoreResultReading} from './task-result-view.mjs?v=111';
-import {AGENT_KEY, GOALS_KEY, CONVERSATIONS_KEY, readStored, agentCall, loadNativeConnection, saveNativeConnection} from './agent-client.mjs?v=111';
-import {ADAPTIVE_LAYOUTS_KEY, customGoalEntries, findInitialCustomGoalCandidate, goalDomain, isCustomGoalKey, safeAdaptiveLayout, validateAdaptiveLayout} from './adaptive-ui.mjs?v=111';
+import {KEY, loadState, setSnapshot, summaryHasData} from './health.mjs?v=110';
+import {ACTIVE_GOAL_KEY, FINANCE_KEY, ensureHealthGoal, withoutDefaultHealthGoal, loadFinance, connectFinanceDemo, addFinanceDemoRecord, healthView, financeView} from './workspace.mjs?v=110';
+import {EXPERIMENT, startExperiment, routeHealthEvent, acceptAgentSuggestion, agentRequestPayload} from './loop.mjs?v=110';
+import {goalChangeText} from './goal-agent-core.mjs?v=110';
+import {createEventWorkspace, recurringPlan, chatTimeline, captureChatAnchor, anchoredScrollTop} from './event-workspace.mjs?v=110';
+import {recommendationCard} from './recommendations.mjs?v=110';
+import {dataSourceProvider} from './data-sources.mjs?v=110';
+import {taskResultBodyRelevant} from './task-results.mjs?v=110';
+import {taskResultCard,captureResultReading,restoreResultReading} from './task-result-view.mjs?v=110';
+import {AGENT_KEY, GOALS_KEY, CONVERSATIONS_KEY, readStored, agentCall, loadNativeConnection, saveNativeConnection} from './agent-client.mjs?v=110';
+import {ADAPTIVE_LAYOUTS_KEY, customGoalEntries, findInitialCustomGoalCandidate, goalDomain, isCustomGoalKey, safeAdaptiveLayout, validateAdaptiveLayout} from './adaptive-ui.mjs?v=110';
 import {GOAL_SUPER_AGENT_RUNS_KEY, SUPER_AGENT_RUNS_KEY, createFailedGoalSuperAgentRun, createFailedSuperAgentRun,
   createGoalSuperAgentRequest, createPendingGoalSuperAgentRun, createPendingSuperAgentRun, createSuperAgentRequest,
   safeGoalSuperAgentRun, safeSuperAgentRun, withRunError, AGENT_RUN_TIMEOUT_MS, AGENT_RUNTIME_KEY, CLOUD_RUN_NOT_FOUND, DSH_RUNTIME, KIMI_RUNTIME, agentRuntimeLabel, safeAgentRuntime, newId} from './super-agent.mjs?v=111';
 import {AGENT_NOTIFICATION_LEDGER_KEY, goalRunNotification, taskRunNotification, healthProposalNotification,
-  notificationWasDelivered, recordNotificationDelivered} from './agent-notifications.mjs?v=111';
-import {PLANNING_STATE_KEY,cleanDailyDelegation,validateDailyActions,agentHealthSnapshot,cleanPlanningContext,healthContextChanges,createPlanningContext,validateReassessment,buildBackgroundReviewRequest} from './contextual-planning.mjs?v=111';
-import {NICKNAME_MAX,cleanNickname,readProfile,writeProfile,profileNickname as profileNicknameFor,adoptProfile as adoptProfileFor,setNickname} from './user-profile.mjs?v=110';
+  notificationWasDelivered, recordNotificationDelivered} from './agent-notifications.mjs?v=110';
+import {PLANNING_STATE_KEY,cleanDailyDelegation,validateDailyActions,agentHealthSnapshot,cleanPlanningContext,healthContextChanges,createPlanningContext,validateReassessment,buildBackgroundReviewRequest} from './contextual-planning.mjs?v=110';
+import {NICKNAME_MAX,cleanNickname,readProfile,writeProfile,scopeKey,DEVICE_SCOPE,profileNickname as profileNicknameFor,adoptProfile as adoptProfileFor,setNickname} from './user-profile.mjs?v=110';
 const TICKET_KEY = 'along.goal-ticket.v1';
 const REMINDER_SYNC_KEY='along.health-reminder-sync.v1';
 const HEALTH_SHARING_KEY='along.health-sharing.v1';
@@ -88,6 +88,8 @@ let agentConnection = {status:agentConfig.token?'checking':'unconfigured',error:
 let eventWorkspace=null,eventWorkspaceBinding=null;
 const okxStates=new Map();
 const okxPending=new Map();
+// 待回读的 OKX 目标：设置页重开时标记一次，原生状态回读后就清掉。
+const okxStale=new Set();
 let focusedEventRecommendation=null;
 let selectedEventTaskId=null;
 // 任务详情是从哪里进来的：动态任务列表还是历史任务列表——返回时回到同一处。
@@ -223,7 +225,7 @@ function disconnectEventWorkspace() {
   eventWorkspace?.dispose();
   eventWorkspace=null;
   eventWorkspaceBinding=null;
-  okxStates.clear();okxPending.clear();
+  okxStates.clear();okxPending.clear();okxStale.clear();
   focusedEventRecommendation=null;selectedEventTaskId=null;pendingRecommendationOpen=null;eventTaskDetailOrigin='home';
   waitingForSavedGoal=false;
   lastNotificationProjection='';lastNotificationCheck=0;
@@ -349,7 +351,7 @@ function activateAgentConfig(config,{rebind=false,runtime=agentRuntime,transport
     localStorage.setItem(AGENT_RUNTIME_KEY,runtime);
   }
   verifiedHealthHost=false;
-  agentConnection={status:'checking',error:''};
+  agentConnection={status:'checking',error:'',httpStatus:null};
 }
 function currentBackgroundTemplate() {
   if (eventWorkspace) return null;
@@ -670,16 +672,16 @@ async function syncHealthReminders(goalKey) {
 }
 async function refreshAgentConnection({healthOnly=false}={}) {
   const config=agentConfig,runtime=agentRuntime;
-  if (!config.token) {verifiedHealthHost=false;agentConnection={status:'unconfigured',error:''};return;}
+  if (!config.token) {verifiedHealthHost=false;agentConnection={status:'unconfigured',error:'',httpStatus:null};return;}
   if (healthOnly&&checkingHealthHost===config) return;
   if (healthOnly) checkingHealthHost=config;
-  if (!healthOnly) {agentConnection={status:'checking',error:''};if (screen==='agent') renderAgentUpdate();}
+  if (!healthOnly) {agentConnection={status:'checking',error:'',httpStatus:null};if (screen==='agent') renderAgentUpdate();}
   try {
     const status=await agentCall(config,'/connection/status',{runtime});
     if (agentConfig!==config||agentRuntime!==runtime) return;
     if (status?.eventProtocol===1&&status.along&&status.ready) {
       connectEventWorkspace(status.userId);
-      agentConnection={status:'ready',error:''};
+      agentConnection={status:'ready',error:'',httpStatus:null};
       render();
       void eventWorkspace.sync();
       return;
@@ -687,7 +689,7 @@ async function refreshAgentConnection({healthOnly=false}={}) {
     if (eventConnection()) throw Error('Mac 尚未开启新链路，请检查 Along 服务配置');
     if (!status?.along || !status?.ready || status.runtime!==agentRuntime) throw Error(`${agentRuntimeLabel(agentRuntime)} 尚未就绪`);
     verifiedHealthHost=true;
-    agentConnection={status:'ready',error:''};
+    agentConnection={status:'ready',error:'',httpStatus:null};
     for (const key of healthGoalKeys()) {
       const review=reviewFor(key);
       if (review.canRecoverConnection()) void review.reviewHealthContext('reconnect');
@@ -714,7 +716,9 @@ async function refreshAgentConnection({healthOnly=false}={}) {
   } catch(error) {
     if (agentConfig!==config||agentRuntime!==runtime) return;
     verifiedHealthHost=false;
-    agentConnection={status:'error',error:error.message||'连接检查失败'};
+    // httpStatus 是原生桥透传的 HTTP 状态码：web 层要靠它把「凭据失效」和
+    // 「服务暂不可用」分开说，两者给用户的下一步完全不同。
+    agentConnection={status:'error',error:error.message||'连接检查失败',httpStatus:typeof error.status==='number'?error.status:null};
   } finally { if (healthOnly&&checkingHealthHost===config) checkingHealthHost=null; }
   if (eventWorkspace) renderEventUpdate();
   else if (screen==='agent') renderAgentUpdate();
@@ -768,18 +772,33 @@ function brand() {
 // 这里只负责存取与渲染。认领只改昵称归属，不改 UID，也不动配对关系。
 const PROFILE_KEY='along.user-profile.v1';
 function currentUserId() { return eventConnection()?.userId||null; }
+// 昵称属于「已核验的 Host + UID」这一对身份：同一台 Host 换用户（UID 变了）
+// 或换一台 Host（哪怕回传同一个 UID）都看不到对方的昵称。
+// Host 用 origin 归一：地址或端口不同就是另一台 Host。
+function currentProfileScope() {
+  const userId=currentUserId();
+  // 还没确认身份时不知道该属于哪台 Host，昵称先记在本机桶，等配对确认后再认领。
+  if (!userId) return DEVICE_SCOPE;
+  // 已配对时按「已核验的 Host」算归属：用核验过的 origin，不拿用户随便填的地址当身份。
+  return scopeKey(eventConnection()?.bindingOrigin||originOf(agentConfig.baseURL)||'',userId);
+}
 function storedProfile() { return readProfile(localStorage.getItem(PROFILE_KEY)); }
-function profileNickname() { return profileNicknameFor(storedProfile(),currentUserId()); }
+function profileNickname() { return profileNicknameFor(storedProfile(),currentProfileScope()); }
 function saveProfile(nickname) {
-  const record=setNickname(storedProfile(),nickname,currentUserId());
-  if (record) localStorage.setItem(PROFILE_KEY,writeProfile(record));
+  const record=setNickname(storedProfile(),currentProfileScope(),nickname);
+  // 一条昵称都没留下时把存储删掉，别留一个空壳记录。
+  if (record&&Object.keys(record.nicknames||{}).length) localStorage.setItem(PROFILE_KEY,writeProfile(record));
   else localStorage.removeItem(PROFILE_KEY);
   return record;
 }
 // 身份确认后，把还挂在设备上的昵称认领到该身份：昵称跟着走，UID 不变。
 function adoptProfile(userId) {
-  const record=adoptProfileFor(storedProfile(),userId);
-  if (record) localStorage.setItem(PROFILE_KEY,writeProfile(record));
+  if (!userId) return;
+  const host=eventConnection()?.bindingOrigin||originOf(agentConfig.baseURL)||'';
+  const before=storedProfile();
+  const record=adoptProfileFor(before,scopeKey(host,userId));
+  // 没有可认领的昵称时什么都不写：不能凭空造出一条空的本机记录。
+  if (record&&writeProfile(record)!==writeProfile(before)) localStorage.setItem(PROFILE_KEY,writeProfile(record));
 }
 // 顶部栏的个人入口：设置过昵称就显示昵称，否则显示身份标识，都没有就写「设置」。
 function profileChip() {
@@ -1421,6 +1440,10 @@ function healthSourceStatus() {
   if (state.source==='demo') return {label:'演示数据',kind:'demo',detail:'当前是演示数据，没有连接真实健康数据。'};
   if (state.source==='healthkit') {
     const types=state.snapshot?.selectedTypes?.length??0;
+    // 选了类型却读不到任何数值：这台机现在拿不到健康记录（没样本、权限被撤、
+    // 或读取失败）。这时不能说「已连接」——那会让用户以为数据已经接上了。
+    // 空读数按 health.mjs 的口径不算「用户没有数据」，所以要看真实读数而不是状态位。
+    if (!summaryHasData(state.snapshot)) return {label:'无可读取记录',kind:'none',detail:`已选 ${types} 项，但本机读不到数值。请检查系统健康权限或「健康」App 里是否有记录。`};
     return state.snapshot?.contextReviewAllowed===true
       ? {label:'已连接',kind:'real',detail:`已选 ${types} 项 · 已允许 Agent 评估`}
       : {label:'已导入',kind:'none',detail:`已选 ${types} 项 · 尚未允许 Agent 评估`};
@@ -1429,10 +1452,45 @@ function healthSourceStatus() {
 }
 function okxSourceStatus(goal) {
   const status=okxStates.get(goal.id);
-  if (!status) return {label:'未连接',kind:'none',detail:'只读接入 · 尚未连接'};
-  if (status.error) return {label:'连接失败',kind:'none',detail:'连接状态暂不可用，可以重试。'};
-  if (status.state==='connected') return {label:'已连接',kind:'real',detail:status.syncState==='received'?'只读 · Mac 已收到摘要':'只读 · 等待同步到 Mac'};
-  return {label:'未连接',kind:'none',detail:'只读接入 · 尚未连接'};
+  // 设置页可能显示的不是当前选中的目标，所以要说清这是哪个目标的 OKX。
+  const where=goal?.title?`「${goal.title}」`:'';
+  if (!status) return {label:'未连接',kind:'none',detail:`${where}只读接入 · 尚未连接`};
+  if (status.error) return {label:'连接失败',kind:'none',detail:`${where}连接状态暂不可用，可以重试。`};
+  if (status.state==='connected') return {label:'已连接',kind:'real',detail:`${where}只读 · ${status.syncState==='received'?'Mac 已收到摘要':'等待同步到 Mac'}`};
+  // 本机已经停了采集、但撤回还排着队等 Host 收尾：这跟「从没连过」不是一回事，
+  // 不能混成同一句话（原生 PhoneSourceCoordinator 的 syncState 就是这么分的）。
+  if (status.syncState==='pending') return {label:'已停止采集',kind:'none',detail:`${where}本机已停止采集，撤回仍待 Host 接收。`};
+  if (status.syncState==='received') return {label:'已停止采集',kind:'none',detail:`${where}本机已停止采集，最后一份摘要已被 Host 接收。`};
+  return {label:'未连接',kind:'none',detail:`${where}只读接入 · 尚未连接`};
+}
+// 服务状态按「可观测结果」分类，不靠猜：
+//   401/403 → 凭据失效，下一步是重新配对；
+//   5xx     → 服务暂不可用（Agent 未就绪），下一步是稍后重试；
+//   没有状态码 → 请求没到 Host，下一步是查网络和服务地址。
+// 配对本身成功（凭据已存）时，卡片要说「已配对」，不能说「连接需处理」——
+// 那会让用户以为配对没成，白白重配一遍。
+function serverStatusView() {
+  if (!agentConfig.token) return {label:'未配对',kind:'none',detail:'还没有连接 Along 服务。'};
+  if (agentConnection.status==='ready') return {label:'已连接',kind:'real',detail:`${agentConfig.baseURL||''}`};
+  if (agentConnection.status==='error') {
+    const code=agentConnection.httpStatus;
+    const reason=agentConnection.error||'连接检查失败';
+    if (code===401||code===403) return {label:'已配对',kind:'none',detail:`凭据已失效，需要重新配对：${reason}`};
+    if (typeof code==='number'&&code>=500) return {label:'已配对',kind:'none',detail:`服务暂不可用（Agent 未就绪）：${reason}`};
+    return {label:'已配对',kind:'none',detail:`服务暂不可用，连不上 Host：${reason}`};
+  }
+  return {label:'检查中',kind:'none',detail:'正在验证 Along 服务。'};
+}
+// OKX 的入口跟着「本人获推荐的目标」走：设置页不该要求用户先切目标才管得到 OKX。
+function okxGoal() {
+  const view=eventWorkspace?.view();
+  if (!view) return null;
+  const goals=view.goals||{};
+  const list=Array.isArray(goals)?goals:Object.values(goals);
+  const active=list.find(goal=>goal.id===view.activeGoalId);
+  const hasOkx=goal=>!!goal?.dataSources?.some(source=>source.provider==='okx');
+  if (hasOkx(active)) return active;
+  return list.find(hasOkx)||null;
 }
 function sourceCard(symbol,name,status,action) {
   return `<div class="connection-card"><div class="connection-symbol" aria-hidden="true">${symbol}</div><div class="connection-copy"><div class="connection-name"><strong>${esc(name)}</strong><span class="source-tag ${esc(status.kind)}">${esc(status.label)}</span></div><p>${esc(status.detail)}</p></div><button class="agent-action connection-agent-action" data-action="${esc(action.id)}" ${action.disabled?'disabled':''}>${esc(action.label)}</button></div>`;
@@ -1444,15 +1502,12 @@ function settingsPage() {
   const userId=currentUserId();
   const health=healthSourceStatus();
   const healthAction=eventWorkspace?'event-health-connect':'connect-health';
-  const healthButton=health.kind==='real'?{id:healthAction,label:'管理'}:health.label==='读取失败'?{id:healthAction,label:'重试'}:{id:healthAction,label:'连接'};
-  const view=eventWorkspace?.view();
-  const goal=view?.goals?.[view.activeGoalId];
-  const okx=goal?.dataSources?.some(source=>source.provider==='okx')?goal:null;
+  const healthButton=health.kind==='real'?{id:healthAction,label:'管理'}
+    :(health.label==='读取失败'||health.label==='无可读取记录')?{id:'settings-retry-health',label:'重试'}
+    :{id:healthAction,label:'连接'};
+  const okx=okxGoal();
   if (okx) queueOkxStatus(okx.id);
-  const serverLabel=!agentConfig.token?{label:'未配对',kind:'none',detail:'还没有连接 Along 服务。'}
-    :agentConnection.status==='ready'?{label:'已连接',kind:'real',detail:`${agentConfig.baseURL||''}`}
-    :agentConnection.status==='error'?{label:'连接需处理',kind:'none',detail:agentConnection.error||'连接检查失败，可以重试。'}
-    :{label:'检查中',kind:'none',detail:'正在验证 Along 服务。'};
+  const serverLabel=serverStatusView();
   return `<div class="app-shell">${topbar('设置')}
   <main class="content settings-content">
     ${backButton('settings-back','返回')}
@@ -1472,7 +1527,7 @@ function settingsPage() {
     </section>
     <section class="settings-section" aria-label="Along 服务">
       <div class="section-heading"><h2>Along 服务</h2><span>配对与连接</span></div>
-      <div class="connection-card"><div class="connection-symbol" aria-hidden="true">⌘</div><div class="connection-copy"><div class="connection-name"><strong>Along 服务</strong><span class="source-tag ${esc(serverLabel.kind)}">${esc(serverLabel.label)}</span></div><p>${esc(serverLabel.detail)}</p></div>${agentConfig.token?`<button class="agent-action connection-agent-action" data-action="settings-retry-connection" ${connectionBusy?'disabled':''}>重试</button>`:''}</div>
+      <div class="connection-card"><div class="connection-symbol" aria-hidden="true">⌘</div><div class="connection-copy"><div class="connection-name"><strong>Along 服务</strong><span class="source-tag ${esc(serverLabel.kind)}">${esc(serverLabel.label)}</span></div><p>${esc(serverLabel.detail)}</p></div>${agentConfig.token?`<button class="agent-action connection-agent-action" data-action="settings-retry-connection" ${connectionBusy?'disabled':''}>重试连接</button>`:''}</div>
       ${agentConfig.token?`<details class="agent-setup" data-agent-connection open><summary>重新配对或更新服务地址</summary>${pairForm()}${agentConnection.error?hostAddressForm():''}</details>`
         :`<details class="agent-setup" data-agent-connection open><summary>连接 Along</summary>${pairForm()}</details>`}
     </section>
@@ -1576,22 +1631,28 @@ function eventDataSources(goal) {
     return `<div class="connection-card"><div class="connection-symbol" aria-hidden="true">${provider.symbol}</div><div class="connection-copy"><div class="connection-name"><strong>${provider.name}</strong><span class="source-tag">Agent 推荐</span></div><p>${esc(source.reason)}</p><p>${detail}</p></div>${action}</div>`;
   }).join('')}</section>`;
 }
+// 原生把 OKX 状态分成 received / pending / none 三档（PhoneSourceCoordinator.snapshot）：
+// pending 不只是「还没同步」，也包括「本机已停采集、撤回还排着队等 Host 收尾」。
+// 三档必须原样带到页面，不能压成两档。
+function okxSyncState(value){return value?.syncState==='received'?'received':value?.syncState==='pending'?'pending':'none';}
 function queueOkxStatus(goalId) {
-  if(!window.AlongAgentBridge?.source||okxPending.has(goalId)||okxStates.has(goalId))return;
+  if(!window.AlongAgentBridge?.source||okxPending.has(goalId))return;
+  // 缓存在设置页重开时是过期的（Host 可能已经收过摘要、原生也可能已排队撤回），
+  // 所以标记为「待回读」的目标一定要重新问一次原生。
+  if(okxStates.has(goalId)&&!okxStale.has(goalId))return;
   const binding=eventWorkspaceBinding;
   const request={};
   okxPending.set(goalId,request);
   const current=()=>binding===eventWorkspaceBinding&&okxPending.get(goalId)===request;
   void Promise.resolve().then(()=>window.AlongAgentBridge.source('status',goalId)).then(value=>{
-    if(current())okxStates.set(goalId,{state:value?.provider==='okx'&&value.state==='connected'?'connected':'disconnected',syncState:value?.syncState==='received'?'received':'pending'});
+    if(current())okxStates.set(goalId,{state:value?.provider==='okx'&&value.state==='connected'?'connected':'disconnected',syncState:okxSyncState(value)});
   }).catch(()=>{if(current())okxStates.set(goalId,{error:true});}).finally(()=>{
-    if(current()){okxPending.delete(goalId);render();}
+    if(current()){okxPending.delete(goalId);okxStale.delete(goalId);render();}
   });
 }
-async function connectOkx() {
-  const goalId=eventWorkspace?.view().activeGoalId;
+async function connectOkx(goalId) {
   const goal=eventWorkspace?.view().goals[goalId];
-  if(!goal?.dataSources.some(s=>s.provider==='okx'))return;
+  if(!goal?.dataSources?.some(s=>s.provider==='okx'))return;
   if(!window.AlongAgentBridge?.source){notice('请在 iPhone Along App 中连接 OKX');return;}
   if(okxPending.get(goalId)?.connect)return;
   const binding=eventWorkspaceBinding,request={connect:true};
@@ -1599,7 +1660,7 @@ async function connectOkx() {
   const current=()=>binding===eventWorkspaceBinding&&okxPending.get(goalId)===request;
   try {
     const value=await window.AlongAgentBridge.source('connect',goalId);
-    if(current())okxStates.set(goalId,{state:value?.provider==='okx'&&value.state==='connected'?'connected':'disconnected',syncState:value?.syncState==='received'?'received':'pending'});
+    if(current())okxStates.set(goalId,{state:value?.provider==='okx'&&value.state==='connected'?'connected':'disconnected',syncState:okxSyncState(value)});
   }catch{if(current())notice('无法打开连接，请检查 Mac 连接后重试');}
   if(current()){okxPending.delete(goalId);render();}
 }
@@ -2056,9 +2117,19 @@ app.addEventListener('click', event => {
   if (!action) return;
   // 设置页在两种链路下都能进，所以它的动作放在事件工作区分支之前。
   // 已经在设置页时不改返回目标：否则返回键会把用户留在设置页里。
-  if (action==='open-settings') {if (screen!=='settings') settingsFrom=screen;screen='settings';render();return;}
+  if (action==='open-settings') {
+    if (screen!=='settings') settingsFrom=screen;
+    screen='settings';
+    // 重开设置页要回读一次原生状态：Host 可能已经收过摘要，原生也可能已排队撤回，
+    // 页面不能拿上一次缓存的「等待同步」继续骗用户。
+    const okx=okxGoal();
+    if (okx) {okxStale.add(okx.id);queueOkxStatus(okx.id);}
+    render();
+    return;
+  }
   if (action==='settings-back') {screen=settingsFrom||'home';render();return;}
   if (action==='settings-retry-connection') {void refreshAgentConnection().then(()=>render());return;}
+  if (action==='settings-retry-health') {void refreshFromNative(true).then(()=>render());return;}
   if (eventWorkspace) {
     if (action==='new-goal') beginNewGoal();
     else if (action==='local-exit') {
@@ -2090,7 +2161,11 @@ app.addEventListener('click', event => {
       if (eventWorkspace.prepareRecommendationFeedback(actionTarget.dataset.eventId)) {focusedEventRecommendation=null;screen='agent';render();}
     }
     else if (action==='event-health-connect') {void connectHealth();}
-    else if (action==='event-okx-connect') {void connectOkx();}
+    else if (action==='event-okx-connect') {
+      // 设置页显示的可能是「本人获推荐的目标」，不一定是当前选中的那个。
+      const goalId=screen==='settings'?okxGoal()?.id:eventWorkspace.view().activeGoalId;
+      void connectOkx(goalId);
+    }
     else if (action==='agent-back') {
       selectedEventTaskId=null;focusedEventRecommendation=null;eventTaskDetailOrigin='home';
       if (!eventWorkspace.view().activeGoalId) eventWorkspace.leaveConversation();
@@ -2111,7 +2186,7 @@ app.addEventListener('click', event => {
     if (next===agentRuntime) return;
     agentRuntime=next;
     localStorage.setItem(AGENT_RUNTIME_KEY,agentRuntime);
-    agentConnection={status:agentConfig.token?'checking':'unconfigured',error:''};
+    agentConnection={status:agentConfig.token?'checking':'unconfigured',error:'',httpStatus:null};
     renderAgentUpdate();
     if (agentConfig.token) void refreshAgentConnection();
     return;
@@ -2258,7 +2333,13 @@ app.addEventListener('submit', async event => {
       activateAgentConfig(config,{rebind:pairing,runtime,transportMigration,workspaceHandoff});
       await refreshAgentConnection();
       if (!eventWorkspace) void reviewAll();
-      notice(pairing?'已连接 Along，之后会自动恢复':'已更新 Along 服务地址');
+      // 提示要说实话：配对成功但服务检查没通过时，不能报「已连接」。
+      // 配对已经生效（凭据已存），下一步是重试或重新配对，不是「连上了」。
+      if (pairing) {
+        if (agentConnection.status==='ready') notice('已连接 Along，之后会自动恢复');
+        else if (agentConnection.status==='error') notice('已配对 Along，但服务暂不可用，可以在设置里重试');
+        else notice('已配对 Along，正在确认服务状态');
+      } else notice('已更新 Along 服务地址');
     } catch(error) { notice(error.message || 'Along 连接未更新'); }
     finally { connectionBusy=false;render(); }
     return;
@@ -3111,7 +3192,8 @@ window.addEventListener('along-health-update', async event => {
   nativeObservationSeen=true;
   saveHealth(next);
   await reviewAll('observation',previous);
-  if (screen==='home') render();
+  // 设置页开着时也要重画：读数刚回来，状态不能还停在「检查中」。
+  if (screen==='home'||screen==='settings') render();
 });
 function openSavedLocalNotification(detail) {
   const goalKey=detail.goalKey;
@@ -3203,6 +3285,10 @@ async function restoreAlongConnection() {
     } else if (agentConfig.token) {
       await saveNativeConnection(agentConfig);
     }
+    // 旧版昵称（只有 UID、没有 Host 维度）在这里认领一次：用本机存下来的、已经
+    // 核验过的身份，不用等 Host 应答——Host 暂时连不上时昵称也得看得见。
+    const bound=eventConnection();
+    if (bound?.userId) adoptProfile(bound.userId);
   } catch {
     // A transient Keychain failure leaves the WKWebView connection available.
   }
@@ -3254,7 +3340,8 @@ async function refreshFromNative(force=false) {
       }
       nativeHealthStatus='unlinked';
     } else nativeHealthStatus='unavailable';
-    if (screen==='home') render();
+    // 读取失败要当场看得见：设置页正开着却一直停在「检查中」，等于没告诉用户任何事。
+    if (screen==='home'||screen==='settings') render();
   } finally { readingNative=false; }
 }
 void refreshFromNative();

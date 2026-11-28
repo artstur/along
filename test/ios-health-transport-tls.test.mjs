@@ -48,7 +48,7 @@ enum AlongConnectionStore {
  ${block(source,'    static func acceptsPin(')}
 }
 enum AgentBridgeError:Error {
- case invalidConfiguration,invalidResponse,receipt([String:Any]),server(String)
+ case invalidConfiguration,invalidResponse,receipt([String:Any]),server(String),httpStatus(Int,String)
  static func transportMessage(_ error:Error)->String? {nil}
 }
 ${pinned}

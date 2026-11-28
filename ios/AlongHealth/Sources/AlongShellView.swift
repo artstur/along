@@ -589,7 +589,7 @@ enum AlongConnectionStore {
 
 struct AlongWebView: UIViewRepresentable {
     @ObservedObject var bridge: AlongBridgeModel
-    private let site = URL(string: "along://app/index.html?build=111")!
+    private let site = URL(string: "along://app/index.html?build=110")!
 
     func makeCoordinator() -> Coordinator { Coordinator(bridge: bridge) }
 
@@ -676,7 +676,7 @@ struct AlongWebView: UIViewRepresentable {
         const item = agentPending.get(id); if (!item) return;
         agentPending.delete(id);
         if (result.ok) item.resolve(result.value);
-        else item.reject(Object.assign(new Error(result.error || 'Along 请求失败'), result.receipt ? {receipt: result.receipt} : {}));
+        else item.reject(Object.assign(new Error(result.error || 'Along 请求失败'), result.receipt ? {receipt: result.receipt} : {}, result.status ? {status: result.status} : {}));
       };
       window.AlongAgentBridge = {
         request: ({baseURL, fingerprint, path, token, body}) => new Promise((resolve, reject) => {
@@ -846,6 +846,8 @@ struct AlongWebView: UIViewRepresentable {
                         result = ["ok": false, "error": error.localizedDescription]
                         // 回执透传（§4.2）：只有事件回执挂在错误上，其余错误形状不变。
                         if case let AgentBridgeError.receipt(receipt) = error { result["receipt"] = receipt }
+                        // HTTP 状态码透传：web 层据此区分凭据失效与服务暂不可用。
+                        if case let AgentBridgeError.httpStatus(status, _) = error { result["status"] = status }
                     }
                     await MainActor.run { Self.deliverAlongResult(id: id, result: result, webView: webView) }
                 }
@@ -1216,7 +1218,13 @@ struct AlongWebView: UIViewRepresentable {
                 if let status = result["status"] as? String, ["rejected", "conflict", "accepted", "duplicate"].contains(status) {
                     throw AgentBridgeError.receipt(result)
                 }
-                throw AgentBridgeError.server(result["error"] as? String ?? "Along 请求失败")
+                let message = result["error"] as? String ?? "Along 请求失败"
+                // HTTP 状态码一并带到 web 层：文案不变，但「凭据失效（401/403）」和
+                // 「服务暂不可用（5xx）」要分开说，网页才知道该让用户重新配对还是稍后重试。
+                if let statusCode = (response as? HTTPURLResponse)?.statusCode {
+                    throw AgentBridgeError.httpStatus(statusCode, message)
+                }
+                throw AgentBridgeError.server(message)
             }
             return result
         }
@@ -1395,6 +1403,9 @@ enum AgentBridgeError: LocalizedError {
     case invalidConfiguration, invalidResponse, notificationUnavailable, server(String)
     // 事件回执（/events 200/400/409 的回执体）：仅承载给 web 层做处置，不影响用户可见文案。
     case receipt([String: Any])
+    // HTTP 状态码：文案还是 server 那一套，但 web 层要靠它把「凭据失效（401/403）」
+    // 和「服务暂不可用（5xx）」分开说——两者给用户的下一步完全不同。
+    case httpStatus(Int, String)
 
     static func transportMessage(_ error: Error) -> String? {
         let cause = error as NSError
@@ -1423,6 +1434,7 @@ enum AgentBridgeError: LocalizedError {
         case .notificationUnavailable: "请在系统设置中允许 Along 通知"
         case .server(let message): message
         case .receipt(let body): body["reason"] as? String ?? body["error"] as? String ?? "Along 请求失败"
+        case .httpStatus(_, let message): message
         }
     }
 }

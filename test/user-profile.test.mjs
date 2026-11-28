@@ -1,9 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {PROFILE_VERSION,NICKNAME_MAX,cleanNickname,readProfile,writeProfile,profileNickname,adoptProfile,setNickname} from '../web/user-profile.mjs';
+import {PROFILE_VERSION,NICKNAME_MAX,cleanNickname,readProfile,writeProfile,profileNickname,adoptProfile,setNickname,scopeKey,DEVICE_SCOPE,legacyBucket} from '../web/user-profile.mjs';
 
 // 昵称是显示名，不是身份：写它不改 UID，也不改配对关系。
-// 这条文件的规则来自 docs/user-settings.md §2。
+// 这条文件的规则来自 docs/user-settings.md §2：昵称属于「已核验的 Host + UID」
+// 这一对身份，所以作用域键就是 `${host}|${uid}`。
+const HOST_A='https://a.example.com:443';
+const HOST_B='https://b.example.com:443';
+const UID='u_12345678';
+const OTHER='u_87654321';
 
 test('a nickname is cleaned, trimmed and capped',()=>{
   assert.equal(cleanNickname('  小明  '),'小明');
@@ -14,49 +19,76 @@ test('a nickname is cleaned, trimmed and capped',()=>{
   assert.equal(cleanNickname(42),'');
 });
 
-test('a profile round-trips through storage without losing the owner',()=>{
-  const record=setNickname(null,'小明','u_12345678');
-  assert.deepEqual(record,{version:PROFILE_VERSION,nickname:'小明',userId:'u_12345678'});
+test('a nickname round-trips through storage without losing its owner',()=>{
+  const scope=scopeKey(HOST_A,UID);
+  const record=setNickname(null,scope,'小明');
+  assert.deepEqual(record,{version:PROFILE_VERSION,nicknames:{[scope]:'小明'}});
   const restored=readProfile(writeProfile(record));
   assert.deepEqual(restored,record);
+  assert.equal(profileNickname(restored,scope),'小明');
 });
 
 test('a broken or foreign stored profile is ignored instead of throwing',()=>{
-  assert.equal(readProfile(null),null);
-  assert.equal(readProfile('not json'),null);
-  assert.equal(readProfile('{"version":2,"nickname":"x"}'),null);
-  assert.equal(readProfile('{"version":1}'),null);
-  assert.equal(readProfile('{"version":1,"nickname":7}'),null);
+  const empty={version:PROFILE_VERSION,nicknames:{}};
+  assert.deepEqual(readProfile(null),empty);
+  assert.deepEqual(readProfile('not json'),empty);
+  assert.deepEqual(readProfile('{"version":3,"nickname":"x"}'),empty);
+  assert.deepEqual(readProfile('{"version":2,"nicknames":{"a":7}}'),empty);
+});
+
+test('the same Host and UID keeps the same nickname',()=>{
+  const scope=scopeKey(HOST_A,UID);
+  const record=setNickname(null,scope,'小明');
+  assert.equal(profileNickname(record,scope),'小明');
+});
+
+test('two Hosts returning the same UID never see each other nickname',()=>{
+  const scopeA=scopeKey(HOST_A,UID);
+  const scopeB=scopeKey(HOST_B,UID);
+  const first=setNickname(null,scopeA,'OnlyHostA');
+  const second=setNickname(first,scopeB,'OnlyHostB');
+  assert.equal(profileNickname(second,scopeA),'OnlyHostA','回到 Host A 要拿回 A 的昵称');
+  assert.equal(profileNickname(second,scopeB),'OnlyHostB');
+});
+
+test('another UID on the same Host neither sees nor overwrites the nickname',()=>{
+  const scope=scopeKey(HOST_A,UID);
+  const other=scopeKey(HOST_A,OTHER);
+  const first=setNickname(null,scope,'First');
+  const second=setNickname(first,other,'Second');
+  assert.equal(profileNickname(second,scope),'First','换个 UID 不能覆盖原来的昵称');
+  assert.equal(profileNickname(second,other),'Second');
 });
 
 test('a nickname set before pairing stays visible, then belongs to the paired identity',()=>{
-  const pending=setNickname(null,'小明',null);
-  assert.equal(profileNickname(pending,null),'小明');
-  const adopted=adoptProfile(pending,'u_12345678');
-  assert.equal(adopted.userId,'u_12345678');
-  assert.equal(adopted.nickname,'小明');
-  assert.equal(profileNickname(adopted,'u_12345678'),'小明');
+  const pending=setNickname(null,DEVICE_SCOPE,'小明');
+  assert.equal(profileNickname(pending,DEVICE_SCOPE),'小明');
+  const adopted=adoptProfile(pending,scopeKey(HOST_A,UID));
+  assert.equal(profileNickname(adopted,scopeKey(HOST_A,UID)),'小明');
+  assert.equal(profileNickname(adopted,DEVICE_SCOPE),'','认领后本机桶就不再占着这条');
 });
 
-test('a nickname never leaks across identities',()=>{
-  const owned=setNickname(null,'小明','u_12345678');
-  assert.equal(profileNickname(owned,'u_87654321'),'');
-  assert.equal(profileNickname(owned,'u_12345678'),'小明');
+test('adopting never carries a nickname to another Host',()=>{
+  const owned=setNickname(null,scopeKey(HOST_A,UID),'小明');
+  const adopted=adoptProfile(owned,scopeKey(HOST_B,UID));
+  assert.equal(profileNickname(adopted,scopeKey(HOST_B,UID)),'');
+  assert.equal(profileNickname(adopted,scopeKey(HOST_A,UID)),'小明','Host A 的昵称还留在 Host A 名下');
 });
 
-test('adopting an already-owned nickname leaves the owner alone',()=>{
-  const owned=setNickname(null,'小明','u_12345678');
-  assert.deepEqual(adoptProfile(owned,'u_87654321'),owned);
+test('a v1 record migrates into the legacy bucket and is claimed by the same UID only',()=>{
+  const legacy=readProfile(JSON.stringify({version:1,nickname:'旧名字',userId:UID}));
+  assert.equal(profileNickname(legacy,scopeKey(HOST_A,UID)),'','刚读出来时还没归到身份上');
+  const adopted=adoptProfile(legacy,scopeKey(HOST_A,UID));
+  assert.equal(profileNickname(adopted,scopeKey(HOST_A,UID)),'旧名字');
+  // 另一个 UID 认领不了这条旧记录。
+  const other=adoptProfile(legacy,scopeKey(HOST_A,OTHER));
+  assert.equal(profileNickname(other,scopeKey(HOST_A,OTHER)),'');
+  assert.equal(profileNickname(legacy,legacyBucket(UID)),'旧名字');
 });
 
-test('clearing the nickname removes the record instead of storing an empty one',()=>{
-  assert.equal(setNickname(null,'   ',null),null);
-  assert.equal(setNickname(setNickname(null,'小明',null),'',null),null);
-});
-
-test('an unpaired device still shows the nickname it saved',()=>{
-  const pending=setNickname(null,'小明',null);
-  assert.equal(profileNickname(pending,null),'小明');
-  // 认领之前，别的身份看不到它。
-  assert.equal(profileNickname(pending,'u_12345678'),'小明');
+test('clearing the nickname removes the entry instead of storing an empty one',()=>{
+  const scope=scopeKey(HOST_A,UID);
+  const record=setNickname(setNickname(null,scope,'小明'),scope,'');
+  assert.deepEqual(record,{version:PROFILE_VERSION,nicknames:{}});
+  assert.equal(profileNickname(record,scope),'');
 });
