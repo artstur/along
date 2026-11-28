@@ -105,7 +105,7 @@ HTTP 状态码由原生桥透传到网页层（`AgentBridgeError.httpStatus` →
 - 数据源能授权、能连接；拒绝授权、撤销授权或连接失败时页面显示实际状态并可重试。
 - 未配对用户能在设置页完成配对与连接；已配对用户升级后能继续连接；配对失败或连接中断有明确状态并可重试。
 
-自动化覆盖见 `test/user-profile.test.mjs`（昵称规则）与 `test/app-settings-page.test.mjs`（页面行为，含重启后仍显示）。
+自动化覆盖见 `test/user-profile.test.mjs`（昵称规则）、`test/app-settings-page.test.mjs`（页面行为，含重启后仍显示）与 `test/ats88-review-regressions.test.mjs`（独立复核四项缺陷的回归，含隔离真实 Host 的配对与重试）。
 
 ## 6. 待确认项
 
@@ -125,5 +125,6 @@ HTTP 状态码由原生桥透传到网页层（`AgentBridgeError.httpStatus` →
 | `test/dom-stub.mjs` | 新增 `submitForm()`：按 id 提交指定表单；补 `CustomEvent` 与 `window.dispatchEvent`，让原生健康读数能真的回到页面 |
 | `test/user-profile.test.mjs` | 新增：昵称规则（含换 Host、换 UID 的隔离与认领） |
 | `test/app-settings-page.test.mjs` | 新增：设置页行为（含复核提出的四项缺陷的回归） |
+| `test/ats88-review-regressions.test.mjs` | 新增：复核复现脚本的「修复后期望」版回归（健康空读数、昵称隔离、OKX 回读与撤回态、真实 Host 配对后未就绪） |
 | `test/ios-health-transport-tls.test.mjs` | 原生桩补上 `httpStatus` 分支，跟真实枚举保持一致 |
 | `tools/build.mjs`、`web/sw.js` | 登记新模块（构建与离线预缓存清单） |

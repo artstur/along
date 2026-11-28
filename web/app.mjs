@@ -1477,7 +1477,9 @@ function serverStatusView() {
     const reason=agentConnection.error||'连接检查失败';
     if (code===401||code===403) return {label:'已配对',kind:'none',detail:`凭据已失效，需要重新配对：${reason}`};
     if (typeof code==='number'&&code>=500) return {label:'已配对',kind:'none',detail:`服务暂不可用（Agent 未就绪）：${reason}`};
-    return {label:'已配对',kind:'none',detail:`服务暂不可用，连不上 Host：${reason}`};
+    // 拿不到状态码：请求多半没到 Host（网络不通、地址不对、服务没起）。
+    // 原生给的传输错误文案本身会说清是哪一种，这里不再替它猜。
+    return {label:'已配对',kind:'none',detail:`服务暂不可用，暂时联系不上 Along 服务：${reason}`};
   }
   return {label:'检查中',kind:'none',detail:'正在验证 Along 服务。'};
 }
