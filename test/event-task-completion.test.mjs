@@ -246,7 +246,7 @@ test('a completion already submitted is not submitted again until the server sna
 let instance=0;
 // 还要拒收几次（跨页面实例共享：重载后的实例接着用同一份额度）。
 let refuseBudget=0;
-async function pageFixture({pending=false,offline=false,refused=false,syncFails=false,storage=null}={}) {
+async function pageFixture({pending=false,offline=false,refused=false,syncFails=false,completions=null,storage=null}={}) {
   const goal={id:GOAL,domain:'custom',status:'active',revision:1,title:'睡眠目标',metric:null,context:[],dataSources:[],
     tasks:[{id:'t_open',goalId:GOAL,status:'open',content:'睡前放下手机',revision:1},
       {id:'t_repeat',goalId:GOAL,status:'open',content:'每天快走',revision:1,scheduledAt:'2099-01-02T11:00:00Z',
@@ -254,6 +254,7 @@ async function pageFixture({pending=false,offline=false,refused=false,syncFails=
       {id:'t_done',goalId:GOAL,status:'done',content:'早起的散步',revision:2}]};
   const saved={version:1,recommendationsVersion:1,conversationVersion:1,executionVersion:2,userId:config.userId,cursor:3,
     activeGoalId:GOAL,conversationId:null,goals:{[GOAL]:goal},messages:{},drafts:{}};
+  if(completions) saved.completions=completions;
   const fresh={'along.agent.v1':JSON.stringify({baseURL:config.baseURL,fingerprint:config.fingerprint,token:config.token}),
     ['along.event-workspace.v1:'+config.userId]:JSON.stringify(saved)};
   if(pending) fresh['along.events.pending.v1:'+config.userId]=JSON.stringify([
@@ -450,6 +451,29 @@ test('a lost receipt is retried with the same event id so the completion is not 
   assert.equal(sent[0],sent[1]);
   assert.equal(pendingEvents(config).length,0);
   assert.ok(workspace.acceptedTaskCompletions().has('t_open'));
+});
+
+test('an old completion entry without a receipt keeps the task visible and retryable',async()=>{
+  // 旧缓存（更早的客户端写的）：完成事实的条目没有 outcome，也没有待发事件、没有任何受理证据。
+  const legacy={t_open:{eventId:'evt_legacy_0001',goalId:GOAL,revision:1}};
+  const {dom}=await pageFixture({completions:legacy});
+  // 没有受理证据就不当已受理：任务必须留在当前列表，完成键必须回来。
+  assert.match(dom.app.innerHTML,/睡前放下手机/);
+  assert.match(dom.app.innerHTML,/data-action="event-task-complete" data-task-id="t_open"/);
+  // 刷新后同样：既没有被藏起来，完成键也在。
+  const reloaded=await pageFixture({completions:legacy,storage:reloadedStorage(dom)});
+  assert.match(reloaded.dom.app.innerHTML,/睡前放下手机/);
+  assert.match(reloaded.dom.app.innerHTML,/data-action="event-task-complete" data-task-id="t_open"/);
+});
+
+test('an old completion entry whose event is still queued stays pending on its original event id',async()=>{
+  // 旧条目、事实还在待发队列里：仍算待处理（不重复提交），队列里保留原事件号。
+  const legacy={t_open:{eventId:'evt_queued_one',goalId:GOAL,revision:1}};
+  const {dom}=await pageFixture({pending:true,offline:true,completions:legacy});
+  const open=dom.app.innerHTML.split('id="event-task-t_open"')[1]?.split('</article>')[0]??'';
+  assert.doesNotMatch(open,/event-task-complete/,'仍在队列里：同一任务不重复提交');
+  assert.match(dom.app.innerHTML,/睡前放下手机/,'仍在队列里不等于已受理，任务留在当前列表');
+  assert.equal(pendingEvents(config)[0].event_id,'evt_queued_one','队列里保留原事件号');
 });
 
 test('a recurring task stays in the current list because only this occurrence is completed',async()=>{

@@ -559,18 +559,24 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
   /**
    * 尚未了结的完成反馈：同一个任务不重复提交（服务端按事件号幂等，重复提交也不会累加执行次数）。
    *
-   * 终态回执（被拒／冲突）已经了结——那条事实不会再送达，任务回到可完成状态，用户可以重试。
    * 依据是**这条完成事实自己的回执**（台账里的 outcome），不是本地失败台账：失败台账有 50 条上限，
    * 别的任务失败得多了会把这条挤掉，那时「没在失败台账里」不再等于「被受理过」。
+   *
+   * - failed（终态拒收）：了结，任务回到可完成状态，用户可以重试。
+   * - accepted（明确受理）：已收下，快照确认前不重复提交。
+   * - queued / 旧缓存里没有回执的条目：只有它真的还在待发队列里才算待处理——队列里存着
+   *   原始信封与原事件号，重投时沿用它。没有受理证据就不当已受理，宁可让用户重试。
    */
   function pendingTaskCompletions() {
     const ids=new Set();
+    const queued=new Set(pendingEvents(config).map(item=>item.event_id));
     for (const {envelope} of pendingEvents(config)) {
       if (envelope?.kind==='task.completed'&&typeof envelope.task_id==='string') ids.add(envelope.task_id);
     }
     for (const [taskId,entry] of Object.entries(completionsOf(state.completions))) {
       if (entry.outcome==='failed') continue;
-      ids.add(taskId);
+      if (entry.outcome==='accepted') {ids.add(taskId);continue;}
+      if (queued.has(entry.eventId)) ids.add(taskId);
     }
     return ids;
   }
@@ -581,19 +587,14 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
    * 补发带目标快照的同步项（那样客户端永远等不到新快照，任务会一直挂在当前列表里）。
    * 服务端补发了快照时，这条任务在快照里已经是 done，两者口径一致。
    *
-   * 判据是**受理这件事本身**（回执），不是「没被拒收」：被拒收的事实只要回执还在，就永远不会被
-   * 当成已受理。没有 outcome 的旧台账条目（更早的客户端写的）沿用旧口径推断。
+   * 判据是**受理这件事本身**（回执），不是「没被拒收」：没有受理证据的条目（被拒收的旧条目、
+   * 更早的客户端写的、只有诊断记录没有回执的）一律不算已受理——宁可让用户重试，也不要把
+   * 一项没做完的任务凭空藏起来。
    */
   function acceptedTaskCompletions() {
-    const queued=new Set(pendingEvents(config).map(item=>item.event_id));
-    const failed=new Set(readEventFailures(config).map(item=>item.event_id));
     const ids=new Set();
     for (const [taskId,entry] of Object.entries(completionsOf(state.completions))) {
-      if (entry.outcome==='accepted') {ids.add(taskId);continue;}
-      // 旧台账没有回执：沿用旧口径（不在队列里、也没有失败记录）推断已受理。
-      if (entry.outcome!==undefined) continue;
-      if (queued.has(entry.eventId)||failed.has(entry.eventId)) continue;
-      ids.add(taskId);
+      if (entry.outcome==='accepted') ids.add(taskId);
     }
     return ids;
   }
