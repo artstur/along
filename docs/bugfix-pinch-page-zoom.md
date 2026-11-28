@@ -93,6 +93,23 @@ TASK85 after pinch-open rect=(101.76,243.54,92.96,47.74)   ← 修复前：比�
 锁只在 `along://` 时生效、锁出现在样式表与模块脚本之前（晚于首次布局就来不及）、App 内置产物与 `web/` 一致。
 `test/brand-double-tap-zoom.test.mjs` 的 viewport 用例改写成新契约：网页版本不跟着锁。
 
+## 与主干的合并（PR #83 冲突处理）
+
+主干在 PR #83 打开后合入了 #81、#82，Web 壳资源版本到 v108，本分支停在 v101，两边改到同一批文件的
+版本号，PR 报冲突。按「保留主干行为、只移植 viewport 修复」处理：
+
+- 只改了版本号的文件（`web/*.mjs`、`ios/AlongHealth/Web/*.mjs`、`web/sw.js`、
+  `ios/AlongHealth/Sources/AlongShellView.swift`）：冲突取主干版本，再由 `tools/bump-shell-version.mjs`
+  统一推进到 v109。
+- `web/index.html` 与 `ios/AlongHealth/Web/index.html`：取主干版本后重新放上「只有 `along://` 的内置页面
+  才锁缩放」的那段 viewport 改写脚本。
+- `docs/bugfix-goal-prompt.md`：两边的踩坑记录都保留。
+- 主干 #81/#82 的行为（完成事实的下落、等待回复只保留三个动态点）原样保留。
+
+合并后：Web 壳资源版本 v109，`CFBundleVersion` 90，PR #83 头提交为本次合并后的最新提交（GitHub 报 MERGEABLE；确切 SHA 见工单评论）。
+合并后重新构建安装实测：首页四种捏合方向比例均为 1.0000；目标聊天页双指张开 1.0000；
+单指滚动 19/20 个文本位移，点按「交给 Super Agent」有响应，输入框敲字收到。
+
 ## 待确认
 
 - 上面是**模拟器**证据，不是真机。真机复测仍待做：iPhone 上装新构建后复测首页与另一个页面的双指放大/缩小、
