@@ -1,20 +1,20 @@
-import {KEY, loadState, setSnapshot} from './health.mjs?v=103';
-import {ACTIVE_GOAL_KEY, FINANCE_KEY, ensureHealthGoal, withoutDefaultHealthGoal, loadFinance, connectFinanceDemo, addFinanceDemoRecord, healthView, financeView} from './workspace.mjs?v=103';
-import {EXPERIMENT, startExperiment, routeHealthEvent, acceptAgentSuggestion, agentRequestPayload} from './loop.mjs?v=103';
-import {goalChangeText} from './goal-agent-core.mjs?v=103';
-import {createEventWorkspace, recurringPlan, chatTimeline, captureChatAnchor, anchoredScrollTop} from './event-workspace.mjs?v=103';
-import {recommendationCard} from './recommendations.mjs?v=103';
-import {dataSourceProvider} from './data-sources.mjs?v=103';
-import {taskResultBodyRelevant} from './task-results.mjs?v=103';
-import {taskResultCard,captureResultReading,restoreResultReading} from './task-result-view.mjs?v=103';
-import {AGENT_KEY, GOALS_KEY, CONVERSATIONS_KEY, readStored, agentCall, loadNativeConnection, saveNativeConnection} from './agent-client.mjs?v=103';
-import {ADAPTIVE_LAYOUTS_KEY, customGoalEntries, findInitialCustomGoalCandidate, goalDomain, isCustomGoalKey, safeAdaptiveLayout, validateAdaptiveLayout} from './adaptive-ui.mjs?v=103';
+import {KEY, loadState, setSnapshot} from './health.mjs?v=104';
+import {ACTIVE_GOAL_KEY, FINANCE_KEY, ensureHealthGoal, withoutDefaultHealthGoal, loadFinance, connectFinanceDemo, addFinanceDemoRecord, healthView, financeView} from './workspace.mjs?v=104';
+import {EXPERIMENT, startExperiment, routeHealthEvent, acceptAgentSuggestion, agentRequestPayload} from './loop.mjs?v=104';
+import {goalChangeText} from './goal-agent-core.mjs?v=104';
+import {createEventWorkspace, recurringPlan, chatTimeline, captureChatAnchor, anchoredScrollTop} from './event-workspace.mjs?v=104';
+import {recommendationCard} from './recommendations.mjs?v=104';
+import {dataSourceProvider} from './data-sources.mjs?v=104';
+import {taskResultBodyRelevant} from './task-results.mjs?v=104';
+import {taskResultCard,captureResultReading,restoreResultReading} from './task-result-view.mjs?v=104';
+import {AGENT_KEY, GOALS_KEY, CONVERSATIONS_KEY, readStored, agentCall, loadNativeConnection, saveNativeConnection} from './agent-client.mjs?v=104';
+import {ADAPTIVE_LAYOUTS_KEY, customGoalEntries, findInitialCustomGoalCandidate, goalDomain, isCustomGoalKey, safeAdaptiveLayout, validateAdaptiveLayout} from './adaptive-ui.mjs?v=104';
 import {GOAL_SUPER_AGENT_RUNS_KEY, SUPER_AGENT_RUNS_KEY, createFailedGoalSuperAgentRun, createFailedSuperAgentRun,
   createGoalSuperAgentRequest, createPendingGoalSuperAgentRun, createPendingSuperAgentRun, createSuperAgentRequest,
-  safeGoalSuperAgentRun, safeSuperAgentRun, withRunError, AGENT_RUN_TIMEOUT_MS, AGENT_RUNTIME_KEY, CLOUD_RUN_NOT_FOUND, DSH_RUNTIME, KIMI_RUNTIME, agentRuntimeLabel, safeAgentRuntime, newId} from './super-agent.mjs?v=103';
+  safeGoalSuperAgentRun, safeSuperAgentRun, withRunError, AGENT_RUN_TIMEOUT_MS, AGENT_RUNTIME_KEY, CLOUD_RUN_NOT_FOUND, DSH_RUNTIME, KIMI_RUNTIME, agentRuntimeLabel, safeAgentRuntime, newId} from './super-agent.mjs?v=104';
 import {AGENT_NOTIFICATION_LEDGER_KEY, goalRunNotification, taskRunNotification, healthProposalNotification,
-  notificationWasDelivered, recordNotificationDelivered} from './agent-notifications.mjs?v=103';
-import {PLANNING_STATE_KEY,cleanDailyDelegation,validateDailyActions,agentHealthSnapshot,cleanPlanningContext,healthContextChanges,createPlanningContext,validateReassessment,buildBackgroundReviewRequest} from './contextual-planning.mjs?v=103';
+  notificationWasDelivered, recordNotificationDelivered} from './agent-notifications.mjs?v=104';
+import {PLANNING_STATE_KEY,cleanDailyDelegation,validateDailyActions,agentHealthSnapshot,cleanPlanningContext,healthContextChanges,createPlanningContext,validateReassessment,buildBackgroundReviewRequest} from './contextual-planning.mjs?v=104';
 const TICKET_KEY = 'along.goal-ticket.v1';
 const REMINDER_SYNC_KEY='along.health-reminder-sync.v1';
 const HEALTH_SHARING_KEY='along.health-sharing.v1';

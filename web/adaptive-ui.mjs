@@ -1,4 +1,4 @@
-import {numberLikeTarget} from './goal-agent-core.mjs?v=103';
+import {numberLikeTarget} from './goal-agent-core.mjs?v=104';
 
 export const ADAPTIVE_LAYOUTS_KEY = 'along.adaptive-layouts.v1';
 
