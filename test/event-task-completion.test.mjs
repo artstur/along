@@ -246,7 +246,7 @@ test('a completion already submitted is not submitted again until the server sna
 let instance=0;
 // 还要拒收几次（跨页面实例共享：重载后的实例接着用同一份额度）。
 let refuseBudget=0;
-async function pageFixture({pending=false,offline=false,refused=false,syncFails=false,completions=null,doneSnapshot=false,storage=null}={}) {
+async function pageFixture({pending=false,offline=false,refused=false,syncFails=false,completions=null,doneSnapshot=false,pagedGoalSnapshot=false,syncHangs=false,storage=null}={}) {
   const goal={id:GOAL,domain:'custom',status:'active',revision:1,title:'睡眠目标',metric:null,context:[],dataSources:[],
     tasks:[{id:'t_open',goalId:GOAL,status:'open',content:'睡前放下手机',revision:1},
       {id:'t_repeat',goalId:GOAL,status:'open',content:'每天快走',revision:1,scheduledAt:'2099-01-02T11:00:00Z',
@@ -276,6 +276,15 @@ async function pageFixture({pending=false,offline=false,refused=false,syncFails=
       return {status:'accepted',event_id:r.body.event_id};}
     if(r.path==='/sync'){
       if(syncFails)throw Error('同步暂不可用');
+      if(syncHangs)await new Promise(()=>{});
+      if(pagedGoalSnapshot){
+        // 目标快照落在第二页：第一页 50 条无关同步项 + nextCursor。
+        if((r.body?.after_seq??0)===0)return {items:Array.from({length:50},(_,n)=>({seq:n+1,userId:config.userId,kind:'changeset_note',payload:{}})),nextCursor:'50'};
+        return {items:[{seq:51,userId:config.userId,goalId:GOAL,kind:'goal_updated',payload:{snapshot:{
+          goal:{id:GOAL,domain:'custom',status:'active',currentRevision:1},
+          revision:{goalId:GOAL,revision:1,title:'睡眠目标',status:'active'},
+          tasks:[{id:'t_open',goalId:GOAL,content:'睡前放下手机',status:'done',currentRevision:2}]}}}]};
+      }
       // 服务端说这项任务已经完成：同步项带上服务端当前的目标快照。
       // 同步项的序号比客户端游标小：只有回放（从 0 重拉）才会拿到它，
       // 普通同步（从游标往后）拿不到——真实服务端就是这样：目标的同步项早就被确认过。
@@ -501,6 +510,26 @@ test('an old completion entry the server still reports as open stays retryable a
   assert.equal(calls.filter(call=>call.path==='/sync').length-syncs,1,'收敛之后不再回放');
 });
 
+test('the replay keeps paging until the goal snapshot shows up on a later page',async()=>{
+  // 目标同步项落在第二页：回放必须按 nextCursor 接着取，跳回旧游标就永远读不到它。
+  const legacy={t_open:{eventId:'evt_legacy_0001',goalId:GOAL,revision:1}};
+  const {dom}=await pageFixture({completions:legacy,pagedGoalSnapshot:true});
+  await new Promise(r=>setTimeout(r,120));
+  assert.doesNotMatch(dom.app.innerHTML,/睡前放下手机/,'第二页的目标快照同样能收敛');
+});
+
+test('a completion queued while the state is unconfirmed is not delivered until the state is known',async()=>{
+  // 首次读取挂起：用户点完成时状态还没核对过，这条完成事实不能先送达——否则服务端会记成第二次完成。
+  const legacy={t_open:{eventId:'evt_legacy_0001',goalId:GOAL,revision:1}};
+  const {dom,calls}=await pageFixture({completions:legacy,syncHangs:true});
+  await new Promise(r=>setTimeout(r,60));
+  await dom.click({action:'event-task-complete',taskId:'t_open'});
+  await sheetClick({action:'event-task-complete-confirm',taskId:'t_open'});
+  await new Promise(r=>setTimeout(r,60));
+  assert.equal(calls.filter(call=>call.path==='/events').length,0,'状态未确认前不投递完成事实');
+  assert.equal(pendingEvents(config).length,1,'完成事实留在队列里，等核对结果');
+});
+
 test('an old completion entry whose event is still queued stays pending on its original event id',async()=>{
   // 旧条目、事实还在待发队列里：仍算待处理（不重复提交），队列里保留原事件号。
   const legacy={t_open:{eventId:'evt_queued_one',goalId:GOAL,revision:1}};
@@ -509,6 +538,17 @@ test('an old completion entry whose event is still queued stays pending on its o
   assert.doesNotMatch(open,/event-task-complete/,'仍在队列里：同一任务不重复提交');
   assert.match(dom.app.innerHTML,/睡前放下手机/,'仍在队列里不等于已受理，任务留在当前列表');
   assert.equal(pendingEvents(config)[0].event_id,'evt_queued_one','队列里保留原事件号');
+});
+
+test('the queued fact the ledger already records is still re-sent as it is',async()=>{
+  // 台账记着的那条旧事实：服务端可能已经收过（按事件号幂等，同号重投不会变成第二次完成），
+  // 照常送达；用户重新提交、换了事件号的那条才需要等核对。
+  const legacy={t_open:{eventId:'evt_queued_one',goalId:GOAL,revision:1}};
+  const {dom,calls}=await pageFixture({pending:true,completions:legacy});
+  await new Promise(r=>setTimeout(r,60));
+  const events=calls.filter(call=>call.path==='/events');
+  assert.equal(events.length,1,'台账记着的那条旧事实照常送达');
+  assert.equal(events[0].body.event_id,'evt_queued_one','沿用原事件号与原信封');
 });
 
 test('a recurring task stays in the current list because only this occurrence is completed',async()=>{
