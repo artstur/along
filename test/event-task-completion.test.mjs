@@ -246,7 +246,7 @@ test('a completion already submitted is not submitted again until the server sna
 let instance=0;
 // 还要拒收几次（跨页面实例共享：重载后的实例接着用同一份额度）。
 let refuseBudget=0;
-async function pageFixture({pending=false,offline=false,refused=false,syncFails=false,completions=null,doneSnapshot=false,pagedGoalSnapshot=false,syncHangs=false,storage=null}={}) {
+async function pageFixture({pending=false,offline=false,refused=false,syncFails=false,completions=null,doneSnapshot=false,pagedGoalSnapshot=false,goalOnFirstPage=false,syncHangs=false,holdFirstSync=false,storage=null}={}) {
   const goal={id:GOAL,domain:'custom',status:'active',revision:1,title:'睡眠目标',metric:null,context:[],dataSources:[],
     tasks:[{id:'t_open',goalId:GOAL,status:'open',content:'睡前放下手机',revision:1},
       {id:'t_repeat',goalId:GOAL,status:'open',content:'每天快走',revision:1,scheduledAt:'2099-01-02T11:00:00Z',
@@ -264,6 +264,11 @@ async function pageFixture({pending=false,offline=false,refused=false,syncFails=
       occurred_at:'2026-11-27T08:00:00.000Z',timezone:'Asia/Shanghai',goal_id:GOAL,task_id:'t_open',
       payload:{event_type:'along.message',kind:'task.completed',task_id:'t_open',completed_at:'2026-11-27T08:00:00.000Z'}}}]);
   const dom=installDomStub({storage:storage??fresh});
+  // 首个 /sync 挂起，等测试放行：模拟「首读未回来时用户点了完成」。
+  let held=false;
+  let releasePromise=Promise.resolve();
+  let release=()=>{};
+  if(holdFirstSync)releasePromise=new Promise(resolve=>{release=resolve;});
   const calls=[];
   window.AlongAgentBridge={request:async r=>{calls.push(r);
     if(r.path==='/connection/status')return {along:true,ready:true,eventProtocol:1,userId:config.userId};
@@ -277,6 +282,15 @@ async function pageFixture({pending=false,offline=false,refused=false,syncFails=
     if(r.path==='/sync'){
       if(syncFails)throw Error('同步暂不可用');
       if(syncHangs)await new Promise(()=>{});
+      if(holdFirstSync&&!held){held=true;await releasePromise;}
+      if(goalOnFirstPage){
+        // 目标快照在第一页，后面还有一页：清理不能等到末页。
+        if((r.body?.after_seq??0)===0)return {items:[{seq:50,userId:config.userId,goalId:GOAL,kind:'goal_updated',payload:{snapshot:{
+          goal:{id:GOAL,domain:'custom',status:'active',currentRevision:1},
+          revision:{goalId:GOAL,revision:1,title:'睡眠目标',status:'active'},
+          tasks:[{id:'t_open',goalId:GOAL,content:'睡前放下手机',status:'done',currentRevision:2}]}}}],nextCursor:'50'};
+        return {items:[{seq:51,userId:config.userId,kind:'changeset_note',payload:{}}]};
+      }
       if(pagedGoalSnapshot){
         // 目标快照落在第二页：第一页 50 条无关同步项 + nextCursor。
         if((r.body?.after_seq??0)===0)return {items:Array.from({length:50},(_,n)=>({seq:n+1,userId:config.userId,kind:'changeset_note',payload:{}})),nextCursor:'50'};
@@ -297,7 +311,7 @@ async function pageFixture({pending=false,offline=false,refused=false,syncFails=
     throw Error(r.path);},notification:async()=>({})};
   await import('../web/app.mjs?task-completion='+ ++instance);
   await new Promise(r=>setTimeout(r,30));
-  return {dom,calls};
+  return {dom,calls,release:()=>release()};
 }
 const sheetClick=dataset=>document.querySelector('#sheet').dispatch('click',{target:{closest:()=>({dataset})}});
 // 重载页面：把本地存储原样带过去，模拟刷新／重新进入。
@@ -516,6 +530,48 @@ test('the replay keeps paging until the goal snapshot shows up on a later page',
   const {dom}=await pageFixture({completions:legacy,pagedGoalSnapshot:true});
   await new Promise(r=>setTimeout(r,120));
   assert.doesNotMatch(dom.app.innerHTML,/睡前放下手机/,'第二页的目标快照同样能收敛');
+});
+
+test('a receipt that confirms the completion landed drops the other queued facts for that task',async()=>{
+  // 台账记着的那条旧事实已经送达（回执丢了，旧信封还在队列里），用户又提交了一条新的。
+  // 旧事实的回执说服务端早就收过这一件：排队里那条新的完成事实不必再送达。
+  const legacy={t_open:{eventId:'evt_old_0001',goalId:GOAL,revision:1}};
+  const cached={version:1,recommendationsVersion:1,conversationVersion:1,dataSourcesVersion:1,executionVersion:2,
+    taskCapabilityVersion:1,resultPresentationVersion:1,userId:config.userId,cursor:3,activeGoalId:GOAL,
+    conversationId:null,goals:{[GOAL]:{id:GOAL,domain:'custom',status:'active',revision:1,title:'睡眠目标',metric:null,
+      context:[],dataSources:[],tasks:[{id:'t_open',goalId:GOAL,content:'睡前放下手机',status:'open',revision:1}]}},messages:{},drafts:{},
+    completions:legacy};
+  installDomStub({storage:{'along.agent.v1':JSON.stringify(config),['along.event-workspace.v1:'+config.userId]:JSON.stringify(cached)}});
+  const envelope=(eventId)=>({event_type:'along.message',kind:'task.completed',event_id:eventId,occurred_at:'2026-11-27T08:00:00.000Z',
+    timezone:'Asia/Shanghai',goal_id:GOAL,task_id:'t_open',
+    payload:{event_type:'along.message',kind:'task.completed',task_id:'t_open',completed_at:'2026-11-27T08:00:00.000Z'}});
+  await queueEvent(config,envelope('evt_old_0001'),{send:false});
+  await queueEvent(config,envelope('evt_new_0001'),{send:false});
+  assert.equal(pendingEvents(config).length,2);
+  window.AlongAgentBridge={request:async input=>{
+    if(input.path==='/events')return {status:'duplicate',event_id:input.body.event_id};
+    if(input.path==='/sync')return {items:[]};
+    return {acked:0};}};
+  const workspace=createEventWorkspace({config});
+  await workspace.sync();
+  // 旧事实的回执确认服务端已受理：排队里那条新的完成事实当场清掉，不会变成第二次完成。
+  assert.equal(pendingEvents(config).length,0);
+});
+
+test('the queued completion is cleared when the goal snapshot shows the task is done on an earlier page',async()=>{
+  // 首读挂起时用户点完成；放行后第一页就是目标的 done 快照、后面还有一页：
+  // 读完这一页就知道服务端已经完成，排队里那条完成事实当场清掉，不能等到末页才清。
+  const legacy={t_open:{eventId:'evt_legacy_0001',goalId:GOAL,revision:1}};
+  const {dom,calls,release}=await pageFixture({completions:legacy,goalOnFirstPage:true,holdFirstSync:true});
+  await dom.click({action:'event-task-complete',taskId:'t_open'});
+  await sheetClick({action:'event-task-complete-confirm',taskId:'t_open'});
+  await new Promise(r=>setTimeout(r,60));
+  assert.equal(calls.filter(call=>call.path==='/events').length,0,'状态未确认前不投递完成事实');
+  assert.equal(pendingEvents(config).length,1,'完成事实先留在队列里等核对');
+  release();
+  await new Promise(r=>setTimeout(r,120));
+  assert.equal(pendingEvents(config).length,0,'服务端说完成，排队里那条完成事实当场清掉');
+  assert.doesNotMatch(dom.app.innerHTML,/睡前放下手机/);
 });
 
 test('a completion queued while the state is unconfirmed is not delivered until the state is known',async()=>{
