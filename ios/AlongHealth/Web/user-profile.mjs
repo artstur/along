@@ -145,6 +145,9 @@ export function adoptProfile(profile,scope,{binding=''}={}) {
     delete nicknames[candidate.scope];
     const legacyOwners={...(profile.legacyOwners||{})};
     if (candidate.needsSameBinding) delete legacyOwners[host];
+    // 认领到旧协议作用域（这台 Host 还没认出 UID）时，记下这次绑定：
+    // 等它认出 UID 时，同一个绑定才能把昵称领过去（首次配对的昵称就是这么跟过去的）。
+    if (isLegacyScope(scope)&&binding) legacyOwners[host]=binding;
     return {version:PROFILE_VERSION,nicknames,legacyOwners};
   }
   return profile;

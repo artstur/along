@@ -408,3 +408,13 @@ test('a late status probe does not override a newer successful retry',async()=>{
   await settle();
   assert.match(serverSection(dom),/已连接/,'晚到的旧响应不能覆盖较新的结果');
 });
+
+test('a nickname saved before the first pairing belongs to the identity once the UID is confirmed',async()=>{
+  const dom=await app({bridge:async input=>input.path==='/pair'?{token:'b'.repeat(64)}:READY});
+  await dom.submitForm('nickname-form',{nickname:'FirstPair'});
+  assert.equal(JSON.parse(dom.storage.get(PROFILE_KEY)).nicknames['|'],'FirstPair','还没配对时昵称先记在本机桶');
+  await dom.submitForm('pair-form',{baseURL:HOST_A,code:'stub'});
+  assert.match(dom.app.innerHTML,/FirstPair/,'配对确认 UID 后昵称要跟着走');
+  const stored=JSON.parse(dom.storage.get(PROFILE_KEY));
+  assert.equal(stored.nicknames['https://a.example.invalid:443|u_12345678'],'FirstPair','昵称归到该身份下');
+});
