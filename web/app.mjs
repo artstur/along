@@ -15,7 +15,7 @@ import {GOAL_SUPER_AGENT_RUNS_KEY, SUPER_AGENT_RUNS_KEY, createFailedGoalSuperAg
 import {AGENT_NOTIFICATION_LEDGER_KEY, goalRunNotification, taskRunNotification, healthProposalNotification,
   notificationWasDelivered, recordNotificationDelivered} from './agent-notifications.mjs?v=110';
 import {PLANNING_STATE_KEY,cleanDailyDelegation,validateDailyActions,agentHealthSnapshot,cleanPlanningContext,healthContextChanges,createPlanningContext,validateReassessment,buildBackgroundReviewRequest} from './contextual-planning.mjs?v=110';
-import {NICKNAME_MAX,cleanNickname,readProfile,writeProfile,scopeKey,DEVICE_SCOPE,profileNickname as profileNicknameFor,adoptProfile as adoptProfileFor,setNickname} from './user-profile.mjs?v=110';
+import {NICKNAME_MAX,cleanNickname,readProfile,writeProfile,scopeKey,DEVICE_SCOPE,isLegacyScope,hostOfScope,bindingFingerprint,profileNickname as profileNicknameFor,adoptProfile as adoptProfileFor,setNickname} from './user-profile.mjs?v=110';
 const TICKET_KEY = 'along.goal-ticket.v1';
 const REMINDER_SYNC_KEY='along.health-reminder-sync.v1';
 const HEALTH_SHARING_KEY='along.health-sharing.v1';
@@ -676,15 +676,21 @@ async function syncHealthReminders(goalKey) {
     if (screen==='home') render();
   }
 }
+// 状态探测的序号：同一绑定下的多次检查按发起顺序裁决——晚到的旧响应
+// （例如冷启动探测晚于手动重试返回）不能覆盖较新的结果。
+let agentProbeSeq=0;
 async function refreshAgentConnection({healthOnly=false}={}) {
   const config=agentConfig,runtime=agentRuntime;
   if (!config.token) {verifiedHealthHost=false;agentConnection={status:'unconfigured',error:'',httpStatus:null};return;}
   if (healthOnly&&checkingHealthHost===config) return;
   if (healthOnly) checkingHealthHost=config;
   if (!healthOnly) {agentConnection={status:'checking',error:'',httpStatus:null};if (screen==='agent') renderAgentUpdate();}
+  const seq=++agentProbeSeq;
   try {
     const status=await agentCall(config,'/connection/status',{runtime});
     if (agentConfig!==config||agentRuntime!==runtime) return;
+    // 已经有更新的探测在飞：这次是过期结果，丢掉。
+    if (seq!==agentProbeSeq) return;
     if (status?.eventProtocol===1&&status.along&&status.ready) {
       connectEventWorkspace(status.userId);
       agentConnection={status:'ready',error:'',httpStatus:null};
@@ -721,6 +727,8 @@ async function refreshAgentConnection({healthOnly=false}={}) {
     }
   } catch(error) {
     if (agentConfig!==config||agentRuntime!==runtime) return;
+    // 同上：过期的失败结果不覆盖较新的成功结果。
+    if (seq!==agentProbeSeq) return;
     verifiedHealthHost=false;
     // httpStatus 是原生桥透传的 HTTP 状态码：web 层要靠它把「凭据失效」和
     // 「服务暂不可用」分开说，两者给用户的下一步完全不同。
@@ -795,8 +803,12 @@ function currentProfileScope() {
 }
 function storedProfile() { return readProfile(localStorage.getItem(PROFILE_KEY)); }
 function profileNickname() { return profileNicknameFor(storedProfile(),currentProfileScope()); }
-function saveProfile(nickname) {
-  const record=setNickname(storedProfile(),currentProfileScope(),nickname);
+// 保存昵称到指定作用域（默认当前作用域）。
+// 旧协议作用域（Host 有、UID 空）要记下这次绑定：只有同一个绑定升级协议时才认领，
+// 换配对码重新配对（凭据变了）时新身份独立显示。
+function saveProfile(nickname,scope=currentProfileScope()) {
+  const owner=isLegacyScope(scope)?bindingFingerprint(agentConfig):'';
+  const record=setNickname(storedProfile(),scope,nickname,{legacyOwner:owner});
   // 一条昵称都没留下时把存储删掉，别留一个空壳记录。
   if (record&&Object.keys(record.nicknames||{}).length) localStorage.setItem(PROFILE_KEY,writeProfile(record));
   else localStorage.removeItem(PROFILE_KEY);
@@ -819,7 +831,7 @@ function adoptCurrentScope() {
 }
 function adoptScope(scope) {
   const before=storedProfile();
-  const record=adoptProfileFor(before,scope);
+  const record=adoptProfileFor(before,scope,{binding:bindingFingerprint(agentConfig)});
   // 没有可认领的昵称时什么都不写：不能凭空造出一条空的本机记录。
   if (record&&writeProfile(record)!==writeProfile(before)) localStorage.setItem(PROFILE_KEY,writeProfile(record));
 }
@@ -1545,7 +1557,7 @@ function settingsPage() {
     <h1>设置</h1>
     <section class="settings-section" aria-label="昵称">
       <div class="section-heading"><h2>昵称</h2><span>Along 怎么称呼你</span></div>
-      <form id="nickname-form" class="settings-form">
+      <form id="nickname-form" class="settings-form" data-scope="${esc(scope)}">
         <input name="nickname" type="text" maxlength="${NICKNAME_MAX}" aria-label="昵称" placeholder="你的昵称" value="${esc(draft)}">
         <button class="button" ${connectionBusy?'disabled':''}>保存</button>
       </form>
@@ -2318,10 +2330,14 @@ app.addEventListener('submit', async event => {
   if (!['pair-form','agent-form','health-review-answer','host-address-form','nickname-form'].includes(event.target.id)) return;
   event.preventDefault();
   if (event.target.id==='nickname-form') {
+    // 换绑进行中时，页面上的表单还属于上一台 Host：这时保存昵称会把旧身份的草稿
+    // 写进新身份，直接拦住。
+    if (connectionBusy) {notice('Along 连接正在切换，请等它完成后再保存昵称');return;}
     const value=String(new FormData(event.target).get('nickname')||'');
     const clean=cleanNickname(value);
     // 昵称只是显示名：写它不动 UID，也不动配对关系与凭据。
-    saveProfile(clean);
+    // 作用域取表单自己的：表单是哪一对身份渲染的，就写回哪一对。
+    saveProfile(clean,event.target.dataset?.scope||currentProfileScope());
     nicknameDraft=null;
     nicknameDraftScope=null;
     notice(clean?'昵称已保存':'已清除昵称');

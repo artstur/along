@@ -343,3 +343,68 @@ test('an archived goal keeps no OKX connect action',async()=>{
   assert.doesNotMatch(sourceSection(dom),/OKX/,'只有已归档目标保留推荐时，不该给出连不上的 OKX 入口');
   assert.ok(!calls.some(([action,id])=>action==='connect'&&id==='g_old'),'不能把已归档目标传给原生桥');
 });
+
+// —— 第三轮复验补的三个场景（ats88-bd0392d-review.md）——
+
+test('a save while a rebind is in flight does not write the old draft into the new identity',async()=>{
+  let finishStatus;
+  const bridge=async input=>{
+    if (input.path==='/connection/status'&&input.baseURL===HOST_B) return new Promise(resolve=>{finishStatus=resolve;});
+    return input.path==='/pair'?{token:'b'.repeat(64)}:READY;
+  };
+  const dom=await app({connection:{baseURL:HOST_A,token:'a'.repeat(64),fingerprint:'f'.repeat(64)},bridge});
+  await dom.submitForm('nickname-form',{nickname:'SavedBeforeSwitch'});
+  await dom.app.dispatch('input',{target:{matches:()=>true,value:'DraftDuringSwitch'}});
+  const pending=dom.submitForm('pair-form',{baseURL:HOST_B,code:'stub'});
+  await settle();
+  assert.equal(typeof finishStatus,'function','B 的身份探测要处于等待中');
+  await dom.submitForm('nickname-form',{nickname:'DraftDuringSwitch'});
+  finishStatus(READY);
+  await pending;
+  const stored=JSON.parse(dom.storage.get(PROFILE_KEY)||'{"nicknames":{}}');
+  assert.equal(stored.nicknames['https://b.example.invalid:443|u_12345678'],undefined,'换绑进行中不能把草稿写进新身份');
+  assert.equal(stored.nicknames['https://a.example.invalid:443|u_12345678'],'SavedBeforeSwitch','原来那对身份不受影响');
+});
+
+test('an explicit same-address re-pair with new credentials leaves the new UID independent',async()=>{
+  let advertisesUid=false;
+  const transitions=async input=>input.path==='/pair'?{token:'e'.repeat(64)}
+    :input.path==='/connection/status'?(advertisesUid?READY:{along:true,ready:true,runtime:'dsh-superagent'}):{items:[]};
+  const dom=await app({connection:{baseURL:HOST_A,token:'a'.repeat(64),fingerprint:'f'.repeat(64)},bridge:transitions});
+  await dom.submitForm('nickname-form',{nickname:'PreviousBinding'});
+  advertisesUid=true;
+  await dom.submitForm('pair-form',{baseURL:HOST_A,code:'stub'});
+  const stored=JSON.parse(dom.storage.get(PROFILE_KEY));
+  assert.equal(stored.nicknames['https://a.example.invalid:443|u_12345678'],undefined,'换配对码取得的新身份要独立显示');
+  assert.equal(stored.nicknames['https://a.example.invalid:443|'],'PreviousBinding','旧昵称仍留在旧绑定名下');
+});
+
+test('the same binding that starts returning a UID keeps the nickname',async()=>{
+  let advertisesUid=false;
+  const transitions=async input=>input.path==='/connection/status'
+    ?(advertisesUid?READY:{along:true,ready:true,runtime:'dsh-superagent'}):{items:[]};
+  const dom=await app({connection:{baseURL:HOST_A,token:'a'.repeat(64),fingerprint:'f'.repeat(64)},bridge:transitions});
+  await dom.submitForm('nickname-form',{nickname:'SameBinding'});
+  advertisesUid=true;
+  await dom.click({action:'settings-retry-connection'});
+  await settle();
+  assert.match(dom.app.innerHTML,/SameBinding/,'同一绑定升级协议时昵称要续用');
+});
+
+test('a late status probe does not override a newer successful retry',async()=>{
+  const probes=[];
+  const dom=await app({connection:{baseURL:HOST_A,token:'a'.repeat(64),fingerprint:'f'.repeat(64)},
+    bridge:async input=>input.path==='/connection/status'
+      ?new Promise((resolve,reject)=>{probes.push({resolve,reject});}):{items:[]}});
+  await settle();
+  assert.equal(probes.length,1);
+  await dom.click({action:'settings-retry-connection'});
+  await settle();
+  assert.equal(probes.length,2);
+  probes[1].resolve(READY);
+  await settle();
+  assert.match(serverSection(dom),/已连接/);
+  probes[0].reject(Object.assign(Error('delayed old response'),{status:503}));
+  await settle();
+  assert.match(serverSection(dom),/已连接/,'晚到的旧响应不能覆盖较新的结果');
+});

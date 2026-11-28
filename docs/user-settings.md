@@ -25,7 +25,7 @@ Along iPhone App 缺一个统一入口：用户要设置昵称、查看并管理
 | --- | --- | --- |
 | 尚未连上任何 Host | 记在本机桶（`\|`） | 本机可见 |
 | 已连上 Host 且认得出 UID | 属于该 Host + 该 UID（`${host}\|${uid}`） | 只有这一对身份可见 |
-| 已连上 Host 但 Host 不认 UID（旧协议） | 属于该 Host（`${host}\|`） | 只有这台 Host 可见 |
+| 已连上 Host 但 Host 不认 UID（旧协议） | 属于该 Host（`${host}\|`），并记下属于哪一次绑定 | 只有这台 Host 可见 |
 | 配对确认身份后 | 从本机桶认领到该身份 | 昵称跟着走，UID 与配对关系不动 |
 
 因此：
@@ -34,7 +34,11 @@ Along iPhone App 缺一个统一入口：用户要设置昵称、查看并管理
 - 换一台 Host（哪怕回传同一个 UID）→ 看不到另一台 Host 的昵称。
 - 两台都不回传 UID 的旧协议 Host → 各自按自己那台 Host 分桶，不共用一条昵称。
 - 换回原来那台 Host（UID 相同）→ 拿回自己上次保存的昵称。
-- 正在输入、还没保存的草稿也记着它属于哪一对身份：换绑之后不跟着飘到另一台 Host，也不会被误存进新身份。
+- 旧协议 Host 的昵称只归它那一次绑定：同一个绑定升级协议（认出了 UID）时昵称续用；
+  换配对码重新配对（凭据变了）就不认领，新身份先独立显示。
+- 正在输入、还没保存的草稿也记着它属于哪一对身份：换绑之后不跟着飘到另一台 Host，
+  也不会被误存进新身份。表单渲染时把自己的作用域写进 `data-scope`，
+  保存只写回这一对身份；换绑进行中（连接还在切换）时直接拦住保存。
 
 旧版（v1）记录只有一条昵称、只按 UID 区分、没有 Host 维度，升级后先放进「只有 UID」的旧桶，
 由 UID 对得上的身份认领；UID 对不上就留在旧桶里，不给别人的身份。
@@ -98,6 +102,8 @@ Along iPhone App 缺一个统一入口：用户要设置昵称、查看并管理
 配对走既有 `/pair` 与原生 Keychain 凭据存储；「重试连接」走既有 `/connection/status` 检查。
 配对成功但检查没通过时，提示语要说实话：报「已配对，但服务暂不可用，可以在设置里重试」，不报「已连接 Along」。
 冷启动时凭据已失效（401）也要当场看见：连接检查一有结果就重画设置页，不停在「检查中」等用户手动点重试。
+同一绑定下的多次状态检查按发起顺序裁决：晚到的旧响应（例如冷启动探测晚于手动重试返回）
+不覆盖较新的结果，页面保留最近一次检查的结论。
 
 HTTP 状态码由原生桥透传到网页层（`AgentBridgeError.httpStatus` → 错误对象的 `status`），网页据此分类；
 拿不到状态码时按「连不上 Host」处理——宁可说保守的话，不把服务说成已连接。
@@ -111,7 +117,7 @@ HTTP 状态码由原生桥透传到网页层（`AgentBridgeError.httpStatus` →
 - 数据源能授权、能连接；拒绝授权、撤销授权或连接失败时页面显示实际状态并可重试。
 - 未配对用户能在设置页完成配对与连接；已配对用户升级后能继续连接；配对失败或连接中断有明确状态并可重试。
 
-自动化覆盖见 `test/user-profile.test.mjs`（昵称规则）、`test/app-settings-page.test.mjs`（页面行为，含重启后仍显示）与 `test/ats88-review-regressions.test.mjs`（独立复核缺陷的回归：第一轮四项 + 第二轮五个场景，含隔离真实 Host 的配对与重试）。
+自动化覆盖见 `test/user-profile.test.mjs`（昵称规则）、`test/app-settings-page.test.mjs`（页面行为，含重启后仍显示）与 `test/ats88-review-regressions.test.mjs`（独立复核缺陷的回归：第一轮四项 + 第二轮五个场景 + 第三轮三个场景，含隔离真实 Host 的配对与重试）。
 
 ## 6. 待确认项
 
@@ -124,13 +130,13 @@ HTTP 状态码由原生桥透传到网页层（`AgentBridgeError.httpStatus` →
 
 | 位置 | 改动 |
 | --- | --- |
-| `web/user-profile.mjs` | 新增：昵称的清洗、存取格式、归属与认领规则（纯逻辑）；复核后改成按「Host + UID」分桶的 v2 格式 |
+| `web/user-profile.mjs` | 新增：昵称的清洗、存取格式、归属与认领规则（纯逻辑）；复核后改成按「Host + UID」分桶的 v2 格式，并记下旧协议 Host 昵称所属的绑定 |
 | `web/app.mjs` | 顶部栏个人入口与设置页；昵称存取；数据源与服务端状态汇总；配对/连接操作接线；复核后修正健康状态口径、服务端状态分类、OKX 回读 |
 | `web/style.css` | 顶部栏个人入口与设置页样式 |
 | `ios/AlongHealth/Sources/AlongShellView.swift` | 原生桥把 HTTP 状态码透传给网页层（`AgentBridgeError.httpStatus`） |
 | `test/dom-stub.mjs` | 新增 `submitForm()`：按 id 提交指定表单；补 `CustomEvent` 与 `window.dispatchEvent`，让原生健康读数能真的回到页面 |
 | `test/user-profile.test.mjs` | 新增：昵称规则（含换 Host、换 UID 的隔离与认领） |
 | `test/app-settings-page.test.mjs` | 新增：设置页行为（含复核提出的四项缺陷的回归） |
-| `test/ats88-review-regressions.test.mjs` | 新增：复核复现脚本的「修复后期望」版回归（健康空读数、昵称隔离与草稿、旧协议 Host、冷启动 401、OKX 回读与撤回态、归档目标、真实 Host 配对后未就绪） |
+| `test/ats88-review-regressions.test.mjs` | 新增：复核复现脚本的「修复后期望」版回归（健康空读数、昵称隔离与草稿、旧协议 Host 与绑定归属、冷启动 401、探测乱序、OKX 回读与撤回态、归档目标、真实 Host 配对后未就绪） |
 | `test/ios-health-transport-tls.test.mjs` | 原生桩补上 `httpStatus` 分支，跟真实枚举保持一致 |
 | `tools/build.mjs`、`web/sw.js` | 登记新模块（构建与离线预缓存清单） |
