@@ -444,7 +444,7 @@ enum BackgroundReviewAdmission {
     private var nativeSelection: Set<HealthMetric> {
         Set((defaults.stringArray(forKey: "along.health.selectedTypes") ?? []).compactMap(HealthMetric.init(rawValue:)))
     }
-    private func pairedMac() throws -> ([String: String], String) {
+    private func pairedService() throws -> ([String: String], String) {
         guard let connection = AlongConnectionStore.load(),
               let seed = AlongConnectionStore.scopeSeed(connection) else { throw AgentBridgeError.invalidConfiguration }
         let epoch = defaults.string(forKey: "along.health.backgroundEpoch.v1") ?? ""
@@ -490,7 +490,7 @@ enum BackgroundReviewAdmission {
         }
         let now = Date(), retry = Date(timeIntervalSinceNow: 15 * 60)
         // Protected data and the paired keychain can be unavailable on an overnight wake.
-        guard UIApplication.shared.isProtectedDataAvailable, let state = try? read(), let pair = try? pairedMac().1 else {
+        guard UIApplication.shared.isProtectedDataAvailable, let state = try? read(), let pair = try? pairedService().1 else {
             scheduleCalendarRefresh(retry); return
         }
         guard let template = state["template"] as? [String: Any],
@@ -527,7 +527,7 @@ enum BackgroundReviewAdmission {
 
     func dailyGrantChanged() {
         if defaults.bool(forKey: armedKey), let key = authorizedGoal, let state = try? read(),
-           let t = state["template"] as? [String: Any], let pair = try? pairedMac().1,
+           let t = state["template"] as? [String: Any], let pair = try? pairedService().1,
            BackgroundReviewAdmission.matches(state, template: t, pair: pair), dailyScope(t, key: key) {
             defaults.set(key, forKey: dailyWakeGoal)
             nextCalendarRefresh()
@@ -543,7 +543,7 @@ enum BackgroundReviewAdmission {
               defaults.string(forKey: dailyWakeGoal) == key, defaults.bool(forKey: armedKey) else { completion(false); return }
         // Resubmit first so suspension, lock, network failure or an unfinished DSH ticket can recover.
         scheduleCalendarRefresh(Date(timeIntervalSinceNow: 15 * 60))
-        guard UIApplication.shared.isProtectedDataAvailable, let state = try? read(), let pair = try? pairedMac().1 else { completion(false); return }
+        guard UIApplication.shared.isProtectedDataAvailable, let state = try? read(), let pair = try? pairedService().1 else { completion(false); return }
         guard let template = state["template"] as? [String: Any], BackgroundReviewAdmission.matches(state, template: template, pair: pair),
               dailyScope(template, key: key) else { scheduleCalendarRefresh(nil); completion(false); return }
         observed { [weak self] in
@@ -622,7 +622,7 @@ enum BackgroundReviewAdmission {
     }
     private func deliver(_ generation: Int) async throws {
         var state = try read()
-        let (connection, pair) = try pairedMac()
+        let (connection, pair) = try pairedService()
         guard var template = state["template"] as? [String: Any], let key = authorizedGoal,
               BackgroundReviewAdmission.valid(template, goalKey: key), BackgroundReviewAdmission.matches(state, template: template, pair: pair),
               template["paused"] as? Bool != true, mayDeliver(generation, goalKey: key) else { return }
@@ -632,7 +632,7 @@ enum BackgroundReviewAdmission {
            !dailyScope(template, key: key) { return }
         let comparison = defaults.bool(forKey: "along.health.comparisonHistory.v1") && template["comparisonHistoryAllowed"] as? Bool == true
         let summary = try await reader.read(selected, requestPermission: false, includeContext: true, includeComparisonHistory: comparison)
-        guard summary.hasReadableValue, mayDeliver(generation, goalKey: key), try pairedMac().1 == pair else { return }
+        guard summary.hasReadableValue, mayDeliver(generation, goalKey: key), try pairedService().1 == pair else { return }
         var snapshot = summary.browserSnapshot(contextReviewAllowed: true, comparisonHistoryAllowed: comparison)
         snapshot["backgroundReviewAllowed"] = true; snapshot["backgroundReviewGoalKey"] = key
         let now = Date(), zone = TimeZone.current
@@ -647,7 +647,7 @@ enum BackgroundReviewAdmission {
             var completed = state["completed"] as? [String: Any]
             if completed?["requestId"] as? String != oldID {
                 let run = try await callHost(connection, path: "/super-agent/goals/status", body: ["runtime": "dsh-superagent", "requestId": oldID, "contextReview": true])
-                guard mayDeliver(generation, goalKey: key), try pairedMac().1 == pair else { return }
+                guard mayDeliver(generation, goalKey: key), try pairedService().1 == pair else { return }
                 if oldDay < localDate, dailyScope(template, key: key),
                    let grant = currentPlan["dailyDelegation"] as? [String: Any],
                    let blocked = BackgroundReviewAdmission.priorBlocked(run, id: oldID, day: oldDay, grant: grant) {
@@ -685,10 +685,10 @@ enum BackgroundReviewAdmission {
             state["pending"] = pending; state.removeValue(forKey: "completed"); try write(state)
         }
         guard let id = pending?["requestId"] as? String, let request = pending?["request"] as? [String: Any],
-              mayDeliver(generation, goalKey: key), try pairedMac().1 == pair else { return }
+              mayDeliver(generation, goalKey: key), try pairedService().1 == pair else { return }
         let response = try await callHost(connection, path: "/super-agent/goals", body: request)
         guard let run = response["run"] as? [String: Any], run["actual"] as? Bool == true, run["requestId"] as? String == id,
-              run["runtime"] as? String == "dsh-superagent", mayDeliver(generation, goalKey: key), try pairedMac().1 == pair else { return }
+              run["runtime"] as? String == "dsh-superagent", mayDeliver(generation, goalKey: key), try pairedService().1 == pair else { return }
         pending?["state"] = "accepted"; state["pending"] = pending; try write(state)
         if let receipt = try await completionReceipt(run, id: id, day: localDate, template: template, key: key,
             generation: generation, pair: pair, types: selected) {
@@ -699,7 +699,7 @@ enum BackgroundReviewAdmission {
 
     private func completionReceipt(_ run: [String: Any], id: String, day: String, template: [String: Any],
                                    key: String, generation: Int, pair: String, types: Set<HealthMetric>) async throws -> [String: Any]? {
-        guard mayDeliver(generation, goalKey: key), try pairedMac().1 == pair,
+        guard mayDeliver(generation, goalKey: key), try pairedService().1 == pair,
               run["actual"] as? Bool == true, run["runtime"] as? String == "dsh-superagent", run["requestId"] as? String == id,
               run["status"] as? String == "done", let ticket = run["ticket"] as? [String: Any], let ticketID = ticket["id"] as? String, !ticketID.isEmpty,
               let result = run["result"] as? [String: Any], let assessment = result["reassessment"] as? [String: Any],
@@ -709,7 +709,7 @@ enum BackgroundReviewAdmission {
                   let runPlan = snapshot["planning"] as? [String: Any], let issued = runPlan["dailyDelegation"] as? [String: Any],
                   NSDictionary(dictionary: grant).isEqual(to: issued), runPlan["revisionId"] as? String == id,
                   runPlan["localDate"] as? String == day, runPlan["timezone"] as? String == TimeZone.current.identifier,
-                  await deliverDailyResult(run, key, types.map(\.rawValue)), mayDeliver(generation, goalKey: key), try pairedMac().1 == pair
+                  await deliverDailyResult(run, key, types.map(\.rawValue)), mayDeliver(generation, goalKey: key), try pairedService().1 == pair
             else { return nil }
         }
         return ["requestId": id, "nextReviewAt": assessment["nextReviewAt"] as? String as Any? ?? NSNull()]
@@ -733,7 +733,7 @@ enum BackgroundReviewAdmission {
             if UIApplication.shared.applicationState == .background,
                let goals = value["goals"] as? [[String: Any]], goals.count == 1, let key = authorizedGoal,
                BackgroundReviewAdmission.valid(goals[0], goalKey: key),
-               let pair = try? pairedMac().1, let old = try? read(),
+               let pair = try? pairedService().1, let old = try? read(),
                BackgroundReviewAdmission.matches(old, template: goals[0], pair: pair) {
                 let previous = old["template"] as? [String: Any]
                 if (previous?["paused"] as? Bool == true) != (goals[0]["paused"] as? Bool == true) { disarm() }
@@ -754,7 +754,7 @@ enum BackgroundReviewAdmission {
                   let clean = try sharedFunction("cleanPlanningContext", [planning]).toDictionary() as? [String: Any]
             else { throw AgentBridgeError.invalidConfiguration }
             template["planning"] = clean
-            let (_, pair) = try pairedMac(), old = try read()
+            let (_, pair) = try pairedService(), old = try read()
             var state = BackgroundReviewAdmission.matches(old, template: template, pair: pair) ? old : [:]
             state["pair"] = pair; state["template"] = template
             try write(state)
@@ -767,7 +767,7 @@ enum BackgroundReviewAdmission {
         }
         guard action == "pending" || action == "ack" else { throw AgentBridgeError.invalidConfiguration }
         guard let key = authorizedGoal, UIApplication.shared.applicationState != .background else { return ["enabled": enabled, "runs": []] }
-        let (_, pair) = try pairedMac()
+        let (_, pair) = try pairedService()
         var state = try read()
         guard let template = state["template"] as? [String: Any], BackgroundReviewAdmission.valid(template, goalKey: key),
               BackgroundReviewAdmission.matches(state, template: template, pair: pair), let pending = state["pending"] as? [String: Any]
@@ -870,279 +870,35 @@ enum BackgroundReviewAdmission {
         guard let c = AlongConnectionStore.load() else { throw AgentBridgeError.invalidConfiguration }
         return (c, try connectionHash(c))
     }
-    // Only a valid local pinned credential can identify the same Mac at another
-    // transport. Public PKI authenticates an origin, not this paired Mac.
-    private func localCredential(_ c: [String: String]) -> String? {
-        guard (c["trustPolicy"] ?? AlongConnectionStore.legacyPinPolicy) == AlongConnectionStore.legacyPinPolicy,
-              let base = c["baseURL"], let host = URLComponents(string: base)?.host,
-              AlongConnectionStore.trustPolicy(forHost: host) == AlongConnectionStore.legacyPinPolicy,
-              let pin = c["fingerprint"], pin.count == 64, pin.allSatisfy(\.isHexDigit),
-              let token = c["token"], token.count == 64, token.allSatisfy(\.isHexDigit) else { return nil }
-        return SHA256.hash(data: Data([AlongConnectionStore.legacyPinPolicy, pin, token].joined(separator: "\n").utf8))
-            .map { String(format: "%02x", $0) }.joined()
-    }
     private func owns(_ state: [String: Any], connection c: [String: String], hash: String) -> Bool {
         guard let identity = state["binding"] as? String, defaults.string(forKey: enabledKey) == identity else { return false }
-        if identity == hash { return true }
-        if workspaceHandoffRecord(state, connection: c) != nil { return true }
-        guard let proof = state["verifiedLocalTransports"] as? [String: Any],
-              proof["identity"] as? String == identity,
-              let credential = localCredential(c), proof["credential"] as? String == credential,
-              let transports = proof["hashes"] as? [String], transports.contains(hash) else { return false }
-        return true
+        return identity == hash || installedCloudNotificationScope(state, connection: c) != nil
     }
-    // Called by the native connection-save bridge before replacing its Keychain
-    // value. Never infer an old transport from an opaque binding hash.
-    func saveConnection(_ value: [String: Any]) async throws -> [String: Any] {
-        guard AlongConnectionStore.permitsPairedTransport(value), let next = AlongConnectionStore.clean(value) else { throw AgentBridgeError.invalidConfiguration }
-        if let current = AlongConnectionStore.load(), current["baseURL"] != next["baseURL"],
-           let credential = localCredential(current), credential == localCredential(next) {
-            let oldHash = try connectionHash(current), nextHash = try connectionHash(next)
-            let state = try load(createDirectory: false)
-            if owns(state, connection: current, hash: oldHash), let user = state["user"] as? String, !user.isEmpty {
-                let revision = AlongConnectionStore.saveRevision
-                let before = try JSONSerialization.data(withJSONObject: state, options: [.sortedKeys])
-                let status = try await call(next, path: "/connection/status", body: ["runtime": "dsh-superagent"])
-                guard status["eventProtocol"] as? Int == 1, status["ready"] as? Bool == true,
-                      status["userId"] as? String == user, AlongConnectionStore.load() == current,
-                      AlongConnectionStore.saveRevision == revision,
-                      defaults.string(forKey: enabledKey) == state["binding"] as? String,
-                      try JSONSerialization.data(withJSONObject: load(createDirectory: false), options: [.sortedKeys]) == before
-                else { throw AgentBridgeError.invalidConfiguration }
-                var migrated = state
-                let previousProof = state["verifiedLocalTransports"] as? [String: Any]
-                let persistedScope = defaults.string(forKey: "along.event.notification.scope")
-                let oldSeed = AlongConnectionStore.scopeSeed(current)!
-                let notificationScope = (WorkspaceHandoffProof.isHash(persistedScope) ? persistedScope : nil) ?? previousProof?["notificationScope"] as? String ?? SHA256.hash(data: Data([oldSeed, user].joined(separator: "\n").utf8)).map { String(format: "%02x", $0) }.joined()
-                migrated["verifiedLocalTransports"] = ["identity": state["binding"]!, "credential": credential,
-                    "hashes": [oldHash, nextHash], "notificationScope": notificationScope,
-                    "webMigration": ["fromBaseURL": current["baseURL"]!, "fromBindingScopeId": current["bindingScopeId"] ?? "",
-                        "toBaseURL": next["baseURL"]!, "toBindingScopeId": next["bindingScopeId"] ?? "", "userId": user]]
-                // Atomic queue commit precedes Keychain replacement. Both old and
-                // verified new transports work if power or the Keychain write fails.
-                try save(migrated)
-            }
-        }
-        guard let saved = AlongConnectionStore.save(value) else { throw AgentBridgeError.invalidConfiguration }
-        return connectionForWeb(saved)
-    }
-    // Tokenless evidence is returned only to the built-in connection bridge. Its
-    // source is the atomic, authenticated migration record, never a JS claim.
-    func connectionForWeb(_ c: [String: String]) -> [String: Any] {
-        var result: [String: Any] = c
-        if let state = try? load(createDirectory: false), let record = workspaceHandoffRecord(state, connection: c),
-           let migration = record["webMigration"] as? [String: Any] {
-            result["workspaceHandoff"] = migration
-        }
-        guard let hash = try? connectionHash(c), let state = try? load(createDirectory: false),
-              owns(state, connection: c, hash: hash),
-              let proof = state["verifiedLocalTransports"] as? [String: Any],
-              let migration = proof["webMigration"] as? [String: String],
-              migration["toBaseURL"] == c["baseURL"], migration["toBindingScopeId"] == c["bindingScopeId"],
-              migration["userId"] == state["user"] as? String else { return result }
-        result["transportMigration"] = migration
-        return result
-    }
+
     func notificationScope(_ c: [String: String], user: String) -> String? {
-        if let state = try? load(createDirectory: false), state["user"] as? String == user,
-           let record = workspaceHandoffRecord(state, connection: c), let scope = record["notificationScope"] as? String { return scope }
-        guard let hash = try? connectionHash(c), let state = try? load(createDirectory: false),
-              owns(state, connection: c, hash: hash), state["user"] as? String == user,
-              let proof = state["verifiedLocalTransports"] as? [String: Any],
-              let scope = proof["notificationScope"] as? String, scope.count == 64 else { return nil }
-        return scope
+        guard let state = try? load(createDirectory: false), state["user"] as? String == user else { return nil }
+        return installedCloudNotificationScope(state, connection: c)
     }
-    private func workspaceHandoffRecord(_ state: [String: Any], connection c: [String: String]) -> [String: Any]? {
+
+    // Existing installs may have an outbox and notification IDs issued before
+    // the current cloud binding. The old journal is read only after Keychain has
+    // switched to its exact target. No prior credential or migration file is loaded.
+    private func installedCloudNotificationScope(_ state: [String: Any], connection c: [String: String]) -> String? {
         guard let record = state["workspaceHandoff"] as? [String: Any],
               ["prepared", "committed"].contains(record["phase"] as? String ?? ""),
-              record["binding"] as? String == state["binding"] as? String,
-              record["userId"] as? String == state["user"] as? String,
-              defaults.string(forKey: enabledKey) == state["binding"] as? String,
-              c["trustPolicy"] == AlongConnectionStore.systemTrustPolicy,
-              let token = c["token"], WorkspaceHandoffProof.hash(token) == record["targetCredentialSHA256"] as? String,
-              c["baseURL"] == record["targetBaseURL"] as? String,
-              c["bindingScopeId"] == record["targetBindingScopeId"] as? String,
-              WorkspaceHandoffProof.isHash(record["notificationScope"] as? String) else { return nil }
-        return record
+              let binding = state["binding"] as? String, let user = state["user"] as? String, !user.isEmpty,
+              record["binding"] as? String == binding, record["userId"] as? String == user,
+              defaults.string(forKey: enabledKey) == binding,
+              c["trustPolicy"] == AlongConnectionStore.systemTrustPolicy, let token = c["token"],
+              let base = c["baseURL"], base == record["targetBaseURL"] as? String,
+              let scope = c["bindingScopeId"], scope == record["targetBindingScopeId"] as? String,
+              let notificationScope = record["notificationScope"] as? String,
+              notificationScope.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil else { return nil }
+        let digest = SHA256.hash(data: Data(token.utf8)).map { String(format: "%02x", $0) }.joined()
+        guard digest == record["targetCredentialSHA256"] as? String else { return nil }
+        return notificationScope
     }
-    func prepareWorkspaceHandoff(targetOrigin: String) throws -> [String: Any] {
-        let (c, hash) = try connection()
-        var state = try load(createDirectory: false)
-        guard c["trustPolicy"] == AlongConnectionStore.legacyPinPolicy,
-              AlongConnectionStore.trustPolicy(forHost: URLComponents(string: targetOrigin)?.host ?? "") == AlongConnectionStore.systemTrustPolicy,
-              AlongConnectionStore.hostAccepted(URLComponents(string: targetOrigin)?.host ?? ""),
-              WorkspaceHandoffProof.origin(targetOrigin) == targetOrigin,
-              let source = c["baseURL"].flatMap(WorkspaceHandoffProof.origin), let token = c["token"], let pin = c["fingerprint"],
-              owns(state, connection: c, hash: hash), let user = state["user"] as? String,
-              state["workspaceHandoff"] == nil else { throw WorkspaceHandoffError.invalidState }
-        if let prior = state["workspaceHandoffChallenge"] as? [String: Any], prior["purpose"] as? String == WorkspaceHandoffProof.purpose,
-           prior["sourceOrigin"] as? String == source, prior["targetOrigin"] as? String == targetOrigin,
-           prior["sourceFingerprint"] as? String == pin, prior["sourceCredentialSHA256"] as? String == WorkspaceHandoffProof.hash(token),
-           prior["userId"] as? String == user, WorkspaceHandoffProof.isHash(prior["nonce"] as? String),
-           let expires = prior["expiresAt"] as? Int, expires > Int(Date().timeIntervalSince1970) { return prior }
-        var nonce = Data(count: 32)
-        guard nonce.withUnsafeMutableBytes({ SecRandomCopyBytes(kSecRandomDefault, 32, $0.baseAddress!) }) == errSecSuccess else { throw WorkspaceHandoffError.invalidState }
-        let now = Int(Date().timeIntervalSince1970)
-        let challenge: [String: Any] = ["purpose": WorkspaceHandoffProof.purpose, "sourceOrigin": source, "targetOrigin": targetOrigin,
-            "sourceFingerprint": pin, "sourceCredentialSHA256": WorkspaceHandoffProof.hash(token), "userId": user,
-            "nonce": nonce.map { String(format: "%02x", $0) }.joined(), "createdAt": now, "expiresAt": now + 86400]
-        state["workspaceHandoffChallenge"] = challenge; try save(state)
-        return challenge
-    }
-    func commitWorkspaceHandoff(_ offer: [String: Any]) async throws -> [String: Any] {
-        guard Set(offer.keys) == ["format", "connection", "proof", "manifestUTF8"], offer["format"] as? String == "along-native-workspace-handoff/v1",
-              let manifestText = offer["manifestUTF8"] as? String,
-              let offered = offer["connection"] as? [String: Any], Set(offered.keys) == ["baseURL", "token", "runtime"],
-              let next = AlongConnectionStore.clean(offered), next["trustPolicy"] == AlongConnectionStore.systemTrustPolicy,
-              let proof = offer["proof"] as? [String: Any] else { throw WorkspaceHandoffError.invalidProof }
-        let (current, hash) = try connection()
-        var state = try load(createDirectory: false)
-        if let record = workspaceHandoffRecord(state, connection: current),
-           let originalProof = record["proof"] as? [String: Any],
-           ["algorithm", "payload", "certificateDER", "signature"].allSatisfy({ originalProof[$0] as? String == proof[$0] as? String }),
-           Set(originalProof.keys) == Set(proof.keys), current == next {
-            try await recoverWorkspaceHandoff(); return connectionForWeb(next)
-        }
-        guard current["trustPolicy"] == AlongConnectionStore.legacyPinPolicy, let pin = current["fingerprint"],
-              let token = current["token"], let user = state["user"] as? String, owns(state, connection: current, hash: hash),
-              let challenge = state["workspaceHandoffChallenge"] as? [String: Any],
-              let expires = challenge["expiresAt"] as? Int, expires > Int(Date().timeIntervalSince1970),
-              state["workspaceHandoff"] == nil else { throw WorkspaceHandoffError.invalidState }
-        let claims = try WorkspaceHandoffProof.verifySignature(proof, sourcePin: pin)
-        let manifest = try WorkspaceHandoffProof.manifest(manifestText, claims: claims)
-        guard claims["sourceOrigin"] == current["baseURL"].flatMap(WorkspaceHandoffProof.origin),
-              claims["sourceCredentialSHA256"] == WorkspaceHandoffProof.hash(token), claims["userId"] == user,
-              claims["targetOrigin"] == next["baseURL"].flatMap(WorkspaceHandoffProof.origin),
-              claims["targetCredentialSHA256"] == next["token"].map(WorkspaceHandoffProof.hash),
-              claims["nonce"] == challenge["nonce"] as? String, claims["targetOrigin"] == challenge["targetOrigin"] as? String,
-              challenge["sourceCredentialSHA256"] as? String == claims["sourceCredentialSHA256"] else { throw WorkspaceHandoffError.invalidProof }
-        let revision = AlongConnectionStore.saveRevision
-        let permission = defaults.bool(forKey: "along.health.contextReview.v1")
-        let selection = defaults.stringArray(forKey: "along.health.selectedTypes")
-        let status = try await call(next, path: "/workspace-handoff/status", body: [:])
-        guard WorkspaceHandoffProof.matchesStatus(status, claims: claims, manifest: manifest), AlongConnectionStore.load() == current,
-              AlongConnectionStore.saveRevision == revision,
-              defaults.bool(forKey: "along.health.contextReview.v1") == permission,
-              defaults.stringArray(forKey: "along.health.selectedTypes") == selection else { throw WorkspaceHandoffError.invalidState }
-        // Re-read after the network wait. Legitimate append/ACK changes are retained, not used as
-        // a reason to freeze the entire queue or overwrite it with a stale snapshot.
-        state = try load(createDirectory: false)
-        guard owns(state, connection: current, hash: hash), state["user"] as? String == user,
-              (state["workspaceHandoffChallenge"] as? [String: Any])?["nonce"] as? String == claims["nonce"],
-              state["workspaceHandoff"] == nil else { throw WorkspaceHandoffError.invalidState }
-        let id = claims["migrationId"]!
-        try WorkspaceHandoffVault.save(["source": current, "target": next], id: id)
-        // A prior verified transport may already have retained a namespace that cannot be
-        // reconstructed from today's URL/credential. Capture what the phone actually uses.
-        let persistedScope = defaults.string(forKey: "along.event.notification.scope")
-        let oldScope = (WorkspaceHandoffProof.isHash(persistedScope) ? persistedScope : nil) ?? notificationScope(current, user: user) ?? WorkspaceHandoffProof.hash([AlongConnectionStore.scopeSeed(current)!, user].joined(separator: "\n"))
-        let web: [String: Any] = ["purpose": WorkspaceHandoffProof.purpose, "migrationId": id,
-            "fromBaseURL": current["baseURL"]!, "toBaseURL": next["baseURL"]!, "fromBindingScopeId": current["bindingScopeId"]!,
-            "toBindingScopeId": next["bindingScopeId"]!, "userId": user, "deviceId": claims["deviceId"]!,
-            "manifestSHA256": claims["manifestSHA256"]!, "snapshotSHA256": claims["snapshotSHA256"]!,
-            "syncPrefixSHA256": claims["syncPrefixSHA256"]!, "syncHighWaterMark": Int(claims["syncHighWaterMark"]!)!]
-        state["workspaceHandoff"] = ["phase": "prepared", "migrationId": id, "binding": state["binding"]!, "userId": user,
-            "targetCredentialSHA256": claims["targetCredentialSHA256"]!, "targetBaseURL": next["baseURL"]!,
-            "targetBindingScopeId": next["bindingScopeId"]!, "notificationScope": oldScope, "proof": proof, "manifestUTF8": manifestText, "webMigration": web]
-        try save(state) // durable authorization proof precedes replacement of the sole live connection.
-        try await recoverWorkspaceHandoff()
-        guard AlongConnectionStore.load() == next else { throw WorkspaceHandoffError.invalidState }
-        return connectionForWeb(next)
-    }
-    func recoverWorkspaceHandoff(onlyIfAlreadyTarget: Bool = false) async throws {
-        var state = try load(createDirectory: false)
-        guard var record = state["workspaceHandoff"] as? [String: Any], record["phase"] as? String == "prepared",
-              let id = record["migrationId"] as? String else { return }
-        let secrets = try WorkspaceHandoffVault.load(id)
-        guard let source = secrets["source"] as? [String: String], let target = secrets["target"] as? [String: String],
-              let current = AlongConnectionStore.load(), current == source || current == target,
-              let proof = record["proof"] as? [String: Any], let manifestText = record["manifestUTF8"] as? String,
-              let pin = source["fingerprint"] else { throw WorkspaceHandoffError.invalidState }
-        let claims = try WorkspaceHandoffProof.verifySignature(proof, sourcePin: pin, allowExpired: true)
-        let manifest = try WorkspaceHandoffProof.manifest(manifestText, claims: claims)
-        guard claims["migrationId"] == id, claims["userId"] == state["user"] as? String,
-              claims["sourceCredentialSHA256"] == source["token"].map(WorkspaceHandoffProof.hash),
-              claims["targetCredentialSHA256"] == target["token"].map(WorkspaceHandoffProof.hash),
-              WorkspaceHandoffProof.origin(target["baseURL"]!) == claims["targetOrigin"],
-              defaults.string(forKey: enabledKey) == state["binding"] as? String else { throw WorkspaceHandoffError.invalidState }
-        if current == source {
-            // A normal launch can render its original offline cache first. This option does
-            // not change a connection; the full recovery below retains the live readiness,
-            // connection generation, latest journal and ownership checks before committing.
-            if onlyIfAlreadyTarget { return }
-            let revision = AlongConnectionStore.saveRevision
-            let status = try await call(target, path: "/workspace-handoff/status", body: [:])
-            guard WorkspaceHandoffProof.matchesStatus(status, claims: claims, manifest: manifest), AlongConnectionStore.load() == source,
-                  AlongConnectionStore.saveRevision == revision else { throw WorkspaceHandoffError.invalidState }
-            state = try load(createDirectory: false)
-            guard let latest = state["workspaceHandoff"] as? [String: Any], latest["migrationId"] as? String == id,
-                  latest["phase"] as? String == "prepared", defaults.string(forKey: enabledKey) == state["binding"] as? String,
-                  state["user"] as? String == claims["userId"] else { throw WorkspaceHandoffError.invalidState }
-            record = latest
-            guard AlongConnectionStore.save(target) == target else { throw WorkspaceHandoffError.secretUnavailable }
-        }
-        // Keychain may already have committed before a prior process exited. No new network
-        // or re-pairing is needed to finish the authenticated local journal in that case.
-        state = try load(createDirectory: false)
-        guard AlongConnectionStore.load() == target,
-              (state["workspaceHandoff"] as? [String: Any])?["migrationId"] as? String == id else { throw WorkspaceHandoffError.invalidState }
-        record["phase"] = "committed"; state["workspaceHandoff"] = record
-        state.removeValue(forKey: "workspaceHandoffChallenge"); try save(state)
-    }
-#if DEBUG
-    // Fixed private deployment action only, never a Web bridge or a new handoff. Older committed
-    // journals did not capture the live namespace; its original value must come from the backup.
-    func repairWorkspaceHandoffNotificationScope(_ input: [String: Any]) async throws -> [String: Any] {
-        guard Set(input.keys) == ["format", "migrationId", "proofPayloadSHA256", "manifestSHA256", "targetCredentialSHA256", "expectedNotificationScope", "originalNotificationScope"],
-              input["format"] as? String == "along-handoff-notification-scope-repair/v1",
-              ["proofPayloadSHA256", "manifestSHA256", "targetCredentialSHA256", "expectedNotificationScope", "originalNotificationScope"].allSatisfy({ WorkspaceHandoffProof.isHash(input[$0] as? String) }),
-              let id = input["migrationId"] as? String,
-              let expected = input["expectedNotificationScope"] as? String, let original = input["originalNotificationScope"] as? String,
-              expected != original, let current = AlongConnectionStore.load() else { throw WorkspaceHandoffError.invalidState }
-        var state = try load(createDirectory: false)
-        guard var record = workspaceHandoffRecord(state, connection: current), record["phase"] as? String == "committed",
-              record["migrationId"] as? String == id, let proof = record["proof"] as? [String: Any],
-              let payload = proof["payload"] as? String, WorkspaceHandoffProof.hash(payload) == input["proofPayloadSHA256"] as? String,
-              let manifestText = record["manifestUTF8"] as? String,
-              WorkspaceHandoffProof.hash(manifestText) == input["manifestSHA256"] as? String,
-              record["targetCredentialSHA256"] as? String == input["targetCredentialSHA256"] as? String else { throw WorkspaceHandoffError.invalidState }
-        let secrets = try WorkspaceHandoffVault.load(id)
-        guard let source = secrets["source"] as? [String: String], let target = secrets["target"] as? [String: String],
-              target == current, let pin = source["fingerprint"] else { throw WorkspaceHandoffError.invalidState }
-        // The freshness window gates the initial commit, not recovery of an already committed
-        // authorization. Verify its original signature and every current authority commitment.
-        let claims = try WorkspaceHandoffProof.verifySignature(proof, sourcePin: pin, allowExpired: true)
-        _ = try WorkspaceHandoffProof.manifest(manifestText, claims: claims)
-        guard claims["migrationId"] == id, claims["userId"] == state["user"] as? String,
-              claims["sourceOrigin"] == source["baseURL"].flatMap(WorkspaceHandoffProof.origin),
-              claims["sourceCredentialSHA256"] == source["token"].map(WorkspaceHandoffProof.hash),
-              claims["targetOrigin"] == current["baseURL"].flatMap(WorkspaceHandoffProof.origin),
-              claims["targetCredentialSHA256"] == input["targetCredentialSHA256"] as? String else { throw WorkspaceHandoffError.invalidProof }
-        if let repair = record["notificationScopeRepair"] as? [String: Any] {
-            guard let request = repair["request"] as? NSDictionary, request == input as NSDictionary,
-                  ["prepared", "completed"].contains(repair["phase"] as? String ?? ""),
-                  record["notificationScope"] as? String == original,
-                  [expected, original].contains(defaults.string(forKey: "along.event.notification.scope") ?? "") else { throw WorkspaceHandoffError.invalidState }
-        } else {
-            guard record["notificationScope"] as? String == expected,
-                  defaults.string(forKey: "along.event.notification.scope") == expected else { throw WorkspaceHandoffError.invalidState }
-        }
-        record["notificationScope"] = original
-        record["notificationScopeRepair"] = ["phase": "prepared", "request": input]
-        state["workspaceHandoff"] = record; try save(state)
-        defaults.set(original, forKey: "along.event.notification.scope")
-        let result = try await EventTaskNotifications.shared.repairHandoffScope(from: expected, to: original, user: claims["userId"]!, connection: current)
-        // Preserve legitimate queue/ACK changes during UNCenter awaits. Never restore a snapshot.
-        state = try load(createDirectory: false)
-        guard AlongConnectionStore.load() == current, var latest = workspaceHandoffRecord(state, connection: current),
-              latest["phase"] as? String == "committed", latest["migrationId"] as? String == id,
-              latest["notificationScope"] as? String == original,
-              (latest["notificationScopeRepair"] as? [String: Any])?["request"] as? NSDictionary == input as NSDictionary else { throw WorkspaceHandoffError.invalidState }
-        latest["notificationScopeRepair"] = ["phase": "completed", "request": input]
-        state["workspaceHandoff"] = latest; try save(state)
-        return result
-    }
-#endif
+
     private func stateURL(createDirectory: Bool = true) throws -> URL {
         let dir = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: createDirectory)
             .appendingPathComponent("AlongHealthEvents", isDirectory: true)
@@ -1165,8 +921,7 @@ enum BackgroundReviewAdmission {
     private func call(_ connection: [String: String], path: String, body: [String: Any]) async throws -> [String: Any] {
         var input = connection.reduce(into: [String: Any]()) { $0[$1.key] = $1.value }
         input["path"] = path; input["body"] = body
-        return try await AlongWebView.Coordinator.agentRequest(input, background: UIApplication.shared.applicationState == .background,
-            privateWorkspaceHandoffRequest: path == "/workspace-handoff/status")
+        return try await AlongWebView.Coordinator.agentRequest(input, background: UIApplication.shared.applicationState == .background)
     }
     // Read-only recovery proof for Build78's origin-less Web event binding. No health
     // samples, permissions, observers, delivery requests or outbox writes occur here.
@@ -1182,7 +937,8 @@ enum BackgroundReviewAdmission {
         return ["baseURL": base, "bindingScopeId": scope, "userId": user]
     }
     func configure() async throws -> [String: Any] {
-        let (c, hash) = try connection()
+        guard let c = AlongConnectionStore.load() else { throw AgentBridgeError.invalidConfiguration }
+        let hash = try connectionHash(c)
         let status = try await call(c, path: "/connection/status", body: ["runtime": "dsh-superagent"])
         guard status["eventProtocol"] as? Int == 1, status["ready"] as? Bool == true,
               let user = status["userId"] as? String, !user.isEmpty, try connection().0 == c else { throw AgentBridgeError.invalidConfiguration }
@@ -1204,7 +960,7 @@ enum BackgroundReviewAdmission {
         return ["enabled": true]
     }
     func configureObservers() {
-        let desired = enabled ? selected : []
+        let desired = enabled && AlongConnectionStore.load() != nil ? selected : []
         guard desired != selection else { return }
         selection = desired
         reader.observeChanges(desired) { completion in
@@ -1229,17 +985,16 @@ enum BackgroundReviewAdmission {
         }
     }
     private func deliver() async throws {
-        let (c, hash) = try connection()
+        guard let c = AlongConnectionStore.load() else { return }
+        let hash = try connectionHash(c)
         var state = try load()
-        if (state["workspaceHandoff"] as? [String: Any])?["phase"] as? String == "prepared" { return }
         guard owns(state, connection: c, hash: hash), let identity = state["binding"] as? String,
               let user = state["user"] as? String else { return }
         let types = selected
         if !types.isEmpty {
             let summary = try await HealthDeviceDataCollector(reader: reader, types: types).collect()
             guard types == selected, try connection().0 == c else { return }
-            // A configure/save may have run during the read. Preserve its durable
-            // transport proof and do not write a stale in-memory queue over it.
+            // Re-read after awaiting collection to retain concurrent changes to the queue.
             state = try load()
             guard owns(state, connection: c, hash: hash), state["binding"] as? String == identity,
                   state["user"] as? String == user else { return }
@@ -1267,11 +1022,10 @@ enum BackgroundReviewAdmission {
                 guard HealthEventOutbox.terminal(event, receipt: failure) else { throw AgentBridgeError.receipt(failure) }
                 receipt = failure
             }
-            // An ACK may arrive from the previous verified address. Re-read the
-            // current identity and exact event; never overwrite a newer queue.
+            // Re-read the binding and event before acknowledging it to retain concurrent appends.
             state = try load()
             let (current, currentHash) = try connection()
-            if state["workspaceHandoff"] != nil, try connectionHash(c) != currentHash { return }
+            if c != current { return }
             guard owns(state, connection: current, hash: currentHash), state["binding"] as? String == identity,
                   state["user"] as? String == user,
                   let first = (state["pending"] as? [[String: Any]])?.first,

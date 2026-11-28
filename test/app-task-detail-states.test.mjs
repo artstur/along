@@ -86,7 +86,7 @@ test('the DSH admission decision exposes the actual reason and stops task pollin
 
 test('an unpaired device shows connection setup and sends no task requests',async()=>{
   const dom=await open({paired:false});
-  assert.match(dom.app.innerHTML,/连接这台 Mac/);
+  assert.match(dom.app.innerHTML,/连接 Along 服务/);
   assert.match(dom.app.innerHTML,/data-action="edit-goal"/);
   assert.doesNotMatch(dom.app.innerHTML,/progressbar|真实分工|工作记录|DSH 暂不可用/);
   assert.equal(dom.calls.length,0);

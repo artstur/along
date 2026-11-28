@@ -11,9 +11,9 @@ enum PhoneSourceCoordinatorError: String, LocalizedError {
     var errorDescription: String? {
         switch self {
         case .busy: "当前连接操作尚未完成，请稍后重试。"
-        case .pairingUnavailable: "请先连接已配对的 Mac。"
+        case .pairingUnavailable: "请先连接 Along 服务。"
         case .authorizationChanged: "目标或授权已变化，请重新打开连接页面。"
-        case .hostUnavailable: "Mac 暂时未能接收设备数据，已保存的数据会保留并重试。"
+        case .hostUnavailable: "Along 服务暂时未能接收设备数据，已保存的数据会保留并重试。"
         case .invalidResponse: "连接状态无法验证，请稍后重试。"
         case .storageUnavailable: "iPhone 无法安全保存连接状态，请稍后重试。"
         case .credentialsUnavailable: "iPhone 上没有可用的 OKX 凭证，请重新连接。"
@@ -279,7 +279,7 @@ enum PhoneSourceCoordinatorError: String, LocalizedError {
             try check(operation)
             if case let AgentBridgeError.receipt(receipt) = error { return receipt }
             if case let AgentBridgeError.server(message) = error,
-               ["目标或配对已变化，请重新连接。", "配对已变更", "配对已变化", "配对已变化，请重新打开连接", "请先配对这台 Mac", "这个目标当前无法连接 OKX，请同步目标后重试"].contains(message) {
+               ["目标或配对已变化，请重新连接。", "配对已变更", "配对已变化", "配对已变化，请重新打开连接", "请先配对这台 Mac", "请先配对 Along 服务", "这个目标当前无法连接 OKX，请同步目标后重试"].contains(message) {
                 throw PhoneSourceCoordinatorError.authorizationChanged
             }
             unavailableOperations.insert(operation.id)
@@ -511,15 +511,8 @@ enum PhoneSourceCoordinatorError: String, LocalizedError {
     private static func disconnected() -> [String: Any] { ["provider": "okx", "state": "disconnected", "syncState": "none"] }
     private static func hash(_ values: [String]) -> String { SHA256.hash(data: Data(values.joined(separator: "\n").utf8)).map { String(format: "%02x", $0) }.joined() }
     private static func binding(_ pair: [String: String]) throws -> String {
-        // 绑定 ID 不再用叶指纹：云端系统信任形态下叶证书会轮换，用它当绑定 ID 会把
-        // 同一个用户误判成新绑定（docs/iphone-ca-profile-design.md §2.2）。
-        // 旧 pin 形态保留原算法，保证 Mac 本地状态与迁移前完全一致。
-        guard let token = pair["token"], validHash(token.lowercased()) else { throw PhoneSourceCoordinatorError.pairingUnavailable }
-        let policy = pair["trustPolicy"] ?? AlongConnectionStore.legacyPinPolicy
-        if policy == AlongConnectionStore.legacyPinPolicy {
-            guard let pin = pair["fingerprint"], validHash(pin.lowercased()) else { throw PhoneSourceCoordinatorError.pairingUnavailable }
-            return hash([pin.uppercased(), token.lowercased()]) // A Mac address change is transport, not a new pairing.
-        }
+        guard pair["trustPolicy"] == AlongConnectionStore.systemTrustPolicy,
+              let token = pair["token"], validHash(token.lowercased()) else { throw PhoneSourceCoordinatorError.pairingUnavailable }
         guard let scope = pair["bindingScopeId"] ?? AlongConnectionStore.bindingScopeId(baseURL: pair["baseURL"] ?? "", token: token),
               validHash(scope.lowercased()) else { throw PhoneSourceCoordinatorError.pairingUnavailable }
         return hash([scope.lowercased(), token.lowercased()])

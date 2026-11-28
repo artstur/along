@@ -66,7 +66,7 @@ test('AGENTS.md §4：状态目录三形态与云端部署条目（§2.3 修正 
   assert.ok(s4.includes('环境变量见 `README.md` 与 `deploy/env.example`'),'§4 环境变量指引缺失');
   // 云端部署形态条目：指向设计文档、Mac 回退保留、无模式开关。
   assert.ok(s4.includes('云端部署形态（一台云主机 + Docker Compose、2 个静态用户、每用户一次性配对码）的设计、决策与上线 Runbook 见 `docs/cloud-deploy-multi-user.md`'),'§4 云端部署条目缺失或口径不符');
-  assert.ok(s4.includes('Mac 本地模式完全保留且行为不变，作为回退路径'),'§4 Mac 回退口径缺失');
+  assert.ok(s4.includes('Mac 本地 Host 保留用于开发与旧版客户端。iPhone Build 95 起只配对云端 HTTPS。'),'§4 本地 Host 和 iPhone 云端配对口径缺失');
   assert.ok(s4.includes('云端与本地共用同一套源码，不新增模式开关'),'§4 无模式开关口径缺失');
   // 旧措辞（只写一种本地状态目录）已移除。
   assert.ok(!s4.includes('Mac 本地状态存在 `~/.along/agent-host/`，环境变量见 `README.md`。'),'§4 旧状态目录措辞残留');
@@ -144,9 +144,7 @@ test('README 隐私表按云端形态改写（§2.3 修正 1 落点）',()=>{
   assert.ok(readmePrivacy.includes('部署面收敛'),'缺少「部署面收敛」行');
   assert.ok(readmePrivacy.includes('只开放 443 一个端口'),'隐私表云端端口口径缺失');
   assert.ok(readmePrivacy.includes('按来源（连接 IP）失败限速'),'隐私表配对码限速口径缺失');
-  // TLS 信任：Mac 私网现场自签 + 叶钉扎；云端预签发 CA 叶证书 + iPhone 系统信任评估。
-  assert.ok(readmePrivacy.includes('Mac 私网：服务端启动时现场自签，iPhone 原生网络层校验叶指纹后才传输'),'TLS 信任行 Mac 私网口径不符');
-  assert.ok(readmePrivacy.includes('云端：服务端读预签发的 CA 叶证书'),'TLS 信任行云端口径不符');
+  assert.ok(readmePrivacy.includes('iPhone 使用云端 HTTPS：服务端读预签发的 CA 叶证书'),'TLS 信任行云端口径不符');
   assert.ok(readmePrivacy.includes('iPhone 按系统信任评估校验链/主机名/有效期'),'TLS 信任行系统信任评估口径缺失');
   assert.ok(!readmePrivacy.includes('云端 3650 天自签'),'TLS 信任行旧云端自签口径残留');
   // 连接凭证哈希段落改为 pairings.json 每用户一条的多绑定口径；旧单文件路径移除。

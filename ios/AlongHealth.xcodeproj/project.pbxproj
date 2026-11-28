@@ -7,7 +7,6 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		AA7700010001000000000001 /* WorkspaceHandoff.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA7700010001000000000002 /* WorkspaceHandoff.swift */; };
 		D835B508AA142127BD7E38F4 /* PhoneSourceCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2AB712E316BBFCB655F0DACB /* PhoneSourceCoordinator.swift */; };
 		BE6BD603E12635289BA119B9 /* OKXDeviceClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = EB6F39A3AF6432764E5AAC60 /* OKXDeviceClient.swift */; };
 		DFFA4F5CA2B314F98619B400 /* DeviceDataCollectors.swift in Sources */ = {isa = PBXBuildFile; fileRef = 87296F657FEAE582FDE4E276 /* DeviceDataCollectors.swift */; };
@@ -23,7 +22,6 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
-		AA7700010001000000000002 /* WorkspaceHandoff.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceHandoff.swift; sourceTree = "<group>"; };
 		2AB712E316BBFCB655F0DACB /* PhoneSourceCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneSourceCoordinator.swift; sourceTree = "<group>"; };
 		EB6F39A3AF6432764E5AAC60 /* OKXDeviceClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OKXDeviceClient.swift; sourceTree = "<group>"; };
 		87296F657FEAE582FDE4E276 /* DeviceDataCollectors.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceDataCollectors.swift; sourceTree = "<group>"; };
@@ -44,7 +42,6 @@
 			isa = PBXGroup;
 			children = (
 				558B32A1B3669EFDE3602320 /* AlongShellView.swift */,
-				AA7700010001000000000002 /* WorkspaceHandoff.swift */,
 				2AB712E316BBFCB655F0DACB /* PhoneSourceCoordinator.swift */,
 				EB6F39A3AF6432764E5AAC60 /* OKXDeviceClient.swift */,
 				87296F657FEAE582FDE4E276 /* DeviceDataCollectors.swift */,
@@ -167,7 +164,6 @@
 				DFFA4F5CA2B314F98619B400 /* DeviceDataCollectors.swift in Sources */,
 				3393B362679AFC9A15D81EC0 /* DeviceEventQueue.swift in Sources */,
 				361D36E0A388C9F3D0C516A3 /* HealthKitReader.swift in Sources */,
-				AA7700010001000000000001 /* WorkspaceHandoff.swift in Sources */,
 				9BB4B7FC6CF6944AFB13B0C5 /* HealthModels.swift in Sources */,
 				DE66DFD80001000000000001 /* DailyHealthReminders.swift in Sources */,
 				E55CBCA90001000000000001 /* EventTaskNotifications.swift in Sources */,

@@ -6,9 +6,11 @@
 >
 > 设计基线（2026-11-20，行号以当前 `main` 工作树为准）：`along` 仓库本目录、`along-superagent` 相邻仓库。基线门禁：`npm run check` 通过（node --check 全部 `web/*.mjs`、`web/sw.js`、`host/*.mjs`、`tools/build.mjs` + `node --test test/*.test.mjs`，509 条测试全绿，本轮已实际运行）。
 
+iPhone Build 95 起的日常配对与重试见[用户设置页](user-settings.md#云端连接收敛2026-11-28)。下文涉及局域网配对的部分记录旧版客户端行为。
+
 ## 固定公网 IPv4 直连
 
-固定公网 IPv4 部署按 [公网 IP 运维步骤](../deploy/README.md#固定公网-ipv4-直连) 执行。iPhone 配对、前台请求与后台同步共用原生 HTTPS 入口校验，公网 IPv4 由系统核验 IP SAN、证书链与有效期。原有 RFC1918 叶指纹钉扎和 DNS 系统信任连接继续沿用。
+固定公网 IPv4 部署按 [公网 IP 运维步骤](../deploy/README.md#固定公网-ipv4-直连) 执行。iPhone 配对、前台请求与后台同步共用原生 HTTPS 入口校验，公网 IPv4 由系统核验 IP SAN、证书链与有效期。DNS 部署同样使用系统信任评估。
 
 Tier 2 追加 Compose 叠加文件，由 Along 独立 nginx 终止 TLS。公网 TCP 80 仅用于 HTTP-01，HTTPS 转发通过仅 Host 和 nginx 挂载的 Unix socket，Host 按 nginx 覆写的来源地址继续分配配对失败窗口。公网 IP 证书使用 Let’s Encrypt 的 `shortlived` profile。签发和 nginx 当前证书分别存放；定期续期后先校验证书、测试 nginx 配置，再重载并从 HTTPS 入口核验叶证书。失败保留上一份已加载的有效证书并记录告警。
 
@@ -53,7 +55,7 @@ Tier 2 追加 Compose 叠加文件，由 Along 独立 nginx 终止 TLS。公网 
 - **不做** Kimi 运行时上云：Kimi Code Web Server（`kimi web`，`host/kimi-code-agent.mjs:9-10` 默认 `127.0.0.1:58627`、token 在 `~/.kimi-code/server.token`）是 Mac 本机登录态服务，无云端等价物。云端它按现状自然降级为不可用（选择 Kimi 运行时时报「未找到 Kimi Code Web Server token」，与 Mac 上没启动 `kimi web` 的表现一致，`host/kimi-code-agent.mjs:143-147`），UI 的运行时切换按钮不动。预留 `ALONG_KIMI_CODE_URL` 指向可达服务即可启用，不改代码。
 - **不做** Codex 路径上云：`/goal/event` 依赖本机 Codex 二进制（`host/codex-agent.mjs:9-14`），云端镜像不安装 codex，该端点按既有语义优雅失败（「Along 暂时不可用」）；`web/` 无任何调用 `/goal/event` 的代码（本轮全库 grep 无命中），属休眠路径，上线验收时不得误判为故障（验收 #10）。
 - **基础 Tier 1 不启用 Hy-Memory**；独立 Linux 实测栈可通过 `alongMemory` 接入，见 [Host 部署经验 §6](host-cloud-deploy.md#6-hy-memory-接通真实模型下跑通)。
-- **普通配对不迁移**事件工作区的业务历史库；保全单个既有工作区走[专用冷交接](personal-workspace-handoff.md)，不复用下文 Tier 1 的换端步骤。
+- **普通配对不迁移**事件工作区的业务历史库。
 
 ## 2. 现状结论（本轮已在代码中逐条核实）
 
@@ -348,7 +350,7 @@ secrets:
 
 ### 6.2 Mac 本地数据怎么迁
 
-> 下列步骤只用于 Tier 1 的普通重配，不保全事件工作区的授权、待发与提醒身份。个人事件工作区走[专用冷交接](personal-workspace-handoff.md)。
+> 下列步骤只用于 Tier 1 的普通重配，不保全事件工作区的授权、待发与提醒身份。
 
 云端 v1 **不迁移业务历史库**（along.sqlite 属 Tier 2 数据面；云端 v1 目标空间在手机本地延续）。当前 `persistAgentConfig` 仍按 token/指纹变化清背景模板并撤销每日委托；CA 同端升级须按专项方案先验证同一绑定并映射稳定 scope，不能因叶指纹消失误撤授权。真正跨 Host 的迁移/重建如下：
 

@@ -49,7 +49,7 @@ export function installDomStub({storage={}}={}) {
       if (!elements.has(selector)) elements.set(selector,new StubElement());
       return elements.get(selector);
     },
-    documentElement:{style:{setProperty(){}}},
+    documentElement:new StubElement('html'),
     addEventListener(){},
   };
   const localStorage={

@@ -1,4 +1,4 @@
-import {assembleEnvelope} from './event-envelope.mjs?v=112';
+import {assembleEnvelope} from './event-envelope.mjs?v=114';
 
 export const AGENT_KEY = 'along.agent.v1';
 export const GOALS_KEY = 'along.goal-custom.v1';
@@ -23,7 +23,6 @@ export async function agentCall(config, path, body) {
   if (!window.AlongAgentBridge?.request) throw Error('请在 iPhone 的 Along App 中连接 Along');
   if (!config?.baseURL) throw Error('请先完成 Along 连接设置');
   if (path !== '/pair' && !config.token) throw Error('请先连接 Along');
-  // 叶指纹只在旧 pin 形态（Mac 私网）需要；云端系统信任形态由原生判定策略，不靠网页上报指纹。
   // bindingScopeId 是稳定的归属标识，不是凭证，也不发给模型。
   const payload = {
     baseURL: config.baseURL,
@@ -31,7 +30,6 @@ export async function agentCall(config, path, body) {
     token: config.token ?? '',
     body,
   };
-  if (config.fingerprint) payload.fingerprint = config.fingerprint;
   if (config.bindingScopeId) payload.bindingScopeId = config.bindingScopeId;
   return window.AlongAgentBridge.request(payload);
 }

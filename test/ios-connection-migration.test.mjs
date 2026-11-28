@@ -59,7 +59,7 @@ ${main}
 }
 
 function compileMigration() {
-  return compileStore(`let legacy: [String: Any] = ["baseURL":"https://192.168.1.2:4176","fingerprint":"${'A'.repeat(64)}","token":"${'b'.repeat(64)}"]
+  return compileStore(`let legacy: [String: Any] = ["baseURL":"https://along.example.com:4176","fingerprint":"${'A'.repeat(64)}","token":"${'b'.repeat(64)}"]
 
 FakeDefaults.shared.storage["along.connection.v1"] = legacy
 keychainWriteFails = true
@@ -81,7 +81,7 @@ test('the old connection is only dropped after it is safely stored in the keycha
 
 // M6（docs/cloud-deploy-multi-user.md §4/§5.6）：连接地址在 RFC1918 私网 IPv4 之外放行合法 DNS 域名，
 // https-only 与其余校验不变。两份守卫（clean/agentRequest）都编译真实源码后断言。
-test('the paired host accepts RFC1918 IPv4, public IPv4 and legal DNS domains',{skip:hasSwift?false:'本机没有 Swift 工具链，跳过原生侧行为测试'},()=>{
+test('only cloud pairings can be loaded or saved',{skip:hasSwift?false:'本机没有 Swift 工具链，跳过原生侧行为测试'},()=>{
   const output=compileStore(`extension AlongConnectionStore {
     static func exposeClean(_ value: [String: Any]) -> [String: String]? { clean(value) }
 }
@@ -89,10 +89,10 @@ test('the paired host accepts RFC1918 IPv4, public IPv4 and legal DNS domains',{
 let fingerprint = "${'A'.repeat(64)}"
 let token = "${'b'.repeat(64)}"
 let cases: [(String, Bool)] = [
-    ("https://192.168.1.2:4176", true),
-    ("https://10.0.0.5:4176", true),
-    ("https://172.16.0.9:4176", true),
-    ("https://172.31.255.255:4176", true),
+    ("https://192.168.1.2:4176", false),
+    ("https://10.0.0.5:4176", false),
+    ("https://172.16.0.9:4176", false),
+    ("https://172.31.255.255:4176", false),
     ("https://172.32.0.1:4176", true),
     ("https://8.8.8.8:4176", true),
     ("https://0.1.2.3:4176", false),
@@ -131,10 +131,10 @@ for (baseURL, expected) in cases {
 `);
   assert.doesNotMatch(output,/FAIL/,'主机校验结果与预期不符');
   assert.match(output,/^ok https:\/\/along\.example\.com:4176$/m,'合法 DNS 域名要放行');
-  assert.match(output,/^ok https:\/\/192\.168\.1\.2:4176$/m,'私网 IPv4 行为不变');
+  assert.match(output,/^ok https:\/\/192\.168\.1\.2:4176$/m,'局域网地址应被拒绝');
 });
 
-test('the agent request gate admits DNS domains without loosening host, credential or endpoint rules',{skip:hasSwift?false:'本机没有 Swift 工具链，跳过原生侧行为测试'},()=>{
+test('the agent request gate admits cloud addresses and rejects private endpoints',{skip:hasSwift?false:'本机没有 Swift 工具链，跳过原生侧行为测试'},()=>{
   const funcStart=swiftSource.indexOf('        static func agentRequest(');
   assert.notEqual(funcStart,-1,'找不到 agentRequest');
   const guardStart=swiftSource.indexOf('            guard let base = input["baseURL"]',funcStart);
@@ -149,7 +149,7 @@ test('the agent request gate admits DNS domains without loosening host, credenti
 
 ${storeSnippet()}
 
-func probe(_ input: [String: Any], privateNotificationRequest: Bool = false, privateSourceRequest: Bool = false, privateWorkspaceHandoffRequest: Bool = false) -> Bool {
+func probe(_ input: [String: Any], privateNotificationRequest: Bool = false, privateSourceRequest: Bool = false) -> Bool {
     ${guardSource}
     return true
 }
@@ -157,9 +157,15 @@ func probe(_ input: [String: Any], privateNotificationRequest: Bool = false, pri
 let fingerprint = "${'A'.repeat(64)}"
 let token = "${'b'.repeat(64)}"
 let cases: [(String, String, Bool)] = [
-    ("https://192.168.1.2:4176", "/goal/event", true),
+    ("https://192.168.1.2:4176", "/goal/event", false),
+    ("https://10.0.0.2:4176", "/pair", false),
+    ("https://172.16.0.2:4176", "/events", false),
+    ("https://macbook.Local:4176", "/pair", false),
+    ("https://foo.localhost:4176", "/pair", false),
+    ("https://home.arpa:4176", "/pair", false),
+    ("https://mac.home.arpa:4176", "/pair", false),
     ("https://along.example.com:4176", "/goal/event", true),
-    ("https://along.example.com:4176", "/connection/verify", true),
+    ("https://along.example.com:4176", "/connection/verify", false),
     ("http://along.example.com:4176", "/goal/event", false),
     ("https://user:pass@along.example.com:4176", "/goal/event", false),
     ("https://along.example.com/pair", "/goal/event", false),
@@ -181,12 +187,12 @@ print(probe(["baseURL": "https://along.example.com:4176", "fingerprint": fingerp
     const output=execFileSync('swift',[file],{encoding:'utf8'});
     assert.doesNotMatch(output,/FAIL/,'请求守卫结果与预期不符');
     assert.match(output,/^ok https:\/\/along\.example\.com:4176 \/goal\/event$/m,'域名要走通 agentRequest 守卫');
-    assert.match(output,/^ok https:\/\/192\.168\.1\.2:4176 \/goal\/event$/m,'私网 IPv4 行为不变');
+    assert.match(output,/^ok https:\/\/192\.168\.1\.2:4176 \/goal\/event$/m,'原生应拒绝旧局域网连接');
     assert.match(output,/^ok https:\/\/along\.example\.com:4176 \/notifications\/device$/m,'私有端点仍要求对应开关');
   } finally { rmSync(dir,{recursive:true,force:true}); }
 });
 
-test('the iPhone explains the observed proxy failure and an unreachable paired Mac',{skip:!hasSwift||process.platform!=='darwin'},()=>{
+test('the iPhone explains proxy failures and unreachable cloud service',{skip:!hasSwift||process.platform!=='darwin'},()=>{
   const start=swiftSource.indexOf('enum AgentBridgeError:');
   const end=swiftSource.indexOf('\n}',start)+2;
   const dir=mkdtempSync(join(tmpdir(),'along-transport-'));
@@ -203,8 +209,8 @@ let cases: [Error] = [proxy, wrapped, NSError(domain: NSURLErrorDomain, code: 31
 for error in cases { print(AgentBridgeError.transportMessage(error) ?? "unchanged") }
 `);
     const output=execFileSync('swift',['-module-cache-path',join(dir,'cache'),file],{encoding:'utf8'}).trim().split('\n');
-    for (const message of output.slice(0,3)) assert.match(message,/代理.*局域网/);
-    for (const message of output.slice(3,6)) assert.match(message,/互访.*Mac.*地址/);
+    for (const message of output.slice(0,3)) assert.match(message,/代理.*Along 服务/);
+    for (const message of output.slice(3,6)) assert.match(message,/Along 服务.*服务地址/);
     assert.deepEqual(output.slice(6),['unchanged','unchanged']);
   } finally {rmSync(dir,{recursive:true,force:true});}
 });
@@ -238,8 +244,8 @@ let cases: [(String, Bool)] = [
     ("https://xn--fiq228c.com:4176", false),      // URLComponents.host 把 punycode 解回 Unicode，同样被拒
     ("https://0x7f.0.0.1:4176", false),           // 十六进制 IP 形态：非私网数字 IP，拒绝
     ("https://2130706433:4176", false),           // 整数 IP 形态：单段，拒绝
-    ("https://192.168.1.2:4176", true),           // 私网 IPv4 行为不变
-    ("https://172.16.0.9:4176", true),
+    ("https://192.168.1.2:4176", false),           // 局域网地址应被拒绝
+    ("https://172.16.0.9:4176", false),
     ("https://8.8.8.8:4176", true),
 ]
 for (baseURL, expected) in cases {
@@ -249,7 +255,7 @@ for (baseURL, expected) in cases {
 `);
   assert.doesNotMatch(output,/FAIL/,'clean() 的域名边界结果与文档预期不符');
   assert.match(output,/^ok https:\/\/along\.example\.com$/m,'文档验收原例（无端口域名）要放行');
-  assert.match(output,/^ok https:\/\/192\.168\.1\.2:4176$/m,'私网 IPv4 行为不变');
+  assert.match(output,/^ok https:\/\/192\.168\.1\.2:4176$/m,'局域网地址应被拒绝');
 });
 
 test('the agent gate keeps credential, path and endpoint rules when the host is a domain',{skip:hasSwift?false:'本机没有 Swift 工具链，跳过原生侧行为测试'},()=>{
@@ -267,7 +273,7 @@ test('the agent gate keeps credential, path and endpoint rules when the host is 
 
 ${storeSnippet()}
 
-func probe(_ input: [String: Any], privateNotificationRequest: Bool = false, privateSourceRequest: Bool = false, privateWorkspaceHandoffRequest: Bool = false) -> Bool {
+func probe(_ input: [String: Any], privateNotificationRequest: Bool = false, privateSourceRequest: Bool = false) -> Bool {
     ${gateSource}
     return true
 }
@@ -278,9 +284,8 @@ let tok = "${'b'.repeat(64)}"
 let cases: [(String, String, String, String, Bool)] = [
     ("https://along.example.com", "/goal/event", good, tok, true),   // 无端口域名走通文档验收例
     ("https://along.example.com", "/pair", good, tok, true),         // 多用户配对复用 /pair，域名下必须可达
-    ("https://192.168.1.2", "/goal/event", good, tok, true),         // 无端口私网 IPv4 不变（端口从不要求）
-    // 云端域名走系统信任评估：叶指纹不再是信任依据，入口守卫不再校验它
-    // （docs/iphone-ca-profile-design.md §2.1/§2.2）。旧 pin 形态（Mac 私网）仍须 64hex。
+    ("https://192.168.1.2", "/goal/event", good, tok, false),
+    // 云端证书由系统信任评估。入口无视旧版页面传来的叶指纹。
     ("https://along.example.com:4176", "/goal/event", String(repeating:"F",count:63), tok, true),
     ("https://192.168.1.2:4176", "/goal/event", String(repeating:"F",count:63), tok, false),
     // token 的 64hex 校验在连接存储时（clean()，:458-459）；agentRequest 入口守卫从不校验 token，
@@ -289,7 +294,7 @@ let cases: [(String, String, String, String, Bool)] = [
     ("https://along.example.com:4176", "/goal/event", good, String(repeating:"f",count:63), true),
     ("https://along.example.com:4176/", "/goal/event", good, tok, false), // path "/" 在入口守卫拒绝
     ("https://8.8.8.8", "/pair", "", "", true),
-    ("https://8.8.8.8", "/connection/verify", "", tok, true),
+    ("https://8.8.8.8", "/connection/verify", "", tok, false),
     ("https://8.8.8.8", "/sync", "", tok, true),
     ("https://8.8.8.8", "/sync/ack", "", tok, true),
     ("https://8.8.8.8", "/events", "", tok, true),
@@ -311,12 +316,12 @@ for (baseURL, path, fp, tk, expected) in cases {
 test('public IP uses system trust and preserves the Keychain scope across leaf rotation',{skip:!hasSwift},()=>{
   const output=compileStore(`
 let token = "${'b'.repeat(64)}"
-let first = AlongConnectionStore.save(["baseURL":"https://8.8.8.8","token":token,"fingerprint":"${'A'.repeat(64)}","trustPolicy":AlongConnectionStore.legacyPinPolicy])
+let first = AlongConnectionStore.save(["baseURL":"https://8.8.8.8","token":token,"fingerprint":"${'A'.repeat(64)}","trustPolicy":"legacy-local-pin-v1"])
 let next = AlongConnectionStore.save(["baseURL":"https://8.8.8.8:443","token":token,"fingerprint":"${'C'.repeat(64)}"])
 let local = AlongConnectionStore.save(["baseURL":"https://192.168.1.2","token":token,"fingerprint":"${'A'.repeat(64)}","trustPolicy":AlongConnectionStore.systemTrustPolicy])
 print(first?["trustPolicy"] == AlongConnectionStore.systemTrustPolicy && first?["fingerprint"] == nil)
 print(first.flatMap(AlongConnectionStore.scopeSeed) != nil && first.flatMap(AlongConnectionStore.scopeSeed) == next.flatMap(AlongConnectionStore.scopeSeed))
-print(local?["trustPolicy"] == AlongConnectionStore.legacyPinPolicy && local?["fingerprint"] != nil)
+print(local == nil)
 `);
   assert.deepEqual(output.trim().split('\n'),['true','true','true']);
 });
@@ -347,8 +352,7 @@ print(AlongConnectionStore.save(unknown)?["runtime"] ?? "missing")
   assert.equal(output.trim(),'dsh-superagent\nmissing');
 });
 
-test('ordinary endpoint whitelist retains 12+4 paths and handoff status requires a separate Native-only flag',()=>{
-  // 文档 §2.1：路径白名单 12+4 条（主路径 12 + 通知 2 + 设备来源 2），M6 零新增、零删除。
+test('ordinary endpoint whitelist includes pairing, sync, notifications and device sources',()=>{
   const funcStart=swiftSource.indexOf('        static func agentRequest(');
   assert.notEqual(funcStart,-1,'找不到 agentRequest');
   const condStart=swiftSource.indexOf('(["/pair"',funcStart);
@@ -358,37 +362,24 @@ test('ordinary endpoint whitelist retains 12+4 paths and handoff status requires
   const condition=swiftSource.slice(condStart,condEnd+'.contains(path)))'.length);
   const groups=[...condition.matchAll(/\[([^\[\]]*)\]\.contains\(path\)/g)]
     .map(m=>m[1].split(',').map(s=>s.trim().replaceAll('"','')));
-  assert.equal(groups.length,4,'新增的唯一组须为Native专用交接状态；普通Web路径不增加');
+  assert.equal(groups.length,3);
   assert.deepEqual(groups[0],
-    ['/pair','/connection/verify','/connection/status','/goal/event','/super-agent/tasks','/super-agent/tasks/status','/super-agent/daily-delegation','/super-agent/goals','/super-agent/goals/status','/events','/sync','/sync/ack'],
-    '主路径 12 条零新增零删除（/pair 是多用户配对的唯一入口）');
-  assert.deepEqual(groups[1],['/workspace-handoff/status'],'交接仅一个只读状态端点');
-  assert.match(condition,/privateWorkspaceHandoffRequest && \["\/workspace-handoff\/status"\]/);
-  assert.deepEqual(groups[2],['/notifications/device','/notifications/scheduled'],'通知端点零新增');
-  assert.deepEqual(groups[3],['/sources/okx','/sources/device'],'设备来源端点零新增');
+    ['/pair','/connection/status','/goal/event','/super-agent/tasks','/super-agent/tasks/status','/super-agent/daily-delegation','/super-agent/goals','/super-agent/goals/status','/events','/sync','/sync/ack'],
+    '主路径 11 条（/pair 是配对的唯一入口）');
+  assert.deepEqual(groups[1],['/notifications/device','/notifications/scheduled'],'通知端点零新增');
+  assert.deepEqual(groups[2],['/sources/okx','/sources/device'],'设备来源端点零新增');
 });
 
-test('certificate pinning, redirect blocking and DIRECT-only proxy remain wired into every agent request',()=>{
-  // M6 要求禁重定向/PAC=DIRECT 全不动；CA 方案（docs/iphone-ca-profile-design.md §2.1/§2.2）把
-  // 「叶指纹钉扎」按主机形态拆成两条：云端 DNS 走系统信任评估，Mac 私网保留旧 pin。
-  // 这里钉住真实的接线位置，防止后续松动，也防止云端悄悄退回旧 pin。
+test('every agent request uses system trust, redirect blocking and the existing DIRECT policy',()=>{
   const funcStart=swiftSource.indexOf('        static func agentRequest(');
-  assert.notEqual(funcStart,-1,'找不到 agentRequest');
-  const funcEnd=swiftSource.indexOf('        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!)',funcStart);
-  assert.ok(funcEnd>funcStart,'找不到 agentRequest 结束边界');
-  const body=swiftSource.slice(funcStart,funcEnd);
-  assert.match(body,/let delegate: URLSessionDelegate = fingerprint\.map \{ PinnedAgentDelegate\(fingerprint: \$0\) \} \?\? SystemTrustAgentDelegate\(expectedHost: host\)/,'按主机形态选 delegate：私网 pin，云端系统信任');
-  assert.match(body,/policy: AlongConnectionStore\.trustPolicy\(forHost: host\)/,'信任策略由原生按主机形态推导，不接受网页自报');
-  assert.match(body,/URLSession\(configuration: configuration, delegate: delegate, delegateQueue: nil\)/,'钉扎 delegate 仍要挂在实际发请求的 session 上');
-  assert.match(body,/connectionProxyDictionary[\s\S]*?return 'DIRECT'/,'仍强制 PAC=DIRECT');
-  assert.match(body,/configuration\.waitsForConnectivity = !background/,'前后台等待语义不变');
-  const delegateStart=swiftSource.indexOf('final class PinnedAgentDelegate');
-  assert.notEqual(delegateStart,-1,'找不到 PinnedAgentDelegate');
-  const delegateEnd=swiftSource.indexOf('\n}\n',delegateStart);
-  const delegate=swiftSource.slice(delegateStart,delegateEnd);
-  assert.match(delegate,/completionHandler\(digest == fingerprint \? \.useCredential : \.cancelAuthenticationChallenge/,'叶子证书指纹不匹配仍取消连接');
-  assert.match(delegate,/willPerformHTTPRedirection[\s\S]*?completionHandler\(nil\)/,'重定向仍被丢弃');
-  // 云端系统信任委托：不做自己的信任判断，也不返回 useCredential。
+  assert.ok(funcStart>=0);
+  const body=swiftSource.slice(funcStart,swiftSource.indexOf('        func webView(',funcStart));
+  assert.match(body,/let delegate = SystemTrustAgentDelegate\(expectedHost: host\)/);
+  assert.match(body,/URLSession\(configuration: configuration, delegate: delegate/);
+  assert.match(body,/connectionProxyDictionary[\s\S]*?return 'DIRECT'/);
+  assert.doesNotMatch(swiftSource,/PinnedAgentDelegate|ALONG_MIGRATE_URL|checkLocalRoute/);
+  const plist=readFileSync(new URL('../ios/AlongHealth/Info.plist',import.meta.url),'utf8');
+  assert.doesNotMatch(plist,/NSLocalNetworkUsageDescription/);
   const systemStart=swiftSource.indexOf('final class SystemTrustAgentDelegate');
   assert.notEqual(systemStart,-1,'找不到 SystemTrustAgentDelegate');
   const systemEnd=swiftSource.indexOf('\n}\n',systemStart);
@@ -408,8 +399,8 @@ test('iPhone foreground requests retain their deadlines and background work stop
   const dir=mkdtempSync(join(tmpdir(),'along-deadlines-'));
   try {
     const file=join(dir,'main.swift');
-    writeFileSync(file,`import Foundation\nfunc deadline(_ background: Bool,_ path: String) -> [Double] { [${request},${resource}] }\nlet values=[deadline(false,"/events"),deadline(false,"/connection/verify"),deadline(false,"/sources/device"),deadline(true,"/events"),deadline(true,"/sources/device")]\nprint(String(data:try! JSONSerialization.data(withJSONObject:values),encoding:.utf8)!)`);
+    writeFileSync(file,`import Foundation\nfunc deadline(_ background: Bool,_ path: String) -> [Double] { [${request},${resource}] }\nlet values=[deadline(false,"/events"),deadline(false,"/connection/status"),deadline(false,"/sources/device"),deadline(true,"/events"),deadline(true,"/sources/device")]\nprint(String(data:try! JSONSerialization.data(withJSONObject:values),encoding:.utf8)!)`);
     const output=execFileSync('swift',['-module-cache-path',join(dir,'cache'),file],{encoding:'utf8',timeout:30000});
-    assert.deepEqual(JSON.parse(output),[[120,120],[12,15],[12,15],[8,10],[8,10]]);
+    assert.deepEqual(JSON.parse(output),[[120,120],[120,120],[12,15],[8,10],[8,10]]);
   }finally{rmSync(dir,{recursive:true,force:true});}
 });
