@@ -1,11 +1,11 @@
-import {agentCall, queueEvent, flushEventQueue, dropQueuedEvent, dropQueuedCompletions, pendingEvents, readEventFailures,bindEventAuthority,retireEventAuthority} from './agent-client.mjs?v=106';
-import {assembleEnvelope} from './event-envelope.mjs?v=106';
-import {validateGoalReply} from './goal-agent-core.mjs?v=106';
-import {safeAdaptiveLayout} from './adaptive-ui.mjs?v=106';
-import {safeRecommendation} from './recommendations.mjs?v=106';
-import {safeDataSources} from './data-sources.mjs?v=106';
-import {taskResultRelevant,resultEvidence,validResultEvidence} from './task-results.mjs?v=106';
-import {safeResultPresentation,RESULT_TEXT_LIMIT,wellFormedResultText} from './task-result-view.mjs?v=106';
+import {agentCall, queueEvent, flushEventQueue, dropQueuedEvent, dropQueuedCompletions, pendingEvents, readEventFailures,bindEventAuthority,retireEventAuthority} from './agent-client.mjs?v=107';
+import {assembleEnvelope} from './event-envelope.mjs?v=107';
+import {validateGoalReply} from './goal-agent-core.mjs?v=107';
+import {safeAdaptiveLayout} from './adaptive-ui.mjs?v=107';
+import {safeRecommendation} from './recommendations.mjs?v=107';
+import {safeDataSources} from './data-sources.mjs?v=107';
+import {taskResultRelevant,resultEvidence,validResultEvidence} from './task-results.mjs?v=107';
+import {safeResultPresentation,RESULT_TEXT_LIMIT,wellFormedResultText} from './task-result-view.mjs?v=107';
 
 const id = value => typeof value==='string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$/.test(value);
 const record = value => value!==null && typeof value==='object' && !Array.isArray(value);
@@ -649,6 +649,8 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
         if (entry.outcome===resolved) continue;
         completions[taskId]={...entry,outcome:resolved};
         changed=true;
+        // 服务端已经收下这条完成事实：排队里为这项任务等着的其他完成事实不必再送达。
+        if (resolved==='accepted') dropQueuedCompletions(config,taskId);
       }
     }
     if (!changed) return;
@@ -767,18 +769,29 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
     let changed=false;
     for (const [taskId,entry] of Object.entries(completions)) {
       if (entry.outcome!==undefined&&entry.outcome!=='unconfirmed') continue;
-      const goal=next.goals[entry.goalId];
-      const task=goal?.tasks.find(item=>item.id===taskId);
-      // 服务端说完成了：以服务端为准，这项任务已经做完（台账一并清掉）。
-      if (task?.status==='done') {
-        delete completions[taskId];changed=true;
-        // 排队里为这项任务等着的完成事实不必再送达——服务端已经收过同一次完成了。
-        dropQueuedCompletions(config,taskId);
-        continue;
-      }
       // 服务端说还没完成（或这次没拿到快照）：结果不明，保持可重试，也不再反复回放。
       completions[taskId]={...entry,outcome:'unknown'};
       changed=true;
+    }
+    if (changed) next.completions=completions;
+    return changed;
+  }
+  /**
+   * 服务端快照说这项任务已经完成：以服务端为准，这项任务退出当前列表（台账一并清掉），
+   * 排队里为它等着的完成事实也不必再送达——服务端已经收过同一次完成了。
+   *
+   * 这一步**每页都做**：目标快照可能落在回放的中间某页，不能等到最后一页才清理。
+   */
+  function confirmCompletedTasks(next) {
+    const completions={...completionsOf(next.completions)};
+    let changed=false;
+    for (const [taskId,entry] of Object.entries(completions)) {
+      if (entry.outcome!==undefined&&entry.outcome!=='unconfirmed') continue;
+      const goal=next.goals[entry.goalId];
+      const task=goal?.tasks.find(item=>item.id===taskId);
+      if (task?.status!=='done') continue;
+      delete completions[taskId];changed=true;
+      dropQueuedCompletions(config,taskId);
     }
     if (changed) next.completions=completions;
     return changed;
@@ -885,7 +898,9 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
       if (page.items.length===0) {
         if (page.nextCursor!==undefined) throw Error('同步分页游标不正确');
         if (replay) {next.recommendationsVersion=1;next.conversationVersion=1;next.dataSourcesVersion=1;next.executionVersion=2;next.taskCapabilityVersion=1;next.resultPresentationVersion=1;delete next.resultPresentationReplayAfter;delete next.taskCapabilityReplayAfter;delete next.recommendationReplayAfter;delete next.conversationReplayAfter;delete next.dataSourcesReplayAfter;delete next.executionReplayAfter;delete next.executionReplayVersion;}
-        // 回放完成：按服务端当前快照收敛旧条目（已完成就退出当前列表，没完成就保持可重试）。
+        // 先按服务端当前快照确认「已经完成」的任务（目标快照可能就在这一页）。
+        confirmCompletedTasks(next);
+        // 回放完成：其余旧条目收敛为「结果不明」，保持可重试，也不再反复回放。
         if (replay) resolveUnresolvedCompletions(next);
         // 终态回执（被拒／冲突）立刻收敛完成事实台账：任务回到可完成状态，不必等下一张有内容的同步页。
         const beforeCompletions=JSON.stringify(completionsOf(next.completions));
@@ -927,8 +942,11 @@ export function createEventWorkspace({config,onChange=()=>{},onNotifications}) {
       }
       if (page.nextCursor!==undefined&&String(page.nextCursor)!==String(previous)) throw Error('同步分页游标不正确');
       restoreSelection(next);
-      // 回放结束（最后一页）时先按服务端当前快照收敛旧条目，再剪枝：剪枝会先删掉
-      // 「服务端说已完成」的条目，收敛就来不及丢掉排队里那条完成事实了。
+      // 先按服务端当前快照确认「已经完成」的任务（每页都做），再剪枝：剪枝会先删掉
+      // 「服务端说已完成」的条目，清理排队里那条完成事实就来不及了。
+      confirmCompletedTasks(next);
+      // 回放结束（最后一页）才把其余旧条目收敛为「结果不明」：中途收敛会把还没读到的
+      // 目标快照当成「服务端没说完成」。
       if (replay&&page.nextCursor===undefined) resolveUnresolvedCompletions(next);
       // 快照确认后收敛完成事实台账：同一任务不再重复提交完成事实。
       pruneCompletions(next);
