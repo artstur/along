@@ -15,6 +15,7 @@ import {GOAL_SUPER_AGENT_RUNS_KEY, SUPER_AGENT_RUNS_KEY, createFailedGoalSuperAg
 import {AGENT_NOTIFICATION_LEDGER_KEY, goalRunNotification, taskRunNotification, healthProposalNotification,
   notificationWasDelivered, recordNotificationDelivered} from './agent-notifications.mjs?v=111';
 import {PLANNING_STATE_KEY,cleanDailyDelegation,validateDailyActions,agentHealthSnapshot,cleanPlanningContext,healthContextChanges,createPlanningContext,validateReassessment,buildBackgroundReviewRequest} from './contextual-planning.mjs?v=111';
+import {NICKNAME_MAX,cleanNickname,readProfile,writeProfile,profileNickname as profileNicknameFor,adoptProfile as adoptProfileFor,setNickname} from './user-profile.mjs?v=110';
 const TICKET_KEY = 'along.goal-ticket.v1';
 const REMINDER_SYNC_KEY='along.health-reminder-sync.v1';
 const HEALTH_SHARING_KEY='along.health-sharing.v1';
@@ -65,6 +66,10 @@ let finance = loadFinance(localStorage.getItem(FINANCE_KEY));
 const storedActiveGoal=localStorage.getItem(ACTIVE_GOAL_KEY);
 let activeGoal = storedActiveGoal === 'finance' || isCustomGoalKey(storedActiveGoal) ? storedActiveGoal : 'health';
 let screen = 'home';
+// 设置页从哪儿进的：返回时回到那一页，不把用户丢回首页。
+let settingsFrom = 'home';
+// 设置页里正在输入、尚未保存的昵称。null 表示没在编辑，页面显示已保存的值。
+let nicknameDraft = null;
 let previousGoalBeforeDraft = null;
 let selectedTaskId = null;
 let running = false;
@@ -227,6 +232,8 @@ function connectEventWorkspace(userId) {
   const binding={bindingScopeId:bindingKeyOf(agentConfig),userId,bindingOrigin:originOf(agentConfig.baseURL)};
   const previous=eventConnection();
   localStorage.setItem(EVENT_CONNECTION_KEY,JSON.stringify(binding));
+  // 身份确认了：把还挂在设备上的昵称认领到它。认领只改昵称归属，UID 与配对关系不动。
+  adoptProfile(userId);
   const bindingKey=JSON.stringify([agentConfig.baseURL,bindingKeyOf(agentConfig),agentConfig.token,userId]);
   if (!eventWorkspace||previous?.userId!==userId||eventWorkspaceBinding?.key!==bindingKey) {
     disconnectEventWorkspace();
@@ -246,7 +253,7 @@ function connectEventWorkspace(userId) {
       const local=choices.find(item=>item.key===storedActiveGoal)??choices[0];
       if (local) localSelection={key:local.key,initial:true};
     }
-    screen=localSelection||view.activeGoalId?'home':'agent';
+    screen=screen==='settings'?'settings':localSelection||view.activeGoalId?'home':'agent';
   }
   agentRuntime=DSH_RUNTIME;
   localStorage.setItem(AGENT_RUNTIME_KEY,agentRuntime);
@@ -306,7 +313,7 @@ function activateAgentConfig(config,{rebind=false,runtime=agentRuntime,transport
   const replaceBinding=rebind||previous.token&&!sameBinding;
   persistAgentConfig(config,{preserveTransport});
   if (replaceBinding) {
-    if (eventWorkspace) screen='agent';
+    if (eventWorkspace&&screen!=='settings') screen='agent';
     disconnectEventWorkspace();
     localSelection=null;
     localStorage.removeItem(EVENT_CONNECTION_KEY);
@@ -755,6 +762,32 @@ function show(html) {
 
 function brand() {
   return `<div class="brand"><img class="brand-symbol" src="./app-icon.png" alt=""><span>along</span></div>`;
+}
+
+// 昵称沿用既有身份，不另建账号体系：规则在 user-profile.mjs 里，
+// 这里只负责存取与渲染。认领只改昵称归属，不改 UID，也不动配对关系。
+const PROFILE_KEY='along.user-profile.v1';
+function currentUserId() { return eventConnection()?.userId||null; }
+function storedProfile() { return readProfile(localStorage.getItem(PROFILE_KEY)); }
+function profileNickname() { return profileNicknameFor(storedProfile(),currentUserId()); }
+function saveProfile(nickname) {
+  const record=setNickname(storedProfile(),nickname,currentUserId());
+  if (record) localStorage.setItem(PROFILE_KEY,writeProfile(record));
+  else localStorage.removeItem(PROFILE_KEY);
+  return record;
+}
+// 身份确认后，把还挂在设备上的昵称认领到该身份：昵称跟着走，UID 不变。
+function adoptProfile(userId) {
+  const record=adoptProfileFor(storedProfile(),userId);
+  if (record) localStorage.setItem(PROFILE_KEY,writeProfile(record));
+}
+// 顶部栏的个人入口：设置过昵称就显示昵称，否则显示身份标识，都没有就写「设置」。
+function profileChip() {
+  const label=profileNickname()||currentUserId()||'设置';
+  return `<button class="topbar-profile" data-action="open-settings" aria-label="设置" title="设置">${esc(label)}</button>`;
+}
+function topbar(caption='') {
+  return `<header class="topbar"><div class="topbar-inner">${brand()}<div class="topbar-side">${caption?`<span class="topbar-caption">${esc(caption)}</span>`:''}${profileChip()}</div></div></header>`;
 }
 function backButton(action,label) {
   return `<button class="back-button icon-only" data-action="${esc(action)}" aria-label="${esc(label)}" title="${esc(label)}"><svg viewBox="0 0 12 24" aria-hidden="true"><path d="M9 18l-6-6 6-6"/></svg></button>`;
@@ -1237,7 +1270,7 @@ function home() {
         ${activeGoal === 'finance' && finance.connected ? '<p class="connection-footnote">点“模拟 +¥800”只会更新这份本机演示数据，不会访问账户或发起交易。</p>' : ''}
       </section>`:'';
   const recommendedConnectionContent=layout?adaptiveConnectionSection(layout):'';
-  return `<div class="app-shell"><header class="topbar"><div class="topbar-inner">${brand()}</div></header>
+  return `<div class="app-shell">${topbar()}
     <main class="content ${layout?'adaptive-space':''}">
       <div class="goal-switch"><label for="goal-select">当前目标</label><div class="goal-switch-actions"><div class="select-wrap"><select id="goal-select" aria-label="切换目标"><option value="health" ${activeGoal === 'health' ? 'selected' : ''}>健康 · ${goalLayouts.health?'个性化计划':'每周运动'}</option><option value="finance" ${activeGoal === 'finance' ? 'selected' : ''}>理财 · ${goalLayouts.finance?'个性化计划':'应急储备'}</option>${customOptions}<option value="new-custom">＋ 新建目标</option></select><span aria-hidden="true">⌄</span></div><button class="goal-add-button" data-action="new-goal">新建</button></div></div>
       <div class="runtime-switch home-runtime-switch" role="group" aria-label="选择 Agent 运行时"><button type="button" data-action="select-runtime" data-runtime="${DSH_RUNTIME}" class="${agentRuntime===DSH_RUNTIME?'active':''}" aria-pressed="${agentRuntime===DSH_RUNTIME}">DSH Agents</button><button type="button" data-action="select-runtime" data-runtime="${KIMI_RUNTIME}" class="${agentRuntime===KIMI_RUNTIME?'active':''}" aria-pressed="${agentRuntime===KIMI_RUNTIME}">Kimi Swarm</button></div>
@@ -1280,7 +1313,7 @@ function taskExecutionRecord(run) {
 function taskDetailPage() {
   const task=selectedTask();
   if (!task) {
-    return `<div class="app-shell"><header class="topbar"><div class="topbar-inner">${brand()}<span class="topbar-caption">Along</span></div></header><main class="content task-detail">${backButton('task-back','返回动态任务')}<div class="empty-task"><h1>任务已更新</h1><p>这项动态任务已不在当前计划中，请返回查看最新安排。</p></div></main></div>`;
+    return `<div class="app-shell">${topbar('Along')}<main class="content task-detail">${backButton('task-back','返回动态任务')}<div class="empty-task"><h1>任务已更新</h1><p>这项动态任务已不在当前计划中，请返回查看最新安排。</p></div></main></div>`;
   }
   const local=localOnlyTask(task),run=currentSuperAgentRun(task),actual=run?.actual===true;
   const stopped=actual&&stoppedTaskDecision(run);
@@ -1308,7 +1341,7 @@ function taskDetailPage() {
   const layout=goalLayouts[activeGoal],dayCtx=dailyCardContext(layout,layout?localWeeklyWorkoutProgress(layout):null);
   const dayTopic=Object.keys(dayCtx.actions).find(t=>dayCtx.ids[t]===task.id),daily=dayCtx.actions[dayTopic];
   const showProgress=actual&&!stopped&&Number.isFinite(run.progress),percent=showProgress?runProgress(run.progress):0;
-  return `<div class="app-shell super-agent-shell"><header class="topbar"><div class="topbar-inner">${brand()}<span class="topbar-caption">Along · ${local?'任务详情':'任务协作'}</span></div></header><main class="content task-detail">
+  return `<div class="app-shell super-agent-shell">${topbar(`Along · ${local?'任务详情':'任务协作'}`)}<main class="content task-detail">
     ${backButton('task-back','返回动态任务')}
     <section class="task-hero"><div class="task-hero-top"><span class="eyebrow">${esc(task.when)} · ${esc(taskStateLabel[task.state])}</span><span class="run-status ${actual?runStatus(stopped?'blocked':run.status):''}">${local?'':'<i></i>'}${esc(status)}</span></div><h1>${esc(task.title)}</h1><p>${esc(task.detail)}</p>
     ${showProgress?`<div class="run-progress-head"><span>总体进展</span><strong>${percent}%</strong></div><div class="run-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}"><span style="width:${percent}%"></span></div>`:''}</section>
@@ -1374,7 +1407,76 @@ function pairForm() {
   return `<form id="pair-form"><input name="baseURL" type="url" aria-label="Along 服务地址" placeholder="Along 服务地址" value="${esc(agentConfig.baseURL||'')}" required><input name="fingerprint" aria-label="连接指纹（仅 Mac 私网需要）" placeholder="连接指纹（仅 Mac 私网需要）" value="${esc(agentConfig.fingerprint||'')}"><input name="code" aria-label="一次性连接码" placeholder="一次性连接码" inputmode="numeric" required><button class="button" ${connectionBusy?'disabled':''}>${agentConfig.token?'重新配对':'连接 Along'}</button></form>`;
 }
 function connectionSetup(error) {
-  return `<details class="agent-setup" data-agent-connection><summary>${error?`连接需处理 · ${esc(error)}`:'Along 连接'}</summary>${pairForm()}${error?`<form id="host-address-form"><label>只更新服务地址<input name="baseURL" type="url" value="${esc(agentConfig.baseURL||'')}" required></label><button class="button" ${connectionBusy||agentBusy?'disabled':''}>验证并更新</button></form>`:''}</details>`;
+  return `<details class="agent-setup" data-agent-connection><summary>${error?`连接需处理 · ${esc(error)}`:'Along 连接'}</summary>${pairForm()}${error?hostAddressForm():''}</details>`;
+}
+function hostAddressForm() {
+  return `<form id="host-address-form"><label>只更新服务地址<input name="baseURL" type="url" value="${esc(agentConfig.baseURL||'')}" required></label><button class="button" ${connectionBusy||agentBusy?'disabled':''}>验证并更新</button></form>`;
+}
+// 设置页的三个功能都用同一批既有流程：健康与 OKX 走原生桥接的既有授权，
+// 配对走既有的 /pair 与 Keychain 凭据。设置页只做状态汇总与入口，不新造连接逻辑。
+function healthSourceStatus() {
+  if (nativeHealthStatus==='checking') return {label:'检查中',kind:'none',detail:'正在确认本机健康读取权限。'};
+  if (nativeHealthStatus==='unlinked') return {label:'未连接',kind:'none',detail:'本机没有可用的健康数据授权，可以重新连接。'};
+  if (nativeHealthStatus==='unavailable') return {label:'读取失败',kind:'none',detail:'暂时读不到本机健康数据，可以重试。'};
+  if (state.source==='demo') return {label:'演示数据',kind:'demo',detail:'当前是演示数据，没有连接真实健康数据。'};
+  if (state.source==='healthkit') {
+    const types=state.snapshot?.selectedTypes?.length??0;
+    return state.snapshot?.contextReviewAllowed===true
+      ? {label:'已连接',kind:'real',detail:`已选 ${types} 项 · 已允许 Agent 评估`}
+      : {label:'已导入',kind:'none',detail:`已选 ${types} 项 · 尚未允许 Agent 评估`};
+  }
+  return {label:'未连接',kind:'none',detail:'在 iPhone 上选择要读取的健康数据后导入本机。'};
+}
+function okxSourceStatus(goal) {
+  const status=okxStates.get(goal.id);
+  if (!status) return {label:'未连接',kind:'none',detail:'只读接入 · 尚未连接'};
+  if (status.error) return {label:'连接失败',kind:'none',detail:'连接状态暂不可用，可以重试。'};
+  if (status.state==='connected') return {label:'已连接',kind:'real',detail:status.syncState==='received'?'只读 · Mac 已收到摘要':'只读 · 等待同步到 Mac'};
+  return {label:'未连接',kind:'none',detail:'只读接入 · 尚未连接'};
+}
+function sourceCard(symbol,name,status,action) {
+  return `<div class="connection-card"><div class="connection-symbol" aria-hidden="true">${symbol}</div><div class="connection-copy"><div class="connection-name"><strong>${esc(name)}</strong><span class="source-tag ${esc(status.kind)}">${esc(status.label)}</span></div><p>${esc(status.detail)}</p></div><button class="agent-action connection-agent-action" data-action="${esc(action.id)}" ${action.disabled?'disabled':''}>${esc(action.label)}</button></div>`;
+}
+function settingsPage() {
+  const nickname=profileNickname();
+  // 正在输入的昵称先记在草稿里：后台同步会重画整页，不能把用户打到一半的字抹掉。
+  const draft=nicknameDraft??nickname;
+  const userId=currentUserId();
+  const health=healthSourceStatus();
+  const healthAction=eventWorkspace?'event-health-connect':'connect-health';
+  const healthButton=health.kind==='real'?{id:healthAction,label:'管理'}:health.label==='读取失败'?{id:healthAction,label:'重试'}:{id:healthAction,label:'连接'};
+  const view=eventWorkspace?.view();
+  const goal=view?.goals?.[view.activeGoalId];
+  const okx=goal?.dataSources?.some(source=>source.provider==='okx')?goal:null;
+  if (okx) queueOkxStatus(okx.id);
+  const serverLabel=!agentConfig.token?{label:'未配对',kind:'none',detail:'还没有连接 Along 服务。'}
+    :agentConnection.status==='ready'?{label:'已连接',kind:'real',detail:`${agentConfig.baseURL||''}`}
+    :agentConnection.status==='error'?{label:'连接需处理',kind:'none',detail:agentConnection.error||'连接检查失败，可以重试。'}
+    :{label:'检查中',kind:'none',detail:'正在验证 Along 服务。'};
+  return `<div class="app-shell">${topbar('设置')}
+  <main class="content settings-content">
+    ${backButton('settings-back','返回')}
+    <h1>设置</h1>
+    <section class="settings-section" aria-label="昵称">
+      <div class="section-heading"><h2>昵称</h2><span>Along 怎么称呼你</span></div>
+      <form id="nickname-form" class="settings-form">
+        <input name="nickname" type="text" maxlength="${NICKNAME_MAX}" aria-label="昵称" placeholder="你的昵称" value="${esc(draft)}">
+        <button class="button" ${connectionBusy?'disabled':''}>保存</button>
+      </form>
+      <p class="settings-note">${userId?`当前身份 ${esc(userId)} · 改昵称不会改变身份或配对关系。`:'还没有配对 Along。昵称先保存在本机，配对后归到该身份下。'}</p>
+    </section>
+    <section class="settings-section" aria-label="数据源">
+      <div class="section-heading"><h2>数据源</h2><span>授权与连接状态</span></div>
+      ${sourceCard('♥','Apple Health',health,healthButton)}
+      ${okx?sourceCard('O','OKX',okxSourceStatus(okx),{id:'event-okx-connect',label:okxStates.get(okx.id)?.state==='connected'?'管理连接':'连接'}):''}
+    </section>
+    <section class="settings-section" aria-label="Along 服务">
+      <div class="section-heading"><h2>Along 服务</h2><span>配对与连接</span></div>
+      <div class="connection-card"><div class="connection-symbol" aria-hidden="true">⌘</div><div class="connection-copy"><div class="connection-name"><strong>Along 服务</strong><span class="source-tag ${esc(serverLabel.kind)}">${esc(serverLabel.label)}</span></div><p>${esc(serverLabel.detail)}</p></div>${agentConfig.token?`<button class="agent-action connection-agent-action" data-action="settings-retry-connection" ${connectionBusy?'disabled':''}>重试</button>`:''}</div>
+      ${agentConfig.token?`<details class="agent-setup" data-agent-connection open><summary>重新配对或更新服务地址</summary>${pairForm()}${agentConnection.error?hostAddressForm():''}</details>`
+        :`<details class="agent-setup" data-agent-connection open><summary>连接 Along</summary>${pairForm()}</details>`}
+    </section>
+  </main></div>`;
 }
 function goalAgentPage() {
   const goalKey=activeGoal;
@@ -1390,7 +1492,7 @@ function goalAgentPage() {
   const connectionText=agentConnection.status==='ready'?[`Along 与 ${meta.short} 已连接`,'整条目标编排链路可用','已验证']:
     agentConnection.status==='error'?['连接需处理',agentConnection.error,'需处理']:['正在检查连接',`正在验证 Along 服务与 ${meta.full}`,'检查中'];
   const pending=agentPendingRequest?.goalKey===goalKey?agentPending(agentPendingRequest.id):'';
-  return `<div class="app-shell agent-shell"><header class="topbar"><div class="topbar-inner">${brand()}</div></header><main class="content agent-page"><div class="agent-scroll">${backButton('agent-back','返回目标')}<div class="agent-title"><span class="eyebrow">${label} · ${esc(meta.full)}</span><h1>${esc(goal.title)}</h1><p>当前目标：${targetText}。${esc(meta.description)}</p></div>
+  return `<div class="app-shell agent-shell">${topbar()}<main class="content agent-page"><div class="agent-scroll">${backButton('agent-back','返回目标')}<div class="agent-title"><span class="eyebrow">${label} · ${esc(meta.full)}</span><h1>${esc(goal.title)}</h1><p>当前目标：${targetText}。${esc(meta.description)}</p></div>
   <div class="runtime-switch" role="group" aria-label="选择 Agent 运行时"><button type="button" data-action="select-runtime" data-runtime="${DSH_RUNTIME}" class="${agentRuntime===DSH_RUNTIME?'active':''}" aria-pressed="${agentRuntime===DSH_RUNTIME}">DSH Agents</button><button type="button" data-action="select-runtime" data-runtime="${KIMI_RUNTIME}" class="${agentRuntime===KIMI_RUNTIME?'active':''}" aria-pressed="${agentRuntime===KIMI_RUNTIME}">Kimi Swarm</button></div>
   ${agentConfig.token ? `<div class="agent-status ${agentConnection.status}"><strong>${esc(connectionText[0])}</strong><span>${esc(connectionText[1])}</span><em>${esc(connectionText[2])}</em></div>${connectionSetup(agentConnection.error)}` : `<div class="agent-setup"><h2>首次连接 Along</h2>${pairForm()}</div>`}
   <div class="agent-messages" role="log" aria-live="polite">${history.length?history.map(item=>agentMessage(item,goal,domain)).join(''):pending?'':'<p class="agent-empty">说说你希望达成什么、期限、约束和偏好。</p>'}${pending}</div>
@@ -1454,7 +1556,7 @@ function experimentPanel() {
   return `<section class="lab-card">${loop ? `<div class="lab-head"><div><strong>本周健身 120 分钟</strong><p>从 75 分钟开始，观察任务何时改变。</p></div><button class="minor-action" data-action="experiment-reset">重新开始</button></div><div class="lab-actions"><button class="button" data-action="event-workout-35" ${running ? 'disabled' : ''}>新增 35 分钟</button><button class="button secondary" data-action="event-workout-1" ${running ? 'disabled' : ''}>仅新增 1 分钟</button><button class="button secondary" data-action="event-steps" ${running ? 'disabled' : ''}>仅步数变化</button></div>${latest ? `<div class="change-card"><span class="eyebrow">${latest.status === 'pending' ? '正在请求 Along…' : latest.status === 'error' ? '建议暂不可用' : latest.source === 'live-along' ? 'Along 实时建议' : 'Along 建议回放'}</span><div class="change-flow"><div><span>原任务</span><strong>${esc(latest.beforeTask)}</strong></div><span class="flow-arrow">→</span><div><span>新任务</span><strong>${esc(latest.suggestion?.task ?? (latest.status === 'error' ? '尚未生成' : '生成中…'))}</strong></div></div><p>${latest.remainingBefore} → ${latest.remainingAfter} 分钟待完成。${esc(latest.reason)} ${esc(latest.suggestion?.reason ?? '')}</p>${latest.status === 'error' ? `<p>${esc(latest.error)}</p>` : ''}${latest.source === 'recorded-along' ? '<p>公网版显示已录制的 Along 运行结果。</p>' : ''}</div>` : '<p class="lab-hint">轻微或无关变化会安静处理；显著变化才请求新任务。</p>'}${quiet ? `<p class="lab-hint">${quiet} 条变化已安静处理，没有调用 Along。</p>` : ''}` : `<div class="lab-head"><div><strong>看一次目标驱动的调整</strong><p>预设本周 120 分钟、已完成 75 分钟。</p></div></div><button class="button lab-start" data-action="experiment-start">开始实验</button>`}</section>`;
 }
 function lab() {
-  return `<div class="app-shell"><header class="topbar"><div class="topbar-inner">${brand()}<span class="topbar-caption">目标变化实验</span></div></header><main class="content lab-content">${backButton('back-home','返回目标')}<h1>当进度变化，下一步会怎样变？</h1><p class="lab-intro">这是与真实健康数据隔离的模拟实验。Along 计算进度，再判断是否需要更新建议。</p>${experimentPanel()}</main></div>`;
+  return `<div class="app-shell">${topbar('目标变化实验')}<main class="content lab-content">${backButton('back-home','返回目标')}<h1>当进度变化，下一步会怎样变？</h1><p class="lab-intro">这是与真实健康数据隔离的模拟实验。Along 计算进度，再判断是否需要更新建议。</p>${experimentPanel()}</main></div>`;
 }
 function eventDataSources(goal) {
   if (!goal) return '';
@@ -1578,7 +1680,7 @@ function localRecordPage(choice,title,picker,connection) {
     :`${backButton('local-exit','返回 Along 目标')}<section class="goal-card"><h1>${esc(title)}</h1>${goalLayouts[key]?.summary?`<p class="goal-note">${esc(goalLayouts[key].summary)}</p>`:''}
       ${receipt||(taskId?'<p>原提醒关联的任务已调整</p>':'')}</section>
       <section class="task-section"><div class="section-heading"><h2>本机任务</h2></div><div class="task-list">${tasks.map(t=>`<button class="generated-task generated-task-button" data-action="local-task" data-task-id="${esc(t.id)}"><strong>${esc(t.title)}</strong><p>${esc(t.detail)}</p></button>`).join('')||'<p class="agent-empty">这个目标没有已保存的任务。</p>'}</div></section>`;
-  return `<div class="app-shell"><header class="topbar"><div class="topbar-inner">${brand()}</div></header><main class="content">${picker}${connection}${card}</main></div>`;
+  return `<div class="app-shell">${topbar()}<main class="content">${picker}${connection}${card}</main></div>`;
 }
 function taskReminderLine(task) {
   const plan=task.reminderPlan;
@@ -1724,8 +1826,7 @@ function eventWorkspacePage() {
     :goal&&screen==='task'?eventTaskDetail(goal,scopedMessages)
     :goal&&screen==='history'?eventTaskHistory(goal,pendingCompletions)
     :goal?`${connection}<section class="goal-card"><h1>${esc(goal.title)}</h1>${goalSummary?`<p class="event-goal-summary">${esc(goalSummary)}</p>`:''}${goal.metric?`<p class="goal-note">${esc(goal.metric.target)} ${esc(goal.metric.unit)} · ${esc(goal.metric.period)}</p>`:''}<div class="card-actions"><button class="agent-action" data-action="event-chat">聊聊这个目标</button></div></section><section class="task-section"><div class="section-heading"><h2>动态任务</h2><button class="section-link" data-action="event-task-history">历史任务</button></div><div class="task-list">${openTasks.map(task=>eventTaskCard(task,pendingCompletions)).join('')||'<p class="agent-empty">通过聊天安排下一步。</p>'}</div></section>${eventDataSources(goal)}`:connection;
-  return `<div class="app-shell ${chat?'agent-shell':''}"><header class="topbar"><div class="topbar-inner">${brand()}</div></header><main class="content ${chat?'agent-page':goal&&screen==='task'?'event-task-detail':''}"><div class="${chat?'agent-scroll':''}">${goalPicker}${content}</div>${chat?`<div class="agent-composer-dock"><form id="agent-form" class="agent-composer"><textarea name="message" rows="1" placeholder="说说你的想法" maxlength="800" data-draft-scope="${esc(view.draftScope)}" required>${esc(eventWorkspace.draft())}</textarea><button class="agent-send" aria-label="发送" ${agentBusy?'disabled':''}>↑</button></form><p class="agent-disclaimer">Along · 一起，慢慢向前</p></div>`:''}</main></div>`;
-}
+  return `<div class="app-shell ${chat?'agent-shell':''}">${topbar()}<main class="content ${chat?'agent-page':goal&&screen==='task'?'event-task-detail':''}"><div class="${chat?'agent-scroll':''}">${goalPicker}${content}</div>${chat?`<div class="agent-composer-dock"><form id="agent-form" class="agent-composer"><textarea name="message" rows="1" placeholder="说说你的想法" maxlength="800" data-draft-scope="${esc(view.draftScope)}" required>${esc(eventWorkspace.draft())}</textarea><button class="agent-send" aria-label="发送" ${agentBusy?'disabled':''}>↑</button></form><p class="agent-disclaimer">Along · 一起，慢慢向前</p></div>`:''}</main></div>`;}
 function renderEventUpdate() {
   if (!eventWorkspace) return;
   if (waitingForSavedGoal&&eventWorkspace.view().activeGoalId) {
@@ -1765,7 +1866,11 @@ function render() {
   const panel=connectionBusy?null:app.querySelector('[data-agent-connection][open]');
   const fields=panel?.querySelectorAll('input');
   const focused=document.activeElement;
-  app.innerHTML = eventWorkspace ? eventWorkspacePage() : screen === 'lab' ? lab() : screen === 'agent' ? goalAgentPage() : screen === 'task' ? taskDetailPage() : home();
+  // 昵称输入框：后台同步会重画整页，正在输入的昵称不能被抹掉，
+  // 也不能因此把焦点从输入框里拽走。
+  const nicknameInput=app.querySelector('#nickname-form [name="nickname"]');
+  const nicknameFocused=nicknameInput===focused;
+  app.innerHTML = screen === 'settings' ? settingsPage() : eventWorkspace ? eventWorkspacePage() : screen === 'lab' ? lab() : screen === 'agent' ? goalAgentPage() : screen === 'task' ? taskDetailPage() : home();
   const nextPanel=fields?.length?app.querySelector('[data-agent-connection]'):null;
   if (nextPanel) {
     nextPanel.open=true;
@@ -1777,6 +1882,7 @@ function render() {
       }
     }
   }
+  if (nicknameFocused) app.querySelector('#nickname-form [name="nickname"]')?.focus();
   queueBackgroundSync();
 }
 function renderAgentUpdate({follow=false}={}) {
@@ -1938,6 +2044,7 @@ app.addEventListener('change', event => {
   render();
 });
 app.addEventListener('input', event => {
+  if (event.target.matches?.('#nickname-form [name="nickname"]')) {nicknameDraft=event.target.value;return;}
   if (!event.target.matches('#agent-form textarea')) return;
   if (eventWorkspace) {waitingForSavedGoal=false;eventWorkspace.setDraft(event.target.value);}
   event.target.style.height='auto';
@@ -1947,6 +2054,11 @@ app.addEventListener('click', event => {
   const actionTarget=event.target.closest('[data-action]');
   const action = actionTarget?.dataset.action;
   if (!action) return;
+  // 设置页在两种链路下都能进，所以它的动作放在事件工作区分支之前。
+  // 已经在设置页时不改返回目标：否则返回键会把用户留在设置页里。
+  if (action==='open-settings') {if (screen!=='settings') settingsFrom=screen;screen='settings';render();return;}
+  if (action==='settings-back') {screen=settingsFrom||'home';render();return;}
+  if (action==='settings-retry-connection') {void refreshAgentConnection().then(()=>render());return;}
   if (eventWorkspace) {
     if (action==='new-goal') beginNewGoal();
     else if (action==='local-exit') {
@@ -2093,8 +2205,18 @@ app.addEventListener('click', event => {
   if (action === 'event-steps') injectEvent({type:'steps', amount:100});
 });
 app.addEventListener('submit', async event => {
-  if (!['pair-form','agent-form','health-review-answer','host-address-form'].includes(event.target.id)) return;
+  if (!['pair-form','agent-form','health-review-answer','host-address-form','nickname-form'].includes(event.target.id)) return;
   event.preventDefault();
+  if (event.target.id==='nickname-form') {
+    const value=String(new FormData(event.target).get('nickname')||'');
+    const clean=cleanNickname(value);
+    // 昵称只是显示名：写它不动 UID，也不动配对关系与凭据。
+    saveProfile(clean);
+    nicknameDraft=null;
+    notice(clean?'昵称已保存':'已清除昵称');
+    render();
+    return;
+  }
   if (event.target.id==='health-review-answer') {
     const answer=String(new FormData(event.target).get('answer')||'').trim().slice(0,300);
     if (answer&&hasHealthSource(activeGoal)) await reviewFor(activeGoal).answer(answer);

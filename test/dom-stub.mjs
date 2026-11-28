@@ -95,5 +95,9 @@ export function installDomStub({storage={}}={}) {
     submit(form) {
       return app.dispatch('submit',{target:{id:'agent-form',fields:{message:'继续'},querySelector:()=>null,reset(){},setAttribute(){}},preventDefault(){}});
     },
+    // 提交指定 id 的表单：字段按 FormData 的读法放在 fields 上。
+    submitForm(id,fields={}) {
+      return app.dispatch('submit',{target:{id,fields,querySelector:()=>null,reset(){},setAttribute(){}},preventDefault(){}});
+    },
   };
 }
