@@ -1,11 +1,11 @@
-import {agentCall, queueEvent, flushEventQueue, dropQueuedEvent, dropQueuedCompletions, pendingEvents, readEventFailures,bindEventAuthority,retireEventAuthority} from './agent-client.mjs?v=110';
-import {assembleEnvelope} from './event-envelope.mjs?v=110';
-import {validateGoalReply} from './goal-agent-core.mjs?v=110';
-import {safeAdaptiveLayout} from './adaptive-ui.mjs?v=110';
-import {safeRecommendation} from './recommendations.mjs?v=110';
-import {safeDataSources} from './data-sources.mjs?v=110';
-import {taskResultRelevant,resultEvidence,validResultEvidence} from './task-results.mjs?v=110';
-import {safeResultPresentation,RESULT_TEXT_LIMIT,wellFormedResultText} from './task-result-view.mjs?v=110';
+import {agentCall, queueEvent, flushEventQueue, dropQueuedEvent, dropQueuedCompletions, pendingEvents, readEventFailures,bindEventAuthority,retireEventAuthority} from './agent-client.mjs?v=111';
+import {assembleEnvelope} from './event-envelope.mjs?v=111';
+import {validateGoalReply} from './goal-agent-core.mjs?v=111';
+import {safeAdaptiveLayout} from './adaptive-ui.mjs?v=111';
+import {safeRecommendation} from './recommendations.mjs?v=111';
+import {safeDataSources} from './data-sources.mjs?v=111';
+import {taskResultRelevant,resultEvidence,validResultEvidence} from './task-results.mjs?v=111';
+import {safeResultPresentation,RESULT_TEXT_LIMIT,wellFormedResultText} from './task-result-view.mjs?v=111';
 
 const id = value => typeof value==='string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$/.test(value);
 const record = value => value!==null && typeof value==='object' && !Array.isArray(value);
@@ -254,6 +254,10 @@ export function safeWorkspaceGoal(snapshot) {
   if (goal.domain==='custom' ? metric!=null : !record(metric)||!text(metric.type,64)||!text(metric.unit,16)||!text(metric.period,32)) throw Error('目标指标格式不正确');
   if (revision.context!=null && (!Array.isArray(revision.context)||revision.context.length>20||revision.context.some(item=>
     typeof item==='string'?!text(item,300):!record(item)||!text(item.text,300)||(item.until!==undefined&&!time(item.until))))) throw Error('目标情境格式不正确');
+  const context=revision.context??[];
+  const summaries=context.filter(item=>record(item)&&item.kind==='goal_summary');
+  const summary=summaries.length===1&&summaries[0].until===undefined&&text(summaries[0].text,120)&&!/[\r\n]/.test(summaries[0].text)
+    ?summaries[0].text.trim():'';
   const seen=new Set();
   const cleanTasks=tasks.map(task=>cleanGoalTask(task,goal.id,seen));
   validateGoalReply({reply:'目标已同步',proposal:{title:revision.title,target:metric?.target??null,
@@ -263,7 +267,7 @@ export function safeWorkspaceGoal(snapshot) {
       title:'下一步',detail:task.content,state:'planned'})),questions:[],connections:[]},goal.domain);
   if (!layout) throw Error('目标页面校验失败');
   return {id:goal.id,domain:goal.domain,status:goal.status,revision:goal.currentRevision,title:revision.title,
-    metric:metric??null,context:revision.context??[],tasks:cleanTasks,layout,dataSources:safeDataSources(snapshot.dataSources)};
+    metric:metric??null,context,...(summary?{summary}:{}),tasks:cleanTasks,layout,dataSources:safeDataSources(snapshot.dataSources)};
 }
 
 function safeMessage(message,item) {
