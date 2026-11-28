@@ -294,3 +294,35 @@ L3 仍不通过，且客户端侧无解：这一档客户端跑的是**修复前
 原验收脚本与补充脚本（`task86-review.mjs`、`task86-review-persistent-503.mjs`，真实 Host + 真实旧 Agent `d16a98b` + 临时 SQLite + Chrome 158）复跑：`accepted`、`recovery`、`retry`、`transport`、`rejectedThenSyncUnavailable` 全部保持通过——`rejectedThenSyncUnavailable` 为 `taskVisible: true`、`buttonWhileFailed: 1`、`buttonAfterReload: 1`、`removedAfterRetry: true`、`dbCompletionCount: 1`、`syncStill503: true`、`successfulSyncsSinceRejection: 0`。
 
 未验证：iPhone/WKWebView 真机、原生桥、App 升级缓存切换，以及正式 Host / Compose / 线上部署态。
+
+### 独立验收再退回：从 v102 升级，旧完成条目没有受理证据（Bug#4）
+
+独立复验（附件 `task86-cache-upgrade-probe.mjs`）用 v102 实际写出的缓存升级，两个场景都没通过：
+
+- 拒收记录仍保留：任务可见，但「完成」按钮缺失，用户无法重试；
+- 拒收记录已被 50 条上限淘汰：任务在初次打开、刷新、同步返回空页后都被隐藏，而服务端那边任务仍是 `open`。
+
+根因：旧缓存里的完成条目没有 `outcome`（那是本轮才加的字段）。上一轮仍按旧口径推断「已受理」——不在待发队列里、也不在失败台账里就算已受理。失败台账被淘汰后，被拒的事实被当成了已受理，任务凭空消失；失败台账还在时，它又被算作「待处理」，完成键被一直扣住。同一个「没有回执」的状态，因为失败台账在不在，两头都错。
+
+修法：**没有受理证据就不当已受理。**
+
+- `acceptedTaskCompletions()` 只认 `outcome==='accepted'`。旧条目（没有 `outcome`）一律不算已受理——宁可让用户重试，也不要把一项没做完的任务凭空藏起来。服务端快照说 done 的任务本来就只出现在历史任务里，两处口径一致。
+- `pendingTaskCompletions()`：`failed` 可重试；`accepted` 不重复提交；`queued` 与旧条目只有在事件**真的还在待发队列里**时才算待处理——队列里存着原始信封与原事件号，重投时沿用它。
+- 本地失败台账彻底退回诊断记录，不再参与任何判定。
+
+验收：旧条目没有回执时，任务可见、完成键回来、刷新与同步返回空页后同样；旧条目的事实还在队列里时仍算待处理、队列保留原事件号；有明确受理回执的条目仍然隐藏已完成项。
+
+本轮实测：客户端 `npm run check` 913 项：909 通过、0 失败、4 跳过（新增 2 项）。回退检测：把旧条目的受理判定改回旧口径 → 「旧完成条目没有回执时任务仍可见可重试」变红。
+
+用独立验收的升级探针原样复跑（`task86-cache-upgrade-probe.mjs`，v102 真实客户端写出的缓存 + v104 客户端 + DOM 桩）：
+
+| 场景 | 修前（`9c91f2a`） | 修后 |
+| --- | --- | --- |
+| 拒收记录仍保留 → 打开 v104 | 任务可见、**按钮缺失** | 任务可见、**按钮在** |
+| 拒收记录已淘汰 → 打开 v104 | **任务被隐藏** | 任务可见、按钮在 |
+| 同上，刷新后 | **任务被隐藏** | 任务可见、按钮在 |
+| 同上，同步返回空页后 | **任务被隐藏** | 任务可见、按钮在 |
+
+新链路（v104 自己的缓存）同时保持：`afterEviction` 与 `afterReload` 均 `visible: true, retryable: true`；重试回执挂起时 `beforeAcceptance` 为 `visible: true, retryable: false`（卡片还在，完成键暂时扣住）；收到明确的 `accepted` 后 `afterAcceptance` 才变成 `visible: false`——只有明确受理才移除卡片。
+
+未验证：iPhone/WKWebView 真机、原生桥、App 升级缓存切换，以及正式 Host / Compose / 线上部署态。
