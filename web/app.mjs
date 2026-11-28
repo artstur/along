@@ -69,7 +69,10 @@ let screen = 'home';
 // 设置页从哪儿进的：返回时回到那一页，不把用户丢回首页。
 let settingsFrom = 'home';
 // 设置页里正在输入、尚未保存的昵称。null 表示没在编辑，页面显示已保存的值。
+// 草稿要带上它属于哪一对身份：换绑到另一台 Host（或另一个 UID）之后，
+// 上一对身份的草稿不能跟着飘过去，也不能被误存进新身份。
 let nicknameDraft = null;
+let nicknameDraftScope = null;
 let previousGoalBeforeDraft = null;
 let selectedTaskId = null;
 let running = false;
@@ -350,6 +353,9 @@ function activateAgentConfig(config,{rebind=false,runtime=agentRuntime,transport
     agentRuntime=runtime;
     localStorage.setItem(AGENT_RUNTIME_KEY,runtime);
   }
+  // 连上（或换到）一台 Host 后，把本机桶里的昵称认领过去：
+  // 配到不认 UID 的旧协议 Host 时，作用域是那台 Host，也不该让昵称“消失”。
+  adoptCurrentScope();
   verifiedHealthHost=false;
   agentConnection={status:'checking',error:'',httpStatus:null};
 }
@@ -722,6 +728,8 @@ async function refreshAgentConnection({healthOnly=false}={}) {
   } finally { if (healthOnly&&checkingHealthHost===config) checkingHealthHost=null; }
   if (eventWorkspace) renderEventUpdate();
   else if (screen==='agent') renderAgentUpdate();
+  // 设置页开着时也要重画：冷启动的凭据失效（401）不能停在「检查中」等用户手动重试。
+  else if (screen==='settings') render();
 }
 function healthStateForWorkspace(next) {
   if ((eventWorkspace||eventConnection())&&!localGoalEntries().some(entry=>entry.key==='health')) return withoutDefaultHealthGoal(next);
@@ -776,11 +784,14 @@ function currentUserId() { return eventConnection()?.userId||null; }
 // 或换一台 Host（哪怕回传同一个 UID）都看不到对方的昵称。
 // Host 用 origin 归一：地址或端口不同就是另一台 Host。
 function currentProfileScope() {
-  const userId=currentUserId();
-  // 还没确认身份时不知道该属于哪台 Host，昵称先记在本机桶，等配对确认后再认领。
-  if (!userId) return DEVICE_SCOPE;
-  // 已配对时按「已核验的 Host」算归属：用核验过的 origin，不拿用户随便填的地址当身份。
-  return scopeKey(eventConnection()?.bindingOrigin||originOf(agentConfig.baseURL)||'',userId);
+  const bound=eventConnection();
+  const userId=bound?.userId||null;
+  // Host 也要算进归属：新协议用核验过的 origin；旧协议 Host 不回传 UID，
+  // 但「连的是哪台 Host」是确定的，同样按 Host 分桶，不能让所有 Host 共用本机桶。
+  const host=bound?.bindingOrigin||originOf(agentConfig.baseURL)||'';
+  // 连都没连上（连 Host 都不知道）：先记在本机桶，等配对确认身份后再认领。
+  if (!host) return DEVICE_SCOPE;
+  return scopeKey(host,userId||'');
 }
 function storedProfile() { return readProfile(localStorage.getItem(PROFILE_KEY)); }
 function profileNickname() { return profileNicknameFor(storedProfile(),currentProfileScope()); }
@@ -795,8 +806,20 @@ function saveProfile(nickname) {
 function adoptProfile(userId) {
   if (!userId) return;
   const host=eventConnection()?.bindingOrigin||originOf(agentConfig.baseURL)||'';
+  if (!host) return;
+  adoptScope(scopeKey(host,userId));
+}
+// 把本机桶里还没认领的昵称认领到当前作用域。
+// 旧协议 Host 不回传 UID，但「连的是哪台 Host」是确定的：作用域就是那台 Host，
+// 不给 UID。这时本机桶里的昵称也要认领过去，否则用户会以为刚设的昵称没了。
+function adoptCurrentScope() {
+  const scope=currentProfileScope();
+  if (scope===DEVICE_SCOPE) return;
+  adoptScope(scope);
+}
+function adoptScope(scope) {
   const before=storedProfile();
-  const record=adoptProfileFor(before,scopeKey(host,userId));
+  const record=adoptProfileFor(before,scope);
   // 没有可认领的昵称时什么都不写：不能凭空造出一条空的本机记录。
   if (record&&writeProfile(record)!==writeProfile(before)) localStorage.setItem(PROFILE_KEY,writeProfile(record));
 }
@@ -1460,7 +1483,9 @@ function okxSourceStatus(goal) {
   // 本机已经停了采集、但撤回还排着队等 Host 收尾：这跟「从没连过」不是一回事，
   // 不能混成同一句话（原生 PhoneSourceCoordinator 的 syncState 就是这么分的）。
   if (status.syncState==='pending') return {label:'已停止采集',kind:'none',detail:`${where}本机已停止采集，撤回仍待 Host 接收。`};
-  if (status.syncState==='received') return {label:'已停止采集',kind:'none',detail:`${where}本机已停止采集，最后一份摘要已被 Host 接收。`};
+  // 原生在收到断开回执时把对应序号记为已接收并转 stopped，所以 disconnected+received
+  // 说的是「撤回已获 Host 接收」，不是「最后一份摘要已被接收」。
+  if (status.syncState==='received') return {label:'已停止采集',kind:'none',detail:`${where}本机已停止采集，撤回已获 Host 接收。`};
   return {label:'未连接',kind:'none',detail:`${where}只读接入 · 尚未连接`};
 }
 // 服务状态按「可观测结果」分类，不靠猜：
@@ -1484,11 +1509,13 @@ function serverStatusView() {
   return {label:'检查中',kind:'none',detail:'正在验证 Along 服务。'};
 }
 // OKX 的入口跟着「本人获推荐的目标」走：设置页不该要求用户先切目标才管得到 OKX。
+// 但只有活跃目标能接 OKX——Host 明确要求目标与修订都活跃，
+// 已归档目标即使还留着推荐，也不该给出连不上的连接按钮。
 function okxGoal() {
   const view=eventWorkspace?.view();
   if (!view) return null;
   const goals=view.goals||{};
-  const list=Array.isArray(goals)?goals:Object.values(goals);
+  const list=(Array.isArray(goals)?goals:Object.values(goals)).filter(goal=>goal?.status==='active');
   const active=list.find(goal=>goal.id===view.activeGoalId);
   const hasOkx=goal=>!!goal?.dataSources?.some(source=>source.provider==='okx');
   if (hasOkx(active)) return active;
@@ -1500,7 +1527,9 @@ function sourceCard(symbol,name,status,action) {
 function settingsPage() {
   const nickname=profileNickname();
   // 正在输入的昵称先记在草稿里：后台同步会重画整页，不能把用户打到一半的字抹掉。
-  const draft=nicknameDraft??nickname;
+  // 草稿只在它所属的作用域里有效：换绑之后回到别的身份，就该看到那边已存的（或空的）值。
+  const scope=currentProfileScope();
+  const draft=nicknameDraftScope===scope?(nicknameDraft??nickname):nickname;
   const userId=currentUserId();
   const health=healthSourceStatus();
   const healthAction=eventWorkspace?'event-health-connect':'connect-health';
@@ -2107,7 +2136,11 @@ app.addEventListener('change', event => {
   render();
 });
 app.addEventListener('input', event => {
-  if (event.target.matches?.('#nickname-form [name="nickname"]')) {nicknameDraft=event.target.value;return;}
+  if (event.target.matches?.('#nickname-form [name="nickname"]')) {
+    nicknameDraft=event.target.value;
+    nicknameDraftScope=currentProfileScope();
+    return;
+  }
   if (!event.target.matches('#agent-form textarea')) return;
   if (eventWorkspace) {waitingForSavedGoal=false;eventWorkspace.setDraft(event.target.value);}
   event.target.style.height='auto';
@@ -2290,6 +2323,7 @@ app.addEventListener('submit', async event => {
     // 昵称只是显示名：写它不动 UID，也不动配对关系与凭据。
     saveProfile(clean);
     nicknameDraft=null;
+    nicknameDraftScope=null;
     notice(clean?'昵称已保存':'已清除昵称');
     render();
     return;

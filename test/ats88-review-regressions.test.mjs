@@ -238,3 +238,108 @@ test('a real Host that pairs but is not ready is reported as paired and unavaila
   assert.match(serverSection(dom),/已连接/,'同一 Host 重启后手动重试可恢复');
   assert.equal(JSON.parse(dom.storage.get(AGENT_KEY)).token,token);
 });
+
+// —— 第二轮复验补的五个场景（ats88-reverify-55daf1d.md）——
+
+test('an unsaved nickname draft does not follow a rebind to another Host',async()=>{
+  const bridge=async input=>input.path==='/pair'?{token:'b'.repeat(64)}
+    :input.path==='/connection/status'?READY:{items:[]};
+  const dom=await app({connection:{baseURL:HOST_A,token:'a'.repeat(64),fingerprint:'f'.repeat(64)},bridge});
+  await dom.app.dispatch('input',{target:{matches:selector=>selector.includes('nickname'),value:'DraftA'}});
+  // 同一对身份内的重画不能把草稿抹掉。
+  await dom.click({action:'settings-retry-connection'});
+  await settle();
+  assert.match(dom.app.innerHTML,/DraftA/,'正在输入的草稿要留在输入框里');
+  // 同一页重配到另一台 Host：草稿属于原来那对身份，不能跟过去。
+  await dom.submitForm('pair-form',{baseURL:HOST_B,code:'stub'});
+  assert.doesNotMatch(dom.app.innerHTML,/DraftA/,'换绑后不能显示上一对身份的草稿');
+  await dom.submitForm('nickname-form',{nickname:'SavedB'});
+  const stored=JSON.parse(dom.storage.get(PROFILE_KEY));
+  assert.equal(stored.nicknames['https://b.example.invalid:443|u_12345678'],'SavedB','保存要写进当前身份');
+  assert.equal(stored.nicknames['https://a.example.invalid:443|u_12345678'],undefined,'不能写进原来那台 Host');
+});
+
+test('two connected legacy Hosts that do not return a UID keep separate nicknames',async()=>{
+  // 旧协议 Host 的就绪回包带 ready 与 runtime，不带 userId。
+  const legacy=async input=>input.path==='/pair'?{token:'d'.repeat(64)}
+    :input.path==='/connection/status'?{along:true,ready:true,runtime:'dsh-superagent'}:{items:[]};
+  const dom=await app({connection:{baseURL:HOST_A,token:'a'.repeat(64),fingerprint:'f'.repeat(64)},bridge:legacy});
+  await dom.submitForm('nickname-form',{nickname:'LegacyA'});
+  await dom.submitForm('pair-form',{baseURL:HOST_B,code:'stub'});
+  assert.doesNotMatch(dom.app.innerHTML,/LegacyA/,'另一台旧协议 Host 不能看到 A 的昵称');
+  await dom.submitForm('nickname-form',{nickname:'LegacyB'});
+  await dom.submitForm('pair-form',{baseURL:HOST_A,code:'stub'});
+  assert.match(dom.app.innerHTML,/LegacyA/,'切回 A 要拿回 A 自己的昵称');
+  assert.doesNotMatch(dom.app.innerHTML,/LegacyB/,'B 的昵称不能跟过来');
+});
+
+test('a cold start whose credential check returns 401 updates the open settings page',async()=>{
+  let rejectStatus;
+  const dom=await app({connection:{baseURL:HOST_A,token:'a'.repeat(64),fingerprint:'f'.repeat(64)},
+    bridge:async input=>{
+      if (input.path==='/connection/status') return new Promise((_,reject)=>{rejectStatus=()=>reject(Object.assign(Error('请先配对这台 Mac'),{status:401}));});
+      return {};}});
+  await dom.click({action:'open-settings'});
+  assert.match(serverSection(dom),/检查中|已配对/);
+  rejectStatus();
+  await settle();
+  assert.match(serverSection(dom),/凭据已失效/,'401 要在当前页面立刻提示凭据失效');
+  assert.match(serverSection(dom),/重新配对/,'并指引重新配对');
+});
+
+test('a revoked OKX connection that the Host acknowledged reads as acknowledged, not as a summary receipt',async()=>{
+  const goal={id:'g_okx',domain:'custom',status:'active',revision:1,title:'OKX 目标',metric:null,context:[],tasks:[],
+    dataSources:[{provider:'okx',status:'recommended',reason:'只读接入账户摘要'}]};
+  const workspace={version:1,userId:'u_app_b',cursor:1,activeGoalId:goal.id,conversationId:null,
+    goals:{[goal.id]:goal},messages:{},drafts:{}};
+  const config={baseURL:'https://along.example.com',token:'b'.repeat(64),trustPolicy:'system-pki-v1',bindingScopeId:'scope-1'};
+  const dom=installDomStub({storage:{
+    [AGENT_KEY]:JSON.stringify(config),
+    'along.event-connection.v1':JSON.stringify({bindingScopeId:'scope-1',userId:'u_app_b',bindingOrigin:'https://along.example.com:443'}),
+    'along.event-workspace.v1:u_app_b':JSON.stringify(workspace)}});
+  globalThis.window.AlongHealthBridge={connect:async()=>({}),healthEvents:async()=>({enabled:true}),clear:async()=>{}};
+  globalThis.window.AlongAgentBridge={
+    connection:async()=>config,
+    request:async input=>{
+      if (input.path==='/connection/status') return {along:true,ready:true,eventProtocol:1,userId:'u_app_b'};
+      if (input.path==='/sync') return {items:[]};
+      return {};},
+    notification:async()=>({scheduled:true}),
+    // 原生在收到断开回执后转 stopped，并把对应序号记为已接收。
+    source:async()=>({provider:'okx',state:'disconnected',syncState:'received'})};
+  await import(`../web/app.mjs?ats88-okx-revoke=${++serial}`);
+  await settle();
+  await dom.click({action:'open-settings'});
+  await settle();
+  assert.match(sourceSection(dom),/撤回已获 Host 接收/,'撤回拿到回执要说撤回已获接收');
+  assert.doesNotMatch(sourceSection(dom),/最后一份摘要已被 Host 接收/,'不能说成最后一份摘要已被接收');
+});
+
+test('an archived goal keeps no OKX connect action',async()=>{
+  const archived={id:'g_old',domain:'custom',status:'archived',revision:1,title:'已归档目标',metric:null,context:[],tasks:[],
+    dataSources:[{provider:'okx',status:'recommended',reason:'只读接入账户摘要'}]};
+  const current={id:'g_now',domain:'custom',status:'active',revision:1,title:'当前目标',metric:null,context:[],tasks:[],dataSources:[]};
+  const workspace={version:1,userId:'u_app_b',cursor:1,activeGoalId:current.id,conversationId:null,
+    goals:{[archived.id]:archived,[current.id]:current},messages:{},drafts:{}};
+  const config={baseURL:'https://along.example.com',token:'b'.repeat(64),trustPolicy:'system-pki-v1',bindingScopeId:'scope-1'};
+  const calls=[];
+  const dom=installDomStub({storage:{
+    [AGENT_KEY]:JSON.stringify(config),
+    'along.event-connection.v1':JSON.stringify({bindingScopeId:'scope-1',userId:'u_app_b',bindingOrigin:'https://along.example.com:443'}),
+    'along.event-workspace.v1:u_app_b':JSON.stringify(workspace)}});
+  globalThis.window.AlongHealthBridge={connect:async()=>({}),healthEvents:async()=>({enabled:true}),clear:async()=>{}};
+  globalThis.window.AlongAgentBridge={
+    connection:async()=>config,
+    request:async input=>{
+      if (input.path==='/connection/status') return {along:true,ready:true,eventProtocol:1,userId:'u_app_b'};
+      if (input.path==='/sync') return {items:[]};
+      return {};},
+    notification:async()=>({scheduled:true}),
+    source:async(action,id)=>{calls.push([action,id]);return {provider:'okx',state:'disconnected',syncState:'none'};}};
+  await import(`../web/app.mjs?ats88-okx-archived=${++serial}`);
+  await settle();
+  await dom.click({action:'open-settings'});
+  await settle();
+  assert.doesNotMatch(sourceSection(dom),/OKX/,'只有已归档目标保留推荐时，不该给出连不上的 OKX 入口');
+  assert.ok(!calls.some(([action,id])=>action==='connect'&&id==='g_old'),'不能把已归档目标传给原生桥');
+});
