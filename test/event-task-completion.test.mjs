@@ -356,6 +356,21 @@ test('cancelling the confirmation sends nothing and keeps the task as it was',as
   assert.match(open,/data-action="event-task-complete"/);
 });
 
+test('closing the completion sheet leaves the task card out of the focus path',async()=>{
+  const {dom,calls}=await pageFixture();
+  const sheet=document.querySelector('#sheet');
+  let closed=false;
+  sheet.close=()=>{closed=true;};
+  await dom.click({action:'event-task-complete',taskId:'t_open'});
+  assert.match(sheet.innerHTML,/<button[^>]*data-action="close"[^>]*aria-label="关闭"/);
+  await sheetClick({action:'close'});
+  assert.equal(closed,true);
+  assert.equal(calls.some(call=>call.path==='/events'),false);
+  const card=dom.app.innerHTML.match(/<article[^>]* id="event-task-t_open"[^>]*>/)?.[0];
+  assert.ok(card);
+  assert.doesNotMatch(card,/\btabindex=/);
+});
+
 test('confirming sends exactly one task.completed fact',async()=>{
   const {dom,calls}=await pageFixture();
   await dom.click({action:'event-task-complete',taskId:'t_open'});

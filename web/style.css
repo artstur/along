@@ -210,9 +210,11 @@ footer { padding: 0 0 26px; color: #aaa; text-align: center; font-size: 12px; }
 .button:disabled { opacity: .45; cursor: default; }
 #sheet { width: min(440px, calc(100% - 32px)); padding: 26px; border: 1px solid #ddd; border-radius: 20px; background: #fff; color: #191919; box-shadow: 0 24px 70px #0002; }
 #sheet::backdrop { background: #0007; backdrop-filter: blur(3px); }
-.sheet-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.sheet-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .sheet-head h2 { font-size: 19px; }
-.icon-button { padding: 0 4px; border: 0; background: none; color: #888; font-size: 24px; line-height: 1; }
+.icon-button { display: grid; place-items: center; flex: 0 0 44px; width: 44px; height: 44px; padding: 0; border: 0; border-radius: 50%; background: #f2f2f1; color: #555; font-size: 24px; line-height: 1; -webkit-tap-highlight-color: transparent; }
+.icon-button:active { background: #e6e6e5; }
+.icon-button:focus-visible { outline-offset: 0; }
 .sheet-copy { margin-top: 15px; font-size: var(--text-body); color: #696969; }
 .permission-list { display: flex; flex-wrap: wrap; gap: 7px; margin: 17px 0; }
 .permission-list span { padding: 7px 9px; border-radius: 7px; background: #f3f3f3; color: #555; font-size: var(--text-caption); }
